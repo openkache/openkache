@@ -20,7 +20,7 @@ use std::time::Duration;
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
     AlpnPolicy, Backend, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity, ClientRootKey,
-    ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection, DeleteOutcome,
+    ClientTimeouts, ConnectionState, DataProtection, DeleteOutcome,
     Endpoint, Error, EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome,
     ItemId, ItemValue, KeyError, KeyFormat, KeySpace, KeyType, MAX_ITEM_ID_BYTES,
     MAX_KEY_INPUT_BYTES, NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy,
@@ -575,17 +575,17 @@ impl ClientBuilder {
 
 #[cfg(feature = "quic-quinn")]
 impl Client {
-    /// Connects with data protection, system trust, and default client behavior.
-    pub async fn connect(endpoint: &str, data_protection_key: ClientRootKey) -> Result<Self> {
-        Self::builder(endpoint.parse()?, data_protection_key)
+    /// Connects with a client root key, system trust, and default client behavior.
+    pub async fn connect(endpoint: &str, client_root_key: ClientRootKey) -> Result<Self> {
+        Self::builder(endpoint.parse()?, client_root_key)
             .connect()
             .await
     }
 
     /// Starts explicit client configuration.
-    pub fn builder(endpoint: Endpoint, data_protection_key: ClientRootKey) -> ClientBuilder {
+    pub fn builder(endpoint: Endpoint, client_root_key: ClientRootKey) -> ClientBuilder {
         ClientBuilder {
-            inner: SharedClient::builder(endpoint, data_protection_key),
+            inner: SharedClient::builder(endpoint, client_root_key),
         }
     }
 
@@ -634,17 +634,17 @@ impl LocalClientBuilder {
 
 #[cfg(feature = "quic-compio")]
 impl LocalClient {
-    /// Connects with data protection, system trust, and default Compio behavior.
-    pub async fn connect(endpoint: &str, data_protection_key: ClientRootKey) -> Result<Self> {
-        Self::builder(endpoint.parse()?, data_protection_key)
+    /// Connects with a client root key, system trust, and default Compio behavior.
+    pub async fn connect(endpoint: &str, client_root_key: ClientRootKey) -> Result<Self> {
+        Self::builder(endpoint.parse()?, client_root_key)
             .connect()
             .await
     }
 
     /// Starts explicit Compio client configuration.
-    pub fn builder(endpoint: Endpoint, data_protection_key: ClientRootKey) -> LocalClientBuilder {
+    pub fn builder(endpoint: Endpoint, client_root_key: ClientRootKey) -> LocalClientBuilder {
         LocalClientBuilder {
-            inner: SharedLocalClient::builder(endpoint, data_protection_key),
+            inner: SharedLocalClient::builder(endpoint, client_root_key),
         }
     }
 

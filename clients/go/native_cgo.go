@@ -264,7 +264,7 @@ openkache_client_result *openkache_go_connect(
     const uint8_t *certificate, size_t certificate_length,
     const uint8_t *identity_certificate_chain, size_t identity_certificate_chain_length,
     const uint8_t *identity_private_key, size_t identity_private_key_length,
-    const uint8_t *data_protection_key, size_t data_protection_key_length,
+    const uint8_t *client_root_key, size_t client_root_key_length,
     uint8_t compression_enabled, int32_t compression_level,
     size_t minimum_input_size, size_t minimum_savings,
     uint32_t encryption,
@@ -282,8 +282,8 @@ openkache_client_result *openkache_go_connect(
             address, address_length, server_name, server_name_length,
             certificate, certificate_length, identity_certificate_chain,
             identity_certificate_chain_length, identity_private_key,
-            identity_private_key_length, data_protection_key,
-            data_protection_key_length, compression_enabled, compression_level,
+            identity_private_key_length, client_root_key,
+            client_root_key_length, compression_enabled, compression_level,
             minimum_input_size, minimum_savings, encryption,
             connect_timeout_ms, request_timeout_ms, retry_max_attempts,
             max_in_flight,
@@ -299,16 +299,16 @@ openkache_client_result *openkache_go_connect(
             address, address_length, server_name, server_name_length,
             certificate, certificate_length, identity_certificate_chain,
             identity_certificate_chain_length, identity_private_key,
-            identity_private_key_length, data_protection_key,
-            data_protection_key_length, compression_enabled, compression_level,
+            identity_private_key_length, client_root_key,
+            client_root_key_length, compression_enabled, compression_level,
             minimum_input_size, minimum_savings, encryption,
             retry_max_attempts, max_in_flight, connect_timeout_ms,
             request_timeout_ms);
     }
     return library->connect(
         address, address_length, server_name, server_name_length,
-        certificate, certificate_length, data_protection_key,
-        data_protection_key_length, compression_enabled, compression_level,
+        certificate, certificate_length, client_root_key,
+        client_root_key_length, compression_enabled, compression_level,
         minimum_input_size, minimum_savings, connect_timeout_ms,
         request_timeout_ms);
 }
@@ -542,7 +542,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	certificate := C.CBytes(options.certificate)
 	identityCertificate := C.CBytes(options.identityCertificate)
 	identityPrivateKey := C.CBytes(options.identityPrivateKey)
-	dataProtectionKey := C.CBytes(options.dataProtectionKey)
+	clientRootKey := C.CBytes(options.clientRootKey)
 
 	connectTimeout, requestTimeout, err := durationMilliseconds(options.timeouts)
 	if err != nil {
@@ -551,7 +551,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		C.free(certificate)
 		C.free(identityCertificate)
 		C.free(identityPrivateKey)
-		C.free(dataProtectionKey)
+		C.free(clientRootKey)
 		C.openkache_go_library_free(library)
 		return nil, err
 	}
@@ -578,7 +578,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	hasExtended := C.openkache_go_has_connect_ex(library) != 0
 	useExtended := hasExtended && options.keyFormat == KeyFormatHash
 	requiresProtectedProfile := options.encryptionExplicit &&
-		(len(options.dataProtectionKey) == 0 || options.encryption != EncryptionRobust)
+		(len(options.clientRootKey) == 0 || options.encryption != EncryptionRobust)
 	if !hasExtended &&
 		(len(options.identityCertificate) != 0 ||
 			len(options.identityPrivateKey) != 0 ||
@@ -590,7 +590,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		C.free(certificate)
 		C.free(identityCertificate)
 		C.free(identityPrivateKey)
-		C.free(dataProtectionKey)
+		C.free(clientRootKey)
 		C.openkache_go_library_free(library)
 		return nil, &Error{
 			Operation: "connect",
@@ -611,7 +611,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 			(*C.uint8_t)(certificate), C.size_t(len(options.certificate)),
 			(*C.uint8_t)(identityCertificate), C.size_t(len(options.identityCertificate)),
 			(*C.uint8_t)(identityPrivateKey), C.size_t(len(options.identityPrivateKey)),
-			(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
+			(*C.uint8_t)(clientRootKey), C.size_t(len(options.clientRootKey)),
 			C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
 			C.size_t(minimumInputSize), C.size_t(minimumSavings),
 			C.uint32_t(encryption),
@@ -624,7 +624,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		C.free(certificate)
 		C.free(identityCertificate)
 		C.free(identityPrivateKey)
-		C.free(dataProtectionKey)
+		C.free(clientRootKey)
 		handle, err := decodeConnectResult(nativeLibrary, result)
 		select {
 		case reply <- connectReply{handle: handle, err: err}:

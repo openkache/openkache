@@ -111,7 +111,7 @@ from ._generated.smithy_contract import (
     SMITHY_SET_IF_ABSENT_BITS,
     SMITHY_SET_IF_PRESENT_BITS,
     SMITHY_MAX_VARUINT_BYTES,
-    SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES,
+    SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES,
     SMITHY_VALUE_ENCRYPTION_NONE,
     SMITHY_VALUE_ENCRYPTION_COMPACT,
     SMITHY_VALUE_ENCRYPTION_ROBUST,
@@ -424,7 +424,7 @@ class OpenKacheClient:
         address: str,
         *,
         certificate: bytes | bytearray | memoryview | str | PathLike[str],
-        data_protection_key: bytes | bytearray | memoryview | None = None,
+        client_root_key: bytes | bytearray | memoryview | None = None,
         key_spec: KeySpec | str = KeySpec.TEXT,
         key_format: KeyFormat | str = KeyFormat.HASH,
         server_name: str | None = None,
@@ -447,7 +447,7 @@ class OpenKacheClient:
                 _connection_settings,
                 address,
                 certificate=certificate,
-                data_protection_key=data_protection_key,
+                client_root_key=client_root_key,
                 server_name=server_name,
                 identity=identity,
                 compression=compression,
@@ -893,7 +893,7 @@ def _connection_settings(
     address: str,
     *,
     certificate: bytes | bytearray | memoryview | str | PathLike[str],
-    data_protection_key: bytes | bytearray | memoryview | None,
+    client_root_key: bytes | bytearray | memoryview | None,
     server_name: str | None,
     identity: ClientIdentity | None,
     compression: CompressionOptions | None,
@@ -907,20 +907,20 @@ def _connection_settings(
 ) -> dict[str, Any]:
     native_address, host = _resolve_address(address)
     certificate_bytes = _as_file_or_bytes(certificate, "certificate")
-    protection_key = (
+    root_key = (
         b""
-        if data_protection_key is None
-        else _as_bytes(data_protection_key, "data_protection_key")
+        if client_root_key is None
+        else _as_bytes(client_root_key, "client_root_key")
     )
-    if len(protection_key) not in (0, SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES):
+    if len(root_key) not in (0, SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES):
         raise OpenKacheValueError(
-            "data_protection_key must contain exactly "
-            f"{SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes when supplied"
+            "client_root_key must contain exactly "
+            f"{SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES} bytes when supplied"
         )
-    if encryption is Encryption.UNPROTECTED and protection_key:
+    if encryption is Encryption.UNPROTECTED and root_key:
         raise OpenKacheValueError(
             "connection-level Encryption.UNPROTECTED is not available with "
-            "data_protection_key; omit encryption for Robust or use the "
+            "client_root_key; omit encryption for Robust or use the "
             "operation-local override"
         )
     compression = compression or CompressionOptions()
@@ -970,7 +970,7 @@ def _connection_settings(
         "certificate": certificate_bytes,
         "client_certificate_chain": identity_chain,
         "client_private_key": identity_key,
-        "data_protection_key": protection_key,
+        "client_root_key": root_key,
         "compression_enabled": compression.enabled,
         "compression_level": compression.level,
         "minimum_input_size": compression.minimum_input_size,

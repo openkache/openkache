@@ -26,7 +26,7 @@ export interface Native_Client_Options {
   readonly server_name: string
   readonly certificate: Uint8Array
   readonly identity?: Native_Identity
-  readonly data_protection_key?: Uint8Array
+  readonly client_root_key?: Uint8Array
   readonly compression_enabled: boolean
   readonly compression_level?: number
   readonly minimum_input_size?: number

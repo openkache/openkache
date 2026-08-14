@@ -7,13 +7,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, Result};
 
-pub(crate) const PROTECTION_KEY_BYTES: usize =
-    crate::contract::VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
-
-/// Bytes in an application-managed data protection key.
-pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 /// Bytes in the client root key.
-pub const CLIENT_ROOT_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
+pub const CLIENT_ROOT_KEY_BYTES: usize = crate::contract::VALUE_FORMAT_CLIENT_ROOT_KEY_BYTES;
 /// Maximum application key input bytes accepted by every conforming SDK.
 pub const MAX_KEY_INPUT_BYTES: usize = 1_048_576;
 /// Maximum Item ID bytes accepted by the wire protocol.
@@ -1136,14 +1131,14 @@ impl TryFrom<&[u8]> for ItemId {
 /// Application-managed root secret used to derive Item IDs and value keys.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ClientRootKey {
-    master_key: [u8; DATA_PROTECTION_KEY_BYTES],
-    item_id_root: [u8; DATA_PROTECTION_KEY_BYTES],
-    value_root_key: [u8; DATA_PROTECTION_KEY_BYTES],
+    master_key: [u8; CLIENT_ROOT_KEY_BYTES],
+    item_id_root: [u8; CLIENT_ROOT_KEY_BYTES],
+    value_root_key: [u8; CLIENT_ROOT_KEY_BYTES],
 }
 
 impl ClientRootKey {
     /// Creates a client root key from exact bytes.
-    pub fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
+    pub fn from_bytes(bytes: [u8; CLIENT_ROOT_KEY_BYTES]) -> Self {
         let item_id_root =
             blake3::derive_key(crate::contract::VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT, &bytes);
         let value_root_key =
@@ -1157,7 +1152,7 @@ impl ClientRootKey {
 
     /// Returns the all-zero root used for the unprotected formatted default.
     pub fn zero() -> Self {
-        Self::from_bytes([0; DATA_PROTECTION_KEY_BYTES])
+        Self::from_bytes([0; CLIENT_ROOT_KEY_BYTES])
     }
 
     pub(crate) fn is_zero(&self) -> bool {
@@ -1178,11 +1173,11 @@ impl ClientRootKey {
     ///
     /// Returns an error when `bytes` does not contain exactly 32 bytes.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        let exact: &[u8; DATA_PROTECTION_KEY_BYTES] = bytes.try_into().map_err(|_| {
+        let exact: &[u8; CLIENT_ROOT_KEY_BYTES] = bytes.try_into().map_err(|_| {
             Error::configuration(
                 "client_root_key",
                 format!(
-                    "must contain exactly {DATA_PROTECTION_KEY_BYTES} bytes, got {}",
+                    "must contain exactly {CLIENT_ROOT_KEY_BYTES} bytes, got {}",
                     bytes.len()
                 ),
             )
@@ -1198,7 +1193,7 @@ impl ClientRootKey {
     ///
     /// # Returns
     ///
-    /// An owned data protection key.
+    /// An owned client root key.
     ///
     /// # Errors
     ///
@@ -1214,16 +1209,16 @@ impl ClientRootKey {
                 .decode(encoded)
                 .map_err(|error| Error::configuration("client_root_key", error.to_string()))?,
         );
-        if decoded.len() != DATA_PROTECTION_KEY_BYTES {
+        if decoded.len() != CLIENT_ROOT_KEY_BYTES {
             return Err(Error::configuration(
                 "client_root_key",
                 format!(
-                    "must decode to exactly {DATA_PROTECTION_KEY_BYTES} bytes, got {}",
+                    "must decode to exactly {CLIENT_ROOT_KEY_BYTES} bytes, got {}",
                     decoded.len()
                 ),
             ));
         }
-        let mut bytes = [0; DATA_PROTECTION_KEY_BYTES];
+        let mut bytes = [0; CLIENT_ROOT_KEY_BYTES];
         bytes.copy_from_slice(&decoded);
         Ok(Self::from_bytes(bytes))
     }
@@ -1342,7 +1337,7 @@ impl ClientRootKey {
             .expect("legacy application key exceeds the key input limit")
     }
 
-    pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
+    pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; CLIENT_ROOT_KEY_BYTES]> {
         Zeroizing::new(self.value_root_key)
     }
 }

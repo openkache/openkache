@@ -22,7 +22,7 @@ use crate::contract::{
     VALUE_FORMAT_AAD_DOMAIN, VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
     VALUE_FORMAT_COMPACT_MAC_CONTEXT, VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
     VALUE_FORMAT_COMPRESSION_MASK, VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_COMPRESSION_SHIFT,
-    VALUE_FORMAT_COMPRESSION_ZSTANDARD, VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES,
+    VALUE_FORMAT_COMPRESSION_ZSTANDARD, VALUE_FORMAT_CLIENT_ROOT_KEY_BYTES,
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
     VALUE_FORMAT_FORMAT_BYTE_BYTES, VALUE_FORMAT_MAX_VU128_BYTES, VALUE_FORMAT_PAYLOAD_CBOR,
     VALUE_FORMAT_PAYLOAD_MASK, VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES, VALUE_FORMAT_PAYLOAD_SHIFT,
@@ -30,7 +30,7 @@ use crate::contract::{
     VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES, VALUE_FORMAT_VERSION,
     VALUE_FORMAT_VERSION_BYTES,
 };
-use crate::{ClientRootKey, DATA_PROTECTION_KEY_BYTES, ItemId};
+use crate::{ClientRootKey, CLIENT_ROOT_KEY_BYTES, ItemId};
 
 // The selector layout is part of the value contract. Keep these local until
 // the generated client contract exposes the same names across every binding.
@@ -50,8 +50,8 @@ const MAX_VU128_BYTES: usize = VALUE_FORMAT_MAX_VU128_BYTES;
 /// Current value-format version.
 pub const VERSION: u64 = VALUE_FORMAT_VERSION as u64;
 
-/// Bytes required for an application data protection key.
-pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
+/// Bytes required for a client root key.
+pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_CLIENT_ROOT_KEY_BYTES;
 
 const VERSION_BYTES: &[u8] = VALUE_FORMAT_VERSION_BYTES;
 const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + VALUE_FORMAT_FORMAT_BYTE_BYTES;
@@ -398,7 +398,7 @@ impl Encryption {
 pub struct ValueCodec {
     compression: Compression,
     encryption: Encryption,
-    value_root_key: Option<Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]>>,
+    value_root_key: Option<Zeroizing<[u8; CLIENT_ROOT_KEY_BYTES]>>,
 }
 
 impl Default for ValueCodec {
@@ -464,7 +464,7 @@ impl ValueCodec {
     ///
     /// # Arguments
     ///
-    /// * `key` - Application-managed data protection key.
+    /// * `key` - Application-managed client root key.
     /// * `compression` - Compression policy applied before encryption.
     ///
     /// # Returns
@@ -482,7 +482,7 @@ impl ValueCodec {
     ///
     /// # Arguments
     ///
-    /// * `key` - Application-managed data protection key.
+    /// * `key` - Application-managed client root key.
     /// * `compression` - Compression policy applied before encryption.
     /// * `encryption` - Compact or Robust authenticated-encryption profile.
     ///
@@ -512,11 +512,11 @@ impl ValueCodec {
         })
     }
 
-    /// Creates the recommended Robust codec from exact data-protection-key bytes.
+    /// Creates the recommended Robust codec from exact client-root-key bytes.
     ///
     /// # Arguments
     ///
-    /// * `key` - Exact 32-byte data protection key.
+    /// * `key` - Exact 32-byte client root key.
     /// * `compression` - Compression policy applied before encryption.
     ///
     /// # Returns
@@ -530,16 +530,16 @@ impl ValueCodec {
         mut key: [u8; ENCRYPTION_KEY_BYTES],
         compression: Compression,
     ) -> Result<Self> {
-        let protection_key = ClientRootKey::from_bytes(key);
+        let client_root_key = ClientRootKey::from_bytes(key);
         key.zeroize();
-        Self::protected(&protection_key, compression)
+        Self::protected(&client_root_key, compression)
     }
 
-    /// Creates a protected codec from exact data-protection-key bytes and an explicit profile.
+    /// Creates a protected codec from exact client-root-key bytes and an explicit profile.
     ///
     /// # Arguments
     ///
-    /// * `key` - Exact 32-byte data protection key.
+    /// * `key` - Exact 32-byte client root key.
     /// * `compression` - Compression policy applied before encryption.
     /// * `encryption` - Compact or Robust authenticated-encryption profile.
     ///
@@ -555,9 +555,9 @@ impl ValueCodec {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        let protection_key = ClientRootKey::from_bytes(key);
+        let client_root_key = ClientRootKey::from_bytes(key);
         key.zeroize();
-        Self::protected_with_profile(&protection_key, compression, encryption)
+        Self::protected_with_profile(&client_root_key, compression, encryption)
     }
 
     /// Encodes a core logical value for opaque server storage.
@@ -990,7 +990,7 @@ impl ValueCodec {
         }
     }
 
-    fn value_root_key(&self) -> Result<&[u8; DATA_PROTECTION_KEY_BYTES]> {
+    fn value_root_key(&self) -> Result<&[u8; CLIENT_ROOT_KEY_BYTES]> {
         self.value_root_key
             .as_deref()
             .ok_or(Error::EncryptionKeyRequired)
@@ -1208,7 +1208,7 @@ pub enum Error {
     #[error("value authentication failed")]
     Authentication,
     /// Encrypted input was provided to a codec without a key.
-    #[error("encrypted value requires a data protection key")]
+    #[error("encrypted value requires a client root key")]
     EncryptionKeyRequired,
     /// Unencrypted input was provided to a codec that requires encryption.
     #[error("client policy requires encrypted values")]
@@ -1827,11 +1827,11 @@ fn make_aad(namespace_id: u64, item_id: ItemId, format: u8) -> Vec<u8> {
 }
 
 fn item_id_material(
-    value_root_key: &[u8; DATA_PROTECTION_KEY_BYTES],
+    value_root_key: &[u8; CLIENT_ROOT_KEY_BYTES],
     item_id: ItemId,
 ) -> Zeroizing<Vec<u8>> {
     let id = item_id.as_bytes();
-    let mut material = Zeroizing::new(Vec::with_capacity(DATA_PROTECTION_KEY_BYTES + 1 + id.len()));
+    let mut material = Zeroizing::new(Vec::with_capacity(CLIENT_ROOT_KEY_BYTES + 1 + id.len()));
     material.extend_from_slice(value_root_key);
     material.push(id.len() as u8);
     material.extend_from_slice(id);

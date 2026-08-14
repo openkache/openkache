@@ -28,8 +28,8 @@ private struct Smithy_Native_Connect_Options {
     var clientCertificateChainLength: Int
     var clientPrivateKey: UnsafePointer<UInt8>?
     var clientPrivateKeyLength: Int
-    var dataProtectionKey: UnsafePointer<UInt8>?
-    var dataProtectionKeyLength: Int
+    var clientRootKey: UnsafePointer<UInt8>?
+    var clientRootKeyLength: Int
     var compressionEnabled: UInt8
     var compressionLevel: Int32
     var minimumInputSize: Int
@@ -101,8 +101,8 @@ private func nativeConnect(
     _ clientCertificateLength: Int,
     _ clientPrivateKey: UnsafePointer<UInt8>?,
     _ clientPrivateKeyLength: Int,
-    _ dataProtectionKey: UnsafePointer<UInt8>?,
-    _ dataProtectionKeyLength: Int,
+    _ clientRootKey: UnsafePointer<UInt8>?,
+    _ clientRootKeyLength: Int,
     _ compressionEnabled: UInt8,
     _ compressionLevel: Int32,
     _ minimumInputSize: Int,
@@ -359,17 +359,17 @@ public struct OpenKacheClientOptions: Sendable {
     public var certificate: Data?
     /// Optional mutual-TLS identity.
     public var identity: OpenKacheClientIdentity?
-    /// Optional persistent 32-byte application data-protection key.
-    public var dataProtectionKey: Data
+    /// Optional persistent 32-byte client root key.
+    public var clientRootKey: Data
     /// Client-local application-key mapping profile.
     public var keyFormat: OpenKacheKeyFormat
     /// Value compression policy.
     public var compression: OpenKacheCompression
     /// Optional value authenticated-encryption profile.
     ///
-    /// When omitted, the shared core selects the robust profile when a data
-    /// protection key is configured and leaves values unprotected otherwise.
-    /// Supplying an authenticated profile without a data protection key is
+    /// When omitted, the shared core selects the robust profile when a client
+    /// root key is configured and leaves values unprotected otherwise.
+    /// Supplying an authenticated profile without a client root key is
     /// rejected by the shared core.
     public var encryption: OpenKacheEncryption?
     /// Maximum connection-establishment duration.
@@ -384,7 +384,7 @@ public struct OpenKacheClientOptions: Sendable {
     /// Creates a client configuration with shared-core defaults.
     public init(
         address: String,
-        dataProtectionKey: Data = Data(),
+        clientRootKey: Data = Data(),
         keyFormat: OpenKacheKeyFormat = .hash,
         serverName: String? = nil,
         certificate: Data? = nil,
@@ -404,7 +404,7 @@ public struct OpenKacheClientOptions: Sendable {
         self.serverName = serverName
         self.certificate = certificate
         self.identity = identity
-        self.dataProtectionKey = dataProtectionKey
+        self.clientRootKey = clientRootKey
         self.keyFormat = keyFormat
         self.compression = compression
         self.encryption = encryption
@@ -452,11 +452,11 @@ private enum NativeBridge {
         guard !options.address.isEmpty else {
             throw OpenKacheError("address must not be empty")
         }
-        guard options.dataProtectionKey.isEmpty
-            || options.dataProtectionKey.count == Smithy_Value_Format.dataProtectionKeyBytes
+        guard options.clientRootKey.isEmpty
+            || options.clientRootKey.count == Smithy_Value_Format.clientRootKeyBytes
         else {
             throw OpenKacheError(
-                "dataProtectionKey must contain exactly \(Smithy_Value_Format.dataProtectionKeyBytes) bytes when supplied"
+                "clientRootKey must contain exactly \(Smithy_Value_Format.clientRootKeyBytes) bytes when supplied"
             )
         }
         let connectTimeout = try milliseconds(options.connectTimeout, named: "connectTimeout")
@@ -497,14 +497,14 @@ private enum NativeBridge {
         let certificate = Array(options.certificate ?? Data())
         let clientCertificate = Array(options.identity?.certificate ?? Data())
         let clientPrivateKey = Array(options.identity?.privateKey ?? Data())
-        let dataProtectionKey = Array(options.dataProtectionKey)
+        let clientRootKey = Array(options.clientRootKey)
 
         let result = withBytes(address) { addressPointer, addressLength in
             withBytes(serverName) { serverNamePointer, serverNameLength in
                 withBytes(certificate) { certificatePointer, certificateLength in
                     withBytes(clientCertificate) { clientCertificatePointer, clientCertificateLength in
                         withBytes(clientPrivateKey) { clientPrivateKeyPointer, clientPrivateKeyLength in
-                            withBytes(dataProtectionKey) { keyPointer, keyLength in
+                            withBytes(clientRootKey) { keyPointer, keyLength in
                                 let base = Smithy_Native_Connect_Options(
                                     address: addressPointer, addressLength: addressLength,
                                     serverName: serverNamePointer, serverNameLength: serverNameLength,
@@ -513,7 +513,7 @@ private enum NativeBridge {
                                     clientCertificateChainLength: clientCertificateLength,
                                     clientPrivateKey: clientPrivateKeyPointer,
                                     clientPrivateKeyLength: clientPrivateKeyLength,
-                                    dataProtectionKey: keyPointer, dataProtectionKeyLength: keyLength,
+                                    clientRootKey: keyPointer, clientRootKeyLength: keyLength,
                                     compressionEnabled: options.compression.enabled ? 1 : 0,
                                     compressionLevel: options.compression.level,
                                     minimumInputSize: options.compression.minimumInputSize,

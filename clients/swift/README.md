@@ -51,7 +51,7 @@ import OpenKache
 let key = Data(repeating: 0x42, count: 32)
 let options = OpenKacheClientOptions(
     address: "cache.example.com:4433",
-    dataProtectionKey: key,
+    clientRootKey: key,
     certificate: try Data(contentsOf: certificateURL)
 )
 
@@ -103,16 +103,16 @@ _ = (output, smithyOutput)
 
 Keys are exact UTF-8 or binary bytes, including empty and NUL-containing keys.
 Empty values are valid for the protected adapter. Raw item IDs may contain zero
-through `Smithy_Value_Format.maxItemIdBytes` bytes. `dataProtectionKey` must contain
+through `Smithy_Value_Format.maxItemIdBytes` bytes. `clientRootKey` must contain
 exactly 32 persistent random bytes.
 When `encryption` is omitted, the shared core selects Robust with a
-`dataProtectionKey` and Unprotected without one. Explicit Compact or Robust
-requires a data-protection key.
+`clientRootKey` and Unprotected without one. Explicit Compact or Robust
+requires a client root key.
 `OpenKacheKeyFormat.byteKeyOrHash` preserves `Data` keys up to the 32-byte Item
 ID limit and hashes longer keys; use it only with byte-key APIs.
 When `encryption` is omitted, the shared core selects Robust when
-`dataProtectionKey` is supplied and Unprotected otherwise. An explicit
-authenticated profile requires a data-protection key.
+`clientRootKey` is supplied and Unprotected otherwise. An explicit
+authenticated profile requires a client root key.
 `certificate` may be one DER certificate or a PEM chain; omit it to use system
 roots. A numeric address may provide a separate `serverName` for certificate
 verification.

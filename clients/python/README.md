@@ -39,7 +39,7 @@ from openkache import Client, KeySpec, SetOptions
 client = await Client.connect(
     "cache.example.com:4433",
     certificate="client-bundle/ca.crt",
-    data_protection_key=Path("client-bundle/data-protection.key").read_bytes(),
+    client_root_key=Path("client-bundle/client-root.key").read_bytes(),
 )
 try:
     await client.set(
@@ -106,7 +106,7 @@ result = await client.raw.get(
 
 - `certificate` accepts a DER/PEM path or bytes containing one trusted
   certificate or PEM chain.
-- `data_protection_key` is optional. When supplied it is an
+- `client_root_key` is optional. When supplied it is an
   application-managed 32-byte secret shared by clients that must address the
   same protected entries. When omitted, values are unprotected.
 - `key_spec` selects `KeySpec.TEXT` (the default), `KeySpec.BYTES`, or
@@ -121,13 +121,13 @@ result = await client.raw.get(
   key for mutual TLS.
 - `compression`, `encryption`, `timeouts`, `max_in_flight`, and
   `retry_max_attempts` map directly to shared-core settings. When `encryption`
-  is omitted, the shared core selects Robust if a data-protection key is
+  is omitted, the shared core selects Robust if a client root key is
   supplied and Unprotected otherwise. An explicit Compact or Robust profile
-  requires a data-protection key; select Compact only when every client
+  requires a client root key; select Compact only when every client
   sharing the protected entries uses that profile.
   `Encryption.UNPROTECTED` is valid for a connection without a key and for
   operation-local overrides; it is rejected as a connection setting when a
-  data-protection key is supplied because the native connection value `0` is
+  client root key is supplied because the native connection value `0` is
   the default-profile sentinel.
 - `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
 

@@ -45,8 +45,8 @@ from the endpoint:
 ```rust
 use openkache_client::{Client, ClientRootKey};
 
-let protection_key = ClientRootKey::from_base64(&configured_base64_secret)?;
-let client = Client::connect("cache.example.com:4433", protection_key).await?;
+let client_root_key = ClientRootKey::from_base64(&configured_base64_secret)?;
+let client = Client::connect("cache.example.com:4433", client_root_key).await?;
 ```
 
 Use the builder for a pre-resolved address, explicit trust root, or mutual TLS:
@@ -56,8 +56,8 @@ use openkache_client::{Certificate, Client, ClientRootKey, Endpoint};
 
 let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
 let certificate = Certificate::from_der(certificate_der)?;
-let protection_key = ClientRootKey::from_base64(&configured_base64_secret)?;
-let client = Client::builder(endpoint, protection_key)
+let client_root_key = ClientRootKey::from_base64(&configured_base64_secret)?;
+let client = Client::builder(endpoint, client_root_key)
     .trust_certificate(certificate)
     .connect()
     .await?;
@@ -76,7 +76,7 @@ let identity = ClientIdentity::new(
     PrivateKey::from_pem(&client_private_key_pem)?,
 )?;
 
-let client = Client::builder(endpoint, protection_key)
+let client = Client::builder(endpoint, client_root_key)
     .trust_certificate(server_ca)
     .client_identity(identity)
     .connect()
@@ -90,7 +90,7 @@ it with a cryptographically secure random source and store its Base64 form in
 secret storage. Do not hash, truncate, or pad a human-readable password into a
 key.
 
-Clients must use the same data-protection key to share protected entries.
+Clients must use the same client root key to share protected entries.
 Rotating it changes derived item IDs, so old entries become unreachable and
 must be repopulated.
 

@@ -52,7 +52,7 @@ class _ConnectOptions(ctypes.Structure):
         ("client_certificate_chain", _U8_POINTER),
         ("client_certificate_chain_length", ctypes.c_size_t),
         ("client_private_key", _U8_POINTER), ("client_private_key_length", ctypes.c_size_t),
-        ("data_protection_key", _U8_POINTER), ("data_protection_key_length", ctypes.c_size_t),
+        ("client_root_key", _U8_POINTER), ("client_root_key_length", ctypes.c_size_t),
         ("compression_enabled", _U8), ("compression_level", ctypes.c_int32),
         ("minimum_input_size", ctypes.c_size_t), ("minimum_savings", ctypes.c_size_t),
         ("encryption", ctypes.c_uint32), ("connect_timeout_ms", ctypes.c_uint64),
@@ -401,7 +401,7 @@ class NativeClient:
         certificate: bytes,
         client_certificate_chain: bytes = b"",
         client_private_key: bytes = b"",
-        data_protection_key: bytes,
+        client_root_key: bytes,
         compression_enabled: bool,
         compression_level: int,
         minimum_input_size: int,
@@ -421,13 +421,13 @@ class NativeClient:
             _as_native_buffer(certificate),
             _as_native_buffer(client_certificate_chain),
             _as_native_buffer(client_private_key),
-            _as_native_buffer(data_protection_key),
+            _as_native_buffer(client_root_key),
         ]
         options = _ConnectOptionsV2(
             _ConnectOptions(
                 buffers[0][1], len(address), buffers[1][1], len(server_name),
                 buffers[2][1], len(certificate), buffers[3][1], len(client_certificate_chain),
-                buffers[4][1], len(client_private_key), buffers[5][1], len(data_protection_key),
+                buffers[4][1], len(client_private_key), buffers[5][1], len(client_root_key),
                 1 if compression_enabled else 0, compression_level, minimum_input_size,
                 minimum_savings, encryption, connect_timeout_ms, request_timeout_ms,
                 retry_max_attempts, max_in_flight,

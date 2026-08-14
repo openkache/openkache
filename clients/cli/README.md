@@ -9,7 +9,7 @@ protection.
 
 The CLI provides one-shot commands that compose naturally with Unix pipelines
 and an interactive shell that keeps one connection open for multiple commands.
-It uses text application keys. Supply a data-protection key to protect values;
+It uses text application keys. Supply a client root key to protect values;
 when omitted, it uses the unprotected formatted profile while retaining the
 same Item ID derivation as other text-key clients.
 
@@ -75,12 +75,12 @@ openkache-cli set lease value --if-present
 
 ## Configuration
 
-The data-protection key is optional. Supply it through an environment variable
+The client root key is optional. Supply it through an environment variable
 or a file so secrets do not appear in the process list when protection is
 wanted:
 
 ```bash
-export OPENKACHE_DATA_PROTECTION_KEY='base64-encoded-32-byte-key'
+export OPENKACHE_CLIENT_ROOT_KEY='base64-encoded-32-byte-key'
 export OPENKACHE_ADDRESS='cache.example.com:4433'
 openkache-cli get greeting
 ```
@@ -88,8 +88,8 @@ openkache-cli get greeting
 Available environment variables are `OPENKACHE_ADDRESS`,
 `OPENKACHE_SERVER_NAME`, `OPENKACHE_CERTIFICATE`,
 `OPENKACHE_CLIENT_CERTIFICATE`, `OPENKACHE_CLIENT_KEY`,
-`OPENKACHE_DATA_PROTECTION_KEY`, and
-`OPENKACHE_DATA_PROTECTION_KEY_FILE`. Command-line options take precedence
+`OPENKACHE_CLIENT_ROOT_KEY`, and
+`OPENKACHE_CLIENT_ROOT_KEY_FILE`. Command-line options take precedence
 over environment variables. `--certificate` accepts one DER certificate or a
 PEM certificate chain; when it is omitted, the operating system trust store is
 used.
@@ -105,7 +105,7 @@ openkache-cli \
   --address 127.0.0.1:4433 \
   --server-name localhost \
   --certificate target/openkache-local/certificate.local.der \
-  --data-protection-key "$OPENKACHE_DATA_PROTECTION_KEY" \
+  --client-root-key "$OPENKACHE_CLIENT_ROOT_KEY" \
   get greeting
 ```
 

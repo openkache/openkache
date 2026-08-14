@@ -33,7 +33,7 @@ export interface Value_Format_Contract {
   readonly compact_synthetic_iv_bytes: number
   readonly compression_none: number
   readonly compression_zstandard: number
-  readonly data_protection_key_bytes: number
+  readonly client_root_key_bytes: number
   readonly encryption_compact: number
   readonly encryption_none: number
   readonly encryption_robust: number
@@ -811,9 +811,9 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       0,
       0xff,
     ),
-    data_protection_key_bytes: integer_member(
+    client_root_key_bytes: integer_member(
       contract,
-      "dataProtectionKeyBytes",
+      "clientRootKeyBytes",
       VALUE_FORMAT_TRAIT_ID,
       1,
     ),
@@ -932,7 +932,7 @@ function value_format_contract(value: unknown): Value_Format_Contract {
     ["compactSyntheticIvBytes", values.compact_synthetic_iv_bytes, 16],
     ["robustNonceBytes", values.robust_nonce_bytes, 12],
     ["robustTagBytes", values.robust_tag_bytes, 16],
-    ["dataProtectionKeyBytes", values.data_protection_key_bytes, 32],
+    ["clientRootKeyBytes", values.client_root_key_bytes, 32],
   ] as const) {
     if (actual !== expected) {
       throw new Error(
@@ -1817,8 +1817,8 @@ pub const VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES: usize = ${formatted_decimal(v
 pub const VALUE_FORMAT_ROBUST_NONCE_BYTES: usize = ${formatted_decimal(value.robust_nonce_bytes)};
 /// Robust AES-GCM-SIV authentication-tag size.
 pub const VALUE_FORMAT_ROBUST_TAG_BYTES: usize = ${formatted_decimal(value.robust_tag_bytes)};
-/// Application-managed data-protection key size.
-pub const VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES: usize = ${formatted_decimal(value.data_protection_key_bytes)};
+/// Client root key size.
+pub const VALUE_FORMAT_CLIENT_ROOT_KEY_BYTES: usize = ${formatted_decimal(value.client_root_key_bytes)};
 /// BLAKE3 protected-item-ID root derivation context.
 pub const VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT: &str = ${rust_string_literal(value.item_id_root_context)};
 /// Associated-data domain separator.
@@ -2059,7 +2059,7 @@ ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES ${value.compact_synthetic_iv_bytes}u
 #define OPENKACHE_SMITHY_VALUE_ROBUST_NONCE_BYTES ${value.robust_nonce_bytes}u
 #define OPENKACHE_SMITHY_VALUE_ROBUST_TAG_BYTES ${value.robust_tag_bytes}u
-#define OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES ${value.data_protection_key_bytes}u
+#define OPENKACHE_SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES ${value.client_root_key_bytes}u
 #define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES ${envelope.max_encoding_bytes}u
 #define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES ${envelope.max_type_name_bytes}u
 
@@ -2233,7 +2233,7 @@ ${csharp_descriptor_offsets}
     internal const int ValueFormatCompactSyntheticIvBytes = ${formatted_decimal(value.compact_synthetic_iv_bytes)};
     internal const int ValueFormatRobustNonceBytes = ${formatted_decimal(value.robust_nonce_bytes)};
     internal const int ValueFormatRobustTagBytes = ${formatted_decimal(value.robust_tag_bytes)};
-    internal const int ValueFormatDataProtectionKeyBytes = ${formatted_decimal(value.data_protection_key_bytes)};
+    internal const int ValueFormatClientRootKeyBytes = ${formatted_decimal(value.client_root_key_bytes)};
     internal const string ValueFormatItemIdRootContext = ${JSON.stringify(value.item_id_root_context)};
     internal const string ValueFormatAadDomain = ${JSON.stringify(value.aad_domain)};
     internal const string ValueFormatValueRootContext = ${JSON.stringify(value.value_root_context)};
@@ -2664,8 +2664,8 @@ const (
 \tSmithyPolicyEvictionOverride = ${contract.v1.policy_eviction_override_flag}
 \tSmithyPolicyReservedMask = ${contract.v1.policy_reserved_mask}
 \tSmithyErrorStatusMinimum = ${contract.v1.error_status_minimum}
-\t// SmithyDataProtectionKeyBytes is the shared key width.
-\tSmithyDataProtectionKeyBytes = ${value.data_protection_key_bytes}
+\t// SmithyClientRootKeyBytes is the shared key width.
+\tSmithyClientRootKeyBytes = ${value.client_root_key_bytes}
 \t// SmithyValueEncryptionNone selects unprotected values.
 \tSmithyValueEncryptionNone uint32 = ${value.encryption_none}
 \t// SmithyValueEncryptionCompact selects deterministic AES-SIV protection.
@@ -3116,7 +3116,7 @@ SMITHY_VALUE_ENCRYPTION_ROBUST = ${value.encryption_robust}
 SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES = ${value.compact_synthetic_iv_bytes}
 SMITHY_VALUE_ROBUST_NONCE_BYTES = ${value.robust_nonce_bytes}
 SMITHY_VALUE_ROBUST_TAG_BYTES = ${value.robust_tag_bytes}
-SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes}
+SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES = ${value.client_root_key_bytes}
 SMITHY_VALUE_ITEM_ID_ROOT_CONTEXT = ${JSON.stringify(value.item_id_root_context)}
 SMITHY_VALUE_AAD_DOMAIN = ${JSON.stringify(value.aad_domain)}
 SMITHY_VALUE_VALUE_ROOT_CONTEXT = ${JSON.stringify(value.value_root_context)}
@@ -3407,7 +3407,7 @@ public enum Smithy_Value_Format: Sendable {
   public static let compactSyntheticIvBytes: Int = ${value.compact_synthetic_iv_bytes}
   public static let robustNonceBytes: Int = ${value.robust_nonce_bytes}
   public static let robustTagBytes: Int = ${value.robust_tag_bytes}
-  public static let dataProtectionKeyBytes: Int = ${value.data_protection_key_bytes}
+  public static let clientRootKeyBytes: Int = ${value.client_root_key_bytes}
   public static let itemIdRootContext: String = ${swift_string_literal(value.item_id_root_context)}
   public static let aadDomain: String = ${swift_string_literal(value.aad_domain)}
   public static let valueRootContext: String = ${swift_string_literal(value.value_root_context)}
@@ -3486,8 +3486,8 @@ export const SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES = ${value.compact_synthetic
 export const SMITHY_VALUE_ROBUST_NONCE_BYTES = ${value.robust_nonce_bytes}
 /** Robust AES-GCM-SIV authentication-tag size. */
 export const SMITHY_VALUE_ROBUST_TAG_BYTES = ${value.robust_tag_bytes}
-/** Application-managed data-protection key size. */
-export const SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes}
+/** Client root key size. */
+export const SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES = ${value.client_root_key_bytes}
 /** BLAKE3 protected-item-ID root derivation context. */
 export const SMITHY_VALUE_ITEM_ID_ROOT_CONTEXT = ${JSON.stringify(value.item_id_root_context)}
 /** Associated-data domain separator. */

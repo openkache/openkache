@@ -163,24 +163,24 @@ pub struct Arguments {
     )]
     pub client_key: Option<PathBuf>,
 
-    /// Optional Base64-encoded 32-byte data-protection key.
+    /// Optional Base64-encoded 32-byte client root key.
     #[arg(
         long,
-        env = "OPENKACHE_DATA_PROTECTION_KEY",
-        conflicts_with = "data_protection_key_file",
+        env = "OPENKACHE_CLIENT_ROOT_KEY",
+        conflicts_with = "client_root_key_file",
         hide_env_values = true,
         value_name = "BASE64"
     )]
-    pub data_protection_key: Option<String>,
+    pub client_root_key: Option<String>,
 
-    /// Optional file containing a Base64-encoded 32-byte data-protection key.
+    /// Optional file containing a Base64-encoded 32-byte client root key.
     #[arg(
         long,
-        env = "OPENKACHE_DATA_PROTECTION_KEY_FILE",
-        conflicts_with = "data_protection_key",
+        env = "OPENKACHE_CLIENT_ROOT_KEY_FILE",
+        conflicts_with = "client_root_key",
         value_name = "PATH"
     )]
-    pub data_protection_key_file: Option<PathBuf>,
+    pub client_root_key_file: Option<PathBuf>,
 
     /// Operation to perform.
     #[command(subcommand)]
@@ -343,13 +343,13 @@ impl ConnectedClient {
 
 async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
     let endpoint = endpoint_from_arguments(arguments)?;
-    let data_protection_key = data_protection_key_from_arguments(arguments)?;
+    let client_root_key = client_root_key_from_arguments(arguments)?;
     let trust = trust_from_arguments(arguments)?;
     let identity = client_identity_from_arguments(arguments)?;
 
     #[cfg(feature = "quic-compio")]
     {
-        let mut builder = match data_protection_key {
+        let mut builder = match client_root_key {
             Some(key) => LocalClient::builder(endpoint, key),
             None => LocalClient::builder_unprotected(endpoint),
         }
@@ -367,7 +367,7 @@ async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
 
     #[cfg(feature = "quic-quinn")]
     {
-        let mut builder = match data_protection_key {
+        let mut builder = match client_root_key {
             Some(key) => Client::builder(endpoint, key),
             None => Client::builder_unprotected(endpoint),
         }
@@ -410,17 +410,17 @@ fn endpoint_from_arguments(arguments: &Arguments) -> Result<Endpoint> {
     Endpoint::from_str(address).map_err(CliError::from)
 }
 
-fn data_protection_key_from_arguments(arguments: &Arguments) -> Result<Option<ClientRootKey>> {
+fn client_root_key_from_arguments(arguments: &Arguments) -> Result<Option<ClientRootKey>> {
     let encoded = match (
-        arguments.data_protection_key.as_deref(),
-        arguments.data_protection_key_file.as_deref(),
+        arguments.client_root_key.as_deref(),
+        arguments.client_root_key_file.as_deref(),
     ) {
         (Some(value), None) => value.to_string(),
         (None, Some(path)) => std::fs::read_to_string(path)?,
         (None, None) => return Ok(None),
         (Some(_), Some(_)) => {
             return Err(CliError::Configuration(
-                "data-protection key may be supplied only once".to_string(),
+                "client root key may be supplied only once".to_string(),
             ));
         }
     };
@@ -428,7 +428,7 @@ fn data_protection_key_from_arguments(arguments: &Arguments) -> Result<Option<Cl
     let encoded = encoded.trim();
     if encoded.is_empty() {
         return Err(CliError::Configuration(
-            "data-protection key must not be empty".to_string(),
+            "client root key must not be empty".to_string(),
         ));
     }
     ClientRootKey::from_base64(encoded)

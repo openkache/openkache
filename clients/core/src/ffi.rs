@@ -79,10 +79,10 @@ pub struct FfiConnectOptions {
     pub client_private_key: *const u8,
     /// Byte length of [`Self::client_private_key`].
     pub client_private_key_length: usize,
-    /// Optional exact 32-byte application data-protection key. Empty selects unprotected values.
-    pub data_protection_key: *const u8,
-    /// Byte length of [`Self::data_protection_key`].
-    pub data_protection_key_length: usize,
+    /// Optional exact 32-byte client root key. Empty selects unprotected values.
+    pub client_root_key: *const u8,
+    /// Byte length of [`Self::client_root_key`].
+    pub client_root_key_length: usize,
     /// Non-zero to enable Zstandard compression.
     pub compression_enabled: u8,
     /// Zstandard level, validated by the shared value codec.
@@ -169,7 +169,7 @@ type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 struct WorkerOptions {
     endpoint: Endpoint,
     certificate: Vec<u8>,
-    data_protection_key: Option<ClientRootKey>,
+    client_root_key: Option<ClientRootKey>,
     client_certificate_chain: Vec<u8>,
     client_private_key: Vec<u8>,
     compression: Compression,
@@ -212,7 +212,7 @@ impl FfiClient {
     fn connect(
         endpoint: Endpoint,
         certificate: Vec<u8>,
-        data_protection_key: Option<ClientRootKey>,
+        client_root_key: Option<ClientRootKey>,
         client_certificate_chain: Vec<u8>,
         client_private_key: Vec<u8>,
         compression: Compression,
@@ -233,7 +233,7 @@ impl FfiClient {
         let options = WorkerOptions {
             endpoint,
             certificate,
-            data_protection_key,
+            client_root_key,
             client_certificate_chain,
             client_private_key,
             compression,
@@ -415,7 +415,7 @@ fn run_worker(
     let WorkerOptions {
         endpoint,
         certificate,
-        data_protection_key,
+        client_root_key,
         client_certificate_chain,
         client_private_key,
         compression,
@@ -438,8 +438,8 @@ fn run_worker(
         ));
         return;
     }
-    let protected = data_protection_key.is_some();
-    let mut builder = match data_protection_key {
+    let protected = client_root_key.is_some();
+    let mut builder = match client_root_key {
         Some(key) => LocalProtectedClient::builder(endpoint, key),
         None => LocalProtectedClient::builder_unprotected(endpoint),
     }
@@ -978,7 +978,7 @@ pub extern "C" fn openkache_client_abi_version() -> u32 {
 ///
 /// The address is a UTF-8 host/port authority such as `127.0.0.1:4433` or
 /// `cache.example.com:4433`. The certificate may be one DER certificate, a
-/// PEM chain, or empty to use system trust roots. The data-protection key is
+/// PEM chain, or empty to use system trust roots. The client root key is
 /// exactly 32 bytes. All input buffers are copied before this function returns.
 ///
 /// # Safety
@@ -993,8 +993,8 @@ pub unsafe extern "C" fn openkache_client_connect(
     server_name_length: usize,
     certificate: *const u8,
     certificate_length: usize,
-    data_protection_key: *const u8,
-    data_protection_key_length: usize,
+    client_root_key: *const u8,
+    client_root_key_length: usize,
     compression_enabled: u8,
     compression_level: i32,
     minimum_input_size: usize,
@@ -1009,8 +1009,8 @@ pub unsafe extern "C" fn openkache_client_connect(
         server_name_length,
         certificate,
         certificate_length,
-        data_protection_key,
-        data_protection_key_length,
+        client_root_key,
+        client_root_key_length,
         client_certificate_chain: ptr::null(),
         client_certificate_chain_length: 0,
         client_private_key: ptr::null(),
@@ -1031,14 +1031,14 @@ pub unsafe extern "C" fn openkache_client_connect(
 /// Connects a native client with the complete shared-core configuration.
 ///
 /// Zero retry and lane limits select shared-core defaults. With a data
-/// protection key, Smithy `NONE` selects the Robust default; without a key it
+/// client root key, Smithy `NONE` selects the Robust default; without a key it
 /// selects Unprotected. `ROBUST` and `COMPACT` select those profiles
 /// explicitly, and an authenticated profile without a key is rejected.
 ///
 /// # Safety
 ///
 /// Every non-empty pointer/length pair must identify readable memory for the duration of this
-/// call. `data_protection_key` must contain exactly 32 bytes.
+/// call. `client_root_key` must contain exactly 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_ex(
     address: *const u8,
@@ -1051,8 +1051,8 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
     client_certificate_chain_length: usize,
     client_private_key: *const u8,
     client_private_key_length: usize,
-    data_protection_key: *const u8,
-    data_protection_key_length: usize,
+    client_root_key: *const u8,
+    client_root_key_length: usize,
     compression_enabled: u8,
     compression_level: i32,
     minimum_input_size: usize,
@@ -1070,8 +1070,8 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
         server_name_length,
         certificate,
         certificate_length,
-        data_protection_key,
-        data_protection_key_length,
+        client_root_key,
+        client_root_key_length,
         client_certificate_chain,
         client_certificate_chain_length,
         client_private_key,
@@ -1160,17 +1160,17 @@ fn connect_options_with_format(
         options.certificate_length,
         "certificate",
     )?;
-    let data_protection_key = copy_data_protection_key(
-        options.data_protection_key,
-        options.data_protection_key_length,
+    let client_root_key = copy_client_root_key(
+        options.client_root_key,
+        options.client_root_key_length,
     )?;
     // `NONE` is the ABI's "use the profile default" sentinel: it means
     // unprotected when no key is supplied and Robust when a key is supplied.
     // Any explicit authenticated profile without key material must fail rather
     // than silently downgrading to an unprotected codec.
-    if data_protection_key.is_none() && options.encryption != VALUE_FORMAT_ENCRYPTION_NONE as u32 {
+    if client_root_key.is_none() && options.encryption != VALUE_FORMAT_ENCRYPTION_NONE as u32 {
         return Err(
-            "an authenticated value-encryption profile requires a data protection key".to_owned(),
+            "an authenticated value-encryption profile requires a client root key".to_owned(),
         );
     }
     let client_certificate_chain = copy_bytes(
@@ -1242,7 +1242,7 @@ fn connect_options_with_format(
     FfiClient::connect(
         endpoint,
         certificate,
-        data_protection_key,
+        client_root_key,
         client_certificate_chain,
         client_private_key,
         compression,
@@ -2281,7 +2281,7 @@ fn copy_utf8(pointer: *const u8, length: usize, name: &str) -> std::result::Resu
     String::from_utf8(bytes).map_err(|error| format!("{name} is not valid UTF-8: {error}"))
 }
 
-fn copy_data_protection_key(
+fn copy_client_root_key(
     pointer: *const u8,
     length: usize,
 ) -> std::result::Result<Option<ClientRootKey>, String> {
@@ -2290,7 +2290,7 @@ fn copy_data_protection_key(
     }
     if pointer.is_null() {
         return Err(format!(
-            "data protection key pointer is null for {length} bytes"
+            "client root key pointer is null for {length} bytes"
         ));
     }
     let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };

@@ -69,8 +69,8 @@ internal static class NativeMethods
         internal nuint ClientCertificateChainLength;
         internal IntPtr ClientPrivateKey;
         internal nuint ClientPrivateKeyLength;
-        internal IntPtr DataProtectionKey;
-        internal nuint DataProtectionKeyLength;
+        internal IntPtr ClientRootKey;
+        internal nuint ClientRootKeyLength;
         internal byte CompressionEnabled;
         internal int CompressionLevel;
         internal nuint MinimumInputSize;
@@ -490,7 +490,7 @@ internal sealed class NativeClient : IAsyncDisposable
         using var addressBuffer = new NativeBuffer(Encoding.UTF8.GetBytes(address));
         using var serverNameBuffer = new NativeBuffer(Encoding.UTF8.GetBytes(serverName));
         using var certificateBuffer = new NativeBuffer(certificate);
-        using var dataProtectionKey = new NativeBuffer(Array.Empty<byte>());
+        using var clientRootKey = new NativeBuffer(Array.Empty<byte>());
         var options = new NativeMethods.ConnectOptions
         {
             Address = addressBuffer.Pointer,
@@ -499,13 +499,13 @@ internal sealed class NativeClient : IAsyncDisposable
             ServerNameLength = serverNameBuffer.Length,
             Certificate = certificateBuffer.Pointer,
             CertificateLength = certificateBuffer.Length,
-            DataProtectionKey = dataProtectionKey.Pointer,
-            DataProtectionKeyLength = dataProtectionKey.Length,
+            ClientRootKey = clientRootKey.Pointer,
+            ClientRootKeyLength = clientRootKey.Length,
             CompressionEnabled = 0,
             CompressionLevel = Protocol.DefaultZstandardLevel,
             MinimumInputSize = (nuint)Protocol.DefaultZstandardMinimumInputBytes,
             MinimumSavings = (nuint)Protocol.DefaultZstandardMinimumSavingsBytes,
-            // The .NET adapter does not expose a data-protection key. Keep its
+            // The .NET adapter does not expose a client root key. Keep its
             // connection profile plaintext until callers can provide key material.
             Encryption = Protocol.ValueFormatEncryptionNone,
             ConnectTimeoutMilliseconds = ToMilliseconds(connectTimeout),

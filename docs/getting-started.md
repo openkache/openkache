@@ -111,8 +111,8 @@ let certificate = std::fs::read(
 )?;
 let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
 let certificate = Certificate::from_der(certificate)?;
-let protection_key = ClientRootKey::from_base64(configured_base64_secret)?;
-let client = Client::builder(endpoint, protection_key)
+let client_root_key = ClientRootKey::from_base64(configured_base64_secret)?;
+let client = Client::builder(endpoint, client_root_key)
     .trust_certificate(certificate)
     .compression(Compression::Zstandard(ZstandardOptions::default()))
     .connect()

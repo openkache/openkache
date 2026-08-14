@@ -92,7 +92,7 @@ impl DataProtection {
     ///
     /// # Arguments
     ///
-    /// * `key` - Application-managed data protection key.
+    /// * `key` - Application-managed client root key.
     /// * `compression` - Compression policy applied before encryption.
     /// * `encryption` - Compact or Robust authenticated-encryption profile.
     ///

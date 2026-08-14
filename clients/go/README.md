@@ -53,7 +53,7 @@ client, err := openkache.Connect(ctx, openkache.Options{
     Address:           "cache.example.com:4433",
     ServerName:        "cache.example.com",
     Certificate:       caCertificateDER,
-    DataProtectionKey: dataProtectionKey, // optional; exactly 32 bytes when supplied
+    ClientRootKey: clientRootKey, // optional; exactly 32 bytes when supplied
 })
 if err != nil {
     return err
@@ -94,13 +94,13 @@ Use `client.Smithy()` when an application needs the generated
 - `Compression`, `Timeouts`, `Retry`, and `MaxInFlight` map directly to core
   settings; zero values select documented core defaults.
 - When `Encryption` is omitted, the shared core selects randomized
-  AES-256-GCM-SIV (Robust) when `DataProtectionKey` is supplied and leaves
+  AES-256-GCM-SIV (Robust) when `ClientRootKey` is supplied and leaves
   values Unprotected otherwise. Explicit `EncryptionCompact` selects
   deterministic AES-256-SIV-CMAC; explicit authenticated profiles require a
-  data-protection key.
+  client root key.
 - `KeyFormatByteKeyOrHash` preserves byte keys up to 32 bytes as Item IDs and
   hashes longer byte keys; it requires the `Bytes` key representation.
-- An empty `DataProtectionKey` selects unprotected values while retaining
+- An empty `ClientRootKey` selects unprotected values while retaining
   client-side Item ID derivation.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
   artifact. The native artifact must have ABI version 1 and the extended

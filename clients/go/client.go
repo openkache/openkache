@@ -109,14 +109,14 @@ type Options struct {
 	Certificate []byte
 	// Identity is optional mutual-TLS client authentication material.
 	Identity *Identity
-	// DataProtectionKey is the persistent application data-protection secret.
-	DataProtectionKey []byte
+	// ClientRootKey is the persistent application client root secret.
+	ClientRootKey []byte
 	// Compression is applied before the core's authenticated encryption.
 	Compression CompressionOptions
 	// Encryption selects the shared-core value-protection profile. The zero
 	// value means the option was omitted: the shared core selects Robust when
-	// a data-protection key is supplied and Unprotected otherwise. An explicit
-	// authenticated profile requires a data-protection key.
+	// a client root key is supplied and Unprotected otherwise. An explicit
+	// authenticated profile requires a client root key.
 	Encryption Encryption
 	// KeyFormat selects the client-local key mapping profile.
 	KeyFormat KeyFormat
@@ -138,7 +138,7 @@ type normalizedOptions struct {
 	certificate         []byte
 	identityCertificate []byte
 	identityPrivateKey  []byte
-	dataProtectionKey   []byte
+	clientRootKey       []byte
 	compression         CompressionOptions
 	encryption          Encryption
 	encryptionExplicit  bool
@@ -153,10 +153,10 @@ func (o Options) normalize() (normalizedOptions, error) {
 	if o.Address == "" {
 		return normalizedOptions{}, validationError("address", "must not be empty")
 	}
-	if len(o.DataProtectionKey) != 0 && len(o.DataProtectionKey) != SmithyDataProtectionKeyBytes {
+	if len(o.ClientRootKey) != 0 && len(o.ClientRootKey) != SmithyClientRootKeyBytes {
 		return normalizedOptions{}, validationError(
-			"data_protection_key",
-			fmt.Sprintf("must contain exactly %d bytes, got %d", SmithyDataProtectionKeyBytes, len(o.DataProtectionKey)),
+			"client_root_key",
+			fmt.Sprintf("must contain exactly %d bytes, got %d", SmithyClientRootKeyBytes, len(o.ClientRootKey)),
 		)
 	}
 
@@ -282,7 +282,7 @@ func (o Options) normalize() (normalizedOptions, error) {
 		certificate:         normalizedPEM(o.Certificate),
 		identityCertificate: identityCertificate,
 		identityPrivateKey:  identityPrivateKey,
-		dataProtectionKey:   append([]byte(nil), o.DataProtectionKey...),
+		clientRootKey:       append([]byte(nil), o.ClientRootKey...),
 		compression:         compression,
 		encryption:          encryption,
 		encryptionExplicit:  encryptionExplicit,

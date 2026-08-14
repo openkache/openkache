@@ -27,8 +27,8 @@ extern "C" {
 #endif
 
 #define OPENKACHE_CLIENT_ABI_VERSION OPENKACHE_SMITHY_FFI_ABI_VERSION
-#define OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES \
-    OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
+#define OPENKACHE_CLIENT_ROOT_KEY_BYTES \
+    OPENKACHE_SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES
 
 typedef struct openkache_client openkache_client_t;
 typedef struct openkache_client_result openkache_client_result_t;
@@ -144,8 +144,8 @@ typedef struct openkache_client_connect_options {
     size_t client_certificate_chain_length;
     const uint8_t *client_private_key;
     size_t client_private_key_length;
-    const uint8_t *data_protection_key;
-    size_t data_protection_key_length;
+    const uint8_t *client_root_key;
+    size_t client_root_key_length;
     uint8_t compression_enabled;
     int32_t compression_level;
     size_t minimum_input_size;
@@ -165,7 +165,7 @@ typedef struct openkache_client_connect_options_v2 {
 uint32_t openkache_client_abi_version(void);
 
 /*
- * Connects a client. An empty data-protection-key buffer selects the
+ * Connects a client. An empty client-root-key buffer selects the
  * unprotected formatted-value profile while retaining Item ID derivation.
  *
  * `address` is a UTF-8 host/port authority such as "127.0.0.1:4433" or
@@ -173,7 +173,7 @@ uint32_t openkache_client_abi_version(void);
  * `server_name` is the TLS DNS name or IP identity.
  * `certificate` is one DER-encoded server trust certificate, a PEM chain,
  * or an empty buffer to use system trust roots.
- * `data_protection_key` is optional; when supplied it must contain exactly
+ * `client_root_key` is optional; when supplied it must contain exactly
  * 32 bytes.
  * All input buffers are copied before this call returns.
  */
@@ -184,8 +184,8 @@ openkache_client_result_t *openkache_client_connect(
     size_t server_name_length,
     const uint8_t *certificate,
     size_t certificate_length,
-    const uint8_t *data_protection_key,
-    size_t data_protection_key_length,
+    const uint8_t *client_root_key,
+    size_t client_root_key_length,
     uint8_t compression_enabled,
     int32_t compression_level,
     size_t minimum_input_size,
@@ -210,8 +210,8 @@ openkache_client_result_t *openkache_client_connect_ex(
     size_t client_certificate_chain_length,
     const uint8_t *client_private_key,
     size_t client_private_key_length,
-    const uint8_t *data_protection_key,
-    size_t data_protection_key_length,
+    const uint8_t *client_root_key,
+    size_t client_root_key_length,
     uint8_t compression_enabled,
     int32_t compression_level,
     size_t minimum_input_size,

@@ -77,7 +77,7 @@ import {
   type Smithy_Sync_Input,
   type Smithy_Sync_Output,
 } from "./generated_local/smithy-api.js"
-import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
+import { SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
 const TEXT_ENCODER = new TextEncoder()
 /** Maximum logical application-key input bytes accepted by the key contract. */
@@ -153,7 +153,7 @@ export interface Client_Options {
   /** Server or CA certificate trusted for the QUIC connection, encoded as DER or PEM. */
   readonly certificate: Uint8Array
   /** Optional exact 32-byte root secret; omitted means unprotected values. */
-  readonly data_protection_key?: Uint8Array
+  readonly client_root_key?: Uint8Array
   /** Exact key type selected for this formatted keyspace. Defaults to `text`. */
   readonly key_spec?: Key_Spec
   /** Client-local mapping profile. Defaults to `hash`. */
@@ -171,7 +171,7 @@ export interface Client_Options {
   /** Maximum concurrent request lanes on one connection. */
   readonly max_in_flight?: number
   /**
-   * Authenticated value-encryption profile; requires `data_protection_key`.
+   * Authenticated value-encryption profile; requires `client_root_key`.
    * When omitted, the shared core uses Robust with a key and Unprotected
    * without one. Operation-local overrides may additionally select
    * `unprotected`.
@@ -290,7 +290,7 @@ export class OpenKache_Client {
       server_name: options.server_name ?? SMITHY_CLIENT_DEFAULT_SERVER_NAME,
       certificate: options.certificate.slice(),
       identity: owned_identity(options.identity),
-      data_protection_key: options.data_protection_key?.slice(),
+      client_root_key: options.client_root_key?.slice(),
       compression_enabled: compression.enabled !== false,
       compression_level: compression.level ?? SMITHY_DEFAULT_ZSTANDARD_LEVEL,
       minimum_input_size:
@@ -1114,12 +1114,12 @@ function validate_options(options: Client_Options): void {
     throw new OpenKache_Error("certificate must be a non-empty Uint8Array")
   }
   if (
-    options.data_protection_key !== undefined &&
-    (!(options.data_protection_key instanceof Uint8Array) ||
-      options.data_protection_key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES)
+    options.client_root_key !== undefined &&
+    (!(options.client_root_key instanceof Uint8Array) ||
+      options.client_root_key.byteLength !== SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES)
   ) {
     throw new OpenKache_Error(
-      `data_protection_key must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes when supplied`,
+      `client_root_key must contain exactly ${SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES} bytes when supplied`,
     )
   }
   if (

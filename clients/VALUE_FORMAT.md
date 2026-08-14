@@ -6,14 +6,15 @@ This document defines the client-side v1 value encoding before it is handed to
 the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
 
-The Rust `value_envelope` module and the TypeScript `set_value`/`get_value`
-compatibility methods use a separate legacy metadata envelope (`OKV1` magic
-prefix plus metadata lengths). That legacy format is not this v1 value format;
-it is retained only for migration compatibility and is not described by the
-grammar below. Formatted client APIs use the normative `OpaqueBytes` payload
-selector; they still emit and parse this value envelope. In contrast, exact
-Item ID APIs such as the raw clients' `get`/`set` operations bypass this
-envelope and send the caller's item ID and opaque value bytes directly.
+The Rust `ValueCodec` and TypeScript `get_raw`/`set_raw` convenience methods
+use this normative format. TypeScript `get`/`set` and the legacy
+`value_envelope` module use a separate migration envelope (`OKV1` magic prefix
+plus metadata lengths); that format is not described by the grammar below.
+Low-level exact Item ID APIs, such as `RawClient` or native `raw_get`/`raw_set`
+operations, bypass this envelope and send the caller's Item ID and opaque
+value bytes directly. A binding MUST document whether a method named
+`get_raw` or `set_raw` is a logical-key convenience method using this format
+or an exact Item ID operation bypassing it.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -140,7 +141,7 @@ binding exposes that operation-local option. If no override is supplied, the
 operation uses the instance default; an override MUST NOT mutate that default.
 The selected operation profile MUST be represented by `protection_id`.
 
-Without a configured protection key, the default and only valid profile is
+Without a configured client root key, the default and only valid profile is
 `Unprotected`. With a configured key, the default profile is
 `AES-256-GCM-SIV`. An omitted connection profile therefore means
 `Unprotected` without a key and `AES-256-GCM-SIV` with a key. The client MAY
@@ -251,7 +252,7 @@ language-adapter policy; the current adapters use these defaults:
 
 | Adapter | Compression enabled when omitted |
 |---|---:|
-| Rust core, C++, Go, Swift | No |
+| Rust core, C ABI, C++, Go, Swift, CLI | No |
 | Python, TypeScript | Yes |
 | .NET | Not applicable (exact Item ID API only) |
 

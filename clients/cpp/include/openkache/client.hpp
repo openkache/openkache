@@ -145,7 +145,7 @@ struct Connect_Options {
     /// One DER certificate or PEM chain. Empty selects system trust roots.
     std::vector<Byte> certificate;
     /// Optional exact 32-byte root key. Empty selects unprotected values.
-    std::vector<Byte> data_protection_key;
+    std::vector<Byte> client_root_key;
     bool compression_enabled = false;
     std::int32_t compression_level = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL;
     std::size_t minimum_input_size = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES;
@@ -195,12 +195,12 @@ public:
         close();
     }
 
-    /// Connects with the supplied certificate, protection key, and deadlines.
+    /// Connects with the supplied certificate, client root key, and deadlines.
     static Client connect(const Connect_Options& options) {
         const auto* certificate = options.certificate.empty()
             ? nullptr
             : options.certificate.data();
-        const auto* key = options.data_protection_key.data();
+        const auto* key = options.client_root_key.data();
         const auto* client_certificate_chain =
             options.client_certificate_chain.empty()
                 ? nullptr
@@ -213,7 +213,7 @@ public:
             reinterpret_cast<const Byte*>(options.server_name.data()), options.server_name.size(),
             certificate, options.certificate.size(), client_certificate_chain,
             options.client_certificate_chain.size(), client_private_key,
-            options.client_private_key.size(), key, options.data_protection_key.size(),
+            options.client_private_key.size(), key, options.client_root_key.size(),
             static_cast<std::uint8_t>(options.compression_enabled ? 1u : 0u),
             options.compression_level, options.minimum_input_size, options.minimum_savings,
             options.encryption.has_value()

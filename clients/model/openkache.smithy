@@ -136,7 +136,7 @@ structure valueFormat {
     robustTagBytes: Integer
 
     @required
-    dataProtectionKeyBytes: Integer
+    clientRootKeyBytes: Integer
 
     @required
     itemIdRootContext: String
@@ -212,7 +212,7 @@ structure valueEnvelope {
     compactSyntheticIvBytes: 16,
     robustNonceBytes: 12,
     robustTagBytes: 16,
-    dataProtectionKeyBytes: 32,
+    clientRootKeyBytes: 32,
     itemIdRootContext: "OpenKache item ID derivation root v1",
     aadDomain: "openkache/value-format/aad/v1",
     valueRootContext: "OpenKache value format v1 root key",

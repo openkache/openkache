@@ -118,8 +118,9 @@ operation MAY supply its own explicit discriminator.
 It is a mapping policy, not a fourth typed-key type.
 
 Bindings use different names for this same discriminator. `KeyType` is the
-normative contract term; Rust uses `KeyType`, Python and TypeScript use
-`KeySpec`, the C ABI uses `FfiKeySpec`, and C++ uses `Key_Type`.
+normative contract term; Rust uses `KeyType`, Python uses `KeySpec`, the
+TypeScript SDK uses `Key_Spec`, the C ABI uses the generated `FfiKeySpec`
+values, and C++ uses `Key_Type`.
 
 ### 2.3 Language binding requirements
 

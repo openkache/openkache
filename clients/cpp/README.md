@@ -47,7 +47,7 @@ Rust/C core is the native binary.
 ## API
 
 Construct `openkache::Connect_Options` with the server address and, when
-protection is wanted, a persistent 32-byte data-protection key, then call
+protection is wanted, a persistent 32-byte client root key, then call
 `openkache::Client::connect`. Omitting both the key and `encryption` selects
 unprotected formatted values; omitting only `encryption` selects Robust when
 the key is present. An explicit Compact or Robust profile without a key is

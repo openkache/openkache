@@ -87,8 +87,8 @@ v1 contract calls the root secret `client_root_key` and binds the selected
 namespace into both Item ID derivation and value AAD. The Rust API retains
 `ClientRootKey` as its API name; it is not a separate wire concept.
 
-`ValueCodec` stores its current metadata inside the opaque value. The v1
-container is defined by [`VALUE_FORMAT.md`](../VALUE_FORMAT.md):
+`ValueCodec` stores the selected transform profile inside the opaque value.
+The v1 container is defined by [`VALUE_FORMAT.md`](../VALUE_FORMAT.md):
 
 ```text
 value_envelope_version:vu128 | selector:u8 | body
@@ -137,7 +137,7 @@ does not provide one.
 - `src/transport.rs` manages reusable stream lanes and backend-neutral
   deadlines.
 - `src/config.rs` provides public transport and TLS configuration wrappers.
-- `src/key.rs` handles exact item IDs and data-protection keys.
+- `src/key.rs` handles exact item IDs and client root keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated

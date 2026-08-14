@@ -48,7 +48,7 @@ const client = await OpenKache_Client.connect({
     certificate_chain: [await readFile("client-bundle/client.crt")],
     private_key: await readFile("client-bundle/client.key"),
   },
-  data_protection_key: await readFile("client-bundle/data-protection.key"),
+  client_root_key: await readFile("client-bundle/client-root.key"),
 })
 
 await client.set("profile", {
@@ -121,7 +121,7 @@ The runtime-neutral codec layer is available from
 - `certificate` is one trusted DER or PEM server or CA certificate.
 - `identity` contains the DER or PEM client certificate chain and private key
   used for mutual TLS.
-- `data_protection_key` is optional. When supplied it is a persistent
+- `client_root_key` is optional. When supplied it is a persistent
   application-managed 32-byte random secret; clients sharing protected values
   must use the same key. When omitted, Item IDs are still derived but values
   are stored unprotected.
@@ -132,7 +132,7 @@ The runtime-neutral codec layer is available from
 - `retry.max_attempts` controls retries for response-safe operations.
 - `max_in_flight` bounds concurrent request lanes on one connection.
 - `encryption` explicitly selects the shared core's `compact` or `robust`
-  authenticated-encryption profile and requires `data_protection_key`. When
+  authenticated-encryption profile and requires `client_root_key`. When
   omitted, the shared core selects Robust with a key and Unprotected without
   one. Operation-local overrides may additionally select `unprotected`.
 - `key_format` defaults to `hash`; `byte_key_or_hash` requires
@@ -141,7 +141,7 @@ The runtime-neutral codec layer is available from
 - `value_codecs` registers current package codecs.
 - `native_path` overrides Node-API adapter discovery for custom packaging.
 
-Generate the data-protection key once with a cryptographically secure random
+Generate the client root key once with a cryptographically secure random
 source and store it as a secret. Rotating it makes existing protected entries
 unreachable.
 

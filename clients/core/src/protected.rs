@@ -648,7 +648,7 @@ pub struct ProtectedClient {
 }
 
 #[cfg(feature = "quic-quinn")]
-/// Connection and data-protection builder for a shared Tokio client.
+/// Connection and client-root-key builder for a shared Tokio client.
 pub struct ProtectedClientBuilder {
     raw: RawClientBuilder,
     protection: ProtectionSettings,
@@ -669,7 +669,7 @@ impl ProtectedClientBuilder {
 
 #[cfg(feature = "quic-quinn")]
 impl ProtectedClient {
-    /// Connects with mandatory data protection, system trust, and default client behavior.
+    /// Connects with a mandatory client root key, system trust, and default client behavior.
     pub async fn connect(endpoint: &str, key: ClientRootKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, key).connect().await
     }
@@ -702,7 +702,7 @@ pub struct LocalProtectedClient {
 }
 
 #[cfg(feature = "quic-compio")]
-/// Connection and data-protection builder for a shared Compio client.
+/// Connection and client-root-key builder for a shared Compio client.
 pub struct LocalProtectedClientBuilder {
     raw: LocalRawClientBuilder,
     protection: ProtectionSettings,
@@ -723,7 +723,7 @@ impl LocalProtectedClientBuilder {
 
 #[cfg(feature = "quic-compio")]
 impl LocalProtectedClient {
-    /// Connects with mandatory data protection, system trust, and default Compio behavior.
+    /// Connects with a mandatory client root key, system trust, and default Compio behavior.
     pub async fn connect(endpoint: &str, key: ClientRootKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, key).connect().await
     }

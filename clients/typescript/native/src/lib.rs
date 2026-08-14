@@ -45,8 +45,8 @@ pub struct NativeClientOptions {
     pub server_name: String,
     pub certificate: Uint8Array,
     pub identity: Option<NativeIdentity>,
-    #[napi(js_name = "data_protection_key")]
-    pub data_protection_key: Option<Uint8Array>,
+    #[napi(js_name = "client_root_key")]
+    pub client_root_key: Option<Uint8Array>,
     #[napi(js_name = "compression_enabled")]
     pub compression_enabled: bool,
     #[napi(js_name = "compression_level")]
@@ -665,8 +665,8 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         )));
     }
 
-    let data_protection_key = options
-        .data_protection_key
+    let client_root_key = options
+        .client_root_key
         .as_ref()
         .map(|key| {
             openkache_client_core::ClientRootKey::from_slice(key.as_ref()).map_err(native_error)
@@ -722,7 +722,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let key_format = parse_key_format(options.key_format.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
-    let mut builder = match data_protection_key {
+    let mut builder = match client_root_key {
         Some(key) => ProtectedClient::builder(endpoint, key),
         None => ProtectedClient::builder_unprotected(endpoint),
     }

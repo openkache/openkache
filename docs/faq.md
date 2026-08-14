@@ -42,8 +42,8 @@ Rust, TypeScript and JavaScript on Node.js, Bun, and Deno, .NET, and the
 
 ### Is end-to-end encryption mandatory?
 
-High-level Rust and TypeScript clients require a random 32-byte data protection
-master key. The shared client core derives HMAC-SHA-256 item IDs and an
+High-level Rust and TypeScript clients require a random 32-byte client root key.
+The shared client core derives HMAC-SHA-256 item IDs and an
 independent XChaCha20-Poly1305 value key. The server sees deterministic 32-byte
 item IDs and encoded value sizes, but not application keys or value plaintext.
 The low-level raw API accepts exact item IDs and encoded values for callers
