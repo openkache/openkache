@@ -43,7 +43,7 @@ impl Status {
 
 /// Canonical generated operation metadata shared by all adapters.
 pub mod operation {
-    use super::{Opcode, Status};
+    use super::{Opcode, OptionalValueCodec, Status};
     include!(concat!(env!("OUT_DIR"), "/operation_contract.rs"));
 }
 
@@ -94,7 +94,7 @@ pub use request::{
 pub use response::{
     OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes, ResponseParts,
 };
-pub use segments::{OwnedFrame, OwnedRange, ResponseSegment, WireSegment};
+pub use segments::{OwnedFrame, OwnedRange, ResponseSegment, SegmentFrame, WireSegment};
 
 /// The exact fixed-size item identifier carried by the wire protocol.
 #[repr(transparent)]

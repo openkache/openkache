@@ -8,9 +8,18 @@ use crate::{
     OperationFieldLayout, OperationFieldPlan, OwnedFrame, ProtocolError, Result, WireSegment,
     encode_field_sequence,
 };
-use smallvec::SmallVec;
+use smallvec::{Array, SmallVec};
 
 const INLINE_FIELDS: usize = 8;
+
+pub(crate) const OPTIONAL_VALUE_CODEC: crate::OptionalValueCodec =
+    match crate::OptionalValueCodec::new(
+        crate::OPTIONAL_VALUE_LENGTH_BYTES,
+        crate::OPTIONAL_VALUE_MISSING as u64,
+    ) {
+        Ok(codec) => codec,
+        Err(_) => panic!("generated optional-value wire constants are invalid"),
+    };
 
 /// Encodes required fixed-width fields without per-field prefixes.
 pub fn encode_dense_fields(values: &[&[u8]], widths: &[usize]) -> Result<Vec<u8>> {
@@ -111,11 +120,7 @@ pub fn encode_layout_fields(
     match layout {
         OperationFieldLayout::Sequence => encode_field_sequence(values),
         OperationFieldLayout::OptionalValues => {
-            let codec = crate::OptionalValueCodec::new(
-                crate::OPTIONAL_VALUE_LENGTH_BYTES,
-                u64::from(crate::OPTIONAL_VALUE_MISSING),
-            )?;
-            crate::encode_optional_values(codec, values)
+            crate::encode_optional_values(OPTIONAL_VALUE_CODEC, values)
         }
         OperationFieldLayout::Dense => {
             if values.iter().any(Option::is_none) {
@@ -154,13 +159,9 @@ pub fn decode_layout_fields(
         OperationFieldLayout::Sequence => {
             crate::FieldSequence::decode_with_required(payload, required, offsets).map(|_| ())
         }
-        OperationFieldLayout::OptionalValues => {
-            let codec = crate::OptionalValueCodec::new(
-                crate::OPTIONAL_VALUE_LENGTH_BYTES,
-                u64::from(crate::OPTIONAL_VALUE_MISSING),
-            )?;
-            codec.decode(payload, required.len(), offsets).map(|_| ())
-        }
+        OperationFieldLayout::OptionalValues => OPTIONAL_VALUE_CODEC
+            .decode(payload, required.len(), offsets)
+            .map(|_| ()),
         OperationFieldLayout::Dense => {
             if required.iter().any(|r| !r) {
                 return Err(ProtocolError::InvalidFieldSequence(
@@ -220,6 +221,29 @@ where
     I: IntoIterator<Item = Option<T>>,
     T: Into<WireSegment>,
 {
+    encode_planned_field_segments_in::<[WireSegment; crate::segments::INLINE_SEGMENTS], _, _>(
+        values,
+        plan,
+        layout,
+        optional_codec,
+    )
+}
+
+/// Encodes a generated field plan with caller-selected inline segment storage.
+///
+/// Selecting storage changes only ownership metadata capacity. The encoded
+/// bytes, validation, field ordering, and payload owners are identical.
+pub(crate) fn encode_planned_field_segments_in<A, I, T>(
+    values: I,
+    plan: &[OperationFieldPlan],
+    layout: OperationFieldLayout,
+    optional_codec: Option<&crate::OptionalValueCodec>,
+) -> Result<crate::SegmentFrame<A>>
+where
+    A: Array<Item = WireSegment>,
+    I: IntoIterator<Item = Option<T>>,
+    T: Into<WireSegment>,
+{
     if plan.len() > crate::MAX_OPERATION_FIELDS {
         return Err(ProtocolError::InvalidFieldSequence(
             "operation field count exceeds the generated bound",
@@ -263,7 +287,7 @@ where
         }
     }
 
-    let mut segments = SmallVec::<[WireSegment; crate::segments::INLINE_SEGMENTS]>::new();
+    let mut segments = SmallVec::<A>::new();
     match layout {
         OperationFieldLayout::Dense => {
             if values.iter().any(Option::is_none) {
@@ -325,7 +349,7 @@ where
         }
     }
 
-    let frame = OwnedFrame::from_segments(segments)?;
+    let frame = crate::SegmentFrame::from_segments(segments)?;
     if frame.len() > crate::MAX_VALUE_BYTES {
         return Err(ProtocolError::ValueTooLarge {
             size: frame.len(),

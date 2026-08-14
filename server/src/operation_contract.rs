@@ -13,11 +13,11 @@ use openkache_protocol::Opcode;
 // or compact bit constants merely because the generated artifact contains
 // them.
 pub(super) use crate::contract::{
-    MAX_OPERATION_REQUEST_FIELDS, OperationFieldLayout, OperationFieldPlan, OperationFramePolicy,
-    OperationLayoutFraming, OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS,
-    WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor, WireCodecKind,
-    WireCodecLengthEncoding, WireCodecWidth, operation_registry, operation_wire_spec,
-    request_fields, wire_codec_kind, wire_request_layout,
+    MAX_OPERATION_REQUEST_FIELDS, OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
+    OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES,
+    WireCodecCardinality, WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding,
+    WireCodecWidth, operation_registry, operation_wire_spec, request_fields, wire_codec_kind,
+    wire_request_layout,
 };
 
 pub(super) const MAX_FIELDS: usize = crate::contract::MAX_OPERATION_FIELDS;
