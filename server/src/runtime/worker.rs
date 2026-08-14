@@ -292,7 +292,8 @@ pub(super) async fn worker_loop<C, X>(
     observability: Option<std::sync::Arc<ObservabilityState>>,
 ) -> Result<()>
 where
-    C: KeyedWorkPort<Kvkache, StorageKey>,
+    C: KeyedWorkPort<Kvkache, StorageKey> + Send + Unpin + 'static,
+    X: Send + Unpin + 'static,
     Kvkache: ExclusiveWorkPort<C> + ControlPort<X>,
 {
     let storage_shard = observability
