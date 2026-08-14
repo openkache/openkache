@@ -1,6 +1,7 @@
 //! Shared application-key hiding and value-protection composition.
 
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
+use crate::key::validate_canonical_key;
 use crate::{ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, Result};
 
 /// Reusable keyed transformation shared by language-specific client layers.
@@ -135,15 +136,15 @@ impl DataProtection {
         namespace_id: u64,
         canonical_key: &[u8],
     ) -> Result<ItemId> {
-        let key = PortableKey::decode_canonical(canonical_key)?;
-        if key.spec() != self.key_spec {
+        let canonical_key = validate_canonical_key(canonical_key)?;
+        if canonical_key.spec() != self.key_spec {
             return Err(crate::Error::Key(crate::KeyError::KeySpecMismatch {
                 expected: self.key_spec,
-                actual: key.spec(),
+                actual: canonical_key.spec(),
             }));
         }
         self.key
-            .derive_item_id_from_canonical_key(namespace_id, canonical_key)
+            .derive_item_id_from_validated_canonical_key(namespace_id, canonical_key)
             .map_err(Into::into)
     }
 
