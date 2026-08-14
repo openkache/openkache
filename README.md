@@ -63,7 +63,8 @@ and rings instead.
 
 Secure clients may compress values and encrypt them with the v1
 AES-256-SIV-CMAC or AES-256-GCM-SIV profiles before transmission. The
-authenticated value is bound to its exact 32-byte wire Item ID and namespace,
+authenticated value is bound to its exact variable-length wire Item ID
+(0 through 32 bytes) and namespace,
 so moving ciphertext to another cache item or namespace fails authentication.
 Protected clients hide typed application keys behind namespace-bound BLAKE3
 item IDs. The server observes
