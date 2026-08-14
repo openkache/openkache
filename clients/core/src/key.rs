@@ -368,6 +368,26 @@ struct Cursor<'a> {
     position: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ValidatedCanonicalKey<'a> {
+    bytes: &'a [u8],
+    spec: KeySpec,
+}
+
+impl<'a> ValidatedCanonicalKey<'a> {
+    const fn generated(bytes: &'a [u8], spec: KeySpec) -> Self {
+        Self { bytes, spec }
+    }
+
+    pub(crate) const fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub(crate) const fn spec(self) -> KeySpec {
+        self.spec
+    }
+}
+
 impl<'a> Cursor<'a> {
     const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, position: 0 }
@@ -437,7 +457,7 @@ impl<'a> Cursor<'a> {
         Ok((major, value))
     }
 
-    fn parse_bytes(&mut self, length: u64) -> std::result::Result<Vec<u8>, KeyError> {
+    fn read_borrowed_bytes(&mut self, length: u64) -> std::result::Result<&'a [u8], KeyError> {
         let length = usize::try_from(length).map_err(|_| KeyError::Overflow)?;
         if length > MAX_CANONICAL_KEY_BYTES {
             return Err(KeyError::TooLarge {
@@ -445,7 +465,54 @@ impl<'a> Cursor<'a> {
                 maximum: MAX_CANONICAL_KEY_BYTES,
             });
         }
-        Ok(self.read_exact(length)?.to_vec())
+        self.read_exact(length)
+    }
+
+    fn parse_bytes(&mut self, length: u64) -> std::result::Result<Vec<u8>, KeyError> {
+        Ok(self.read_borrowed_bytes(length)?.to_vec())
+    }
+
+    fn validate_key(&mut self) -> std::result::Result<KeySpec, KeyError> {
+        let header = self
+            .bytes
+            .get(self.position)
+            .copied()
+            .ok_or(KeyError::Truncated)?;
+        let major = header >> 5;
+        if major == 6 {
+            let _ = self.read_byte()?;
+            let (tag, preferred) = self.read_argument(header & 0x1f)?;
+            if !preferred || !matches!(tag, 2 | 3) {
+                return Err(KeyError::UnsupportedType);
+            }
+            let (byte_major, length) = self.parse_header()?;
+            if byte_major != 2 {
+                return Err(KeyError::UnsupportedType);
+            }
+            let magnitude = self.read_borrowed_bytes(length)?;
+            if magnitude.is_empty()
+                || magnitude[0] == 0
+                || as_u64(magnitude).is_some()
+            {
+                return Err(KeyError::NonCanonical);
+            }
+            return Ok(KeySpec::Integer);
+        }
+
+        let (major, argument) = self.parse_header()?;
+        match major {
+            0 | 1 => Ok(KeySpec::Integer),
+            2 => {
+                let _ = self.read_borrowed_bytes(argument)?;
+                Ok(KeySpec::Bytes)
+            }
+            3 => {
+                let bytes = self.read_borrowed_bytes(argument)?;
+                std::str::from_utf8(bytes).map_err(|_| KeyError::InvalidUtf8)?;
+                Ok(KeySpec::Text)
+            }
+            _ => Err(KeyError::UnsupportedType),
+        }
     }
 
     fn parse_key(&mut self) -> std::result::Result<PortableKey, KeyError> {
@@ -513,6 +580,23 @@ impl<'a> Cursor<'a> {
             _ => Err(KeyError::UnsupportedType),
         }
     }
+}
+
+pub(crate) fn validate_canonical_key(
+    bytes: &[u8],
+) -> std::result::Result<ValidatedCanonicalKey<'_>, KeyError> {
+    if bytes.len() > MAX_CANONICAL_KEY_BYTES {
+        return Err(KeyError::TooLarge {
+            size: bytes.len(),
+            maximum: MAX_CANONICAL_KEY_BYTES,
+        });
+    }
+    let mut cursor = Cursor::new(bytes);
+    let spec = cursor.validate_key()?;
+    if !cursor.is_empty() {
+        return Err(KeyError::TrailingBytes);
+    }
+    Ok(ValidatedCanonicalKey { bytes, spec })
 }
 
 /// Errors from key conversion or canonical key decoding.
@@ -763,15 +847,20 @@ impl ClientRootKey {
         if namespace_id == 0 {
             return Err(KeyError::InvalidNamespace);
         }
-        let canonical_key = key.into().canonical_bytes()?;
-        self.derive_item_id_from_canonical_key(namespace_id, &canonical_key)
+        let key = key.into();
+        let spec = key.spec();
+        let canonical_key = key.canonical_bytes()?;
+        self.derive_item_id_from_validated_canonical_key(
+            namespace_id,
+            ValidatedCanonicalKey::generated(&canonical_key, spec),
+        )
     }
 
     /// Derives an Item ID from already canonical deterministic-CBOR key bytes.
     ///
     /// This is the boundary used by language adapters that perform native-value
-    /// conversion outside the Rust core. The bytes are decoded and re-encoded
-    /// before hashing, so a caller cannot smuggle a non-canonical representation.
+    /// conversion outside the Rust core. The bytes are validated before hashing,
+    /// so a caller cannot smuggle a non-canonical representation.
     pub fn derive_item_id_from_canonical_key(
         &self,
         namespace_id: u64,
@@ -780,13 +869,23 @@ impl ClientRootKey {
         if namespace_id == 0 {
             return Err(KeyError::InvalidNamespace);
         }
-        let key = PortableKey::decode_canonical(canonical_key)?;
-        let canonical_key = key.canonical_bytes()?;
-        let mut input = Vec::with_capacity(8 + canonical_key.len());
-        input.extend_from_slice(&namespace_id.to_be_bytes());
-        input.extend_from_slice(&canonical_key);
+        let canonical_key = validate_canonical_key(canonical_key)?;
+        self.derive_item_id_from_validated_canonical_key(namespace_id, canonical_key)
+    }
+
+    pub(crate) fn derive_item_id_from_validated_canonical_key(
+        &self,
+        namespace_id: u64,
+        canonical_key: ValidatedCanonicalKey<'_>,
+    ) -> std::result::Result<ItemId, KeyError> {
+        if namespace_id == 0 {
+            return Err(KeyError::InvalidNamespace);
+        }
+        let mut hasher = blake3::Hasher::new_keyed(&self.item_id_root);
+        hasher.update(&namespace_id.to_be_bytes());
+        hasher.update(canonical_key.bytes());
         Ok(ItemId::from_bytes(
-            *blake3::keyed_hash(&self.item_id_root, &input).as_bytes(),
+            *hasher.finalize().as_bytes(),
         ))
     }
 
