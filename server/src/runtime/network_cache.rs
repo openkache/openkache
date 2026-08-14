@@ -176,21 +176,25 @@ impl NetworkWorkerCache {
             .await
     }
 
-    pub(crate) async fn stats(&self) -> Result<Vec<String>> {
+    pub(crate) async fn stats(&self, operation: Operation) -> Result<Vec<String>> {
         self.cache
-            .stats_async_with_requester(Some(self.network_worker))
+            .stats_async_with_requester(operation, Some(self.network_worker))
             .await
     }
 
-    pub(crate) async fn sync(&self) -> Result<()> {
+    pub(crate) async fn sync(&self, operation: Operation) -> Result<()> {
         self.cache
-            .sync_async_with_requester(Some(self.network_worker))
+            .sync_async_with_requester(operation, Some(self.network_worker))
             .await
     }
 
-    pub(crate) async fn sync_workers(&self, workers: &[usize]) -> Result<()> {
+    pub(crate) async fn sync_workers(
+        &self,
+        workers: &[usize],
+        operation: Operation,
+    ) -> Result<()> {
         self.cache
-            .sync_workers_async_with_requester(workers, Some(self.network_worker))
+            .sync_workers_async_with_requester(workers, operation, Some(self.network_worker))
             .await
     }
 }

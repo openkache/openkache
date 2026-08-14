@@ -288,11 +288,18 @@ impl StorageCapability for NetworkWorkerCache {
     }
 
     fn stats<'a>(&'a self) -> CacheFuture<'a, Vec<String>> {
-        Box::pin(NetworkWorkerCache::stats(self))
+        Box::pin(NetworkWorkerCache::stats(
+            self,
+            Operation::from_opcode(Opcode::Stats),
+        ))
     }
 
     fn sync_workers<'a>(&'a self, workers: &'a [usize]) -> CacheFuture<'a, ()> {
-        Box::pin(NetworkWorkerCache::sync_workers(self, workers))
+        Box::pin(NetworkWorkerCache::sync_workers(
+            self,
+            workers,
+            Operation::from_opcode(Opcode::Sync),
+        ))
     }
 }
 

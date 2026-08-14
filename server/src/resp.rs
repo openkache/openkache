@@ -664,7 +664,10 @@ async fn execute_command(
             }
         }
         RespCommandKind::Stats => match command {
-            [_] => match cache.stats().await {
+            [_] => match cache
+                .stats(Operation::from_opcode(Opcode::Stats))
+                .await
+            {
                 Ok(stats) => {
                     let stats = stats.join("\n");
                     bulk(response, Some(stats.as_bytes()));
@@ -674,7 +677,10 @@ async fn execute_command(
             _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
         },
         RespCommandKind::Sync => match command {
-            [_] => match cache.sync().await {
+            [_] => match cache
+                .sync(Operation::from_opcode(Opcode::Sync))
+                .await
+            {
                 Ok(()) => simple(response, "OK"),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
