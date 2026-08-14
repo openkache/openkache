@@ -1,0 +1,270 @@
+//! Keyed storage commands and their worker lifecycle.
+//!
+//! This module owns storage semantics shared by every API adapter. Adapters
+//! construct commands and project the neutral storage response; the scheduler
+//! remains unaware of both API families and storage actions.
+
+mod completion;
+mod reducer;
+
+use crate::observability::Operation;
+use crate::protocol::SetOptions;
+use crate::store::{CompletedKeyedJob, KeyedJob, KeyedOperation, KeyedVisibleState};
+use crate::types::StoredItemValue;
+use crate::{KvError, Kvkache, SetOutcome, StorageKey};
+
+use super::scheduler::ScheduledTask;
+use super::storage_task::StorageTask;
+use super::worker::{ExclusiveWorkPort, ExclusiveWorkResult};
+use super::worker_contract::{
+    CollapsedKeyedWork, KeyedWorkMetadata, KeyedWorkPort, PreparedKeyedWork,
+};
+use super::worker_control::execute_storage_task;
+use super::{WorkerResponse, WorkerResponseSender};
+
+pub(in crate::runtime) use crate::store::KeyedOutcome as Response;
+pub(in crate::runtime) use reducer::CollapsedBatch;
+
+pub(super) type VisibleState = KeyedVisibleState;
+pub(super) type PreparedJob = KeyedJob;
+pub(super) type CompletedJob = CompletedKeyedJob;
+
+/// One keyed storage command routed through a worker lane.
+pub(in crate::runtime) enum Command {
+    Task {
+        task: StorageTask,
+        response: WorkerResponseSender,
+    },
+    Get {
+        response: WorkerResponseSender,
+    },
+    Set {
+        value: StoredItemValue,
+        options: SetOptions,
+        response: WorkerResponseSender,
+    },
+    Delete {
+        response: WorkerResponseSender,
+    },
+}
+
+pub(in crate::runtime) fn storage_task(
+    task: StorageTask,
+    response: WorkerResponseSender,
+) -> Command {
+    Command::Task { task, response }
+}
+
+pub(in crate::runtime) fn get(response: WorkerResponseSender) -> Command {
+    Command::Get { response }
+}
+
+pub(in crate::runtime) fn set(
+    value: StoredItemValue,
+    options: SetOptions,
+    response: WorkerResponseSender,
+) -> Command {
+    Command::Set {
+        value,
+        options,
+        response,
+    }
+}
+
+pub(in crate::runtime) fn delete(response: WorkerResponseSender) -> Command {
+    Command::Delete { response }
+}
+
+impl Command {
+    fn metadata(&self, cache: &Kvkache) -> KeyedWorkMetadata {
+        let (operation, collapsible) = match self {
+            Self::Task { .. } => (Operation::unknown(), false),
+            Self::Get { .. } => (Operation::storage_get(), true),
+            Self::Set { value, options, .. } => {
+                let collapsible =
+                    *options == SetOptions::NONE && cache.can_collapse_set(value);
+                (Operation::storage_set(), collapsible)
+            }
+            Self::Delete { .. } => (Operation::storage_delete(), true),
+        };
+        KeyedWorkMetadata {
+            operation,
+            collapsible,
+        }
+    }
+
+    fn prepare(
+        self,
+        cache: &mut Kvkache,
+        storage_key: StorageKey,
+    ) -> PreparedKeyedWork<WorkerResponse, PreparedJob> {
+        let (operation, response) = match self {
+            Self::Task { .. } => {
+                unreachable!("exclusive storage tasks do not enter the keyed job path")
+            }
+            Self::Get { response, .. } => (KeyedOperation::Get, response),
+            Self::Set {
+                value,
+                options,
+                response,
+                ..
+            } => (KeyedOperation::Set { value, options }, response),
+            Self::Delete { response, .. } => (KeyedOperation::Delete, response),
+        };
+        PreparedKeyedWork {
+            response,
+            job: cache.prepare_keyed(storage_key, operation),
+        }
+    }
+}
+
+pub(in crate::runtime) fn value_response(
+    response: WorkerResponse,
+    operation: &'static str,
+) -> crate::Result<Option<StoredItemValue>> {
+    match response {
+        WorkerResponse::Data(Response::Value(value)) => Ok(value),
+        response => Err(KvError::Worker(format!(
+            "unexpected {operation} response: {response:?}"
+        ))),
+    }
+}
+
+pub(in crate::runtime) fn set_response(
+    response: WorkerResponse,
+    operation: &'static str,
+) -> crate::Result<SetOutcome> {
+    match response {
+        WorkerResponse::Data(Response::Set(outcome)) => Ok(outcome),
+        response => Err(KvError::Worker(format!(
+            "unexpected {operation} response: {response:?}"
+        ))),
+    }
+}
+
+pub(in crate::runtime) fn delete_response(
+    response: WorkerResponse,
+    operation: &'static str,
+) -> crate::Result<bool> {
+    match response {
+        WorkerResponse::Data(Response::Deleted(deleted)) => Ok(deleted),
+        response => Err(KvError::Worker(format!(
+            "unexpected {operation} response: {response:?}"
+        ))),
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum CollapseGroup {
+    Storage,
+    Task,
+}
+
+impl ScheduledTask for Command {
+    type CollapseGroup = CollapseGroup;
+
+    fn collapse_group(&self) -> Self::CollapseGroup {
+        match self {
+            Self::Task { .. } => CollapseGroup::Task,
+            Self::Get { .. } | Self::Set { .. } | Self::Delete { .. } => CollapseGroup::Storage,
+        }
+    }
+
+    fn is_exclusive(&self) -> bool {
+        matches!(self, Self::Task { .. })
+    }
+}
+
+pub(in crate::runtime) struct ExclusiveStorageTask {
+    task: StorageTask,
+    response: WorkerResponseSender,
+}
+
+impl ExclusiveWorkPort<Command> for Kvkache {
+    type Work = ExclusiveStorageTask;
+
+    fn take_exclusive(command: Command) -> Option<Self::Work> {
+        match command {
+            Command::Task { task, response } => Some(ExclusiveStorageTask { task, response }),
+            Command::Get { .. } | Command::Set { .. } | Command::Delete { .. } => None,
+        }
+    }
+
+    fn execute_exclusive(
+        &mut self,
+        work: Self::Work,
+    ) -> impl std::future::Future<Output = ExclusiveWorkResult> + '_ {
+        async move {
+            let ExclusiveStorageTask { task, response } = work;
+            if task.metadata().cancellation()
+                == super::StorageTaskCancellation::CancelIfDisconnected
+                && response.is_disconnected()
+            {
+                return ExclusiveWorkResult::Cancelled;
+            }
+            let result = execute_storage_task(self, task).await;
+            let _ = response.send(Ok(result));
+            ExclusiveWorkResult::Completed {
+                operation: Operation::unknown(),
+            }
+        }
+    }
+}
+
+impl KeyedWorkPort<Kvkache, StorageKey> for Command {
+    type Response = WorkerResponse;
+    type PreparedJob = PreparedJob;
+    type CompletedJob = CompletedJob;
+    type VisibleState = VisibleState;
+    type CapacityCompletion = crate::store::PendingKeyedResult;
+
+    fn metadata(&self, lifecycle: &Kvkache) -> KeyedWorkMetadata {
+        Command::metadata(self, lifecycle)
+    }
+
+    fn prepare(
+        self,
+        lifecycle: &mut Kvkache,
+        storage_key: StorageKey,
+    ) -> PreparedKeyedWork<Self::Response, Self::PreparedJob> {
+        Command::prepare(self, lifecycle, storage_key)
+    }
+
+    fn run(job: Self::PreparedJob) -> impl std::future::Future<Output = Self::CompletedJob> {
+        job.run()
+    }
+
+    fn collapse(
+        lifecycle: &mut Kvkache,
+        storage_key: StorageKey,
+        base: Self::VisibleState,
+        commands: Vec<Self>,
+    ) -> CollapsedKeyedWork<Self::Response, Self::PreparedJob, Self::VisibleState> {
+        CollapsedBatch::reduce(base, commands).into_work(lifecycle, storage_key)
+    }
+
+    fn finish(
+        lifecycle: &mut Kvkache,
+        job: Self::CompletedJob,
+        include_visible_state: bool,
+    ) -> super::worker_contract::FinishedKeyedWork<Self::Response, Self::VisibleState> {
+        completion::finish(lifecycle, job, include_visible_state)
+    }
+
+    fn progress_capacity(
+        lifecycle: &mut Kvkache,
+    ) -> crate::Result<(bool, Vec<Self::CapacityCompletion>)> {
+        lifecycle.progress_capacity()
+    }
+
+    fn capacity_completion(
+        completion: Self::CapacityCompletion,
+    ) -> super::worker_contract::CapacityCompletion<StorageKey, Self::Response, Self::VisibleState>
+    {
+        completion::capacity_completion(completion)
+    }
+
+    fn cancel_pending(lifecycle: &mut Kvkache, storage_key: StorageKey) {
+        lifecycle.cancel_pending_keyed_mutation(storage_key);
+    }
+}

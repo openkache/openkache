@@ -10,13 +10,11 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::*;
-use crate::observability::Operation;
 use crate::protocol::{EvictionMode, SetCondition, SetOptions};
 use crate::storage_backend;
 use crate::types::StoredItemValue;
 use futures_util::future::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::Opcode;
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
 
@@ -62,16 +60,6 @@ pub(crate) enum KeyedOperation {
         options: SetOptions,
     },
     Delete,
-}
-
-impl KeyedOperation {
-    pub(crate) const fn telemetry_operation(&self) -> Operation {
-        match self {
-            Self::Get => Operation::from_opcode(Opcode::Get),
-            Self::Set { .. } => Operation::from_opcode(Opcode::Set),
-            Self::Delete => Operation::from_opcode(Opcode::Delete),
-        }
-    }
 }
 
 pub(crate) enum KeyedOutcome {
