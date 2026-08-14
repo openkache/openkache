@@ -351,7 +351,7 @@ impl CollapsedLaneBatch {
             };
             responses.push(DeferredWorkerResponse {
                 sender,
-                value: WorkerResponse::Keyed(value),
+                value: WorkerResponse::Data(value),
             });
         }
 
@@ -453,7 +453,7 @@ pub(in crate::runtime) struct KeyedFinish {
 }
 
 pub(in crate::runtime) fn worker_response_for_outcome(outcome: KeyedOutcome) -> WorkerResponse {
-    WorkerResponse::Keyed(match outcome {
+    WorkerResponse::Data(match outcome {
         KeyedOutcome::Value(value) => KeyedResponse::Value(value),
         KeyedOutcome::Set(outcome) => KeyedResponse::Set(outcome),
         KeyedOutcome::Deleted(deleted) => KeyedResponse::Deleted(deleted),
@@ -469,7 +469,7 @@ pub(in crate::runtime) fn value_response(
     operation: &'static str,
 ) -> crate::Result<Option<StoredItemValue>> {
     match response {
-        WorkerResponse::Keyed(KeyedResponse::Value(value)) => Ok(value),
+        WorkerResponse::Data(KeyedResponse::Value(value)) => Ok(value),
         response => Err(KvError::Worker(format!(
             "unexpected {operation} response: {response:?}"
         ))),
@@ -481,7 +481,7 @@ pub(in crate::runtime) fn set_response(
     operation: &'static str,
 ) -> crate::Result<SetOutcome> {
     match response {
-        WorkerResponse::Keyed(KeyedResponse::Set(outcome)) => Ok(outcome),
+        WorkerResponse::Data(KeyedResponse::Set(outcome)) => Ok(outcome),
         response => Err(KvError::Worker(format!(
             "unexpected {operation} response: {response:?}"
         ))),
@@ -493,7 +493,7 @@ pub(in crate::runtime) fn delete_response(
     operation: &'static str,
 ) -> crate::Result<bool> {
     match response {
-        WorkerResponse::Keyed(KeyedResponse::Deleted(deleted)) => Ok(deleted),
+        WorkerResponse::Data(KeyedResponse::Deleted(deleted)) => Ok(deleted),
         response => Err(KvError::Worker(format!(
             "unexpected {operation} response: {response:?}"
         ))),

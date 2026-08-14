@@ -24,6 +24,7 @@ mod scheduler;
 pub(crate) mod storage_backend;
 mod storage_keys;
 mod worker;
+mod worker_contract;
 mod worker_control;
 pub(in crate::runtime) use adapters::draft_v1_keyed as keyed_compatibility;
 pub(crate) use network_cache::NetworkWorkerCache;
@@ -42,37 +43,15 @@ use self::completion::{CompletionReceiver, CompletionSlab};
 #[allow(unused_imports)]
 pub(crate) use crate::storage_backend::{RUNNING_MARKER_FILE, SERVER_KEY_FILE};
 
-pub(in crate::runtime) enum WorkerResponse {
-    /// API-owned keyed result. The worker transports this opaque projection.
-    Keyed(keyed_compatibility::KeyedResponse),
-    Stats(String),
-    Synced,
-    StorageResult(StorageTaskOutput),
-    StorageFailure(StorageError),
-}
-
-impl std::fmt::Debug for WorkerResponse {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Keyed(_) => formatter.write_str("Keyed(..)"),
-            Self::Stats(stats) => formatter.debug_tuple("Stats").field(stats).finish(),
-            Self::Synced => formatter.write_str("Synced"),
-            // API-owned task results are intentionally erased at the runtime
-            // boundary and are therefore only identified, never formatted.
-            Self::StorageResult(_) => formatter.write_str("StorageResult(..)"),
-            Self::StorageFailure(error) => formatter
-                .debug_tuple("StorageFailure")
-                .field(error)
-                .finish(),
-        }
-    }
-}
-
-pub(in crate::runtime) type WorkerResponseSender = worker::ResponseSender<WorkerResponse>;
+pub(in crate::runtime) type WorkerResponse =
+    worker_contract::Response<keyed_compatibility::KeyedResponse>;
+pub(in crate::runtime) type WorkerResponseSender =
+    worker_contract::ResponseSender<WorkerResponse>;
 pub(in crate::runtime) type WorkerRequest =
-    worker::Request<StorageKey, keyed_compatibility::KeyedCommand, WorkerControlRequest>;
+    worker_contract::Request<StorageKey, keyed_compatibility::KeyedCommand, WorkerControlRequest>;
 pub(in crate::runtime) type WorkerControlRequest = worker_control::ControlRequest<WorkerResponse>;
-pub(in crate::runtime) type DeferredWorkerResponse = worker::DeferredResponse<WorkerResponse>;
+pub(in crate::runtime) type DeferredWorkerResponse =
+    worker_contract::DeferredResponse<WorkerResponse>;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
@@ -1098,14 +1077,14 @@ impl ThreadedKvkache {
         match (pending.kind, response) {
             (
                 BenchmarkResponseKind::Get,
-                WorkerResponse::Keyed(keyed_compatibility::KeyedResponse::Value(value)),
+                WorkerResponse::Data(keyed_compatibility::KeyedResponse::Value(value)),
             ) => {
                 stats.gets += 1;
                 stats.hits += value.is_some() as usize;
             }
             (
                 BenchmarkResponseKind::Set,
-                WorkerResponse::Keyed(keyed_compatibility::KeyedResponse::Set(outcome)),
+                WorkerResponse::Data(keyed_compatibility::KeyedResponse::Set(outcome)),
             ) => {
                 stats.sets += 1;
                 match outcome {
@@ -1116,7 +1095,7 @@ impl ThreadedKvkache {
             }
             (
                 BenchmarkResponseKind::Delete,
-                WorkerResponse::Keyed(keyed_compatibility::KeyedResponse::Deleted(deleted)),
+                WorkerResponse::Data(keyed_compatibility::KeyedResponse::Deleted(deleted)),
             ) => {
                 stats.deletes += 1;
                 stats.deleted += deleted as usize;

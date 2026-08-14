@@ -6,7 +6,8 @@
 
 use super::storage_backend::RuntimeStorageBackend;
 use super::storage_context::StorageWorkerContext;
-use super::worker::{ControlFlow, ControlPort, ResponseSender};
+use super::worker::{ControlFlow, ControlPort};
+use super::worker_contract::ResponseSender;
 use super::{Kvkache, StorageTask, StorageTaskCancellation, WorkerResponse};
 use crate::Result;
 
