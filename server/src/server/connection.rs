@@ -10,7 +10,7 @@ pub(super) struct NetworkWorkerLimits {
     pub(super) namespaces: Arc<Mutex<NamespaceRegistry>>,
     pub(super) observability: Arc<ObservabilityState>,
     pub(super) capabilities: Arc<dyn CapabilityCatalog>,
-    pub(super) frame_layout_provider: Arc<dyn FrameLayoutProvider>,
+    pub(super) request_descriptor_provider: Arc<dyn RequestDescriptorProvider>,
 }
 
 pub(super) async fn run_selected_endpoint(
@@ -52,7 +52,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         namespaces,
         observability,
         capabilities,
-        frame_layout_provider,
+        request_descriptor_provider,
     } = limits;
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
     let cache = Arc::new(NetworkWorkerCache::new(
@@ -78,7 +78,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                         incoming, network_shard, access_policy, request_timeout,
                         max_stream_lanes, request_budget.clone(), max_item_bytes,
                         Arc::clone(&capabilities),
-                        Arc::clone(&frame_layout_provider),
+                        Arc::clone(&request_descriptor_provider),
                     ));
                 }
                 _ = stopping => break,
@@ -95,7 +95,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                         incoming, network_shard, access_policy, request_timeout,
                         max_stream_lanes, request_budget.clone(), max_item_bytes,
                         Arc::clone(&capabilities),
-                        Arc::clone(&frame_layout_provider),
+                        Arc::clone(&request_descriptor_provider),
                     ));
                 }
                 _ = completed => {}
@@ -118,7 +118,7 @@ async fn serve_incoming<I: TransportIncoming>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
     capabilities: Arc<dyn CapabilityCatalog>,
-    frame_layout_provider: Arc<dyn FrameLayoutProvider>,
+    request_descriptor_provider: Arc<dyn RequestDescriptorProvider>,
 ) {
     match incoming.connect().await {
         Ok(mut connection) => {
@@ -139,7 +139,7 @@ async fn serve_incoming<I: TransportIncoming>(
                 request_budget,
                 max_item_bytes,
                 capabilities,
-                frame_layout_provider,
+                request_descriptor_provider,
             )
             .await;
             network_shard.connection_finished();
@@ -158,7 +158,7 @@ async fn serve_connection<C: TransportConnection>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
     capabilities: Arc<dyn CapabilityCatalog>,
-    frame_layout_provider: Arc<dyn FrameLayoutProvider>,
+    request_descriptor_provider: Arc<dyn RequestDescriptorProvider>,
 ) {
     let mut streams = FuturesUnordered::new();
     loop {
@@ -179,7 +179,7 @@ async fn serve_connection<C: TransportConnection>(
                         request_budget.clone(),
                         max_item_bytes,
                         Arc::clone(&capabilities),
-                        Arc::clone(&frame_layout_provider),
+                        Arc::clone(&request_descriptor_provider),
                     ));
                 }
                 Err(_) => break,
@@ -201,7 +201,7 @@ async fn serve_connection<C: TransportConnection>(
                             request_budget.clone(),
                             max_item_bytes,
                             Arc::clone(&capabilities),
-                            Arc::clone(&frame_layout_provider),
+                            Arc::clone(&request_descriptor_provider),
                         ));
                     }
                     Err(_) => break,
@@ -223,7 +223,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
     capabilities: Arc<dyn CapabilityCatalog>,
-    frame_layout_provider: Arc<dyn FrameLayoutProvider>,
+    request_descriptor_provider: Arc<dyn RequestDescriptorProvider>,
 ) {
     let _stream_guard = ActiveStream { network_shard };
     loop {
@@ -282,7 +282,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         let mut terminal_after_response = frame.has_trailing_bytes;
         let response_result = match Request::decode_owned_for_server_with(
             request_bytes,
-            frame_layout_provider.as_ref(),
+            request_descriptor_provider.as_ref(),
         ) {
             Ok(request) => {
                 let request_opcode = request.opcode();
