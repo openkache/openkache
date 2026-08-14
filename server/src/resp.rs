@@ -19,12 +19,12 @@ use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
 };
 use crate::platform::StorageDeviceKind;
-use crate::protocol::{ItemId, SetOptions};
+use crate::protocol::ItemId;
 use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
     launch_network_role, shutdown_network_workers_and_cache,
 };
-use crate::types::StoredItemValue;
+use crate::types::{StorageWriteOptions, StoredItemValue};
 use crate::{AppConfig, NetworkWorkerCache, SetOutcome, ThreadedKvkache};
 
 const MAX_ARRAY_ITEMS: usize = 64;
@@ -622,7 +622,7 @@ async fn execute_command(
                 .set_with_options(
                     resp_item_id(application_key),
                     StoredItemValue::new(value.to_vec()),
-                    SetOptions::NONE,
+                    StorageWriteOptions::default(),
                 )
                 .await
             {

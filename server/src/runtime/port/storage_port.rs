@@ -10,6 +10,10 @@ use std::pin::Pin;
 
 use openkache_protocol::OwnedRange;
 
+pub(crate) use crate::types::{
+    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
+};
+
 use super::storage_task::{StorageTask, StorageTaskMetadata};
 
 /// Opaque address accepted by the generic storage capability.
@@ -310,48 +314,6 @@ pub(crate) enum StorageBatchResult {
     Value(Option<Vec<u8>>),
     Mutation(StorageMutation),
     CompareAndSet(bool),
-}
-
-/// Existence condition for a storage mutation.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum StorageWriteCondition {
-    #[default]
-    Any,
-    IfAbsent,
-    IfPresent,
-}
-
-/// Expiration selection independent of the protocol-v1 flag byte.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum StorageWriteExpiration {
-    #[default]
-    Inherit,
-    NoExpiry,
-    Ttl(u64),
-}
-
-/// Capacity selection independent of the protocol-v1 flag byte.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum StorageWriteEviction {
-    #[default]
-    Inherit,
-    Evictable,
-    Protected,
-}
-
-/// Neutral write options supplied by API-owned storage tasks.
-///
-/// This type is deliberately not a wire or client type. Runtime adapters
-/// translate it to the active backend's concrete write options.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct StorageWriteOptions {
-    pub(crate) condition: StorageWriteCondition,
-    pub(crate) expiration: StorageWriteExpiration,
-    pub(crate) eviction: StorageWriteEviction,
 }
 
 /// Operations that can safely share a worker's read lane.

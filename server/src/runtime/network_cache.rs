@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::observability::NetworkWorkerId;
-use crate::protocol::{ItemId, SetOptions};
+use crate::protocol::ItemId;
 use crate::types::StoredItemValue;
 use crate::{Result, SetOutcome, StorageKey};
 
@@ -105,7 +105,7 @@ impl NetworkWorkerCache {
         namespace_id: u64,
         item_id: ItemId,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
         self.cache
             .set_async_in_namespace_with_requester(
@@ -142,7 +142,7 @@ impl NetworkWorkerCache {
         &self,
         item_id: ItemId,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
         self.cache
             .set_async_with_options_requester(item_id, value, options, Some(self.network_worker))
@@ -194,7 +194,6 @@ impl StoragePort for NetworkWorkerCache {
     ) -> StorageWriteFuture<'a> {
         let storage_key = storage_backend::storage_key_for_address(&storage_address);
         let value = StoredItemValue::from_owned_range(value.into_owned_range());
-        let options = storage_backend::protocol_storage_options(options);
         Box::pin(async move {
             self.cache
                 .set_storage_key_with_requester(

@@ -1,6 +1,6 @@
 //! Reduction of contiguous keyed storage actions.
 
-use crate::protocol::SetOptions;
+use crate::types::StorageWriteOptions;
 use crate::store::{KeyedOperation, KeyedVisibleState};
 use crate::{Kvkache, SetOutcome, StorageKey};
 use crate::observability::Operation;
@@ -47,7 +47,7 @@ impl CollapsedBatch {
                     options,
                     response,
                 } => {
-                    debug_assert_eq!(options, SetOptions::NONE);
+                    debug_assert_eq!(options, StorageWriteOptions::default());
                     let outcome = match current {
                         KeyedVisibleState::Missing => SetOutcome::Created,
                         KeyedVisibleState::Present(_) => SetOutcome::Replaced,
@@ -73,7 +73,7 @@ impl CollapsedBatch {
             let operation = match &current {
                 KeyedVisibleState::Present(value) => KeyedOperation::Set {
                     value: value.clone(),
-                    options: SetOptions::NONE,
+                    options: StorageWriteOptions::default(),
                 },
                 KeyedVisibleState::Missing if base_present => KeyedOperation::Delete,
                 KeyedVisibleState::Missing => return None,

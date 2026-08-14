@@ -10,9 +10,8 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::*;
-use crate::protocol::{EvictionMode, SetCondition, SetOptions};
 use crate::storage_backend;
-use crate::types::StoredItemValue;
+use crate::types::{StorageWriteCondition, StorageWriteOptions, StoredItemValue};
 use futures_util::future::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
@@ -57,7 +56,7 @@ pub(crate) enum KeyedOperation {
     Get,
     Set {
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
     },
     Delete,
 }
@@ -91,7 +90,7 @@ enum PreparedKeyedOperation {
     Get,
     Set {
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
     },
     Delete,
 }
@@ -423,7 +422,7 @@ enum PendingKeyedMutation {
         previous: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
         previous_state: Option<ItemState>,
-        condition: SetCondition,
+        condition: StorageWriteCondition,
         include_visible_state: bool,
     },
 }
@@ -678,14 +677,14 @@ impl Kvkache {
                 self.keyed_read_plan(storage_key, ReadPurpose::Value),
             ),
             KeyedOperation::Set { value, options } => {
-                let observation = if options.ttl_ms == Some(0) {
+                let observation = if options.ttl_ms() == Some(0) {
                     KeyedObservationPlan::Error(KvError::InvalidRequest(
                         "SET TTL must be greater than zero milliseconds".into(),
                     ))
-                } else if let Err(error) = validate_ttl(options.ttl_ms) {
+                } else if let Err(error) = validate_ttl(options.ttl_ms()) {
                     KeyedObservationPlan::Error(error)
                 } else if let Err(error) =
-                    self.validate_value(&value.bytes, options.ttl_ms.is_some())
+                    self.validate_value(&value.bytes, options.ttl_ms().is_some())
                 {
                     KeyedObservationPlan::Error(error)
                 } else {
@@ -870,7 +869,7 @@ impl Kvkache {
         &mut self,
         storage_key: StorageKey,
         mut value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
         evaluated_at_ms: u64,
         previous: Option<LocatedKeyState>,
         include_visible_state: bool,
@@ -897,8 +896,8 @@ impl Kvkache {
         if let Some(replacement) = self.try_append_value(
             storage_key,
             &value.bytes,
-            options.ttl_ms,
-            matches!(options.eviction_mode, EvictionMode::EvictionProtected),
+            options.ttl_ms(),
+            options.eviction_protected(),
             previous_location,
             previous_mutable_value,
         )? {
@@ -916,7 +915,7 @@ impl Kvkache {
             } else {
                 SetOutcome::Created
             };
-            let visible_state = (include_visible_state && options == SetOptions::NONE)
+            let visible_state = (include_visible_state && options == StorageWriteOptions::default())
                 .then(|| KeyedVisibleState::Present(value.clone_for_visible_state()));
             return Ok((outcome, visible_state, false, false));
         }
@@ -924,11 +923,8 @@ impl Kvkache {
             .push_back(PendingKeyedMutation::Set {
                 storage_key,
                 value,
-                ttl_ms: options.ttl_ms,
-                eviction_protected: matches!(
-                    options.eviction_mode,
-                    EvictionMode::EvictionProtected
-                ),
+                ttl_ms: options.ttl_ms(),
+                eviction_protected: options.eviction_protected(),
                 previous: previous_location,
                 previous_mutable_value,
                 previous_state,
@@ -1115,7 +1111,7 @@ impl Kvkache {
         storage_key: StorageKey,
         value: StoredItemValue,
     ) -> Result<SetOutcome> {
-        self.set_encoded_with_options(storage_key, value, SetOptions::NONE)
+        self.set_encoded_with_options(storage_key, value, StorageWriteOptions::default())
             .await
     }
 
@@ -1123,16 +1119,16 @@ impl Kvkache {
         &mut self,
         storage_key: StorageKey,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
         self.drive_background_once().await?;
-        if options.ttl_ms == Some(0) {
+        if options.ttl_ms() == Some(0) {
             return Err(KvError::InvalidRequest(
                 "SET TTL must be greater than zero milliseconds".into(),
             ));
         }
-        validate_ttl(options.ttl_ms)?;
-        self.validate_value(&value.bytes, options.ttl_ms.is_some())?;
+        validate_ttl(options.ttl_ms())?;
+        self.validate_value(&value.bytes, options.ttl_ms().is_some())?;
         // Check the condition before admission so a request that is already
         // known to be NotStored does not fail because of unrelated capacity.
         let initial_previous = self.locate_item(&storage_key).await?;
@@ -1167,8 +1163,8 @@ impl Kvkache {
             if let Some(location) = self.try_append_value(
                 storage_key,
                 &value.bytes,
-                options.ttl_ms,
-                matches!(options.eviction_mode, EvictionMode::EvictionProtected),
+                options.ttl_ms(),
+                options.eviction_protected(),
                 previous_location,
                 previous_mutable_value,
             )? {
@@ -1219,7 +1215,7 @@ impl Kvkache {
         storage_key: StorageKey,
         expected: Option<&[u8]>,
         replacement: Option<StoredItemValue>,
-        options: SetOptions,
+        options: StorageWriteOptions,
     ) -> Result<bool> {
         let current = self.get_encoded(&storage_key).await?;
         let matches = match (expected, current.as_ref()) {
@@ -2879,11 +2875,11 @@ fn bucket_hash_index_for_bucket(
     (0..bucket_choice_count as u8).find(|index| hashes.get(*index) == bucket_index)
 }
 
-fn set_condition_allows(condition: SetCondition, current_live: bool) -> bool {
+fn set_condition_allows(condition: StorageWriteCondition, current_live: bool) -> bool {
     match condition {
-        SetCondition::Any => true,
-        SetCondition::IfAbsent => !current_live,
-        SetCondition::IfPresent => current_live,
+        StorageWriteCondition::Any => true,
+        StorageWriteCondition::IfAbsent => !current_live,
+        StorageWriteCondition::IfPresent => current_live,
     }
 }
 

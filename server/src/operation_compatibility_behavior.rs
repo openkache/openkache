@@ -19,7 +19,7 @@ use super::operation_compatibility_bindings::{
     SetInput,
 };
 use super::operation_compatibility_services::{
-    CompatibilityServices, NamespaceCapability, StorageCapability,
+    CompatibilityServices, NamespaceCapability, StorageCapability, storage_write_options,
 };
 use super::operation_contract::OperationStatus;
 use super::operation_outcome::{
@@ -288,6 +288,10 @@ pub(super) fn set<'a>(
             Ok(options) => options,
             Err(error) => return namespace_error(error, b"SET policy is disallowed"),
         };
+        let storage_options = match storage_write_options(effective_options) {
+            Ok(options) => options,
+            Err(message) => return domain_error(OperationStatus::InternalError, message),
+        };
         let item_id = decoded.item_id;
         let value = decoded.value;
         let worker = cache.namespace_item_worker(namespace_id, item_id);
@@ -302,7 +306,7 @@ pub(super) fn set<'a>(
                 namespace_id,
                 item_id,
                 super::super::types::StoredItemValue::from_owned_range(value),
-                effective_options,
+                storage_options,
             )
             .await;
         match outcome {

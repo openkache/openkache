@@ -57,6 +57,7 @@ mod operation_compatibility_behavior;
 mod operation_compatibility_bindings;
 #[path = "../operation_compatibility_services.rs"]
 mod operation_compatibility_services;
+pub(crate) use operation_compatibility_services::storage_write_options;
 #[path = "../operation_dispatch.rs"]
 pub(crate) mod operation_dispatch;
 #[path = "../operation_fields.rs"]

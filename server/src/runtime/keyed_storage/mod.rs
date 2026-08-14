@@ -8,9 +8,8 @@ mod completion;
 mod reducer;
 
 use crate::observability::Operation;
-use crate::protocol::SetOptions;
 use crate::store::{CompletedKeyedJob, KeyedJob, KeyedOperation, KeyedVisibleState};
-use crate::types::StoredItemValue;
+use crate::types::{StorageWriteOptions, StoredItemValue};
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
 use super::scheduler::ScheduledTask;
@@ -40,7 +39,7 @@ pub(in crate::runtime) enum Command {
     },
     Set {
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
         response: WorkerResponseSender,
     },
     Delete {
@@ -61,7 +60,7 @@ pub(in crate::runtime) fn get(response: WorkerResponseSender) -> Command {
 
 pub(in crate::runtime) fn set(
     value: StoredItemValue,
-    options: SetOptions,
+    options: StorageWriteOptions,
     response: WorkerResponseSender,
 ) -> Command {
     Command::Set {
@@ -82,7 +81,7 @@ impl Command {
             Self::Get { .. } => (Operation::storage_get(), true),
             Self::Set { value, options, .. } => {
                 let collapsible =
-                    *options == SetOptions::NONE && cache.can_collapse_set(value);
+                    *options == StorageWriteOptions::default() && cache.can_collapse_set(value);
                 (Operation::storage_set(), collapsible)
             }
             Self::Delete { .. } => (Operation::storage_delete(), true),

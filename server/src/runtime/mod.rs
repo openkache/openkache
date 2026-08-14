@@ -13,7 +13,7 @@ use openkache_protocol::Opcode;
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
-use crate::protocol::{ItemId, SetOptions};
+use crate::protocol::ItemId;
 use crate::types::StoredItemValue;
 use crate::*;
 
@@ -592,7 +592,7 @@ impl ThreadedKvkache {
         &self,
         storage_key: StorageKey,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
         requester: Option<NetworkWorkerId>,
     ) -> Result<SetOutcome> {
         let worker = self.owner(&storage_key);
@@ -656,7 +656,11 @@ impl ThreadedKvkache {
     }
 
     pub async fn set(&self, item_id: ItemId, value: Vec<u8>) -> Result<SetOutcome> {
-        self.set_with_options(item_id, StoredItemValue::new(value), SetOptions::NONE)
+        self.set_with_options(
+            item_id,
+            StoredItemValue::new(value),
+            StorageWriteOptions::default(),
+        )
             .await
     }
 
@@ -664,7 +668,7 @@ impl ThreadedKvkache {
         &self,
         item_id: ItemId,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
         self.set_async_with_options_requester(item_id, value, options, None)
             .await
@@ -674,7 +678,7 @@ impl ThreadedKvkache {
         &self,
         item_id: ItemId,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
         requester: Option<NetworkWorkerId>,
     ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(item_id);
@@ -699,7 +703,7 @@ impl ThreadedKvkache {
         namespace_id: u64,
         item_id: ItemId,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
         self.set_async_in_namespace_with_requester(namespace_id, item_id, value, options, None)
             .await
@@ -710,7 +714,7 @@ impl ThreadedKvkache {
         namespace_id: u64,
         item_id: ItemId,
         value: StoredItemValue,
-        options: SetOptions,
+        options: StorageWriteOptions,
         requester: Option<NetworkWorkerId>,
     ) -> Result<SetOutcome> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
@@ -1070,7 +1074,7 @@ impl ThreadedKvkache {
                         storage_key,
                         command: keyed_storage::set(
                             StoredItemValue::new(value),
-                            SetOptions::NONE,
+                            StorageWriteOptions::default(),
                             response_tx,
                         ),
                     },
