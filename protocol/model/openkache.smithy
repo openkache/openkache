@@ -460,9 +460,6 @@ enum Opcode {
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
 
-    @wireOpcode(value: 34)
-    EXPERIMENTAL_MULTI_RESOURCE_MUTATION = "experimental_multi_resource_mutation"
-
 }
 
 @operationContract(
@@ -477,20 +474,6 @@ enum Opcode {
 operation Ping {
     input: PingInput
     output: PingOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "ordered_fields",
-    responseFraming: "field_sequence",
-    responseSemantics: "receipt",
-    retryMode: "never",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict"]
-)
-operation ExperimentalMultiResourceMutation {
-    input: ExperimentalMultiResourceMutationInput
-    output: ExperimentalMultiResourceMutationOutput
 }
 
 @operationContract(
@@ -773,26 +756,6 @@ structure SyncInput {
 }
 
 structure SyncOutput {}
-
-structure ExperimentalMultiResourceMutationInput {
-    @required
-    @operationField(role: "source_resource")
-    sourceResource: Value
-
-    @required
-    @operationField(role: "target_resource")
-    targetResource: Value
-
-    @required
-    @operationField(role: "payload")
-    payload: Value
-}
-
-structure ExperimentalMultiResourceMutationOutput {
-    @required
-    @operationField(role: "receipt")
-    receipt: Value
-}
 
 structure NamespaceOpenInput {
     @required

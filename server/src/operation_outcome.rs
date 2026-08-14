@@ -110,6 +110,7 @@ pub(super) enum OperationBody {
     /// One opaque response payload.
     Opaque(OperationValue),
     /// One ordered output field sequence.
+    #[allow(dead_code)]
     Fields(OperationFieldValues),
 }
 
@@ -155,6 +156,10 @@ impl OperationOutcome {
     }
 
     /// Creates a successful ordered field-sequence response.
+    ///
+    /// This generic response path remains available for future generated APIs;
+    /// the currently registered generic operation returns an opaque response.
+    #[allow(dead_code)]
     pub(super) fn field_sequence<I, V>(status: OperationSuccessStatus, values: I) -> Self
     where
         I: IntoIterator<Item = Option<V>>,

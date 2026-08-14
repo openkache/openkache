@@ -50,7 +50,6 @@ pub(super) fn install_runtime_capabilities(
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
     let mut registry = CapabilityRegistry::overlay(base);
     super::storage_port::install(&mut registry, storage_port);
-    generic::install_resource_store(&mut registry);
     compatibility::install_compatibility_services(
         &mut registry,
         cache,
