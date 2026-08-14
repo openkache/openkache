@@ -108,6 +108,15 @@ impl BackendStream for Stream {
         .map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
     }
 
+    async fn read_byte(&mut self, timeout: Duration) -> Result<u8, TransportError> {
+        let mut byte = [0];
+        tokio::time::timeout(timeout, self.receive.read_exact(&mut byte))
+            .await
+            .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?
+            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamRead, error))?;
+        Ok(byte[0])
+    }
+
     async fn read_exact(
         &mut self,
         length: usize,

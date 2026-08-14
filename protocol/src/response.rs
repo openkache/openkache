@@ -10,9 +10,11 @@ use std::ops::Range;
 use smallvec::SmallVec;
 
 use crate::{
-    MIN_VARUINT_BYTES, ProtocolError, RESPONSE_FIXED_BYTES, Result, Status, decode_varuint,
-    encode_varuint, validate_value_length,
+    MAX_VARUINT_BYTES, MIN_VARUINT_BYTES, ProtocolError, RESPONSE_FIXED_BYTES, Result, Status,
+    decode_varuint, encode_varuint, validate_value_length,
 };
+
+const _: () = assert!(RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES <= 32);
 
 /// An owned buffer with a logical byte range.
 ///
@@ -178,8 +180,8 @@ impl<'a> ResponseFrame<'a> {
 /// The frame allocation stays intact while callers inspect the payload. This
 /// is the allocation-free counterpart to [`Response::decode_owned`], whose
 /// conventional `Response { payload: Vec<u8> }` shape must move the payload
-    /// over the status/length prefix. Use this type when an API field view can
-    /// retain the received frame for its lifetime.
+/// over the status/length prefix. Use this type when an API field view can
+/// retain the received frame for its lifetime.
 #[derive(Debug, Eq, PartialEq)]
 pub struct OwnedResponseFrame {
     header: ResponseHeader,
@@ -246,6 +248,59 @@ pub struct ResponseParts {
     pub payload: Vec<u8>,
     /// Additional ownership-preserving payload segments in wire order.
     pub segments: SmallVec<[ResponseSegment; 8]>,
+}
+
+/// Inline-owned response header bytes assembled by a streaming transport.
+///
+/// The compact response header fits in inline storage, so reading its status
+/// and canonical length prefix does not require a heap allocation. Moving
+/// this owner into [`ResponseParts`] also avoids copying into another header
+/// buffer after the frame boundary is known.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct ResponseHeaderBytes {
+    bytes: SmallVec<[u8; 32]>,
+}
+
+impl ResponseHeaderBytes {
+    /// Creates an empty response header owner.
+    pub const fn new() -> Self {
+        Self {
+            bytes: SmallVec::new_const(),
+        }
+    }
+
+    /// Appends one byte received from the transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::FrameLength`] if the bytes exceed the largest
+    /// compact response header accepted by this protocol.
+    pub fn push(&mut self, byte: u8) -> Result<()> {
+        let maximum = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES;
+        if self.bytes.len() >= maximum {
+            return Err(ProtocolError::FrameLength {
+                expected: maximum,
+                actual: self.bytes.len() + 1,
+            });
+        }
+        self.bytes.push(byte);
+        Ok(())
+    }
+
+    /// Returns the received header prefix.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the received header byte count.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Returns whether no header byte has been received.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
 }
 
 /// One owned response-body segment.
@@ -322,11 +377,12 @@ impl ResponseParts {
     /// The payload allocation is retained exactly as supplied. This is the
     /// preferred receive-side constructor for transports that read the small
     /// response header and the body separately.
-    pub fn decode(header: Vec<u8>, payload: Vec<u8>) -> Result<Self> {
-        let decoded = Response::decode_header(&header)?.ok_or(ProtocolError::FrameTooShort {
-            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
-            actual: header.len(),
-        })?;
+    pub fn decode(header: ResponseHeaderBytes, payload: Vec<u8>) -> Result<Self> {
+        let decoded =
+            Response::decode_header(header.as_slice())?.ok_or(ProtocolError::FrameTooShort {
+                expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
+                actual: header.len(),
+            })?;
         if decoded.encoded_len() != header.len() {
             return Err(ProtocolError::FrameLength {
                 expected: decoded.encoded_len(),
@@ -345,7 +401,7 @@ impl ResponseParts {
             return Err(ProtocolError::FrameLength { expected, actual });
         }
         Ok(Self {
-            header: header.into_iter().collect(),
+            header: header.bytes,
             payload,
             segments: SmallVec::new(),
         })
@@ -389,8 +445,7 @@ impl ResponseParts {
             .len()
             .checked_add(segment_len)
             .ok_or(ProtocolError::FrameLengthOverflow)?;
-        if decoded.encoded_len() != self.header.len()
-            || decoded.payload_len() != actual_payload_len
+        if decoded.encoded_len() != self.header.len() || decoded.payload_len() != actual_payload_len
         {
             let expected = decoded
                 .encoded_len()
