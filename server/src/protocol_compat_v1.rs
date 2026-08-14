@@ -25,7 +25,7 @@ use super::{
 mod policy;
 pub(crate) use policy::decode_namespace_policy;
 
-pub(super) const REQUEST_DESCRIPTOR: RequestDescriptor = RequestDescriptor::new(
+pub(super) static REQUEST_DESCRIPTOR: RequestDescriptor = RequestDescriptor::new(
     "draft-v1",
     request_frame_layout,
     decode_header,
