@@ -5,12 +5,12 @@
 //! compact protocol-v1 values into the generated field plan. Typed bindings
 //! decode those field values at the behavior boundary.
 
-use openkache_protocol::ItemId;
+use openkache_protocol::{ItemId, OwnedRange};
 use smallvec::SmallVec;
 
 use super::operation_handlers::{OperationFieldRecord, OperationFieldStorage, OperationInputView};
 use super::super::operation_contract as generic_contract;
-use crate::protocol::{NamespacePolicy, Request, ServerRequest, SetOptions};
+use crate::protocol::{NamespacePolicy, Request, RequestHeader, ServerRequest, SetOptions};
 
 /// Verifies the compact compatibility projection independently of the generic
 /// operation registry.
@@ -120,7 +120,79 @@ pub(super) fn adapt_request(request: ServerRequest) -> OperationInputView {
         openkache_protocol::compat_v1::route_for_opcode(request.opcode()).is_some(),
         "v1 adapter registered for a non-compatibility operation"
     );
-    adapt_compact_request(request.into_request())
+    match request {
+        ServerRequest::Frame { frame, header } => adapt_compact_frame(frame, header),
+        ServerRequest::Semantic(request) => adapt_compact_request(request),
+    }
+}
+
+/// Projects an admitted compact item frame without materializing semantic
+/// item/value buffers. All ranges remain relative to the retained frame owner.
+fn adapt_compact_frame(frame: Vec<u8>, header: RequestHeader) -> OperationInputView {
+    let opcode = header.opcode();
+    let plan = generic_contract::operation_wire_spec(opcode).request.fields;
+    let mut fields = SmallVec::<[Option<OperationFieldRecord>; 8]>::with_capacity(plan.len());
+    fields.resize_with(plan.len(), || None);
+    populate_frame_fields(plan, &mut fields, header);
+    let mut input =
+        OperationInputView::from_populated_projection(opcode, OwnedRange::whole(frame), fields);
+    input.validate_populated_fields();
+    input
+}
+
+fn populate_frame_fields(
+    plan: &'static [generic_contract::OperationFieldPlan],
+    fields: &mut [Option<OperationFieldRecord>],
+    header: RequestHeader,
+) {
+    let mut item_index = 0_usize;
+    let item_start = header.item_id_start();
+    let set_options = header.set_options();
+    for (index, field_plan) in plan.iter().enumerate() {
+        let Some(slot) = fields.get_mut(index) else {
+            break;
+        };
+        let value = match field_plan.role {
+            "namespace_id" => header.namespace_id().map(|_| OperationFieldStorage::OwnerRange {
+                start: openkache_protocol::OPCODE_BYTES,
+                end: openkache_protocol::OPCODE_BYTES
+                    + openkache_protocol::NAMESPACE_ID_BYTES,
+            }),
+            "item_id" => item_start.and_then(|start| {
+                let start = start.checked_add(
+                    item_index.checked_mul(openkache_protocol::ITEM_ID_BYTES)?,
+                )?;
+                item_index += 1;
+                let end = start.checked_add(openkache_protocol::ITEM_ID_BYTES)?;
+                (item_index <= header.item_id_count())
+                    .then_some(OperationFieldStorage::OwnerRange { start, end })
+            }),
+            "value" => header
+                .encoded_len()
+                .checked_add(header.value_len())
+                .map(|end| OperationFieldStorage::OwnerRange {
+                    start: header.encoded_len(),
+                    end,
+                }),
+            "condition" => Some(OperationFieldStorage::StaticBytes(set_condition_token(
+                set_options.condition,
+            ))),
+            "expiration_mode" => Some(OperationFieldStorage::StaticBytes(expiration_mode_token(
+                set_options.expiration_mode,
+            ))),
+            "eviction_mode" => Some(OperationFieldStorage::StaticBytes(eviction_mode_token(
+                set_options.eviction_mode,
+            ))),
+            "ttl_milliseconds" => set_options
+                .ttl_ms
+                .map(|value| OperationFieldStorage::OwnedBytes(value.to_be_bytes().to_vec())),
+            _ => None,
+        };
+        *slot = Some(OperationFieldRecord {
+            plan: field_plan,
+            value,
+        });
+    }
 }
 
 /// Projects only the historical compact-v1 request family. Empty, opaque,

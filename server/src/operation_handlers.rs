@@ -116,14 +116,15 @@ pub(super) struct OperationInputView {
 /// protocol-v1 semantic fields. Compact requests use the API-owned v1 adapter
 /// registered alongside their behavior.
 pub(super) fn decode_request(request: ServerRequest) -> OperationInputView {
-    if request.has_generic_frame() {
-        let (opcode, frame, start, end) = request
-            .into_generic_frame()
-            .expect("generic frame marker has a complete payload range");
-        return OperationInputView::from_owned_frame(opcode, frame, start, end);
+    match request.into_payload_frame() {
+        Ok((opcode, frame, start, end)) => {
+            OperationInputView::from_owned_frame(opcode, frame, start, end)
+        }
+        Err(request) => {
+            let (opcode, value) = request.into_generic_parts();
+            OperationInputView::from_parts(opcode, value, std::iter::empty())
+        }
     }
-    let (opcode, value) = request.into_generic_parts();
-    OperationInputView::from_parts(opcode, value, std::iter::empty())
 }
 
 /// One generated plan entry and its decoded semantic value.
@@ -145,7 +146,6 @@ pub(super) struct OperationFieldRecord {
 pub(super) enum OperationFieldStorage {
     OwnedBytes(Vec<u8>),
     FrameRange { start: usize, end: usize },
-    #[allow(dead_code)]
     OwnerRange { start: usize, end: usize },
     StaticBytes(&'static [u8]),
 }
@@ -210,7 +210,6 @@ impl OperationInputView {
     ///
     /// Field ranges are relative to the owner's visible bytes. Adapters remain
     /// responsible for decoding framing and populating generated field slots.
-    #[allow(dead_code)]
     pub(super) fn from_populated_projection<I>(
         opcode: Opcode,
         owner: OwnedRange,

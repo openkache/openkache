@@ -274,14 +274,14 @@ impl RequestHeader {
         }
     }
 
-    pub(super) const fn item_id_start(self) -> Option<usize> {
+    pub(crate) const fn item_id_start(self) -> Option<usize> {
         match self.compatibility {
             Some(metadata) => metadata.item_id_start,
             None => None,
         }
     }
 
-    pub(super) const fn set_options(self) -> SetOptions {
+    pub(crate) const fn set_options(self) -> SetOptions {
         match self.compatibility {
             Some(metadata) => metadata.set_options,
             None => SetOptions::NONE,
@@ -410,69 +410,56 @@ pub struct Request {
 
 /// Server-only request envelope.
 ///
-/// Generic opaque/ordered requests retain their original frame allocation and
-/// expose the payload range to the generated operation view. Compact v1
-/// requests are materialized into [`Request`] by the compatibility adapter.
-/// Keeping this distinction here avoids forcing the public semantic request
-/// type to own a second payload copy on the generic hot path.
+/// Admitted requests retain their original frame allocation and decoded header
+/// until the selected operation adapter projects generated numeric fields.
+/// Semantic requests remain available for public constructors and tests.
 pub(crate) enum ServerRequest {
-    Generic {
-        opcode: Opcode,
+    Frame {
         frame: Vec<u8>,
-        payload_range: (usize, usize),
+        header: RequestHeader,
     },
-    Compatibility(Request),
+    Semantic(Request),
 }
 
 impl ServerRequest {
     pub(crate) fn from_request(request: Request) -> Self {
-        Self::Compatibility(request)
+        Self::Semantic(request)
     }
 
     pub(crate) fn opcode(&self) -> Opcode {
         match self {
-            Self::Generic { opcode, .. } => *opcode,
-            Self::Compatibility(request) => request.opcode,
+            Self::Frame { header, .. } => header.opcode(),
+            Self::Semantic(request) => request.opcode,
         }
     }
 
-    pub(crate) fn into_request(self) -> Request {
+    /// Converts an admitted frame into operation-neutral payload coordinates.
+    pub(crate) fn into_payload_frame(
+        self,
+    ) -> std::result::Result<(Opcode, Vec<u8>, usize, usize), Self> {
         match self {
-            Self::Compatibility(request) => request,
-            Self::Generic { .. } => {
-                unreachable!("generic requests never enter the compatibility adapter")
+            Self::Frame { frame, header } => {
+                let start = header.encoded_len();
+                let end = start + header.value_len();
+                Ok((header.opcode(), frame, start, end))
             }
+            request => Err(request),
         }
     }
 
     /// Returns the operation discriminator and an owned body.
     ///
-    /// The normal generic hot path consumes [`Self::into_generic_frame`]
-    /// without copying. This fallback is retained for small adapter/test
-    /// callers that already own a semantic request.
+    /// Admitted frames use their owner directly in the normal hot path. This
+    /// fallback is retained for small adapter/test callers that already own a
+    /// semantic request.
     pub(crate) fn into_generic_parts(self) -> (Opcode, Vec<u8>) {
         match self {
-            Self::Compatibility(request) => (request.opcode, request.value),
-            Self::Generic {
-                opcode,
-                frame,
-                payload_range: (start, end),
-            } => (opcode, frame[start..end].to_vec()),
-        }
-    }
-
-    pub(crate) fn has_generic_frame(&self) -> bool {
-        matches!(self, Self::Generic { .. })
-    }
-
-    pub(crate) fn into_generic_frame(self) -> Option<(Opcode, Vec<u8>, usize, usize)> {
-        match self {
-            Self::Generic {
-                opcode,
-                frame,
-                payload_range: (start, end),
-            } => Some((opcode, frame, start, end)),
-            Self::Compatibility(_) => None,
+            Self::Semantic(request) => (request.opcode, request.value),
+            Self::Frame { frame, header } => {
+                let start = header.encoded_len();
+                let end = start + header.value_len();
+                (header.opcode(), frame[start..end].to_vec())
+            }
         }
     }
 }

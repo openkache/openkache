@@ -301,7 +301,7 @@ pub(super) fn set<'a>(
             .set_in_namespace(
                 namespace_id,
                 item_id,
-                super::super::types::StoredItemValue::new(value),
+                super::super::types::StoredItemValue::from_owned_range(value),
                 effective_options,
             )
             .await;
