@@ -18,7 +18,7 @@ use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
 use super::super::scheduler::ScheduledTask;
 use super::super::storage_task::StorageTask;
-use super::super::worker::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
+use super::super::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
 
 /// API-owned result projection for the compatibility keyed operations.
 ///

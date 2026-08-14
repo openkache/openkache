@@ -21,6 +21,7 @@ use super::keyed_compatibility::{
 };
 use super::scheduler::KeyScheduler;
 use super::worker_control::{execute_storage_task, process_worker_barrier};
+use super::{DeferredWorkerResponse, WorkerRequest, WorkerResponse, WorkerResponseSender};
 
 pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     while let Ok(task) = receiver.recv_async_storage().await {
@@ -31,7 +32,7 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     }
 }
 
-pub(super) type WorkerResponseSender = CompletionSender<Result<WorkerResponse>>;
+pub(super) type ResponseSender<R> = CompletionSender<Result<R>>;
 type CompatibilityScheduler = KeyScheduler<StorageKey, KeyedCommand>;
 
 #[derive(Debug)]
@@ -76,29 +77,26 @@ impl BenchmarkBatchStats {
     }
 }
 
-pub(super) enum WorkerRequest {
+pub(super) enum Request<K, C, R> {
     /// Keyed data-plane work routed through the per-key scheduler.
     ///
     /// The envelope keeps routing and completion generic at the worker
     /// boundary. API-owned adapters retain their optimized command
     /// implementations behind the keyed-work descriptor.
-    Keyed {
-        storage_key: StorageKey,
-        command: KeyedCommand,
-    },
+    Keyed { storage_key: K, command: C },
     /// Control-plane work is kept separate from keyed data-plane commands.
     ///
     /// Stats, sync, extension tasks, and shutdown all require a quiescent
     /// worker but do not participate in per-key scheduling or collapse.
-    Control(WorkerControlRequest),
+    Control(ControlRequest<R>),
 }
 
-pub(super) enum WorkerControlRequest {
+pub(super) enum ControlRequest<R> {
     Stats {
-        response: WorkerResponseSender,
+        response: ResponseSender<R>,
     },
     Sync {
-        response: WorkerResponseSender,
+        response: ResponseSender<R>,
     },
     /// Executes an API-owned storage task after all keyed work is quiescent.
     ///
@@ -107,22 +105,22 @@ pub(super) enum WorkerControlRequest {
     /// shapes without adding another cache-specific worker enum variant.
     StorageTask {
         task: super::StorageTask,
-        response: WorkerResponseSender,
+        response: ResponseSender<R>,
     },
     Shutdown,
 }
 
-pub(super) enum WorkerResponse {
+pub(super) enum Response<K> {
     /// API-owned keyed result. The worker only transports this opaque
     /// projection and never selects a response shape by operation name.
-    Keyed(super::keyed_compatibility::KeyedResponse),
+    Keyed(K),
     Stats(String),
     Synced,
     StorageResult(super::StorageTaskOutput),
     StorageFailure(super::StorageError),
 }
 
-impl std::fmt::Debug for WorkerResponse {
+impl<K> std::fmt::Debug for Response<K> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Keyed(_) => formatter.write_str("Keyed(..)"),
@@ -146,9 +144,9 @@ pub(super) enum BenchmarkResponseKind {
     Delete,
 }
 
-pub(super) struct DeferredWorkerResponse {
-    pub(super) sender: WorkerResponseSender,
-    pub(super) value: WorkerResponse,
+pub(super) struct DeferredResponse<R> {
+    pub(super) sender: ResponseSender<R>,
+    pub(super) value: R,
 }
 
 struct RunningKeyedCommand {
