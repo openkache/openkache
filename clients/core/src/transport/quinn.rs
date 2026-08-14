@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{BackendConnection, BackendStream, TransportError};
+use crate::protocol::RequestParts;
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Quinn;
@@ -53,10 +54,7 @@ pub(super) async fn connect(
         .map_err(|error| TransportError::backend(BACKEND, Operation::Handshake, error))?;
     let negotiated_alpn = inner
         .handshake_data()
-        .and_then(|data| {
-            data.downcast::<quinn::crypto::rustls::HandshakeData>()
-                .ok()
-        })
+        .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
         .and_then(|data| data.protocol)
         .ok_or_else(|| {
             TransportError::backend(
@@ -93,11 +91,21 @@ impl BackendConnection for Connection {
 }
 
 impl BackendStream for Stream {
-    async fn write_all(&mut self, bytes: Vec<u8>, timeout: Duration) -> Result<(), TransportError> {
-        tokio::time::timeout(timeout, self.send.write_all(&bytes))
-            .await
-            .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?
-            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
+    async fn write_request(
+        &mut self,
+        parts: RequestParts,
+        timeout: Duration,
+    ) -> Result<(), TransportError> {
+        tokio::time::timeout(timeout, async {
+            self.send.write_all(&parts.prefix).await?;
+            if !parts.payload.is_empty() {
+                self.send.write_all(&parts.payload).await?;
+            }
+            Ok::<(), quinn::WriteError>(())
+        })
+        .await
+        .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?
+        .map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
     }
 
     async fn read_exact(

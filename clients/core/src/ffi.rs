@@ -14,26 +14,21 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
-pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::{
-    FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE,
-    FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
-    FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
-    FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
-    FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID,
-    FFI_NAMESPACE_DESCRIPTOR_DECODE_OK,
+    FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE, FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
+    FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL, FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
+    FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID, FFI_NAMESPACE_DESCRIPTOR_DECODE_OK,
     FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EVICTION_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EXPIRATION_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_DEFAULT_TTL_MS_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_EVICTION_OVERRIDE_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_EXPIRATION_OVERRIDE_OFFSET,
-    FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET,
-    FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
-    FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
-    FFI_NAMESPACE_OVERRIDE_ALLOWED,
+    FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET, FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES, FFI_NAMESPACE_OVERRIDE_ALLOWED,
     FFI_NAMESPACE_OVERRIDE_DISALLOWED,
 };
+pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
@@ -628,11 +623,7 @@ async fn execute_protected(
             .await
             .and_then(json_result),
         FfiOperation::Set => client
-            .set_canonical_key_unchecked(
-                canonical_key.as_slice(),
-                Value::Raw(value),
-                set_options,
-            )
+            .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
             .map(set_result),
         FfiOperation::SetJson => match parse_json(&value) {
@@ -822,9 +813,11 @@ async fn namespace_delete(
 
 fn set_options_from_flags(flags: u8, ttl_ms: u64) -> std::result::Result<SetOptions, String> {
     let ttl_ms = (ttl_ms != 0).then_some(ttl_ms);
-    openkache_protocol::SetOptions::from_wire_parts(flags, ttl_ms)
+    crate::protocol::SetWireOptions::from_wire_parts(flags, ttl_ms)
         .map_err(|error| error.to_string())
-        .and_then(|options| SetOptions::from_protocol(options).map_err(|error| error.to_string()))
+        .and_then(|options| {
+            SetOptions::from_wire_options(options).map_err(|error| error.to_string())
+        })
 }
 
 fn namespace_policy_from_flags(
@@ -1401,10 +1394,10 @@ pub unsafe extern "C" fn openkache_client_namespace_open(
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
         let name = copy_bytes(name, name_length, "namespace name")?;
-        if name.len() > openkache_protocol::NAMESPACE_NAME_MAX_BYTES {
+        if name.len() > openkache_protocol::compat_v1::NAMESPACE_NAME_MAX_BYTES {
             return Err(format!(
                 "namespace name exceeds {} octets",
-                openkache_protocol::NAMESPACE_NAME_MAX_BYTES
+                openkache_protocol::compat_v1::NAMESPACE_NAME_MAX_BYTES
             ));
         }
         let create_if_missing = create_if_missing != 0;
@@ -1487,7 +1480,7 @@ pub unsafe extern "C" fn openkache_client_namespace_descriptor_decode(
     } else {
         unsafe { std::slice::from_raw_parts(payload, payload_length) }
     };
-    let Ok(descriptor) = openkache_protocol::NamespaceDescriptor::decode(payload) else {
+    let Ok(descriptor) = crate::NamespaceDescriptor::decode(payload) else {
         return FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID;
     };
     let (default_expiration, default_ttl_ms) = match descriptor.policy.default_expiration {
@@ -1501,8 +1494,7 @@ pub unsafe extern "C" fn openkache_client_namespace_descriptor_decode(
         revision: descriptor.revision,
         default_ttl_ms,
         default_expiration,
-        expiration_override: if descriptor.policy.expiration_override == OverridePolicy::Allowed
-        {
+        expiration_override: if descriptor.policy.expiration_override == OverridePolicy::Allowed {
             FFI_NAMESPACE_OVERRIDE_ALLOWED
         } else {
             FFI_NAMESPACE_OVERRIDE_DISALLOWED

@@ -8,6 +8,7 @@ use compio::BufResult;
 use compio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{BackendConnection, BackendStream, TransportError};
+use crate::protocol::RequestParts;
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Compio;
@@ -98,11 +99,18 @@ impl BackendConnection for Connection {
 }
 
 impl BackendStream for Stream {
-    async fn write_all(&mut self, bytes: Vec<u8>, timeout: Duration) -> Result<(), TransportError> {
-        let BufResult(result, _) =
-            compio::runtime::time::timeout(timeout, self.send.write_all(bytes))
-                .await
-                .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?;
+    async fn write_request(
+        &mut self,
+        parts: RequestParts,
+        timeout: Duration,
+    ) -> Result<(), TransportError> {
+        let BufResult(result, _) = compio::runtime::time::timeout(
+            timeout,
+            self.send
+                .write_vectored_all((parts.prefix, (parts.payload,))),
+        )
+        .await
+        .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?;
         result.map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
     }
 
