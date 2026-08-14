@@ -12,7 +12,6 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use openkache_protocol::ItemId;
 
 use super::CoreTask;
-use super::completion::CompletionSender;
 #[allow(unused_imports)]
 pub(super) use super::keyed_compatibility::{CollapsedLaneBatch, KeyedCommand};
 use super::keyed_compatibility::{
@@ -31,7 +30,6 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     }
 }
 
-pub(super) type ResponseSender<R> = CompletionSender<Result<R>>;
 type CompatibilityScheduler = KeyScheduler<StorageKey, KeyedCommand>;
 
 /// Adapter-owned execution for work that requires a quiescent keyed lane.
@@ -104,17 +102,6 @@ impl BenchmarkBatchStats {
     }
 }
 
-pub(super) enum Request<K, C, X> {
-    /// Keyed data-plane work routed through the per-key scheduler.
-    ///
-    /// The envelope keeps routing and completion generic at the worker
-    /// boundary. API-owned adapters retain their optimized command
-    /// implementations behind the keyed-work descriptor.
-    Keyed { storage_key: K, command: C },
-    /// Adapter-owned control work that requires a quiescent worker.
-    Control(X),
-}
-
 pub(super) trait ControlPort<C> {
     fn execute_control(
         &mut self,
@@ -144,11 +131,6 @@ pub(super) enum BenchmarkResponseKind {
     Get,
     Set,
     Delete,
-}
-
-pub(super) struct DeferredResponse<R> {
-    pub(super) sender: ResponseSender<R>,
-    pub(super) value: R,
 }
 
 struct RunningKeyedCommand {
