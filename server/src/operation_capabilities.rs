@@ -17,6 +17,12 @@ pub trait CapabilityCatalog: Send + Sync {
     /// Returns the dependency registered under one stable composition key.
     fn get(&self, key: &'static str) -> Option<&(dyn Any + Send + Sync)>;
 
+    /// Reports whether any dependency uses one stable numeric identity.
+    ///
+    /// Composition uses this independently of a diagnostic name so duplicate
+    /// keys and hash collisions cannot be resolved by overlay precedence.
+    fn contains_id(&self, id: u64) -> bool;
+
     /// Returns a dependency using its stable numeric identity and diagnostic
     /// name. Implementations that only support the compatibility string method
     /// retain compatibility through this default.
@@ -74,17 +80,22 @@ impl<'a> CapabilityList<'a> {
 
 impl CapabilityCatalog for CapabilityList<'_> {
     fn get(&self, key: &'static str) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .iter()
-            .find(|entry| entry.key == key)
-            .map(|entry| entry.value)
+        self.get_by_id(capability_id(key), key)
+    }
+
+    fn contains_id(&self, id: u64) -> bool {
+        self.entries.iter().any(|entry| entry.id == id)
     }
 
     fn get_by_id(&self, id: u64, name: &'static str) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .iter()
-            .find(|entry| entry.id == id && entry.key == name)
-            .map(|entry| entry.value)
+        let mut found = None;
+        for entry in self.entries.iter().filter(|entry| entry.id == id) {
+            if entry.key != name || found.is_some() {
+                return None;
+            }
+            found = Some(entry.value);
+        }
+        found
     }
 }
 
@@ -95,6 +106,10 @@ pub struct EmptyCapabilityCatalog;
 impl CapabilityCatalog for EmptyCapabilityCatalog {
     fn get(&self, _key: &'static str) -> Option<&(dyn Any + Send + Sync)> {
         None
+    }
+
+    fn contains_id(&self, _id: u64) -> bool {
+        false
     }
 }
 
@@ -130,29 +145,31 @@ impl CapabilityRegistry {
         }
     }
 
-    /// Registers or replaces one API-owned capability.
+    /// Registers one API-owned capability.
     ///
     /// The typed key keeps the downcast type next to the registration site;
     /// the generic dispatcher only stores and looks up the erased value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key duplicates or collides with any existing entry.
     pub fn insert<T>(&mut self, key: CapabilityKey<T>, value: T)
     where
         T: Any + Send + Sync,
     {
-        if self
-            .entries
-            .iter()
-            .any(|(id, name, _)| *id == key.id() && *name != key.name())
-        {
+        if let Some((_, name, _)) = self.entries.iter().find(|(id, _, _)| *id == key.id()) {
+            if *name == key.name() {
+                panic!("duplicate capability key");
+            }
             panic!("capability key hash collision");
         }
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|(_, name, _)| *name == key.name())
+        if let Some(base) = &self.base
+            && base.contains_id(key.id())
         {
-            entry.0 = key.id();
-            entry.2 = Arc::new(value);
-            return;
+            if base.get_by_id(key.id(), key.name()).is_some() {
+                panic!("duplicate capability key");
+            }
+            panic!("capability key conflict");
         }
         self.entries.push((key.id(), key.name(), Arc::new(value)));
         self.entries.sort_unstable_by_key(|(id, _, _)| *id);
@@ -176,18 +193,27 @@ impl Default for CapabilityRegistry {
 
 impl CapabilityCatalog for CapabilityRegistry {
     fn get(&self, key: &'static str) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .iter()
-            .find(|(_, name, _)| *name == key)
-            .map(|(_, _, value)| value.as_ref())
-            .or_else(|| self.base.as_ref()?.get(key))
+        self.get_by_id(capability_id(key), key)
+    }
+
+    fn contains_id(&self, id: u64) -> bool {
+        self.entries.iter().any(|(entry_id, _, _)| *entry_id == id)
+            || self.base.as_ref().is_some_and(|base| base.contains_id(id))
     }
 
     fn get_by_id(&self, id: u64, name: &'static str) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .binary_search_by(|(entry_id, entry_name, _)| (*entry_id, *entry_name).cmp(&(id, name)))
+        let local = self
+            .entries
+            .binary_search_by_key(&id, |(entry_id, _, _)| *entry_id)
             .ok()
-            .map(|index| self.entries[index].2.as_ref())
-            .or_else(|| self.base.as_ref()?.get_by_id(id, name))
+            .filter(|index| self.entries[*index].1 == name)
+            .map(|index| self.entries[index].2.as_ref());
+        let Some(base) = &self.base else {
+            return local;
+        };
+        if local.is_some() && base.contains_id(id) {
+            return None;
+        }
+        local.or_else(|| base.get_by_id(id, name))
     }
 }
