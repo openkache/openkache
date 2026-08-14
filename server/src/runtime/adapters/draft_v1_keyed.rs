@@ -26,16 +26,16 @@ use super::super::worker::{DeferredWorkerResponse, WorkerResponse, WorkerRespons
 /// runtime facade may project it into its historical GET/SET/DELETE result
 /// types, but the scheduler never needs to know those shapes.
 #[derive(Debug)]
-pub(super) enum KeyedResponse {
+pub(in crate::runtime) enum KeyedResponse {
     Value(Option<StoredItemValue>),
     Set(SetOutcome),
     Deleted(bool),
 }
 
 /// Backend-owned keyed state kept opaque to the generic scheduler.
-pub(super) type VisibleState = KeyedVisibleState;
-pub(super) type PreparedJob = KeyedJob;
-pub(super) type CompletedJob = CompletedKeyedJob;
+pub(in crate::runtime) type VisibleState = KeyedVisibleState;
+pub(in crate::runtime) type PreparedJob = KeyedJob;
+pub(in crate::runtime) type CompletedJob = CompletedKeyedJob;
 
 /// One operation's static scheduler metadata and preparation boundary.
 ///
@@ -43,15 +43,17 @@ pub(super) type CompletedJob = CompletedKeyedJob;
 /// scheduler stores the command enum in its existing slab and invokes these
 /// callbacks without matching an operation name or protocol opcode.
 #[derive(Clone, Copy)]
-pub(super) struct KeyedDescriptor {
-    pub(super) operation: Operation,
-    pub(super) collapsible: fn(&Kvkache, &StorageCommand) -> bool,
-    pub(super) prepare: fn(&mut Kvkache, StorageKey, StorageCommand) -> PreparedKeyedCommand,
-    pub(super) collapse: fn(KeyedVisibleState, Vec<StorageCommand>) -> CollapsedLaneBatch,
+pub(in crate::runtime) struct KeyedDescriptor {
+    pub(in crate::runtime) operation: Operation,
+    pub(in crate::runtime) collapsible: fn(&Kvkache, &StorageCommand) -> bool,
+    pub(in crate::runtime) prepare:
+        fn(&mut Kvkache, StorageKey, StorageCommand) -> PreparedKeyedCommand,
+    pub(in crate::runtime) collapse:
+        fn(KeyedVisibleState, Vec<StorageCommand>) -> CollapsedLaneBatch,
     /// Identity for one collapse reducer. Different API adapters must not be
     /// reduced into the same batch even when both report collapsible work.
-    pub(super) collapse_group: u8,
-    pub(super) exclusive: bool,
+    pub(in crate::runtime) collapse_group: u8,
+    pub(in crate::runtime) exclusive: bool,
 }
 
 /// Compatibility-owned keyed data-plane work.
@@ -59,7 +61,7 @@ pub(super) struct KeyedDescriptor {
 /// This enum deliberately lives outside the generic worker scheduler.  Its
 /// constructors are the only compatibility-facing part of the runtime
 /// envelope; the scheduler interacts with it through [`KeyedDescriptor`].
-pub(super) enum StorageCommand {
+pub(in crate::runtime) enum StorageCommand {
     /// API-owned task work that must be serialized in its key lane.
     Custom {
         task: StorageTask,
@@ -80,17 +82,20 @@ pub(super) enum StorageCommand {
 
 /// Name retained for private scheduler fixtures while the compatibility enum
 /// remains owned by this adapter module.
-pub(super) type KeyedCommand = StorageCommand;
+pub(in crate::runtime) type KeyedCommand = StorageCommand;
 
-pub(super) fn storage_task(task: StorageTask, response: WorkerResponseSender) -> KeyedCommand {
+pub(in crate::runtime) fn storage_task(
+    task: StorageTask,
+    response: WorkerResponseSender,
+) -> KeyedCommand {
     StorageCommand::Custom { task, response }
 }
 
-pub(super) fn get(response: WorkerResponseSender) -> KeyedCommand {
+pub(in crate::runtime) fn get(response: WorkerResponseSender) -> KeyedCommand {
     StorageCommand::Get { response }
 }
 
-pub(super) fn set(
+pub(in crate::runtime) fn set(
     value: StoredItemValue,
     options: SetOptions,
     response: WorkerResponseSender,
@@ -102,12 +107,12 @@ pub(super) fn set(
     }
 }
 
-pub(super) fn delete(response: WorkerResponseSender) -> KeyedCommand {
+pub(in crate::runtime) fn delete(response: WorkerResponseSender) -> KeyedCommand {
     StorageCommand::Delete { response }
 }
 
 impl StorageCommand {
-    pub(super) fn descriptor(&self) -> &'static KeyedDescriptor {
+    pub(in crate::runtime) fn descriptor(&self) -> &'static KeyedDescriptor {
         match self {
             Self::Custom { .. } => &CUSTOM_DESCRIPTOR,
             Self::Get { .. } => &GET_DESCRIPTOR,
@@ -116,7 +121,7 @@ impl StorageCommand {
         }
     }
 
-    pub(super) fn metadata(&self, cache: &Kvkache) -> KeyedCommandMetadata {
+    pub(in crate::runtime) fn metadata(&self, cache: &Kvkache) -> KeyedCommandMetadata {
         let descriptor = self.descriptor();
         KeyedCommandMetadata {
             operation: descriptor.operation,
@@ -124,7 +129,7 @@ impl StorageCommand {
         }
     }
 
-    pub(super) fn prepare(
+    pub(in crate::runtime) fn prepare(
         self,
         cache: &mut Kvkache,
         storage_key: StorageKey,
@@ -133,19 +138,11 @@ impl StorageCommand {
         prepare(cache, storage_key, self)
     }
 
-    pub(super) fn is_collapsible(&self, cache: &Kvkache) -> bool {
+    pub(in crate::runtime) fn is_collapsible(&self, cache: &Kvkache) -> bool {
         self.metadata(cache).collapsible
     }
 
-    pub(super) fn belongs_to_collapse_group(&self, collapse_group: u8) -> bool {
-        self.descriptor().collapse_group == collapse_group
-    }
-
-    pub(super) fn is_exclusive(&self) -> bool {
-        self.descriptor().exclusive
-    }
-
-    pub(super) fn take_exclusive(self) -> Option<(StorageTask, WorkerResponseSender)> {
+    pub(in crate::runtime) fn take_exclusive(self) -> Option<(StorageTask, WorkerResponseSender)> {
         match self {
             Self::Custom { task, response } => Some((task, response)),
             Self::Get { .. } | Self::Set { .. } | Self::Delete { .. } => None,
@@ -166,14 +163,14 @@ impl ScheduledTask for StorageCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct KeyedCommandMetadata {
-    pub(super) operation: Operation,
-    pub(super) collapsible: bool,
+pub(in crate::runtime) struct KeyedCommandMetadata {
+    pub(in crate::runtime) operation: Operation,
+    pub(in crate::runtime) collapsible: bool,
 }
 
-pub(super) struct PreparedKeyedCommand {
-    pub(super) response: WorkerResponseSender,
-    pub(super) job: PreparedJob,
+pub(in crate::runtime) struct PreparedKeyedCommand {
+    pub(in crate::runtime) response: WorkerResponseSender,
+    pub(in crate::runtime) job: PreparedJob,
 }
 
 fn prepare_command(
@@ -262,16 +259,19 @@ fn no_collapse(_base: KeyedVisibleState, _commands: Vec<StorageCommand>) -> Coll
 }
 
 /// A response waiting for a collapsed mutation's actual storage result.
-pub(super) struct CollapsedLaneBatch {
-    pub(super) operation: Option<KeyedOperation>,
-    pub(super) responses: Vec<DeferredWorkerResponse>,
-    pub(super) mutation_response_index: Option<usize>,
-    pub(super) success_state: VisibleState,
-    pub(super) failure_state: VisibleState,
+pub(in crate::runtime) struct CollapsedLaneBatch {
+    pub(in crate::runtime) operation: Option<KeyedOperation>,
+    pub(in crate::runtime) responses: Vec<DeferredWorkerResponse>,
+    pub(in crate::runtime) mutation_response_index: Option<usize>,
+    pub(in crate::runtime) success_state: VisibleState,
+    pub(in crate::runtime) failure_state: VisibleState,
 }
 
 impl CollapsedLaneBatch {
-    pub(super) fn reduce(base: KeyedVisibleState, commands: Vec<StorageCommand>) -> Self {
+    pub(in crate::runtime) fn reduce(
+        base: KeyedVisibleState,
+        commands: Vec<StorageCommand>,
+    ) -> Self {
         let base_present = matches!(base, KeyedVisibleState::Present(_));
         let mut current = base.clone();
         let mut responses = Vec::with_capacity(commands.len());
@@ -345,7 +345,7 @@ impl CollapsedLaneBatch {
         }
     }
 
-    pub(super) fn has_mutation(&self) -> bool {
+    pub(in crate::runtime) fn has_mutation(&self) -> bool {
         self.operation.is_some()
     }
 
@@ -373,16 +373,16 @@ fn reduce_compatibility_batch(
     CollapsedLaneBatch::reduce(base, commands)
 }
 
-pub(super) struct PreparedCollapsed {
-    pub(super) operation: Operation,
-    pub(super) job: PreparedJob,
-    pub(super) responses: Vec<DeferredWorkerResponse>,
-    pub(super) mutation_response_index: Option<usize>,
-    pub(super) success_state: VisibleState,
-    pub(super) failure_state: VisibleState,
+pub(in crate::runtime) struct PreparedCollapsed {
+    pub(in crate::runtime) operation: Operation,
+    pub(in crate::runtime) job: PreparedJob,
+    pub(in crate::runtime) responses: Vec<DeferredWorkerResponse>,
+    pub(in crate::runtime) mutation_response_index: Option<usize>,
+    pub(in crate::runtime) success_state: VisibleState,
+    pub(in crate::runtime) failure_state: VisibleState,
 }
 
-pub(super) fn prepare_collapsed_batch(
+pub(in crate::runtime) fn prepare_collapsed_batch(
     cache: &mut Kvkache,
     storage_key: StorageKey,
     batch: CollapsedLaneBatch,
@@ -390,7 +390,7 @@ pub(super) fn prepare_collapsed_batch(
     batch.into_prepared(cache, storage_key)
 }
 
-pub(super) fn finish_keyed(
+pub(in crate::runtime) fn finish_keyed(
     cache: &mut Kvkache,
     job: CompletedJob,
     include_visible_state: bool,
@@ -410,14 +410,14 @@ pub(super) fn finish_keyed(
 }
 
 /// Completion projected into the worker's opaque response envelope.
-pub(super) struct KeyedFinish {
-    pub(super) outcome: Result<WorkerResponse>,
-    pub(super) visible_state: Option<VisibleState>,
-    pub(super) flush_required: bool,
-    pub(super) pending: bool,
+pub(in crate::runtime) struct KeyedFinish {
+    pub(in crate::runtime) outcome: crate::Result<WorkerResponse>,
+    pub(in crate::runtime) visible_state: Option<VisibleState>,
+    pub(in crate::runtime) flush_required: bool,
+    pub(in crate::runtime) pending: bool,
 }
 
-pub(super) fn worker_response_for_outcome(outcome: KeyedOutcome) -> WorkerResponse {
+pub(in crate::runtime) fn worker_response_for_outcome(outcome: KeyedOutcome) -> WorkerResponse {
     WorkerResponse::Keyed(match outcome {
         KeyedOutcome::Value(value) => KeyedResponse::Value(value),
         KeyedOutcome::Set(outcome) => KeyedResponse::Set(outcome),
@@ -425,18 +425,11 @@ pub(super) fn worker_response_for_outcome(outcome: KeyedOutcome) -> WorkerRespon
     })
 }
 
-pub(super) fn pending_response(outcome: KeyedOutcome) -> WorkerResponse {
+pub(in crate::runtime) fn pending_response(outcome: KeyedOutcome) -> WorkerResponse {
     worker_response_for_outcome(outcome)
 }
 
-pub(super) fn replace_mutation_response(
-    response: &mut DeferredWorkerResponse,
-    outcome: WorkerResponse,
-) {
-    response.value = outcome;
-}
-
-pub(super) fn value_response(
+pub(in crate::runtime) fn value_response(
     response: WorkerResponse,
     operation: &'static str,
 ) -> crate::Result<Option<StoredItemValue>> {
@@ -448,7 +441,7 @@ pub(super) fn value_response(
     }
 }
 
-pub(super) fn set_response(
+pub(in crate::runtime) fn set_response(
     response: WorkerResponse,
     operation: &'static str,
 ) -> crate::Result<SetOutcome> {
@@ -460,7 +453,7 @@ pub(super) fn set_response(
     }
 }
 
-pub(super) fn delete_response(
+pub(in crate::runtime) fn delete_response(
     response: WorkerResponse,
     operation: &'static str,
 ) -> crate::Result<bool> {

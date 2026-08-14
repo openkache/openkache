@@ -25,7 +25,7 @@ const READING: u64 = 6;
 const MAX_GENERATION: u64 = u64::MAX >> STATE_BITS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CompletionDisconnected;
+pub(in crate::runtime) struct CompletionDisconnected;
 
 #[derive(Clone, Copy)]
 struct SlotId {
@@ -57,10 +57,7 @@ impl<T> AtomicSlot<T> {
     fn is_disconnected(&self, expected_generation: u64) -> bool {
         let current = self.generation_and_state.load(Ordering::Acquire);
         generation(current) != expected_generation
-            || matches!(
-                state(current),
-                FREE | DISCONNECTED | WRITING_CANCELLED
-            )
+            || matches!(state(current), FREE | DISCONNECTED | WRITING_CANCELLED)
     }
 
     fn activate(&self) -> Option<u64> {
@@ -341,7 +338,7 @@ impl<T> CompletionPool<T> {
     }
 }
 
-pub(super) struct CompletionSlab<T> {
+pub(in crate::runtime) struct CompletionSlab<T> {
     pool: Arc<CompletionPool<T>>,
 }
 
@@ -352,7 +349,7 @@ impl<T> Default for CompletionSlab<T> {
 }
 
 impl<T> CompletionSlab<T> {
-    pub(super) fn with_retained_capacity(retained_capacity: usize) -> Self {
+    pub(in crate::runtime) fn with_retained_capacity(retained_capacity: usize) -> Self {
         assert!(
             u32::try_from(retained_capacity).is_ok(),
             "completion capacity fits in u32"
@@ -362,7 +359,7 @@ impl<T> CompletionSlab<T> {
         }
     }
 
-    pub(super) fn register(&self) -> (CompletionSender<T>, CompletionReceiver<'_, T>) {
+    pub(in crate::runtime) fn register(&self) -> (CompletionSender<T>, CompletionReceiver<'_, T>) {
         if let Some(id) = self.pool.activate() {
             return (
                 CompletionSender {
@@ -443,17 +440,17 @@ impl<T> SenderStorage<T> {
     }
 }
 
-pub(super) struct CompletionSender<T> {
+pub(in crate::runtime) struct CompletionSender<T> {
     storage: SenderStorage<T>,
     finished: bool,
 }
 
 impl<T> CompletionSender<T> {
-    pub(super) fn is_disconnected(&self) -> bool {
+    pub(in crate::runtime) fn is_disconnected(&self) -> bool {
         self.storage.is_disconnected()
     }
 
-    pub(super) fn send(mut self, value: T) -> Result<(), T> {
+    pub(in crate::runtime) fn send(mut self, value: T) -> Result<(), T> {
         let result = self.storage.complete(value);
         self.finished = true;
         result
@@ -476,7 +473,7 @@ enum ReceiverStorage<T> {
     },
 }
 
-pub(super) struct CompletionReceiver<'a, T> {
+pub(in crate::runtime) struct CompletionReceiver<'a, T> {
     slab: &'a CompletionSlab<T>,
     storage: Option<ReceiverStorage<T>>,
 }
@@ -545,7 +542,7 @@ impl<T> CompletionReceiver<'_, T> {
         self.consume_result(result)
     }
 
-    pub(super) async fn recv_async_network(self) -> Result<T, CompletionDisconnected>
+    pub(in crate::runtime) async fn recv_async_network(self) -> Result<T, CompletionDisconnected>
     where
         T: Unpin,
     {

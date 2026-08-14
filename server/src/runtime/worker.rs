@@ -13,10 +13,11 @@ use openkache_protocol::ItemId;
 
 use super::CoreTask;
 use super::completion::CompletionSender;
+#[allow(unused_imports)]
 pub(super) use super::keyed_compatibility::{CollapsedLaneBatch, KeyedCommand};
 use super::keyed_compatibility::{
-    CompletedJob, KeyedFinish, PreparedJob, PreparedKeyedCommand, VisibleState, finish_keyed,
-    pending_response, prepare_collapsed_batch,
+    CompletedJob, KeyedFinish, PreparedJob, VisibleState, finish_keyed, pending_response,
+    prepare_collapsed_batch,
 };
 use super::scheduler::KeyScheduler;
 use super::worker_control::{execute_storage_task, process_worker_barrier};
