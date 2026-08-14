@@ -7,7 +7,7 @@
 use openkache_protocol::{
     MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES,
     Opcode, OperationFramePolicy, OperationLayoutFraming, WireSegment, decode_planned_fields,
-    encode_varuint, operation_wire_spec,
+    operation_wire_spec,
 };
 
 use crate::request::{RequestBuilder, RequestParts, RequestPrefix, RequestRetryPolicy};
@@ -452,11 +452,6 @@ fn validate_operation_field(
     .map_err(|error| {
         ProtocolError::InvalidFieldCodec(String::from_utf8_lossy(error.message()).into_owned())
     })
-}
-
-fn append_varuint(output: &mut Vec<u8>, value: u64) {
-    let (encoded, length) = encode_varuint(value);
-    output.extend_from_slice(&encoded[..length]);
 }
 
 fn read_u64_be(input: &[u8]) -> Result<u64> {
