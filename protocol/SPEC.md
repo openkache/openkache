@@ -310,18 +310,17 @@ possible next frame; it MUST terminate the lane after the error response.
 | Opcode | Name | Request layout | Response payload | Request codecs | Response codecs |
 |---|---|---|---|---|---|
 | `01` | `PING` | opcode only | opaque payload | — | — |
-| `02` | `GET` | opcode + generated exact field plan | opaque payload | — | — |
-| `03` | `SET` | opcode + generated exact field plan | empty | — | — |
-| `04` | `DELETE` | opcode + generated exact field plan | empty | — | — |
-| `05` | `STATS` | opcode + generated exact field plan | opaque payload | — | — |
-| `06` | `SYNC` | opcode + generated exact field plan | empty | — | — |
-| `07` | `NAMESPACE_OPEN` | opcode + generated exact field plan | opaque payload | — | — |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + generated exact field plan | opaque payload | — | — |
-| `09` | `NAMESPACE_DELETE` | opcode + generated exact field plan | empty | — | — |
+| `02` | `GET` | opcode + namespace ID + 1 item ID | opaque payload | `raw_bytes` | — |
+| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | empty | `raw_bytes` | — |
+| `04` | `DELETE` | opcode + namespace ID + 1 item ID | empty | `raw_bytes` | — |
+| `05` | `STATS` | opcode + namespace ID | opaque payload | — | — |
+| `06` | `SYNC` | opcode + namespace ID | empty | — | — |
+| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | opaque payload | — | — |
+| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | opaque payload | — | — |
+| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — | — |
 | `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
 | `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
 | `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload | `packed_f64_be` | `packed_f64_be` |
-| `0D` | `GET2` | opcode + generated exact field plan | 2 ordered optional fields | — | — |
 | `0E` | `EXPERIMENTAL_ACKNOWLEDGE` | opcode + value_len + value | empty | `utf8` | — |
 | `0F` | `EXPERIMENTAL_DENSE` | opcode + fixed-width dense body | 2 compact ordered fields | `u64_be`, `bool_u8` | `u64_be`, `bool_u8` |
 | `20` | `EXPERIMENTAL_STORAGE_READ` | opcode + value_len + value | opaque payload | `raw_bytes` | `raw_bytes` |
@@ -333,9 +332,9 @@ possible next frame; it MUST terminate the lane after the error response.
 | Opcode | Name | Scope | Retry | Semantics | Success statuses | Error statuses | Request plan | Response plan |
 |---|---|---|---|---|---|---|---|---|
 | `01` | `PING` | `global` | `always` | `pong` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `—` | `!payload@payload:PongPayload` |
-| `02` | `GET` | `item` | `always` | `value` | `ok,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId` | `?value@value:Value` |
-| `03` | `SET` | `item` | `never` | `set_outcome` | `created,replaced,not_stored` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,no_capacity,policy_conflict,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId; !value@value:Value; ?condition@condition:SetCondition; ?expiration_mode@expirationMode:ExpirationMode; ?eviction_mode@evictionMode:EvictionMode; ?ttl_milliseconds@ttlMilliseconds:Long` | `!outcome@outcome:SetOutcome` |
-| `04` | `DELETE` | `item` | `never` | `delete_outcome` | `deleted,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found,namespace_not_empty` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId` | `!deleted@deleted:Boolean` |
+| `02` | `GET` | `item` | `always` | `value` | `ok,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>` | `?value@value:Value` |
+| `03` | `SET` | `item` | `never` | `set_outcome` | `created,replaced,not_stored` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,no_capacity,policy_conflict,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>; !value@value:Value; ?condition@condition:SetCondition; ?expiration_mode@expirationMode:ExpirationMode; ?eviction_mode@evictionMode:EvictionMode; ?ttl_milliseconds@ttlMilliseconds:Long` | `!outcome@outcome:SetOutcome` |
+| `04` | `DELETE` | `item` | `never` | `delete_outcome` | `deleted,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found,namespace_not_empty` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>` | `!deleted@deleted:Boolean` |
 | `05` | `STATS` | `namespace` | `always` | `stats_json` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long` | `!json@json:String` |
 | `06` | `SYNC` | `namespace` | `never` | `empty` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long` | `—` |
 | `07` | `NAMESPACE_OPEN` | `namespace_management` | `when_not_creating` | `namespace_descriptor` | `ok,created` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!name@name:String; !create_if_missing@createIfMissing:Boolean; ?policy@policy:NamespacePolicy; ?default_expiration@policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@policy.defaultTtlMilliseconds:Long; ?expiration_override@policy.expirationOverride:OverridePolicy; ?default_eviction@policy.defaultEviction:EvictionDefault; ?eviction_override@policy.evictionOverride:OverridePolicy` | `!descriptor@descriptor:NamespaceDescriptor; !namespace_id@descriptor.namespaceId:Long; !revision@descriptor.revision:Long; !policy@descriptor.policy:NamespacePolicy; !default_expiration@descriptor.policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@descriptor.policy.defaultTtlMilliseconds:Long; !expiration_override@descriptor.policy.expirationOverride:OverridePolicy; !default_eviction@descriptor.policy.defaultEviction:EvictionDefault; !eviction_override@descriptor.policy.evictionOverride:OverridePolicy; !created@created:Boolean` |
@@ -344,7 +343,6 @@ possible next frame; it MUST terminate the lane after the error response.
 | `0A` | `EXPERIMENTAL_ECHO` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@message:String<utf8>` | `!payload@message:String<utf8>` |
 | `0B` | `EXPERIMENTAL_REVERSE` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@message:String<utf8>` | `!payload@message:String<utf8>` |
 | `0C` | `SQUARE_ARRAY` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@values:FloatingPointArray<packed_f64_be>` | `!payload@values:FloatingPointArray<packed_f64_be>` |
-| `0D` | `GET2` | `item` | `always` | `values` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemIdA:ItemId; !item_id@itemIdB:ItemId` | `?value@valueA:Value; ?value@valueB:Value` |
 | `0E` | `EXPERIMENTAL_ACKNOWLEDGE` | `global` | `always` | `accepted` | `accepted` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!token@token:String<utf8>` | `—` |
 | `0F` | `EXPERIMENTAL_DENSE` | `global` | `always` | `values` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!counter@counter:Long<u64_be>; !enabled@enabled:Boolean<bool_u8>` | `!counter@counter:Long<u64_be>; !enabled@enabled:Boolean<bool_u8>` |
 | `20` | `EXPERIMENTAL_STORAGE_READ` | `global` | `always` | `-` | `ok,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!key@key:Value<raw_bytes>` | `!value@value:Value<raw_bytes>` |
@@ -686,34 +684,6 @@ input (`NaN` or either infinity), or a squared result that is not finite, with
 `InvalidRequest`. On success the server returns one big-endian binary64 value
 for each input element, equal to `input * input`.
 
-### `GET2`
-
-`GET2` (`0D`) reads two items in one namespace-scoped request. It uses the
-same generic scoped-item/value contract as `GET`; the Smithy shape happens to
-bind two `item_id` members and two `value` members:
-
-```text
-0D | namespace_id:u64be |
-key_len_a:u8 | item_id_a:key_len_a |
-key_len_b:u8 | item_id_b:key_len_b
-```
-
-The server may issue the two storage reads concurrently, but the response
-always preserves the request order. The descriptor selects an adapter-owned
-response projection, preserving the historical four-octet optional-value
-payload byte-for-byte:
-
-```text
-value_0_len:u32be | value_0 |
-value_1_len:u32be | value_1
-```
-
-Each length is a big-endian `u32`; `FF FF FF FF` is the missing-value sentinel,
-and zero denotes a present empty value. The complete payload remains subject to
-the 64 MiB response limit. A missing namespace returns `NamespaceNotFound`; an
-existing namespace with either or both items missing still returns `Ok` with the
-corresponding sentinel.
-
 ### `GET`
 
 `GET` has the request layout
@@ -1010,7 +980,6 @@ For a valid request, the following are the domain success and result statuses:
 | `EXPERIMENTAL_ECHO` | `Ok` | The input UTF-8 bytes unchanged |
 | `EXPERIMENTAL_REVERSE` | `Ok` | The input UTF-8 string reversed by Unicode scalar value |
 | `SQUARE_ARRAY` | `Ok` | Squared binary64 array |
-| `GET2` | `Ok` | Ordered field sequence of two independently optional item values |
 
 Common error statuses MAY be returned when their stated condition applies. A
 client receiving a status that is neither an allowed domain status nor an

@@ -469,9 +469,6 @@ enum Opcode {
     @wireOpcode(value: 12)
     SQUARE_ARRAY = "square_array"
 
-    @wireOpcode(value: 13)
-    GET2 = "get2"
-
     @wireOpcode(value: 14)
     EXPERIMENTAL_ACKNOWLEDGE = "experimental_acknowledge"
 
@@ -631,26 +628,6 @@ operation ExperimentalMultiResourceMutation {
 operation Get {
     input: GetInput
     output: GetOutput
-}
-
-@operationContract(
-    scope: "item",
-    compactRoute: "item",
-    requestWire: [
-        { fixedField: { field: "namespaceId", bytes: 8 } },
-        { fixedField: { field: "itemIdA", bytes: 32 } },
-        { fixedField: { field: "itemIdB", bytes: 32 } }
-    ],
-    requestFraming: "ordered_fields",
-    responseFraming: "optional_values",
-    responseSemantics: "values",
-    retryMode: "always",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
-)
-operation Get2 {
-    input: Get2Input
-    output: Get2Output
 }
 
 @operationContract(
@@ -848,31 +825,6 @@ structure GetInput {
 structure GetOutput {
     @operationField(role: "value")
     value: Value
-}
-
-structure Get2Input {
-    @required
-    @unsignedLong
-    @operationField(role: "namespace_id")
-    namespaceId: Long
-
-    @required
-    @wireCodec(name: "raw_bytes", width: 32)
-    @operationField(role: "item_id")
-    itemIdA: ItemId
-
-    @required
-    @wireCodec(name: "raw_bytes", width: 32)
-    @operationField(role: "item_id")
-    itemIdB: ItemId
-}
-
-structure Get2Output {
-    @operationField(role: "value")
-    valueA: Value
-
-    @operationField(role: "value")
-    valueB: Value
 }
 
 structure SetInput {
