@@ -460,15 +460,6 @@ enum Opcode {
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
 
-    @wireOpcode(value: 10)
-    EXPERIMENTAL_ECHO = "experimental_echo"
-
-    @wireOpcode(value: 11)
-    EXPERIMENTAL_REVERSE = "experimental_reverse"
-
-    @wireOpcode(value: 12)
-    SQUARE_ARRAY = "square_array"
-
     @wireOpcode(value: 14)
     EXPERIMENTAL_ACKNOWLEDGE = "experimental_acknowledge"
 
@@ -498,20 +489,6 @@ enum Opcode {
 operation Ping {
     input: PingInput
     output: PingOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "opaque",
-    responseFraming: "opaque",
-    responseSemantics: "application_value",
-    retryMode: "always",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation ExperimentalEcho {
-    input: ExperimentalEchoInput
-    output: ExperimentalEchoOutput
 }
 
 @operationContract(
@@ -553,34 +530,6 @@ operation ExperimentalDense {
 operation ExperimentalStorageRead {
     input: ExperimentalStorageReadInput
     output: ExperimentalStorageReadOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "opaque",
-    responseFraming: "opaque",
-    responseSemantics: "application_value",
-    retryMode: "always",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation ExperimentalReverse {
-    input: ExperimentalReverseInput
-    output: ExperimentalReverseOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "opaque",
-    responseFraming: "opaque",
-    responseSemantics: "application_value",
-    retryMode: "always",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation SquareArray {
-    input: SquareArrayInput
-    output: SquareArrayOutput
 }
 
 @operationContract(
@@ -793,12 +742,6 @@ blob ItemId
 blob Value
 blob PongPayload
 
-/// Dense finite IEEE-754 binary64 values. Application-value operations encode
-/// each value as one big-endian eight-octet payload with no count prefix.
-list FloatingPointArray {
-    member: Double
-}
-
 list ExperimentalPageItems {
     member: Value
 }
@@ -902,20 +845,6 @@ structure SyncInput {
 
 structure SyncOutput {}
 
-structure ExperimentalEchoInput {
-    @required
-    @operationField(role: "payload")
-    @wireCodec(name: "utf8")
-    message: String
-}
-
-structure ExperimentalEchoOutput {
-    @required
-    @operationField(role: "payload")
-    @wireCodec(name: "utf8")
-    message: String
-}
-
 structure ExperimentalAcknowledgeInput {
     @required
     @operationField(role: "token")
@@ -963,34 +892,6 @@ structure ExperimentalStorageReadOutput {
     @wireCodec(name: "raw_bytes")
     @operationField(role: "value")
     value: Value
-}
-
-structure ExperimentalReverseInput {
-    @required
-    @operationField(role: "payload")
-    @wireCodec(name: "utf8")
-    message: String
-}
-
-structure ExperimentalReverseOutput {
-    @required
-    @operationField(role: "payload")
-    @wireCodec(name: "utf8")
-    message: String
-}
-
-structure SquareArrayInput {
-    @required
-    @operationField(role: "payload")
-    @wireCodec(name: "packed_f64_be")
-    values: FloatingPointArray
-}
-
-structure SquareArrayOutput {
-    @required
-    @operationField(role: "payload")
-    @wireCodec(name: "packed_f64_be")
-    values: FloatingPointArray
 }
 
 structure ExperimentalPageInput {

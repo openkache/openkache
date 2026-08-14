@@ -318,9 +318,6 @@ possible next frame; it MUST terminate the lane after the error response.
 | `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | opaque payload | — | — |
 | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | opaque payload | — | — |
 | `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — | — |
-| `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
-| `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
-| `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload | `packed_f64_be` | `packed_f64_be` |
 | `0E` | `EXPERIMENTAL_ACKNOWLEDGE` | opcode + value_len + value | empty | `utf8` | — |
 | `0F` | `EXPERIMENTAL_DENSE` | opcode + fixed-width dense body | 2 compact ordered fields | `u64_be`, `bool_u8` | `u64_be`, `bool_u8` |
 | `20` | `EXPERIMENTAL_STORAGE_READ` | opcode + value_len + value | opaque payload | `raw_bytes` | `raw_bytes` |
@@ -340,9 +337,6 @@ possible next frame; it MUST terminate the lane after the error response.
 | `07` | `NAMESPACE_OPEN` | `namespace_management` | `when_not_creating` | `namespace_descriptor` | `ok,created` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!name@name:String; !create_if_missing@createIfMissing:Boolean; ?policy@policy:NamespacePolicy; ?default_expiration@policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@policy.defaultTtlMilliseconds:Long; ?expiration_override@policy.expirationOverride:OverridePolicy; ?default_eviction@policy.defaultEviction:EvictionDefault; ?eviction_override@policy.evictionOverride:OverridePolicy` | `!descriptor@descriptor:NamespaceDescriptor; !namespace_id@descriptor.namespaceId:Long; !revision@descriptor.revision:Long; !policy@descriptor.policy:NamespacePolicy; !default_expiration@descriptor.policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@descriptor.policy.defaultTtlMilliseconds:Long; !expiration_override@descriptor.policy.expirationOverride:OverridePolicy; !default_eviction@descriptor.policy.defaultEviction:EvictionDefault; !eviction_override@descriptor.policy.evictionOverride:OverridePolicy; !created@created:Boolean` |
 | `08` | `NAMESPACE_UPDATE_POLICY` | `namespace_management` | `never` | `namespace_descriptor` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found` | `!namespace_id@namespaceId:Long; !expected_revision@expectedRevision:Long; !policy@policy:NamespacePolicy; !default_expiration@policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@policy.defaultTtlMilliseconds:Long; !expiration_override@policy.expirationOverride:OverridePolicy; !default_eviction@policy.defaultEviction:EvictionDefault; !eviction_override@policy.evictionOverride:OverridePolicy` | `!descriptor@descriptor:NamespaceDescriptor; !namespace_id@descriptor.namespaceId:Long; !revision@descriptor.revision:Long; !policy@descriptor.policy:NamespacePolicy; !default_expiration@descriptor.policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@descriptor.policy.defaultTtlMilliseconds:Long; !expiration_override@descriptor.policy.expirationOverride:OverridePolicy; !default_eviction@descriptor.policy.defaultEviction:EvictionDefault; !eviction_override@descriptor.policy.evictionOverride:OverridePolicy` |
 | `09` | `NAMESPACE_DELETE` | `namespace_management` | `never` | `delete_outcome` | `deleted` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found,namespace_not_empty` | `!namespace_id@namespaceId:Long; !expected_revision@expectedRevision:Long` | `—` |
-| `0A` | `EXPERIMENTAL_ECHO` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@message:String<utf8>` | `!payload@message:String<utf8>` |
-| `0B` | `EXPERIMENTAL_REVERSE` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@message:String<utf8>` | `!payload@message:String<utf8>` |
-| `0C` | `SQUARE_ARRAY` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@values:FloatingPointArray<packed_f64_be>` | `!payload@values:FloatingPointArray<packed_f64_be>` |
 | `0E` | `EXPERIMENTAL_ACKNOWLEDGE` | `global` | `always` | `accepted` | `accepted` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!token@token:String<utf8>` | `—` |
 | `0F` | `EXPERIMENTAL_DENSE` | `global` | `always` | `values` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!counter@counter:Long<u64_be>; !enabled@enabled:Boolean<bool_u8>` | `!counter@counter:Long<u64_be>; !enabled@enabled:Boolean<bool_u8>` |
 | `20` | `EXPERIMENTAL_STORAGE_READ` | `global` | `always` | `-` | `ok,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!key@key:Value<raw_bytes>` | `!value@value:Value<raw_bytes>` |
@@ -653,37 +647,6 @@ its TTL is not applied.
 
 The success response is `Ok` with exactly the four ASCII octets `PONG`.
 
-### Experimental application-value operations
-
-`EXPERIMENTAL_ECHO` (`0A`) and `EXPERIMENTAL_REVERSE` (`0B`) use the
-application-value request layout:
-
-```text
-opcode | value_len:vu128 | value:value_len
-```
-
-The value length is bounded by the protocol's 64 MiB value ceiling. Both
-operations require the value to be valid UTF-8. `EXPERIMENTAL_ECHO` returns the
-same UTF-8 octets. `EXPERIMENTAL_REVERSE` reverses Unicode scalar values
-(equivalently, Rust `char`s) and returns the resulting UTF-8 encoding. A
-malformed UTF-8 input returns `InvalidRequest`.
-
-### `SQUARE_ARRAY`
-
-`SQUARE_ARRAY` (`0C`) uses the same application-value frame layout:
-
-```text
-0C | value_len:vu128 | value:value_len
-```
-
-The payload is a dense array of IEEE-754 binary64 values. Each element occupies
-exactly eight octets in big-endian (network) byte order. There is no count
-prefix; the element count is `value_len / 8`, so an empty array is valid. A
-receiver MUST reject a length that is not a multiple of eight, a non-finite
-input (`NaN` or either infinity), or a squared result that is not finite, with
-`InvalidRequest`. On success the server returns one big-endian binary64 value
-for each input element, equal to `input * input`.
-
 ### `GET`
 
 `GET` has the request layout
@@ -977,10 +940,6 @@ For a valid request, the following are the domain success and result statuses:
 | `NAMESPACE_OPEN` | `Ok`, `Created` | Namespace descriptor |
 | `NAMESPACE_UPDATE_POLICY` | `Ok` | Updated namespace descriptor |
 | `NAMESPACE_DELETE` | `Deleted` | Always empty |
-| `EXPERIMENTAL_ECHO` | `Ok` | The input UTF-8 bytes unchanged |
-| `EXPERIMENTAL_REVERSE` | `Ok` | The input UTF-8 string reversed by Unicode scalar value |
-| `SQUARE_ARRAY` | `Ok` | Squared binary64 array |
-
 Common error statuses MAY be returned when their stated condition applies. A
 client receiving a status that is neither an allowed domain status nor an
 applicable common error for the outstanding request MUST treat the response as

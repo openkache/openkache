@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures_util::lock::Mutex as AsyncMutex;
-use openkache_protocol::{Opcode, OwnedRange};
+use openkache_protocol::Opcode;
 
 use super::operation_api::{
     self, ApiModule, CapabilityKey, PrepareContext, PrepareError, PreparePlan, ResourceLock,
@@ -45,23 +45,10 @@ mod behavior {
         b"PONG"
     }
 
-    pub(super) fn echo<T>(value: T) -> T {
-        value
-    }
-
     pub(super) fn acknowledge(_token: &str) {}
 
     pub(super) fn dense(value: DenseValue) -> DenseValue {
         value
-    }
-
-    pub(super) fn reverse(value: &str) -> String {
-        value.chars().rev().collect()
-    }
-
-    pub(super) fn square(value: f64) -> Option<f64> {
-        let squared = value * value;
-        squared.is_finite().then_some(squared)
     }
 
     pub(super) fn page(cursor: Option<&[u8]>) -> Page {
@@ -164,24 +151,6 @@ fn require_single_field(input: &OperationInputView) -> Result<(), OperationError
     Ok(())
 }
 
-fn take_single_field_range(
-    mut input: OperationInputView,
-) -> Result<OwnedRange, OperationError> {
-    require_single_field(&input)?;
-    input
-        .take_single_field_bytes_range()
-        .ok_or(OperationError::InvalidRequest(
-            b"operation requires one request field",
-        ))
-}
-
-pub(super) fn echo_handler(input: OperationInputView) -> Result<OperationOutcome, OperationError> {
-    Ok(OperationOutcome::opaque(
-        OperationStatus::Ok,
-        behavior::echo(take_single_field_range(input)?),
-    ))
-}
-
 pub(super) fn acknowledge_handler(
     input: OperationInputView,
 ) -> Result<OperationOutcome, OperationError> {
@@ -229,40 +198,6 @@ pub(super) fn dense_handler(input: OperationInputView) -> Result<OperationOutcom
             Some(OperationValue::inline(&enabled)),
         ],
     ))
-}
-
-pub(super) fn reverse_handler(
-    input: OperationInputView,
-) -> Result<OperationOutcome, OperationError> {
-    let field = input
-        .required_encoded_field_at_index(
-            request_fields::op_experimental_reverse::MESSAGE,
-            b"reverse requires one message field",
-        )
-        .map_err(OperationError::InvalidRequest)?;
-    let value = field
-        .decode_utf8()
-        .map_err(OperationError::InvalidRequest)?;
-    let value = behavior::reverse(value);
-    Ok(OperationOutcome::opaque(
-        OperationStatus::Ok,
-        value.into_bytes(),
-    ))
-}
-
-pub(super) fn square_array_handler(
-    input: OperationInputView,
-) -> Result<OperationOutcome, OperationError> {
-    let field = input
-        .required_encoded_field_at_index(
-            request_fields::op_square_array::VALUES,
-            b"SquareArray requires a values field",
-        )
-        .map_err(OperationError::InvalidRequest)?;
-    let output = field
-        .transform_packed_f64(behavior::square)
-        .map_err(OperationError::InvalidRequest)?;
-    Ok(OperationOutcome::opaque(OperationStatus::Ok, output))
 }
 
 pub(super) fn page_handler(input: OperationInputView) -> Result<OperationOutcome, OperationError> {
@@ -419,24 +354,12 @@ macro_rules! immediate_handler {
 }
 
 immediate_handler!(ping_handler_async, ping_handler);
-immediate_handler!(echo_handler_async, echo_handler);
 immediate_handler!(acknowledge_handler_async, acknowledge_handler);
 immediate_handler!(dense_handler_async, dense_handler);
-immediate_handler!(reverse_handler_async, reverse_handler);
-immediate_handler!(square_array_handler_async, square_array_handler);
 immediate_handler!(page_handler_async, page_handler);
 
 pub(super) const API: ApiModule = ApiModule::new(crate::protocol::generic_request_descriptor(), &[
     operation_api::RegistrationBuilder::generic(Opcode::Ping, ping_handler_async)
-        .read_only()
-        .build(),
-    operation_api::RegistrationBuilder::generic(Opcode::ExperimentalEcho, echo_handler_async)
-        .read_only()
-        .build(),
-    operation_api::RegistrationBuilder::generic(Opcode::ExperimentalReverse, reverse_handler_async)
-        .read_only()
-        .build(),
-    operation_api::RegistrationBuilder::generic(Opcode::SquareArray, square_array_handler_async)
         .read_only()
         .build(),
     operation_api::RegistrationBuilder::generic(
