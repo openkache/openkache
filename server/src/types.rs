@@ -341,6 +341,14 @@ impl StorageKey {
         &self.0
     }
 
+    pub(crate) fn routing_hash(&self) -> u64 {
+        u64::from_le_bytes(self.0[8..16].try_into().unwrap())
+    }
+
+    pub(crate) fn table_hash(&self) -> u128 {
+        u128::from_le_bytes(self.0[8..24].try_into().unwrap())
+    }
+
     /// Consumes the wrapper and returns the complete fixed-size storage key bytes.
     pub const fn into_bytes(self) -> [u8; STORAGE_KEY_BYTES] {
         self.0

@@ -4,61 +4,39 @@
 //! worker lifecycle and request routing focused on scheduling. API-facing
 //! storage addresses are normalized by a separate backend adapter.
 
-use aes::{
-    Aes256,
-    cipher::{Block, BlockCipherEncrypt, KeyInit},
-};
-use openkache_protocol::NAMESPACE_ID_BYTES;
-
 use crate::StorageKey;
 use crate::protocol::ItemId;
 
-pub(crate) fn derive_storage_key(server_cipher: &Aes256, item_id: ItemId) -> StorageKey {
-    // Compact v1 currently supplies one storage-width identity. Keep that
-    // compatibility requirement explicit here instead of deriving the
-    // persisted key width from the wire model.
-    let mut bytes: [u8; crate::types::STORAGE_KEY_BYTES] = item_id.into_bytes();
+pub(crate) const DOMAIN_V2_CONTEXT: &str = "OpenKache StorageKey DomainV2 root";
+pub(crate) const INTERNAL_NAMESPACE_ID: u64 = 0;
+const STORAGE_KEY_DIGEST_START: usize = 8;
 
-    // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks
-    // exactly cover the 32-byte digest buffer while preserving its alignment
-    // and exclusive borrow.
-    let blocks = unsafe { &mut *(bytes.as_mut_ptr() as *mut [Block<Aes256>; 2]) };
+pub(crate) fn derive_domain_key(server_secret: &[u8; 32]) -> [u8; 32] {
+    blake3::derive_key(DOMAIN_V2_CONTEXT, server_secret)
+}
 
-    // AES-MDS-AES keeps this fixed-size derivation in place and on the AES
-    // hardware path: two parallel AES passes surround an invertible MDS layer
-    // so each digest half influences both output blocks.
-    server_cipher.encrypt_blocks(blocks);
-
-    let [first_block, second_block] = blocks;
-    for (first, second) in first_block.iter_mut().zip(second_block.iter_mut()) {
-        let first_byte = *first;
-        let second_byte = *second;
-        *first = first_byte ^ second_byte;
-        *second = first_byte ^ gf_double(second_byte);
-    }
-
-    server_cipher.encrypt_blocks(blocks);
-    StorageKey::new(bytes)
+pub(crate) fn derive_storage_key(domain_key: &[u8; 32], item_id: ItemId) -> StorageKey {
+    derive_scoped_storage_key(domain_key, INTERNAL_NAMESPACE_ID, item_id)
 }
 
 /// Derives a storage key for the `(namespace_id, item_id)` wire identity.
 ///
-/// A namespace-specific AES key keeps equal item IDs in two namespaces
-/// distinct without exposing namespace semantics to the worker scheduler.
+/// The namespace prefix remains recoverable while the keyed digest binds the
+/// complete wire identity without allocating a concatenated preimage.
 pub(crate) fn derive_scoped_storage_key(
-    server_cipher: &Aes256,
+    domain_key: &[u8; 32],
     namespace_id: u64,
     item_id: ItemId,
 ) -> StorageKey {
-    let mut scope_material = [0u8; 32];
-    scope_material[..NAMESPACE_ID_BYTES].copy_from_slice(&namespace_id.to_be_bytes());
-    scope_material[NAMESPACE_ID_BYTES..].copy_from_slice(b"OpenKache namespace v1!!");
-    let namespace_key = derive_storage_key(server_cipher, ItemId::new(scope_material)).into_bytes();
-    let namespace_cipher = Aes256::new_from_slice(&namespace_key)
-        .expect("AES-256 namespace derivation always produces a 32-byte key");
-    derive_storage_key(&namespace_cipher, item_id)
-}
+    let namespace_bytes = namespace_id.to_be_bytes();
+    let mut hasher = blake3::Hasher::new_keyed(domain_key);
+    hasher.update(&namespace_bytes);
+    hasher.update(item_id.as_ref());
+    let digest = hasher.finalize();
 
-fn gf_double(byte: u8) -> u8 {
-    (byte << 1) ^ (0x1b & 0u8.wrapping_sub(byte >> 7))
+    let mut bytes = [0; crate::types::STORAGE_KEY_BYTES];
+    bytes[..STORAGE_KEY_DIGEST_START].copy_from_slice(&namespace_bytes);
+    bytes[STORAGE_KEY_DIGEST_START..]
+        .copy_from_slice(&digest.as_bytes()[..crate::types::STORAGE_KEY_BYTES - 8]);
+    StorageKey::new(bytes)
 }

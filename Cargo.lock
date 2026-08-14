@@ -2594,8 +2594,8 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "openkache"
 version = "0.1.0"
 dependencies = [
- "aes 0.9.1",
  "anstream",
+ "blake3",
  "boring",
  "clap",
  "comnoq",
@@ -2688,7 +2688,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
- "smallvec",
  "thiserror",
  "tokio",
  "vu128",

@@ -386,9 +386,7 @@ impl Table {
     }
 
     fn table_coordinates(&self, storage_key: &StorageKey) -> (usize, usize, u16) {
-        let storage_key = storage_key.as_bytes();
-        let prefix = u128::from_le_bytes(storage_key[..16].try_into().unwrap())
-            >> self.fingerprint_hash_offset_bits;
+        let prefix = storage_key.table_hash() >> self.fingerprint_hash_offset_bits;
         let prefix = prefix as u64;
         let quotient_and_fingerprint = self
             .coordinate_modulus
