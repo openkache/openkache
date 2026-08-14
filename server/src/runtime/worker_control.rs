@@ -6,8 +6,8 @@
 
 use super::storage_backend::RuntimeStorageBackend;
 use super::storage_context::StorageWorkerContext;
-use super::worker::{WorkerControlRequest, WorkerRequest, WorkerResponse};
 use super::{Kvkache, StorageTask, StorageTaskCancellation};
+use super::{WorkerControlRequest, WorkerRequest, WorkerResponse};
 use crate::Result;
 
 /// Runs one API-owned task against the worker-local backend.

@@ -40,6 +40,13 @@ use self::completion::{CompletionReceiver, CompletionSlab};
 #[allow(unused_imports)]
 pub(crate) use crate::storage_backend::{RUNNING_MARKER_FILE, SERVER_KEY_FILE};
 
+pub(in crate::runtime) type WorkerResponse = worker::Response<keyed_compatibility::KeyedResponse>;
+pub(in crate::runtime) type WorkerResponseSender = worker::ResponseSender<WorkerResponse>;
+pub(in crate::runtime) type WorkerRequest =
+    worker::Request<StorageKey, keyed_compatibility::KeyedCommand, WorkerResponse>;
+pub(in crate::runtime) type WorkerControlRequest = worker::ControlRequest<WorkerResponse>;
+pub(in crate::runtime) type DeferredWorkerResponse = worker::DeferredResponse<WorkerResponse>;
+
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
     pub(crate) id: [u8; 16],
