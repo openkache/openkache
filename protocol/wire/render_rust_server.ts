@@ -7,16 +7,175 @@ import { fixed_plan_width } from "../wire_layout"
 import type {
   Wire_Contract,
   Wire_Operation,
+  Wire_Request_Step,
 } from "../wire_types"
+import { MAX_GENERATED_REQUEST_FRAME_STATE_SLOTS } from "../wire_types"
 
 function formatted_decimal(value: number): string {
   return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "_")
 }
 
+function formatted_byte(value: number): string {
+  return `0x${value.toString(16).padStart(2, "0")}`
+}
+
+type Packed_Selector = {
+  readonly slot: number
+  readonly values: ReadonlyMap<string, number>
+}
+
+type Request_Wire_Render_State = {
+  readonly byte_length_slots: Map<number, number>
+  readonly packed_selectors: Map<number, Packed_Selector>
+  next_byte_length_slot: number
+  next_packed_selector: number
+  value_length_declared: boolean
+}
+
+function reserve_state_slot(next: number, operation: Wire_Operation, kind: string): number {
+  if (next >= MAX_GENERATED_REQUEST_FRAME_STATE_SLOTS) {
+    throw new Error(
+      `operation ${operation.name} requires more than ` +
+        `${MAX_GENERATED_REQUEST_FRAME_STATE_SLOTS} ${kind} slots`,
+    )
+  }
+  return next
+}
+
+function request_wire_steps(
+  operation: Wire_Operation,
+  steps: readonly Wire_Request_Step[],
+  state: Request_Wire_Render_State,
+): readonly string[] {
+  return steps.map((step): string => {
+    switch (step.kind) {
+      case "fixed_field":
+        return `WireRequestStep::Fixed { bytes: ${formatted_decimal(step.bytes)} }`
+      case "packed": {
+        const fields = step.fields.map((field): string => {
+          if (state.packed_selectors.has(field.field)) {
+            throw new Error(
+              `operation ${operation.name} assigns request field ${field.field} to more than one packed byte`,
+            )
+          }
+          const slot = reserve_state_slot(
+            state.next_packed_selector,
+            operation,
+            "packed-selector",
+          )
+          state.next_packed_selector += 1
+          state.packed_selectors.set(field.field, {
+            slot,
+            values: new Map(field.values.map(({ value, bits }) => [value, bits])),
+          })
+          return `WireRequestPackedField { slot: ${slot}, mask: ${formatted_byte(field.mask)} }`
+        })
+        return `WireRequestStep::Packed {
+                fields: &[${fields.join(", ")}],
+                reserved_mask: ${formatted_byte(step.reserved_mask)},
+                constant_bits: ${formatted_byte(step.constant_bits)},
+            }`
+      }
+      case "byte_length_field":
+        return "WireRequestStep::ByteLength"
+      case "byte_length_prefix_field": {
+        if (state.byte_length_slots.has(step.field)) {
+          throw new Error(
+            `operation ${operation.name} assigns request field ${step.field} more than one byte-length prefix`,
+          )
+        }
+        const slot = reserve_state_slot(
+          state.next_byte_length_slot,
+          operation,
+          "deferred byte-length",
+        )
+        state.next_byte_length_slot += 1
+        state.byte_length_slots.set(step.field, slot)
+        return `WireRequestStep::ByteLengthPrefix { slot: ${slot} }`
+      }
+      case "byte_field": {
+        const slot = state.byte_length_slots.get(step.field)
+        if (slot === undefined) {
+          throw new Error(
+            `operation ${operation.name} request field ${step.field} has no preceding byte-length prefix`,
+          )
+        }
+        state.byte_length_slots.delete(step.field)
+        return `WireRequestStep::ByteLengthBody { slot: ${slot} }`
+      }
+      case "varuint_field":
+        return "WireRequestStep::VarUInt"
+      case "value_length_field":
+        if (state.value_length_declared) {
+          throw new Error(`operation ${operation.name} declares more than one request value body`)
+        }
+        state.value_length_declared = true
+        return "WireRequestStep::ValueLengthPrefix"
+      case "conditional": {
+        const selector = state.packed_selectors.get(step.field)
+        const expected = selector?.values.get(step.equals)
+        if (selector === undefined || expected === undefined) {
+          throw new Error(
+            `operation ${operation.name} conditional field ${step.field} has no preceding packed mapping for ${step.equals}`,
+          )
+        }
+        const nested = request_wire_steps(operation, step.steps, state)
+        return `WireRequestStep::Conditional {
+                selector: ${selector.slot},
+                expected: ${formatted_byte(expected)},
+                steps: &[${nested.join(", ")}],
+            }`
+      }
+      case "constant":
+        return `WireRequestStep::Constant { bytes: &[${step.bytes
+          .map(formatted_byte)
+          .join(", ")}] }`
+      case "trailing_field":
+        if (state.value_length_declared) {
+          throw new Error(`operation ${operation.name} declares more than one request value body`)
+        }
+        state.value_length_declared = true
+        return "WireRequestStep::ValueLength"
+    }
+  })
+}
+
+function explicit_request_step_expression(operation: Wire_Operation): string | undefined {
+  const plan = operation.contract.request_wire
+  if (plan === undefined) return undefined
+  const state: Request_Wire_Render_State = {
+    byte_length_slots: new Map(),
+    packed_selectors: new Map(),
+    next_byte_length_slot: 0,
+    next_packed_selector: 0,
+    value_length_declared: false,
+  }
+  const steps = request_wire_steps(operation, plan, state)
+  if (state.byte_length_slots.size !== 0) {
+    throw new Error(
+      `operation ${operation.name} leaves a byte-length prefix without its body`,
+    )
+  }
+  return `[${steps.join(", ")}]`
+}
+
+function request_wire_uses_packed(steps: readonly Wire_Request_Step[]): boolean {
+  return steps.some((step) =>
+    step.kind === "packed" ||
+    (step.kind === "conditional" && request_wire_uses_packed(step.steps))
+  )
+}
+
 function rust_request_layout(contract: Wire_Contract): string {
   const operations = contract.operations
   if (operations === undefined) return ""
+  const uses_packed = operations.some((operation) =>
+    operation.contract.request_wire !== undefined &&
+    request_wire_uses_packed(operation.contract.request_wire)
+  )
   const step_expression = (operation: Wire_Operation): string => {
+    const explicit = explicit_request_step_expression(operation)
+    if (explicit !== undefined) return explicit
     const descriptor = derive_wire_operation_descriptor(operation.contract)
     switch (descriptor.request_framing) {
       case "empty":
@@ -53,6 +212,7 @@ function rust_request_layout(contract: Wire_Contract): string {
 /// protocol-v1 meanings.
 pub use openkache_protocol::{
     RequestFrameLayout as WireRequestLayout,
+${uses_packed ? "    RequestFramePackedField as WireRequestPackedField,\n" : ""}\
     RequestFrameStep as WireRequestStep,
 };
 

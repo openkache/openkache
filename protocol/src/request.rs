@@ -6,6 +6,18 @@
 
 use crate::{MAX_VALUE_BYTES, OPCODE_BYTES, Opcode, ProtocolError, Result};
 
+const MAX_REQUEST_FRAME_STATE_SLOTS: usize = 8;
+const EMPTY_BYTE_LENGTH: u16 = u16::MAX;
+
+/// One field projected from a packed request byte.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestFramePackedField {
+    /// Bounded state slot retained for a later conditional step.
+    pub slot: usize,
+    /// Bits belonging to this modeled field.
+    pub mask: u8,
+}
+
 /// One operation-neutral byte-consumption step in a request layout.
 ///
 /// The conditional steps are intentionally expressed in terms of byte
@@ -25,6 +37,25 @@ pub enum RequestFrameStep {
     /// Consume one canonical `vu128` value and treat its value as the opaque
     /// body length.
     ValueLength,
+    /// Consume one canonical `vu128` body length while allowing later metadata
+    /// steps before the body.
+    ValueLengthPrefix,
+    /// Consume one canonical `vu128` metadata value.
+    VarUInt,
+    /// Consume one packed byte and retain modeled selector bits.
+    Packed {
+        fields: &'static [RequestFramePackedField],
+        reserved_mask: u8,
+        constant_bits: u8,
+    },
+    /// Conditionally consume nested steps using a retained packed selector.
+    Conditional {
+        selector: usize,
+        expected: u8,
+        steps: &'static [RequestFrameStep],
+    },
+    /// Consume and validate exact constant bytes.
+    Constant { bytes: &'static [u8] },
     /// Consume a conditional canonical `vu128`, selected by a previously
     /// decoded byte.
     ConditionalVarUInt {
@@ -34,6 +65,10 @@ pub enum RequestFrameStep {
     },
     /// Consume one byte length followed by that many bytes.
     ByteLength,
+    /// Consume one byte length and retain it for a later body step.
+    ByteLengthPrefix { slot: usize },
+    /// Consume the body declared by a preceding byte-length prefix.
+    ByteLengthBody { slot: usize },
     /// Consume a fixed prefix and, when the leading byte matches, a canonical
     /// `vu128`.
     ByteThenVarUInt {
@@ -175,28 +210,89 @@ pub fn decode_request_frame_header(
     }
     let opcode_byte = prefix[0];
     let opcode = Opcode::try_from(opcode_byte)?;
-    let mut cursor: usize = OPCODE_BYTES;
-    let mut value_len = 0;
-    for (step_index, step) in layout.steps.iter().enumerate() {
+    let mut state = RequestFrameDecodeState::new();
+    if decode_request_frame_steps(prefix, layout.steps, &mut state)?.is_none() {
+        return Ok(None);
+    }
+    if state
+        .byte_lengths
+        .iter()
+        .any(|length| *length != EMPTY_BYTE_LENGTH)
+    {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "byte-length prefix has no matching body step",
+        ));
+    }
+    Ok(Some(RequestFrameHeader {
+        opcode,
+        encoded_len: state.cursor,
+        value_len: state.value_len,
+    }))
+}
+
+struct RequestFrameDecodeState {
+    cursor: usize,
+    value_len: usize,
+    value_length_seen: bool,
+    terminal_body: bool,
+    packed_values: [u8; MAX_REQUEST_FRAME_STATE_SLOTS],
+    packed_present: u8,
+    byte_lengths: [u16; MAX_REQUEST_FRAME_STATE_SLOTS],
+}
+
+impl RequestFrameDecodeState {
+    const fn new() -> Self {
+        Self {
+            cursor: OPCODE_BYTES,
+            value_len: 0,
+            value_length_seen: false,
+            terminal_body: false,
+            packed_values: [0; MAX_REQUEST_FRAME_STATE_SLOTS],
+            packed_present: 0,
+            byte_lengths: [EMPTY_BYTE_LENGTH; MAX_REQUEST_FRAME_STATE_SLOTS],
+        }
+    }
+
+    fn set_value_length(&mut self, value_len: usize, terminal: bool) -> Result<()> {
+        if self.value_length_seen {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "request layout declares more than one value body",
+            ));
+        }
+        validate_value_length(value_len)?;
+        self.value_len = value_len;
+        self.value_length_seen = true;
+        self.terminal_body = terminal;
+        Ok(())
+    }
+}
+
+fn decode_request_frame_steps(
+    prefix: &[u8],
+    steps: &[RequestFrameStep],
+    state: &mut RequestFrameDecodeState,
+) -> Result<Option<()>> {
+    for step in steps {
+        if state.terminal_body {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "request body must be the final frame step",
+            ));
+        }
         match *step {
             RequestFrameStep::Fixed { bytes } => {
-                let end = cursor
+                let end = state
+                    .cursor
                     .checked_add(bytes)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
                     return Ok(None);
                 }
-                cursor = end;
+                state.cursor = end;
             }
             RequestFrameStep::FixedBody { bytes } => {
-                if step_index + 1 != layout.steps.len() {
-                    return Err(ProtocolError::InvalidFieldSequence(
-                        "fixed-body frame step must be last",
-                    ));
-                }
-                validate_value_length(bytes)?;
-                value_len = bytes;
-                let body_end = cursor
+                state.set_value_length(bytes, true)?;
+                let body_end = state
+                    .cursor
                     .checked_add(bytes)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < body_end {
@@ -204,24 +300,114 @@ pub fn decode_request_frame_header(
                 }
             }
             RequestFrameStep::ValueLength => {
-                if step_index + 1 != layout.steps.len() {
-                    return Err(ProtocolError::InvalidFieldSequence(
-                        "value-length frame step must be last",
-                    ));
-                }
                 let Some((length, encoded_len)) = crate::decode_varuint(
-                    prefix.get(cursor..).unwrap_or_default(),
+                    prefix.get(state.cursor..).unwrap_or_default(),
                     "request value length",
                 )?
                 else {
                     return Ok(None);
                 };
-                value_len =
+                let value_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-                validate_value_length(value_len)?;
-                cursor = cursor
+                state.set_value_length(value_len, true)?;
+                state.cursor = state
+                    .cursor
                     .checked_add(encoded_len)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::ValueLengthPrefix => {
+                let Some((length, encoded_len)) = crate::decode_varuint(
+                    prefix.get(state.cursor..).unwrap_or_default(),
+                    "request value length",
+                )?
+                else {
+                    return Ok(None);
+                };
+                let value_len =
+                    usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+                state.set_value_length(value_len, false)?;
+                state.cursor = state
+                    .cursor
+                    .checked_add(encoded_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::VarUInt => {
+                let Some((_, encoded_len)) = crate::decode_varuint(
+                    prefix.get(state.cursor..).unwrap_or_default(),
+                    "request integer",
+                )?
+                else {
+                    return Ok(None);
+                };
+                state.cursor = state
+                    .cursor
+                    .checked_add(encoded_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::Packed {
+                fields,
+                reserved_mask,
+                constant_bits,
+            } => {
+                let offset = state.cursor;
+                let Some(&byte) = prefix.get(offset) else {
+                    return Ok(None);
+                };
+                if byte & reserved_mask != 0 || byte & constant_bits != constant_bits {
+                    return Err(ProtocolError::InvalidRequestPackedBits { offset });
+                }
+                for field in fields {
+                    if field.slot >= MAX_REQUEST_FRAME_STATE_SLOTS {
+                        return Err(ProtocolError::InvalidFieldSequence(
+                            "packed selector slot is out of range",
+                        ));
+                    }
+                    let bit = 1u8 << field.slot;
+                    if state.packed_present & bit != 0 {
+                        return Err(ProtocolError::InvalidFieldSequence(
+                            "packed selector slot is assigned more than once",
+                        ));
+                    }
+                    state.packed_values[field.slot] = byte & field.mask;
+                    state.packed_present |= bit;
+                }
+                state.cursor = state
+                    .cursor
+                    .checked_add(1)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::Conditional {
+                selector,
+                expected,
+                steps,
+            } => {
+                if selector >= MAX_REQUEST_FRAME_STATE_SLOTS
+                    || state.packed_present & (1u8 << selector) == 0
+                {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "conditional step references an unavailable packed selector",
+                    ));
+                }
+                if state.packed_values[selector] == expected
+                    && decode_request_frame_steps(prefix, steps, state)?.is_none()
+                {
+                    return Ok(None);
+                }
+            }
+            RequestFrameStep::Constant { bytes } => {
+                let end = state
+                    .cursor
+                    .checked_add(bytes.len())
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                let Some(actual) = prefix.get(state.cursor..end) else {
+                    return Ok(None);
+                };
+                if actual != bytes {
+                    return Err(ProtocolError::RequestConstantMismatch {
+                        offset: state.cursor,
+                    });
+                }
+                state.cursor = end;
             }
             RequestFrameStep::ConditionalVarUInt {
                 selector_offset,
@@ -233,30 +419,70 @@ pub fn decode_request_frame_header(
                 };
                 if selector & mask == expected {
                     let Some((_, encoded_len)) = crate::decode_varuint(
-                        prefix.get(cursor..).unwrap_or_default(),
+                        prefix.get(state.cursor..).unwrap_or_default(),
                         "request conditional integer",
                     )?
                     else {
                         return Ok(None);
                     };
-                    cursor = cursor
+                    state.cursor = state
+                        .cursor
                         .checked_add(encoded_len)
                         .ok_or(ProtocolError::FrameLengthOverflow)?;
                 }
             }
             RequestFrameStep::ByteLength => {
-                let Some(&length) = prefix.get(cursor) else {
+                let Some(&length) = prefix.get(state.cursor) else {
                     return Ok(None);
                 };
                 let length = usize::from(length);
-                let end = cursor
+                let end = state
+                    .cursor
                     .checked_add(1)
                     .and_then(|end| end.checked_add(length))
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
                     return Ok(None);
                 }
-                cursor = end;
+                state.cursor = end;
+            }
+            RequestFrameStep::ByteLengthPrefix { slot } => {
+                let Some(&length) = prefix.get(state.cursor) else {
+                    return Ok(None);
+                };
+                let stored = state.byte_lengths.get_mut(slot).ok_or(
+                    ProtocolError::InvalidFieldSequence("byte-length slot is out of range"),
+                )?;
+                if *stored != EMPTY_BYTE_LENGTH {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "byte-length slot is assigned more than once",
+                    ));
+                }
+                *stored = u16::from(length);
+                state.cursor = state
+                    .cursor
+                    .checked_add(1)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::ByteLengthBody { slot } => {
+                let stored = state.byte_lengths.get_mut(slot).ok_or(
+                    ProtocolError::InvalidFieldSequence("byte-length slot is out of range"),
+                )?;
+                if *stored == EMPTY_BYTE_LENGTH {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "byte-length body has no preceding prefix",
+                    ));
+                }
+                let length = usize::from(*stored);
+                *stored = EMPTY_BYTE_LENGTH;
+                let end = state
+                    .cursor
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if prefix.len() < end {
+                    return Ok(None);
+                }
+                state.cursor = end;
             }
             RequestFrameStep::ByteThenVarUInt {
                 prefix_bytes,
@@ -264,11 +490,17 @@ pub fn decode_request_frame_header(
                 expected,
             } => {
                 let Some(encoded_len) =
-                    decode_byte_then_varuint_len(&prefix[cursor..], prefix_bytes, mask, expected)?
+                    decode_byte_then_varuint_len(
+                        &prefix[state.cursor..],
+                        prefix_bytes,
+                        mask,
+                        expected,
+                    )?
                 else {
                     return Ok(None);
                 };
-                cursor = cursor
+                state.cursor = state
+                    .cursor
                     .checked_add(encoded_len)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
             }
@@ -285,7 +517,7 @@ pub fn decode_request_frame_header(
                 };
                 if selector & mask == expected {
                     let Some(encoded_len) = decode_byte_then_varuint_len(
-                        &prefix[cursor..],
+                        &prefix[state.cursor..],
                         prefix_bytes,
                         value_mask,
                         value_expected,
@@ -293,18 +525,15 @@ pub fn decode_request_frame_header(
                     else {
                         return Ok(None);
                     };
-                    cursor = cursor
+                    state.cursor = state
+                        .cursor
                         .checked_add(encoded_len)
                         .ok_or(ProtocolError::FrameLengthOverflow)?;
                 }
             }
         }
     }
-    Ok(Some(RequestFrameHeader {
-        opcode,
-        encoded_len: cursor,
-        value_len,
-    }))
+    Ok(Some(()))
 }
 
 fn decode_byte_then_varuint_len(

@@ -100,6 +100,14 @@ export type Wire_Operation_Frame_Policy = "length_delimited" | "fixed_body"
 export const MAX_GENERATED_OPERATION_FIELDS = 256
 
 /**
+ * Inline state slots available to compact request-frame plans.
+ *
+ * Slots retain one-byte packed selectors or deferred one-byte lengths while
+ * delimiting a frame. The fixed bound keeps request admission allocation-free.
+ */
+export const MAX_GENERATED_REQUEST_FRAME_STATE_SLOTS = 8
+
+/**
  * Upper bound for one recursive codec descriptor path.
  *
  * This is a resource-safety bound for generated metadata, not a domain limit.
