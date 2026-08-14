@@ -15,8 +15,8 @@ use openkache_protocol::Opcode;
 
 use super::super::observability::Operation;
 use super::super::types::{
-    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
-    StoredItemValue,
+    StorageKey, StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration,
+    StorageWriteOptions, StoredItemValue,
 };
 use super::super::{KvError, SetOutcome};
 use super::operation_api::{CapabilityKey, PrepareError, ResourceLock};
@@ -103,28 +103,23 @@ pub(super) type CacheFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, KvErr
 /// modules should register their own capability types when they need richer
 /// commands; the dispatcher and wire layers do not grow a cache-command enum.
 pub(super) trait StorageCapability {
-    fn namespace_item_worker(
+    fn namespace_item_storage_key(
         &self,
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
-    ) -> usize;
-    fn get_in_namespace<'a>(
+    ) -> StorageKey;
+    fn worker_for(&self, storage_key: &StorageKey) -> usize;
+    fn get_storage_key<'a>(
         &'a self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
+        storage_key: StorageKey,
     ) -> CacheFuture<'a, Option<StoredItemValue>>;
-    fn set_in_namespace<'a>(
+    fn set_storage_key<'a>(
         &'a self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
+        storage_key: StorageKey,
         value: StoredItemValue,
         options: StorageWriteOptions,
     ) -> CacheFuture<'a, SetOutcome>;
-    fn delete_in_namespace<'a>(
-        &'a self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
-    ) -> CacheFuture<'a, bool>;
+    fn delete_storage_key<'a>(&'a self, storage_key: StorageKey) -> CacheFuture<'a, bool>;
     fn stats<'a>(&'a self) -> CacheFuture<'a, Vec<String>>;
     fn sync_workers<'a>(&'a self, workers: &'a [usize]) -> CacheFuture<'a, ()>;
 }
@@ -236,53 +231,48 @@ impl ServerContext {
 }
 
 impl StorageCapability for NetworkWorkerCache {
-    fn namespace_item_worker(
+    fn namespace_item_storage_key(
         &self,
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
-    ) -> usize {
-        NetworkWorkerCache::namespace_item_worker(self, namespace_id, item_id)
+    ) -> StorageKey {
+        NetworkWorkerCache::namespace_item_storage_key(self, namespace_id, item_id)
     }
 
-    fn get_in_namespace<'a>(
+    fn worker_for(&self, storage_key: &StorageKey) -> usize {
+        NetworkWorkerCache::worker_for(self, storage_key)
+    }
+
+    fn get_storage_key<'a>(
         &'a self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
+        storage_key: StorageKey,
     ) -> CacheFuture<'a, Option<StoredItemValue>> {
-        Box::pin(NetworkWorkerCache::get_in_namespace(
+        Box::pin(NetworkWorkerCache::get_storage_key(
             self,
-            namespace_id,
-            item_id,
+            storage_key,
             Operation::from_opcode(Opcode::Get),
         ))
     }
 
-    fn set_in_namespace<'a>(
+    fn set_storage_key<'a>(
         &'a self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
+        storage_key: StorageKey,
         value: StoredItemValue,
         options: StorageWriteOptions,
     ) -> CacheFuture<'a, SetOutcome> {
-        Box::pin(NetworkWorkerCache::set_in_namespace(
+        Box::pin(NetworkWorkerCache::set_storage_key(
             self,
-            namespace_id,
-            item_id,
+            storage_key,
             value,
             options,
             Operation::from_opcode(Opcode::Set),
         ))
     }
 
-    fn delete_in_namespace<'a>(
-        &'a self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
-    ) -> CacheFuture<'a, bool> {
-        Box::pin(NetworkWorkerCache::delete_in_namespace(
+    fn delete_storage_key<'a>(&'a self, storage_key: StorageKey) -> CacheFuture<'a, bool> {
+        Box::pin(NetworkWorkerCache::delete_storage_key(
             self,
-            namespace_id,
-            item_id,
+            storage_key,
             Operation::from_opcode(Opcode::Delete),
         ))
     }

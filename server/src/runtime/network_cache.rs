@@ -83,42 +83,39 @@ impl NetworkWorkerCache {
     /// Routes an API-owned opaque storage key using the same hash as keyed
     /// compatibility operations.
     #[allow(dead_code)]
-    fn worker_for(&self, storage_key: &StorageKey) -> usize {
+    pub(crate) fn worker_for(&self, storage_key: &StorageKey) -> usize {
         self.cache.owner(storage_key)
     }
 
-    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
-        self.cache.namespace_item_worker(namespace_id, item_id)
-    }
-
-    pub(crate) async fn get_in_namespace(
+    pub(crate) fn namespace_item_storage_key(
         &self,
         namespace_id: u64,
         item_id: ItemId,
+    ) -> StorageKey {
+        self.cache
+            .namespace_item_storage_key(namespace_id, item_id)
+    }
+
+    pub(crate) async fn get_storage_key(
+        &self,
+        storage_key: StorageKey,
         operation: Operation,
     ) -> Result<Option<StoredItemValue>> {
         self.cache
-            .get_async_in_namespace_with_requester(
-                namespace_id,
-                item_id,
-                operation,
-                Some(self.network_worker),
-            )
+            .get_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
             .await
     }
 
-    pub(crate) async fn set_in_namespace(
+    pub(crate) async fn set_storage_key(
         &self,
-        namespace_id: u64,
-        item_id: ItemId,
+        storage_key: StorageKey,
         value: StoredItemValue,
         options: StorageWriteOptions,
         operation: Operation,
     ) -> Result<SetOutcome> {
         self.cache
-            .set_async_in_namespace_with_requester(
-                namespace_id,
-                item_id,
+            .set_storage_key_with_requester(
+                storage_key,
                 value,
                 options,
                 operation,
@@ -127,19 +124,13 @@ impl NetworkWorkerCache {
             .await
     }
 
-    pub(crate) async fn delete_in_namespace(
+    pub(crate) async fn delete_storage_key(
         &self,
-        namespace_id: u64,
-        item_id: ItemId,
+        storage_key: StorageKey,
         operation: Operation,
     ) -> Result<bool> {
         self.cache
-            .delete_async_in_namespace_with_requester(
-                namespace_id,
-                item_id,
-                operation,
-                Some(self.network_worker),
-            )
+            .delete_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
             .await
     }
 
@@ -205,7 +196,11 @@ impl StoragePort for NetworkWorkerCache {
         let storage_key = storage_backend::storage_key_for_address(&storage_address);
         Box::pin(async move {
             self.cache
-                .get_storage_key_with_requester(storage_key, Some(self.network_worker))
+                .get_storage_key_with_requester(
+                    storage_key,
+                    Operation::unknown(),
+                    Some(self.network_worker),
+                )
                 .await
                 .map(|value| value.map(StorageReadValue::from_owner))
                 .map_err(StorageError::from)
@@ -226,6 +221,7 @@ impl StoragePort for NetworkWorkerCache {
                     storage_key,
                     value,
                     options,
+                    Operation::unknown(),
                     Some(self.network_worker),
                 )
                 .await
@@ -242,7 +238,11 @@ impl StoragePort for NetworkWorkerCache {
         let storage_key = storage_backend::storage_key_for_address(&storage_address);
         Box::pin(async move {
             self.cache
-                .delete_storage_key_with_requester(storage_key, Some(self.network_worker))
+                .delete_storage_key_with_requester(
+                    storage_key,
+                    Operation::unknown(),
+                    Some(self.network_worker),
+                )
                 .await
                 .map(|deleted| {
                     if deleted {

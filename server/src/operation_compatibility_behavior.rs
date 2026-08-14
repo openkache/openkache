@@ -241,7 +241,8 @@ pub(super) fn namespace_delete<'a>(
             }
         };
         for item_id in tracked_items {
-            match cache.get_in_namespace(namespace_id, item_id).await {
+            let storage_key = cache.namespace_item_storage_key(namespace_id, item_id);
+            match cache.get_storage_key(storage_key).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     let pruned = namespaces.prune_item(namespace_id, item_id).map_err(|_| ());
@@ -295,7 +296,8 @@ pub(super) fn set<'a>(
         };
         let item_id = decoded.item_id;
         let value = decoded.value;
-        let worker = cache.namespace_item_worker(namespace_id, item_id);
+        let storage_key = cache.namespace_item_storage_key(namespace_id, item_id);
+        let worker = cache.worker_for(&storage_key);
         let reservation = match namespaces.reserve_item(namespace_id, item_id, worker) {
             Ok(reservation) => reservation,
             Err(error) => {
@@ -303,9 +305,8 @@ pub(super) fn set<'a>(
             }
         };
         let outcome = cache
-            .set_in_namespace(
-                namespace_id,
-                item_id,
+            .set_storage_key(
+                storage_key,
                 super::super::types::StoredItemValue::from_owned_range(value),
                 storage_options,
             )
@@ -358,11 +359,12 @@ pub(super) fn delete<'a>(
             );
         }
         let item_id = decoded.item_id;
-        let worker = cache.namespace_item_worker(namespace_id, item_id);
+        let storage_key = cache.namespace_item_storage_key(namespace_id, item_id);
+        let worker = cache.worker_for(&storage_key);
         if let Err(status) = namespaces.reserve_worker(namespace_id, worker) {
             return namespace_error(status, b"namespace metadata is unavailable");
         }
-        let deleted = cache.delete_in_namespace(namespace_id, item_id).await;
+        let deleted = cache.delete_storage_key(storage_key).await;
         match deleted {
             Ok(deleted) => {
                 if namespaces
@@ -480,7 +482,8 @@ async fn execute_get(
             b"namespace does not exist",
         );
     }
-    match cache.get_in_namespace(namespace_id, item_id).await {
+    let storage_key = cache.namespace_item_storage_key(namespace_id, item_id);
+    match cache.get_storage_key(storage_key).await {
         Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value.into_wire_segment()),
         Ok(None) => {
             if namespaces.prune_item(namespace_id, item_id).is_err() {
