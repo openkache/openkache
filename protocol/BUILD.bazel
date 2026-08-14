@@ -65,6 +65,7 @@ rust_library(
         "src/optional_values.rs",
         "src/request.rs",
         "src/response.rs",
+        "src/segments.rs",
     ],
     aliases = crate_aliases("protocol"),
     crate_name = "openkache_protocol",

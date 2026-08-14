@@ -71,6 +71,8 @@ pub mod optional_values;
 pub mod request;
 /// Operation-neutral response framing and owned response buffers.
 pub mod response;
+/// Operation-neutral ownership for ordered wire byte segments.
+pub mod segments;
 
 pub use compact::{
     FieldSequenceView, LengthDelimitedView, decode_varuint, decode_vu128, encode_varuint,
@@ -90,9 +92,9 @@ pub use request::{
     decode_request_frame_header,
 };
 pub use response::{
-    OwnedRange, OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes,
-    ResponseParts, ResponseSegment,
+    OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes, ResponseParts,
 };
+pub use segments::{OwnedFrame, OwnedRange, ResponseSegment, WireSegment};
 
 /// The exact fixed-size item identifier carried by the wire protocol.
 #[repr(transparent)]
