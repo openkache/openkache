@@ -25,6 +25,50 @@ export type Wire_Model_Request_Framing = (typeof WIRE_REQUEST_FRAMINGS)[number]
  */
 export type Wire_Request_Framing = Wire_Model_Request_Framing
 
+/** One canonical value encoded inside a packed request byte. */
+export interface Wire_Request_Packed_Value {
+  readonly value: string
+  readonly bits: number
+}
+
+/** One modeled field encoded inside a packed request byte. */
+export interface Wire_Request_Packed_Field {
+  readonly field: number
+  readonly mask: number
+  readonly values: readonly Wire_Request_Packed_Value[]
+}
+
+/** Operation-neutral compact request byte primitives. */
+export type Wire_Request_Step =
+  | { readonly kind: "fixed_field"; readonly field: number; readonly bytes: number }
+  | {
+      readonly kind: "packed"
+      readonly fields: readonly Wire_Request_Packed_Field[]
+      readonly reserved_mask: number
+      readonly constant_bits: number
+    }
+  | { readonly kind: "byte_length_field"; readonly field: number }
+  | { readonly kind: "byte_length_prefix_field"; readonly field: number }
+  | { readonly kind: "byte_field"; readonly field: number }
+  | { readonly kind: "varuint_field"; readonly field: number }
+  | {
+      readonly kind: "value_length_field"
+      readonly field: number
+      readonly length: "varuint"
+    }
+  | {
+      readonly kind: "conditional"
+      readonly field: number
+      readonly equals: string
+      readonly steps: readonly Wire_Request_Step[]
+    }
+  | { readonly kind: "constant"; readonly bytes: readonly number[] }
+  | {
+      readonly kind: "trailing_field"
+      readonly field: number
+      readonly length: "varuint"
+    }
+
 /** Generic response payload framing selected by the modeled operation. */
 export const WIRE_RESPONSE_FRAMINGS = [
   "empty",
@@ -263,6 +307,8 @@ export interface Wire_Operation_Contract {
    * member order for server-owned extensions; permissive fixtures may omit it.
    */
   readonly request_plan?: readonly Wire_Operation_Field_Plan[]
+  /** Exact request bytes expressed as operation-neutral field primitives. */
+  readonly request_wire?: readonly Wire_Request_Step[]
   /**
    * Generic request framing from the modeled contract. Permissive fixtures may
    * omit this only when a caller is constructing a partial descriptor for

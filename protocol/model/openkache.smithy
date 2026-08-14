@@ -48,6 +48,114 @@ list OperationStatuses {
     member: String
 }
 
+/// One canonical field-to-bit mapping in a packed request byte.
+structure WirePackedValue {
+    @required
+    value: String
+
+    @required
+    bits: Integer
+}
+
+list WirePackedValues {
+    member: WirePackedValue
+}
+
+/// One modeled field projected into a packed request byte.
+structure WirePackedField {
+    @required
+    field: String
+
+    @required
+    mask: Integer
+
+    @required
+    values: WirePackedValues
+}
+
+list WirePackedFields {
+    member: WirePackedField
+}
+
+structure WireFixedField {
+    @required
+    field: String
+
+    @required
+    bytes: Integer
+}
+
+structure WirePacked {
+    @required
+    fields: WirePackedFields
+
+    reservedMask: Integer
+    constantBits: Integer
+}
+
+structure WireFieldReference {
+    @required
+    field: String
+}
+
+structure WireConditional {
+    @required
+    field: String
+
+    @required
+    equals: String
+
+    @required
+    steps: WireRequestSteps
+}
+
+structure WireConstant {
+    /// An even-length lowercase hexadecimal byte string.
+    @required
+    hex: String
+}
+
+structure WireTrailingField {
+    @required
+    field: String
+
+    /// Length prefix used immediately before the trailing application bytes.
+    @required
+    length: String
+}
+
+structure WireValueLengthField {
+    @required
+    field: String
+
+    /// Length prefix used before a later metadata field and the final value body.
+    @required
+    length: String
+}
+
+/// Emits only the one-octet length prefix for a later byte field body.
+structure WireByteLengthPrefixField {
+    @required
+    field: String
+}
+
+union WireRequestStep {
+    fixedField: WireFixedField
+    packed: WirePacked
+    byteLengthField: WireFieldReference
+    byteLengthPrefixField: WireByteLengthPrefixField
+    byteField: WireFieldReference
+    varuintField: WireFieldReference
+    valueLengthField: WireValueLengthField
+    conditional: WireConditional
+    constant: WireConstant
+    trailingField: WireTrailingField
+}
+
+list WireRequestSteps {
+    member: WireRequestStep
+}
+
 /// Operation framing and status contract shared by wire adapters.
 ///
 /// Client-only members (`scope`, `responseSemantics`, and `retryMode`) are
@@ -63,6 +171,9 @@ structure operationContract {
     /// Optional protocol-v1 compatibility route. Generic operations omit this
     /// member and select only a reusable request framing primitive.
     compactRoute: String
+
+    /// Optional declarative request-wire plan for a compact byte contract.
+    requestWire: WireRequestSteps
 
     /// Generic request framing shared by protocol adapters.
     @required

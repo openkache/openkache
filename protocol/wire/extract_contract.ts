@@ -24,6 +24,7 @@ import {
   type Wire_V1_Contract,
 } from "../wire_types"
 import { fixed_field_width } from "../wire_layout"
+import { request_wire_plan } from "./extract_contract_request_wire"
 import {
   array_member,
   ensure_wire_codec_name,
@@ -1030,6 +1031,11 @@ function operation_contract(
     target,
     "output",
   )
+  const request_wire = request_wire_plan(
+    contract,
+    request_plan,
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
   const status_names = new Set(
     statuses.flatMap((status) => [
       status.name,
@@ -1122,6 +1128,7 @@ function operation_contract(
   const derived_contract = {
     error_statuses,
     request_plan,
+    ...(request_wire === undefined ? {} : { request_wire }),
     ...(request_framing_value === undefined
       ? {}
       : { request_framing: request_framing_value as Wire_Model_Request_Framing }),

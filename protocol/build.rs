@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "wire_descriptor.ts",
         "wire_types.ts",
         "wire_layout.ts",
+        "wire/extract_contract_request_wire.ts",
         "compat_v1_types.ts",
     ] {
         println!(
