@@ -18,6 +18,8 @@ use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
 use super::super::scheduler::ScheduledTask;
 use super::super::storage_task::StorageTask;
+use super::super::worker::{ExclusiveWorkPort, ExclusiveWorkResult};
+use super::super::worker_control::execute_storage_task;
 use super::super::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
 
 /// API-owned result projection for the compatibility keyed operations.
@@ -141,13 +143,6 @@ impl StorageCommand {
     pub(in crate::runtime) fn is_collapsible(&self, cache: &Kvkache) -> bool {
         self.metadata(cache).collapsible
     }
-
-    pub(in crate::runtime) fn take_exclusive(self) -> Option<(StorageTask, WorkerResponseSender)> {
-        match self {
-            Self::Custom { task, response } => Some((task, response)),
-            Self::Get { .. } | Self::Set { .. } | Self::Delete { .. } => None,
-        }
-    }
 }
 
 impl ScheduledTask for StorageCommand {
@@ -159,6 +154,46 @@ impl ScheduledTask for StorageCommand {
 
     fn is_exclusive(&self) -> bool {
         self.descriptor().exclusive
+    }
+}
+
+pub(in crate::runtime) struct ExclusiveStorageTask {
+    task: StorageTask,
+    response: WorkerResponseSender,
+}
+
+impl ExclusiveWorkPort<StorageCommand> for Kvkache {
+    type Work = ExclusiveStorageTask;
+
+    fn take_exclusive(command: StorageCommand) -> Option<Self::Work> {
+        match command {
+            StorageCommand::Custom { task, response } => {
+                Some(ExclusiveStorageTask { task, response })
+            }
+            StorageCommand::Get { .. }
+            | StorageCommand::Set { .. }
+            | StorageCommand::Delete { .. } => None,
+        }
+    }
+
+    fn execute_exclusive(
+        &mut self,
+        work: Self::Work,
+    ) -> impl std::future::Future<Output = ExclusiveWorkResult> + '_ {
+        async move {
+            let ExclusiveStorageTask { task, response } = work;
+            if task.metadata().cancellation()
+                == super::super::StorageTaskCancellation::CancelIfDisconnected
+                && response.is_disconnected()
+            {
+                return ExclusiveWorkResult::Cancelled;
+            }
+            let result = execute_storage_task(self, task).await;
+            let _ = response.send(Ok(result));
+            ExclusiveWorkResult::Completed {
+                operation: Operation::unknown(),
+            }
+        }
     }
 }
 

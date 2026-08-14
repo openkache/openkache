@@ -20,7 +20,7 @@ use super::keyed_compatibility::{
     prepare_collapsed_batch,
 };
 use super::scheduler::KeyScheduler;
-use super::worker_control::{execute_storage_task, process_worker_barrier};
+use super::worker_control::process_worker_barrier;
 use super::{DeferredWorkerResponse, WorkerRequest, WorkerResponse, WorkerResponseSender};
 
 pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
@@ -34,6 +34,34 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
 
 pub(super) type ResponseSender<R> = CompletionSender<Result<R>>;
 type CompatibilityScheduler = KeyScheduler<StorageKey, KeyedCommand>;
+
+/// Adapter-owned execution for work that requires a quiescent keyed lane.
+///
+/// The worker only preserves ordering and records whether work ran. The
+/// adapter owns command extraction, cancellation policy, execution, and
+/// completion projection.
+pub(super) trait ExclusiveWorkPort<C> {
+    type Work;
+
+    fn take_exclusive(command: C) -> Option<Self::Work>;
+    fn execute_exclusive(
+        &mut self,
+        work: Self::Work,
+    ) -> impl Future<Output = ExclusiveWorkResult> + '_;
+}
+
+pub(super) enum ExclusiveWorkResult {
+    Completed { operation: Operation },
+    Cancelled,
+}
+
+async fn execute_exclusive_work<L, C>(lifecycle: &mut L, command: C) -> Option<ExclusiveWorkResult>
+where
+    L: ExclusiveWorkPort<C>,
+{
+    let work = L::take_exclusive(command)?;
+    Some(lifecycle.execute_exclusive(work).await)
+}
 
 #[derive(Debug)]
 pub enum BenchmarkOperation {
@@ -439,30 +467,24 @@ pub(super) async fn worker_loop(
             }
         }
 
-        // A task borrows the worker-local cache for its full future lifetime,
-        // so it cannot overlap an owned keyed read/write job. It still lives
-        // in the keyed lane and therefore preserves per-key ordering; only
-        // this extension action is serialized at the worker boundary.
+        // Exclusive adapter work may borrow worker-local state for its full
+        // future lifetime, so it cannot overlap an owned keyed job. It still
+        // lives in the keyed lane and preserves per-key ordering.
         if inflight.is_empty()
             && let Some((storage_key, command)) = scheduler.take_ready_exclusive()
         {
-            let Some((task, response)) = command.take_exclusive() else {
+            let started_at = Instant::now();
+            let Some(result) = execute_exclusive_work(&mut cache, command).await else {
                 scheduler.finish_running_lane(storage_key);
                 continue;
             };
-            let operation = Operation::unknown();
-            let started_at = Instant::now();
-            if task.metadata().cancellation()
-                == super::StorageTaskCancellation::CancelIfDisconnected
-                && response.is_disconnected()
-            {
-                scheduler.finish_running_lane(storage_key);
-                continue;
-            }
-            let result = execute_storage_task(&mut cache, task).await;
-            let _ = response.send(Ok(result));
-            if let Some(storage_shard) = storage_shard {
-                storage_shard.record_operation(operation, started_at.elapsed());
+            match result {
+                ExclusiveWorkResult::Completed { operation } => {
+                    if let Some(storage_shard) = storage_shard {
+                        storage_shard.record_operation(operation, started_at.elapsed());
+                    }
+                }
+                ExclusiveWorkResult::Cancelled => {}
             }
             scheduler.finish_running_lane(storage_key);
             continue;
