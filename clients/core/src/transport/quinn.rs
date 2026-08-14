@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{BackendConnection, BackendStream, TransportError};
-use crate::protocol::RequestAttempt;
+use crate::request::RequestAttempt;
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Quinn;
