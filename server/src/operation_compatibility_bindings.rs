@@ -41,12 +41,6 @@ pub(super) struct GetInput {
     pub(super) item_id: ItemId,
 }
 
-/// Typed input for the two-item read example.
-pub(super) struct Get2Input {
-    pub(super) namespace_id: u64,
-    pub(super) item_ids: [ItemId; 2],
-}
-
 /// Typed input for the namespace/item mutation adapter.
 pub(super) struct SetInput {
     pub(super) namespace_id: u64,
@@ -99,16 +93,6 @@ fn required_item_id_at(
         .ok_or(b"operation requires a valid item ID")
 }
 
-fn required_item_id_at_role(
-    input: &OperationInputView,
-    occurrence: usize,
-) -> Result<ItemId, &'static [u8]> {
-    input
-        .field_index_at_role(contract::OperationFieldRole::ItemId, occurrence)
-        .and_then(|index| required_item_id_at(input, index).ok())
-        .ok_or(b"operation requires valid item IDs")
-}
-
 pub(super) fn decode_get(input: &OperationInputView) -> Result<GetInput, &'static [u8]> {
     Ok(GetInput {
         namespace_id: required_namespace_id(input, request_fields::GET_NAMESPACE_ID_0)?,
@@ -142,26 +126,6 @@ pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'s
 
 pub(super) fn decode_delete(input: &OperationInputView) -> Result<GetInput, &'static [u8]> {
     decode_get(input)
-}
-
-pub(super) fn decode_get2(input: &OperationInputView) -> Result<Get2Input, &'static [u8]> {
-    let namespace_index = input
-        .field_index_at_role(contract::OperationFieldRole::NamespaceId, 0)
-        .ok_or(&b"operation requires namespace identity"[..])?;
-    let item_count = input.field_count_role(contract::OperationFieldRole::ItemId);
-    if item_count != 2 {
-        return Err(b"get2 requires exactly two item IDs");
-    }
-    let item_ids = (0..item_count)
-        .map(|occurrence| required_item_id_at_role(input, occurrence))
-        .collect::<Result<Vec<_>, _>>()?;
-    let item_ids: [ItemId; 2] = item_ids
-        .try_into()
-        .map_err(|_| &b"get2 item cardinality is invalid"[..])?;
-    Ok(Get2Input {
-        namespace_id: required_namespace_id(input, namespace_index)?,
-        item_ids,
-    })
 }
 
 fn decode_namespace(
@@ -513,7 +477,6 @@ typed_handler!(
 );
 typed_handler!(stats_handler, decode_stats, compatibility_behavior::stats);
 typed_handler!(sync_handler, decode_sync, compatibility_behavior::sync);
-typed_handler!(get2_handler, decode_get2, compatibility_behavior::get2);
 
 /// Returns whether this API module owns the historical v1 projection for an
 /// opcode. The compatibility validator uses this module-local catalog rather
@@ -598,15 +561,6 @@ pub(super) const API: ApiModule = ApiModule::new(
     .prepare(prepare_lifecycle_and_namespace)
     .authorize(operation_handlers::authorization_none)
     .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Get2,
-        super::v1_adapter::adapt_request,
-        get2_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .read_only()
     .build(),
     ],
 );

@@ -9,10 +9,6 @@ use openkache_protocol::ItemId;
 use smallvec::SmallVec;
 
 use super::operation_handlers::{OperationFieldRecord, OperationFieldStorage, OperationInputView};
-// This adapter is nested below the server composition module. Use the
-// structural path rather than a crate-root path so copied white-box tests and
-// the production crate resolve the same generated contracts.
-use super::super::operation_compatibility_contract as contract;
 use super::super::operation_contract as generic_contract;
 use crate::protocol::{NamespacePolicy, Request, ServerRequest, SetOptions};
 
@@ -40,35 +36,6 @@ pub(super) fn validate_compatibility_routes() -> Result<(), &'static str> {
 
 /// Explicit registration metadata for the historical request projection.
 impl OperationInputView {
-    /// Returns the modeled cardinality for one compatibility role.
-    ///
-    /// Numeric generated role access is deliberately implemented by the v1
-    /// adapter. Generic handlers use the string-role accessors in
-    /// `operation_handlers` and therefore do not depend on the compatibility
-    /// role vocabulary.
-    pub(super) fn field_count_role(&self, role: contract::OperationFieldRole) -> usize {
-        contract::operation_field_count(
-            self.opcode(),
-            contract::OperationFieldDirection::Request,
-            role,
-        )
-    }
-
-    /// Resolves one compatibility role and occurrence to its dense field
-    /// index.
-    pub(super) fn field_index_at_role(
-        &self,
-        role: contract::OperationFieldRole,
-        occurrence: usize,
-    ) -> Option<usize> {
-        contract::operation_field_index(
-            self.opcode(),
-            contract::OperationFieldDirection::Request,
-            role,
-            occurrence,
-        )
-    }
-
     /// Decodes a fixed-width item identifier at a generated field index.
     pub(super) fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
         match self.field_at_index(index) {

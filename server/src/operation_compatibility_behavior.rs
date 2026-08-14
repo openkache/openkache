@@ -15,8 +15,8 @@ use super::super::{
     NamespacePolicy, OverridePolicy, SetOptions, SetOutcome,
 };
 use super::operation_compatibility_bindings::{
-    Get2Input, GetInput, NamespaceDeleteInput, NamespaceInput, NamespaceOpenInput,
-    NamespaceRevisionInput, SetInput,
+    GetInput, NamespaceDeleteInput, NamespaceInput, NamespaceOpenInput, NamespaceRevisionInput,
+    SetInput,
 };
 use super::operation_compatibility_services::{
     CompatibilityServices, NamespaceCapability, StorageCapability,
@@ -491,60 +491,4 @@ async fn execute_get(
         }
         Err(error) => domain_storage(error),
     }
-}
-
-/// Executes the experimental two-item read in the API-owned behavior layer.
-///
-/// The generic operation registry only sees the handler future and ordered
-/// response body. Namespace/item lookup and pruning remain isolated in this
-/// compatibility behavior.
-async fn execute_get2(
-    cache: &dyn StorageCapability,
-    input: Get2Input,
-    namespaces: &dyn NamespaceCapability,
-) -> OperationOutcome {
-    let namespace_id = input.namespace_id;
-    let [first_item, second_item] = input.item_ids;
-    if !namespaces.exists(namespace_id) {
-        return domain_error(
-            OperationStatus::NamespaceNotFound,
-            b"namespace does not exist",
-        );
-    }
-
-    let (first, second) = futures_util::future::join(
-        cache.get_in_namespace(namespace_id, first_item),
-        cache.get_in_namespace(namespace_id, second_item),
-    )
-    .await;
-    let mut values = Vec::with_capacity(2);
-    for (item_id, result) in [(first_item, first), (second_item, second)] {
-        match result {
-            Ok(value) => {
-                if value.is_none() && namespaces.prune_item(namespace_id, item_id).is_err() {
-                    return domain_error(
-                        OperationStatus::InternalError,
-                        b"namespace metadata is unavailable",
-                    );
-                }
-                values.push(value.map(|value| value.into_bytes()));
-            }
-            Err(error) => return domain_storage(error),
-        }
-    }
-
-    OperationOutcome::field_sequence(OperationStatus::Ok, values)
-}
-
-pub(super) fn get2<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
-    decoded: Get2Input,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
-    Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        execute_get2(services.storage(), decoded, services.namespaces()).await
-    })
 }
