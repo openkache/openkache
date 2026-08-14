@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
 use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Response, Status};
-use protocol::{Request, RequestRetryPolicy};
+use protocol::{Request, RequestAttempt, RequestParts};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -382,6 +382,39 @@ struct RequestFailure {
     invalidates_connection: bool,
 }
 
+enum RequestAttempts {
+    Once(Option<Request>),
+    Replay(Option<Arc<RequestParts>>),
+}
+
+impl RequestAttempts {
+    fn new(request: Request, replayable: bool) -> Result<Self> {
+        if replayable {
+            request
+                .into_parts()
+                .map(|parts| Self::Replay(Some(Arc::new(parts))))
+                .map_err(Error::protocol)
+        } else {
+            Ok(Self::Once(Some(request)))
+        }
+    }
+
+    fn next(&mut self, final_attempt: bool) -> Option<PendingRequest> {
+        match self {
+            Self::Once(request) => request.take().map(PendingRequest::Once),
+            Self::Replay(parts) if final_attempt => parts.take().map(PendingRequest::Replay),
+            Self::Replay(parts) => parts
+                .as_ref()
+                .map(|parts| PendingRequest::Replay(Arc::clone(parts))),
+        }
+    }
+}
+
+enum PendingRequest {
+    Once(Request),
+    Replay(Arc<RequestParts>),
+}
+
 impl RequestFailure {
     fn before_send(error: Error) -> Self {
         let invalidates_connection = error.invalidates_connection_before_send();
@@ -539,7 +572,7 @@ impl<C: ClientConnection> Core<C> {
             Opcode::Set,
             namespace_id,
             Some(item_id.into_protocol()),
-            options.into_protocol()?,
+            options.into_wire_options()?,
             value.into_bytes(),
         )
         .map_err(Error::protocol)?;
@@ -642,29 +675,32 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats)
-            || (request.opcode == Opcode::NamespaceOpen && !request.create_if_missing);
+        let response_safe = request.retry_policy.is_safe();
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
             1
         };
+        let opcode = request.opcode;
+        let create_if_missing = request.create_if_missing;
         let operation = operation(request.opcode);
-        let mut request = Some(request);
+        let mut attempts = RequestAttempts::new(request, response_safe && max_attempts > 1)?;
         for attempt in 1..=max_attempts {
             let connection = self.current_connection()?;
-            let attempt_request = if attempt == max_attempts {
-                request.take()
-            } else {
-                request.as_ref().cloned()
-            };
+            let attempt_request = attempts.next(attempt == max_attempts);
             let Some(attempt_request) = attempt_request else {
                 return Err(Error::Connection(
                     "request retry state was exhausted before the final attempt".into(),
                 ));
             };
             match self
-                .request_once(&connection, attempt_request, deadline)
+                .request_once(
+                    &connection,
+                    attempt_request,
+                    opcode,
+                    create_if_missing,
+                    deadline,
+                )
                 .await
             {
                 Ok(response) if status_is_error(response.status) => {
@@ -846,31 +882,36 @@ impl<C: ClientConnection> Core<C> {
     async fn request_once(
         &self,
         connection: &C,
-        request: Request,
+        request: PendingRequest,
+        opcode: Opcode,
+        create_if_missing: bool,
         deadline: transport::Deadline,
     ) -> std::result::Result<Response, RequestFailure> {
-        let opcode = request.opcode;
-        let create_if_missing = request.create_if_missing;
         let mut stream = connection
             .acquire_lane(deadline)
             .await
             .map_err(RequestFailure::before_send)?;
-        let parts = request
-            .into_parts()
-            .map_err(Error::protocol)
-            .map_err(RequestFailure::before_send)?;
+        let request = match request {
+            PendingRequest::Once(request) => RequestAttempt::Once(
+                request
+                    .into_parts()
+                    .map_err(Error::protocol)
+                    .map_err(RequestFailure::before_send)?,
+            ),
+            PendingRequest::Replay(parts) => RequestAttempt::Replay(parts),
+        };
         let write_timeout = deadline
             .remaining(Operation::RequestWrite)
             .map_err(RequestFailure::before_send)?;
         stream
-            .write_request_parts(parts, write_timeout)
+            .write_request(request, write_timeout)
             .await
             .map_err(RequestFailure::after_send)?;
-        let frame = stream
+        let parts = stream
             .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
             .await
             .map_err(RequestFailure::after_send)?;
-        let response = frame
+        let response = parts
             .into_response()
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
