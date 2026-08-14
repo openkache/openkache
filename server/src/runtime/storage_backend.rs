@@ -2,19 +2,16 @@
 //!
 //! API-owned tasks use the byte-oriented [`super::storage_context::StorageBackend`]
 //! contract. This module is the composition boundary that translates that
-//! contract into the cache engine's fixed-width key and protocol-facing write
-//! policy. Keeping the translation here prevents generic storage code from
-//! depending on wire types.
+//! contract into the cache engine's fixed-width key and owned value. Storage
+//! write policy remains operation-neutral across this boundary.
 
-use crate::protocol::{EvictionMode, ExpirationMode, SetCondition, SetOptions};
 use crate::types::StoredItemValue;
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 use sha2::{Digest, Sha256};
 
 use super::storage_context;
 use super::storage_port::{
-    StorageAddress, StorageContextFuture, StorageError, StorageMutation, StorageWriteCondition,
-    StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
+    StorageAddress, StorageContextFuture, StorageError, StorageMutation, StorageWriteOptions,
 };
 
 /// Domain separator for addresses submitted through the generic storage port.
@@ -66,26 +63,6 @@ impl<'a> RuntimeStorageBackend<'a> {
     }
 }
 
-#[allow(dead_code)]
-pub(super) fn protocol_storage_options(options: StorageWriteOptions) -> SetOptions {
-    let condition = match options.condition {
-        StorageWriteCondition::Any => SetCondition::Any,
-        StorageWriteCondition::IfAbsent => SetCondition::IfAbsent,
-        StorageWriteCondition::IfPresent => SetCondition::IfPresent,
-    };
-    let (expiration_mode, ttl_ms) = match options.expiration {
-        StorageWriteExpiration::Inherit => (ExpirationMode::Inherit, None),
-        StorageWriteExpiration::NoExpiry => (ExpirationMode::NoExpiry, None),
-        StorageWriteExpiration::Ttl(ttl_ms) => (ExpirationMode::ExplicitTtl, Some(ttl_ms)),
-    };
-    let eviction_mode = match options.eviction {
-        StorageWriteEviction::Inherit => EvictionMode::Inherit,
-        StorageWriteEviction::Evictable => EvictionMode::Evictable,
-        StorageWriteEviction::Protected => EvictionMode::EvictionProtected,
-    };
-    SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode)
-}
-
 impl storage_context::StorageBackend for RuntimeStorageBackend<'_> {
     fn get<'a>(
         &'a mut self,
@@ -113,7 +90,7 @@ impl storage_context::StorageBackend for RuntimeStorageBackend<'_> {
                 .set_encoded_with_options(
                     storage_key,
                     StoredItemValue::new(value),
-                    protocol_storage_options(options),
+                    options,
                 )
                 .await
                 .map(|outcome| match outcome {
@@ -158,7 +135,7 @@ impl storage_context::StorageBackend for RuntimeStorageBackend<'_> {
                     storage_key,
                     expected,
                     replacement.map(StoredItemValue::new),
-                    protocol_storage_options(options),
+                    options,
                 )
                 .await
                 .map_err(StorageError::from)

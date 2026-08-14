@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::lock::Mutex as AsyncMutex;
 
-use super::super::types::StoredItemValue;
+use super::super::types::{
+    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
+    StoredItemValue,
+};
 use super::super::{KvError, SetOutcome};
 use super::operation_api::{CapabilityKey, PrepareError, ResourceLock};
 use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
@@ -113,7 +116,7 @@ pub(super) trait StorageCapability {
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
         value: StoredItemValue,
-        options: super::super::SetOptions,
+        options: StorageWriteOptions,
     ) -> CacheFuture<'a, SetOutcome>;
     fn delete_in_namespace<'a>(
         &'a self,
@@ -256,7 +259,7 @@ impl StorageCapability for NetworkWorkerCache {
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
         value: StoredItemValue,
-        options: super::super::SetOptions,
+        options: StorageWriteOptions,
     ) -> CacheFuture<'a, SetOutcome> {
         Box::pin(NetworkWorkerCache::set_in_namespace(
             self,
@@ -286,6 +289,32 @@ impl StorageCapability for NetworkWorkerCache {
     fn sync_workers<'a>(&'a self, workers: &'a [usize]) -> CacheFuture<'a, ()> {
         Box::pin(NetworkWorkerCache::sync_workers(self, workers))
     }
+}
+
+pub(crate) const fn storage_write_options(
+    options: super::super::SetOptions,
+) -> Result<StorageWriteOptions, &'static [u8]> {
+    let expiration = match (options.expiration_mode, options.ttl_ms) {
+        (super::super::ExpirationMode::Inherit, None) => StorageWriteExpiration::Inherit,
+        (super::super::ExpirationMode::NoExpiry, None) => StorageWriteExpiration::NoExpiry,
+        (super::super::ExpirationMode::ExplicitTtl, Some(ttl_ms)) => {
+            StorageWriteExpiration::Ttl(ttl_ms)
+        }
+        _ => return Err(b"resolved SET expiration policy is inconsistent"),
+    };
+    Ok(StorageWriteOptions {
+        condition: match options.condition {
+            super::super::SetCondition::Any => StorageWriteCondition::Any,
+            super::super::SetCondition::IfAbsent => StorageWriteCondition::IfAbsent,
+            super::super::SetCondition::IfPresent => StorageWriteCondition::IfPresent,
+        },
+        expiration,
+        eviction: match options.eviction_mode {
+            super::super::EvictionMode::Inherit => StorageWriteEviction::Inherit,
+            super::super::EvictionMode::Evictable => StorageWriteEviction::Evictable,
+            super::super::EvictionMode::EvictionProtected => StorageWriteEviction::Protected,
+        },
+    })
 }
 
 impl NamespaceCapability for Mutex<NamespaceRegistry> {

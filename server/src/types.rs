@@ -14,6 +14,54 @@ use crate::store::{DirectIoBuffer, DirectIoBufferLease};
 /// not resize persisted storage records.
 pub const STORAGE_KEY_BYTES: usize = 32;
 
+/// Existence condition for a storage mutation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum StorageWriteCondition {
+    #[default]
+    Any,
+    IfAbsent,
+    IfPresent,
+}
+
+/// Concrete expiration selection accepted by storage.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum StorageWriteExpiration {
+    #[default]
+    Inherit,
+    NoExpiry,
+    Ttl(u64),
+}
+
+/// Concrete eviction selection accepted by storage.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum StorageWriteEviction {
+    #[default]
+    Inherit,
+    Evictable,
+    Protected,
+}
+
+/// Operation-neutral policy for storing one value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StorageWriteOptions {
+    pub(crate) condition: StorageWriteCondition,
+    pub(crate) expiration: StorageWriteExpiration,
+    pub(crate) eviction: StorageWriteEviction,
+}
+
+impl StorageWriteOptions {
+    pub(crate) const fn ttl_ms(self) -> Option<u64> {
+        match self.expiration {
+            StorageWriteExpiration::Ttl(ttl_ms) => Some(ttl_ms),
+            StorageWriteExpiration::Inherit | StorageWriteExpiration::NoExpiry => None,
+        }
+    }
+
+    pub(crate) const fn eviction_protected(self) -> bool {
+        matches!(self.eviction, StorageWriteEviction::Protected)
+    }
+}
+
 /// Variable-length application value associated with an item ID.
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
