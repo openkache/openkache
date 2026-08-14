@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use smallvec::SmallVec;
+use smallvec::{Array, SmallVec};
 
 use crate::{ProtocolError, Result};
 
@@ -10,6 +10,9 @@ use crate::{ProtocolError, Result};
 // carry a large array of segment owners. Longer plans spill metadata only;
 // their payload allocations remain unchanged.
 pub(crate) const INLINE_SEGMENTS: usize = 2;
+
+/// Owned wire frame using the common two-segment inline storage.
+pub type OwnedFrame = SegmentFrame<[WireSegment; INLINE_SEGMENTS]>;
 
 /// An owned buffer with a logical byte range.
 ///
@@ -127,12 +130,18 @@ impl From<Vec<u8>> for WireSegment {
 
 /// Ordered owned wire segments with a checked cached byte length.
 #[derive(Debug, Eq, PartialEq)]
-pub struct OwnedFrame {
-    segments: SmallVec<[WireSegment; INLINE_SEGMENTS]>,
+pub struct SegmentFrame<A>
+where
+    A: Array<Item = WireSegment>,
+{
+    segments: SmallVec<A>,
     encoded_len: usize,
 }
 
-impl OwnedFrame {
+impl<A> SegmentFrame<A>
+where
+    A: Array<Item = WireSegment>,
+{
     /// Builds one frame without coalescing independently owned segments.
     ///
     /// # Errors
@@ -144,14 +153,11 @@ impl OwnedFrame {
         I: IntoIterator<Item = T>,
         T: Into<WireSegment>,
     {
-        let segments: SmallVec<[WireSegment; INLINE_SEGMENTS]> =
-            segments.into_iter().map(Into::into).collect();
+        let segments: SmallVec<A> = segments.into_iter().map(Into::into).collect();
         Self::from_segments(segments)
     }
 
-    pub(crate) fn from_segments(
-        segments: SmallVec<[WireSegment; INLINE_SEGMENTS]>,
-    ) -> Result<Self> {
+    pub(crate) fn from_segments(segments: SmallVec<A>) -> Result<Self> {
         let encoded_len = segments.iter().try_fold(0usize, |total, segment| {
             total
                 .checked_add(segment.len())
@@ -179,7 +185,7 @@ impl OwnedFrame {
     }
 
     /// Recovers the ordered segment owners without copying payload bytes.
-    pub fn into_segments(self) -> SmallVec<[WireSegment; INLINE_SEGMENTS]> {
+    pub fn into_segments(self) -> SmallVec<A> {
         self.segments
     }
 }

@@ -8,6 +8,7 @@ import {
   type Wire_Entry,
   type Wire_Operation,
   type Wire_Operation_Descriptor,
+  type Wire_Operation_Field_Layout,
   type Wire_Operation_Field_Plan,
   type Wire_Response_Framing,
 } from "../wire_types"
@@ -315,6 +316,26 @@ ${operation_modules.join("\n")}
       },
     ]),
   )
+  const optional_value_codec = (
+    layout: Wire_Operation_Field_Layout,
+  ): string => {
+    switch (layout) {
+      case "optional_values":
+        return `Some(match OptionalValueCodec::new(${formatted_decimal(contract.v1.optional_value_length_bytes ?? 4)}, ${formatted_decimal(contract.v1.optional_value_missing ?? 0xffff_ffff)}) {
+                Ok(codec) => codec,
+                Err(_) => panic!("generated optional-value wire constants are invalid"),
+            })`
+      case "empty":
+      case "opaque":
+      case "sequence":
+      case "dense":
+        return "None"
+      default: {
+        const exhaustive_layout: never = layout
+        throw new Error(`unsupported operation field layout ${exhaustive_layout}`)
+      }
+    }
+  }
   const wire_metadata = operations
     .map((operation) => {
       const plans = operation_plans.get(operation.name)!
@@ -326,6 +347,7 @@ ${operation_modules.join("\n")}
             framing: OperationLayoutFraming::${pascal_case(operation_descriptor.request_framing)},
             frame: OperationFramePolicy::${pascal_case(operation_descriptor.request_frame)},
             layout: OperationFieldLayout::${pascal_case(operation_descriptor.request_layout)},
+            optional_value_codec: ${optional_value_codec(operation_descriptor.request_layout)},
             fields: ${plan_slice(request_plan)},
             exact_width: ${formatted_decimal(fixed_plan_width(request_plan) ?? 0)},
             max_width: ${formatted_decimal(request_payload_bound(contract, operation))},
@@ -335,6 +357,7 @@ ${operation_modules.join("\n")}
             framing: OperationLayoutFraming::${pascal_case(operation_descriptor.response_framing)},
             frame: OperationFramePolicy::${pascal_case(operation_descriptor.response_frame)},
             layout: OperationFieldLayout::${pascal_case(operation_descriptor.response_layout)},
+            optional_value_codec: ${optional_value_codec(operation_descriptor.response_layout)},
             fields: ${plan_slice(response_plan)},
             exact_width: ${formatted_decimal(fixed_plan_width(response_plan) ?? 0)},
             max_width: ${formatted_decimal(response_payload_bound(contract, operation))},
@@ -472,6 +495,8 @@ pub struct OperationLayoutPlan {
     pub framing: OperationLayoutFraming,
     pub frame: OperationFramePolicy,
     pub layout: OperationFieldLayout,
+    /// Layout-owned optional-value framing, absent for every other layout.
+    pub optional_value_codec: Option<OptionalValueCodec>,
     pub fields: &'static [OperationFieldPlan],
     pub exact_width: usize,
     pub max_width: usize,

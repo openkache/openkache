@@ -5,7 +5,7 @@
 //! `Response`. Keeping this adapter separate prevents API behavior from
 //! acquiring wire status or framing branches.
 
-use openkache_protocol::{Opcode, Response, ResponseParts, ResponseSegment, Status};
+use openkache_protocol::{Opcode, ProtocolError, Response, ResponseParts, ResponseSegment, Status};
 use smallvec::SmallVec;
 
 use super::operation_capabilities::CapabilityCatalog;
@@ -99,20 +99,21 @@ pub(super) fn contract_error_response(
     message: &[u8],
 ) -> OperationResponse {
     let status = contract_error_status(opcode, preferred);
-    Response::new(status, message.to_vec()).unwrap_or_else(|_| {
-        // Error diagnostics are API-owned bytes. A malformed adapter must not
-        // turn an oversized diagnostic into a server panic; retain the
-        // contract-valid status and send a bounded generic diagnostic instead.
-        Response::new(
-            status,
-            b"operation error exceeds the protocol limit".to_vec(),
-        )
-        .unwrap_or(Response {
-            status,
-            payload: Vec::new(),
+    Response::new(status, message.to_vec())
+        .unwrap_or_else(|_| {
+            // Error diagnostics are API-owned bytes. A malformed adapter must not
+            // turn an oversized diagnostic into a server panic; retain the
+            // contract-valid status and send a bounded generic diagnostic instead.
+            Response::new(
+                status,
+                b"operation error exceeds the protocol limit".to_vec(),
+            )
+            .unwrap_or(Response {
+                status,
+                payload: Vec::new(),
+            })
         })
-    })
-    .into()
+        .into()
 }
 
 /// Builds a contract-valid error response from an API-owned semantic status.
@@ -147,11 +148,13 @@ fn planned_fields_response(
     values: SmallVec<[Option<OperationValue>; 8]>,
 ) -> OperationResponse {
     let wire = contract::spec(opcode);
-    if !matches!(
-        wire.response.framing,
-        contract::OperationLayoutFraming::FieldSequence
-            | contract::OperationLayoutFraming::OptionalValues
-    ) || values.len() != wire.response.fields.len()
+    if values.len() > contract::MAX_FIELDS
+        || !matches!(
+            wire.response.framing,
+            contract::OperationLayoutFraming::FieldSequence
+                | contract::OperationLayoutFraming::OptionalValues
+        )
+        || values.len() != wire.response.fields.len()
     {
         return contract_error_response(
             opcode,
@@ -162,82 +165,29 @@ fn planned_fields_response(
     if let Err(message) = validate_response_fields(&values, wire.response.fields) {
         return contract_error_response(opcode, Status::InternalError, message);
     }
-    let parts = match segmented_response_fields(status, values, wire.response.layout) {
+    let parts = match ResponseParts::planned_fields(
+        status,
+        values
+            .into_iter()
+            .map(|value| value.map(operation_value_segment)),
+        wire.response,
+    ) {
         Ok(parts) => parts,
-        Err(()) => {
-            return contract_error_response(
-                opcode,
-                Status::TooLarge,
-                b"operation response fields exceed the protocol limit",
-            );
+        Err(error) => {
+            let (status, message) = match error {
+                ProtocolError::ValueTooLarge { .. } | ProtocolError::FrameLengthOverflow => (
+                    Status::TooLarge,
+                    b"operation response fields exceed the protocol limit".as_slice(),
+                ),
+                _ => (
+                    Status::InternalError,
+                    b"operation response fields do not match their generated layout".as_slice(),
+                ),
+            };
+            return contract_error_response(opcode, status, message);
         }
     };
     OperationResponse { status, parts }
-}
-
-fn segmented_response_fields(
-    status: Status,
-    values: SmallVec<[Option<OperationValue>; 8]>,
-    layout: contract::OperationFieldLayout,
-) -> Result<ResponseParts, ()> {
-    if values.len() > contract::MAX_FIELDS {
-        return Err(());
-    }
-    let mut segments = SmallVec::<[ResponseSegment; 8]>::new();
-    match layout {
-        contract::OperationFieldLayout::Dense => {
-            segments.extend(
-                values
-                    .into_iter()
-                    .flatten()
-                    .map(operation_value_segment),
-            );
-        }
-        contract::OperationFieldLayout::Sequence => {
-            let mut mask = SmallVec::<[u8; 32]>::new();
-            mask.resize(values.len().saturating_add(7) / 8, 0);
-            let final_present = values.iter().rposition(Option::is_some);
-            for (index, value) in values.iter().enumerate() {
-                if value.is_some() {
-                    mask[index / 8] |= 1 << (index % 8);
-                }
-            }
-            segments.push(ResponseSegment::Inline(mask));
-            for (index, value) in values.into_iter().enumerate() {
-                let Some(value) = value else {
-                    continue;
-                };
-                if Some(index) != final_present {
-                    let length = u64::try_from(value.len()).map_err(|_| ())?;
-                    let (encoded, encoded_len) = openkache_protocol::encode_varuint(length);
-                    segments.push(ResponseSegment::inline(&encoded[..encoded_len]));
-                }
-                segments.push(operation_value_segment(value));
-            }
-        }
-        contract::OperationFieldLayout::OptionalValues => {
-            for value in values {
-                let length = match &value {
-                    Some(value) => {
-                        let length = u32::try_from(value.len()).map_err(|_| ())?;
-                        if length == openkache_protocol::OPTIONAL_VALUE_MISSING {
-                            return Err(());
-                        }
-                        length
-                    }
-                    None => openkache_protocol::OPTIONAL_VALUE_MISSING,
-                };
-                segments.push(ResponseSegment::inline(&length.to_be_bytes()));
-                if let Some(value) = value {
-                    segments.push(operation_value_segment(value));
-                }
-            }
-        }
-        contract::OperationFieldLayout::Empty | contract::OperationFieldLayout::Opaque => {
-            return Err(());
-        }
-    }
-    ResponseParts::segmented(status, segments).map_err(|_| ())
 }
 
 fn operation_value_segment(value: OperationValue) -> ResponseSegment {

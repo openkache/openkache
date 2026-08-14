@@ -8,8 +8,9 @@
 use smallvec::SmallVec;
 
 use crate::{
-    MAX_VARUINT_BYTES, MIN_VARUINT_BYTES, ProtocolError, RESPONSE_FIXED_BYTES, ResponseSegment,
-    Result, Status, decode_varuint, encode_varuint, validate_value_length,
+    MAX_VARUINT_BYTES, MIN_VARUINT_BYTES, OperationLayoutPlan, ProtocolError, RESPONSE_FIXED_BYTES,
+    ResponseSegment, Result, SegmentFrame, Status, WireSegment, decode_varuint, encode_varuint,
+    validate_value_length,
 };
 
 const _: () = assert!(RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES <= 32);
@@ -242,19 +243,53 @@ impl ResponseHeaderBytes {
 }
 
 impl ResponseParts {
+    /// Encodes a generated field plan into an ownership-preserving response.
+    ///
+    /// This is the response projection boundary for every planned operation.
+    /// Its inline metadata capacity and canonical layout codecs are protocol
+    /// details; servers supply only status, owners, and generated layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when values do not match the generated plan, the
+    /// layout codec rejects a value, or the complete payload exceeds protocol
+    /// limits.
+    pub fn planned_fields<I, T>(
+        status: Status,
+        values: I,
+        plan: OperationLayoutPlan,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = Option<T>>,
+        T: Into<WireSegment>,
+    {
+        let frame = crate::layout::encode_planned_field_segments_in::<[WireSegment; 8], _, _>(
+            values,
+            plan.fields,
+            plan.layout,
+            plan.optional_value_codec.as_ref(),
+        )?;
+        Self::from_frame(status, frame)
+    }
+
     /// Encodes a response header over ownership-preserving body segments.
     pub fn segmented<I, T>(status: Status, segments: I) -> Result<Self>
     where
         I: IntoIterator<Item = T>,
         T: Into<ResponseSegment>,
     {
-        let segments: SmallVec<[ResponseSegment; 8]> =
-            segments.into_iter().map(Into::into).collect();
-        let payload_len = segments.iter().try_fold(0usize, |total, segment| {
-            total
-                .checked_add(segment.len())
-                .ok_or(ProtocolError::FrameLengthOverflow)
-        })?;
+        Self::from_frame(status, SegmentFrame::<[WireSegment; 8]>::new(segments)?)
+    }
+
+    /// Encodes a response header over an existing owned body frame.
+    ///
+    /// The frame's checked length and segment storage are consumed directly;
+    /// payload owners are neither copied nor collected into another buffer.
+    pub(crate) fn from_frame(
+        status: Status,
+        frame: SegmentFrame<[WireSegment; 8]>,
+    ) -> Result<Self> {
+        let payload_len = frame.len();
         validate_value_length(payload_len)?;
         let (length, length_bytes) = encode_varuint(payload_len as u64);
         let mut header = SmallVec::new();
@@ -263,7 +298,7 @@ impl ResponseParts {
         Ok(Self {
             header,
             payload: Vec::new(),
-            segments,
+            segments: frame.into_segments(),
         })
     }
 
@@ -309,17 +344,12 @@ impl ResponseParts {
     /// transport can therefore submit or advance one segment sequence without
     /// maintaining separate header, payload, and segmented-body paths.
     pub fn into_segments(self) -> SmallVec<[ResponseSegment; 8]> {
-        let segment_count = self
-            .segments
-            .len()
-            .saturating_add(1)
-            .saturating_add(usize::from(!self.payload.is_empty()));
-        let mut segments = SmallVec::with_capacity(segment_count);
-        segments.push(ResponseSegment::Inline(self.header));
+        let mut segments = self.segments;
+        segments.reserve(1 + usize::from(!self.payload.is_empty()));
         if !self.payload.is_empty() {
-            segments.push(ResponseSegment::Owned(self.payload.into()));
+            segments.insert(0, ResponseSegment::Owned(self.payload.into()));
         }
-        segments.extend(self.segments);
+        segments.insert(0, ResponseSegment::Inline(self.header));
         segments
     }
 
