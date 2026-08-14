@@ -480,7 +480,7 @@ async fn execute_get(
         );
     }
     match cache.get_in_namespace(namespace_id, item_id).await {
-        Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value.into_bytes()),
+        Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value.into_wire_segment()),
         Ok(None) => {
             if namespaces.prune_item(namespace_id, item_id).is_err() {
                 return domain_error(

@@ -74,6 +74,62 @@ impl AsRef<[u8]> for OwnedRange {
     }
 }
 
+/// An operation-neutral owner for stable wire bytes.
+///
+/// Implementations may retain aligned buffers, pooled read leases, shared
+/// segments, or another byte owner without exposing that implementation to the
+/// protocol or transport layers. The returned slice must keep the same length
+/// while the owner is held by a [`WireSegment`].
+pub trait WireByteOwner: Send + Sync + 'static {
+    /// Returns the complete visible wire bytes owned by this value.
+    fn as_bytes(&self) -> &[u8];
+}
+
+/// Type-erased ownership for one stable external byte sequence.
+///
+/// Construct this through [`WireSegment::external`].
+pub struct ExternalWireBytes {
+    owner: Box<dyn WireByteOwner>,
+    len: usize,
+}
+
+impl ExternalWireBytes {
+    fn new(owner: impl WireByteOwner) -> Self {
+        let len = owner.as_bytes().len();
+        Self {
+            owner: Box::new(owner),
+            len,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        let bytes = self.owner.as_bytes();
+        assert_eq!(
+            bytes.len(),
+            self.len,
+            "wire byte owner changed its visible length"
+        );
+        bytes
+    }
+}
+
+impl std::fmt::Debug for ExternalWireBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("External")
+            .field(&self.as_slice())
+            .finish()
+    }
+}
+
+impl PartialEq for ExternalWireBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for ExternalWireBytes {}
+
 /// One owned segment in an operation-neutral wire plan.
 ///
 /// Small framing prefixes stay inline while application and storage bytes
@@ -84,6 +140,8 @@ pub enum WireSegment {
     Inline(SmallVec<[u8; 32]>),
     /// Application, storage, or framing bytes retaining their allocation.
     Owned(OwnedRange),
+    /// Bytes retaining an operation-neutral external owner.
+    External(ExternalWireBytes),
 }
 
 impl WireSegment {
@@ -97,11 +155,17 @@ impl WireSegment {
         Self::Owned(bytes.into())
     }
 
+    /// Retains an external byte owner without copying its payload.
+    pub fn external(owner: impl WireByteOwner) -> Self {
+        Self::External(ExternalWireBytes::new(owner))
+    }
+
     /// Returns the visible wire bytes.
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Inline(bytes) => bytes,
             Self::Owned(bytes) => bytes.as_slice(),
+            Self::External(bytes) => bytes.as_slice(),
         }
     }
 
