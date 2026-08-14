@@ -74,6 +74,42 @@ impl AsRef<[u8]> for OwnedRange {
     }
 }
 
+/// Allocation-free ownership for one bounded byte sequence.
+///
+/// Encoders can append directly into this owner and then move it into a
+/// [`WireSegment`] without an intermediate `Vec` or payload copy.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct InlineBytes(SmallVec<[u8; 32]>);
+
+impl InlineBytes {
+    /// Creates an empty inline byte owner.
+    pub const fn new() -> Self {
+        Self(SmallVec::new_const())
+    }
+
+    /// Appends bytes while preserving inline-only ownership.
+    pub fn try_extend_from_slice(&mut self, value: &[u8]) -> Result<()> {
+        let size = self
+            .0
+            .len()
+            .checked_add(value.len())
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        if size > self.0.inline_size() {
+            return Err(ProtocolError::ValueTooLarge {
+                size,
+                maximum: self.0.inline_size(),
+            });
+        }
+        self.0.extend_from_slice(value);
+        Ok(())
+    }
+
+    /// Returns the encoded bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// An owner for one stable byte sequence.
 ///
 /// Implementations may retain aligned buffers, pooled read leases, shared
@@ -221,6 +257,12 @@ impl WireSegment {
 impl From<OwnedRange> for WireSegment {
     fn from(value: OwnedRange) -> Self {
         Self::owned(value)
+    }
+}
+
+impl From<InlineBytes> for WireSegment {
+    fn from(value: InlineBytes) -> Self {
+        Self::Inline(value.0)
     }
 }
 
