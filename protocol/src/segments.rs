@@ -74,27 +74,32 @@ impl AsRef<[u8]> for OwnedRange {
     }
 }
 
-/// An operation-neutral owner for stable wire bytes.
+/// An owner for one stable byte sequence.
 ///
 /// Implementations may retain aligned buffers, pooled read leases, shared
 /// segments, or another byte owner without exposing that implementation to the
-/// protocol or transport layers. The returned slice must keep the same length
-/// while the owner is held by a [`WireSegment`].
-pub trait WireByteOwner: Send + Sync + 'static {
-    /// Returns the complete visible wire bytes owned by this value.
+/// consumer. The returned slice must keep the same length while the owner is
+/// held by [`StableBytes`].
+pub trait StableByteOwner: Send + Sync + 'static {
+    /// Returns the complete visible bytes owned by this value.
     fn as_bytes(&self) -> &[u8];
 }
 
-/// Type-erased ownership for one stable external byte sequence.
+/// Backward-compatible name for owners passed to [`WireSegment::external`].
+pub use StableByteOwner as WireByteOwner;
+
+/// Type-erased ownership for one stable byte sequence.
 ///
-/// Construct this through [`WireSegment::external`].
-pub struct ExternalWireBytes {
-    owner: Box<dyn WireByteOwner>,
+/// This operation-neutral container can cross application, storage, and
+/// transport boundaries without copying its payload or repeating type erasure.
+pub struct StableBytes {
+    owner: Box<dyn StableByteOwner>,
     len: usize,
 }
 
-impl ExternalWireBytes {
-    fn new(owner: impl WireByteOwner) -> Self {
+impl StableBytes {
+    /// Erases one byte owner's concrete type.
+    pub fn new(owner: impl StableByteOwner) -> Self {
         let len = owner.as_bytes().len();
         Self {
             owner: Box::new(owner),
@@ -102,14 +107,47 @@ impl ExternalWireBytes {
         }
     }
 
-    fn as_slice(&self) -> &[u8] {
+    /// Returns the stable visible bytes.
+    pub fn as_slice(&self) -> &[u8] {
         let bytes = self.owner.as_bytes();
         assert_eq!(
             bytes.len(),
             self.len,
-            "wire byte owner changed its visible length"
+            "stable byte owner changed its visible length"
         );
         bytes
+    }
+}
+
+impl std::fmt::Debug for StableBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("StableBytes")
+            .field(&self.as_slice())
+            .finish()
+    }
+}
+
+impl PartialEq for StableBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for StableBytes {}
+
+/// Type-erased ownership for one stable external byte sequence.
+///
+/// Construct this through [`WireSegment::external`].
+pub struct ExternalWireBytes(StableBytes);
+
+impl ExternalWireBytes {
+    fn new(owner: impl StableByteOwner) -> Self {
+        Self(StableBytes::new(owner))
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
     }
 }
 
@@ -156,7 +194,7 @@ impl WireSegment {
     }
 
     /// Retains an external byte owner without copying its payload.
-    pub fn external(owner: impl WireByteOwner) -> Self {
+    pub fn external(owner: impl StableByteOwner) -> Self {
         Self::External(ExternalWireBytes::new(owner))
     }
 
@@ -183,6 +221,12 @@ impl WireSegment {
 impl From<OwnedRange> for WireSegment {
     fn from(value: OwnedRange) -> Self {
         Self::owned(value)
+    }
+}
+
+impl From<StableBytes> for WireSegment {
+    fn from(value: StableBytes) -> Self {
+        Self::External(ExternalWireBytes(value))
     }
 }
 

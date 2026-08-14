@@ -96,7 +96,8 @@ pub use response::{
     OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes, ResponseParts,
 };
 pub use segments::{
-    OwnedFrame, OwnedRange, ResponseSegment, SegmentFrame, WireByteOwner, WireSegment,
+    OwnedFrame, OwnedRange, ResponseSegment, SegmentFrame, StableByteOwner, StableBytes,
+    WireByteOwner, WireSegment,
 };
 
 /// The exact fixed-size item identifier carried by the wire protocol.

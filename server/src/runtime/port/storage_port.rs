@@ -8,7 +8,7 @@ use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 
-use openkache_protocol::OwnedRange;
+use openkache_protocol::{OwnedRange, StableBytes};
 
 pub(crate) use crate::types::{
     StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
@@ -193,36 +193,29 @@ impl AsRef<[u8]> for StorageValue {
 /// Implementations may retain memory segments, pooled read leases, or another
 /// backend owner. The visible byte length must remain unchanged while the
 /// owner is held by a [`StorageReadValue`].
-pub(crate) trait StorageReadOwner: Send + Sync + 'static {
-    fn as_bytes(&self) -> &[u8];
-}
+pub(crate) use openkache_protocol::StableByteOwner as StorageReadOwner;
 
 /// One storage-read value with backend-independent byte ownership.
 ///
 /// API bindings can inspect or transfer this value without learning which
 /// storage representation keeps its bytes alive.
 pub(crate) struct StorageReadValue {
-    owner: Box<dyn StorageReadOwner>,
-    len: usize,
+    owner: StableBytes,
 }
 
 impl StorageReadValue {
     pub(crate) fn from_owner(owner: impl StorageReadOwner) -> Self {
-        let len = owner.as_bytes().len();
         Self {
-            owner: Box::new(owner),
-            len,
+            owner: StableBytes::new(owner),
         }
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
-        let bytes = self.owner.as_bytes();
-        assert_eq!(
-            bytes.len(),
-            self.len,
-            "storage read owner changed its visible length"
-        );
-        bytes
+        self.owner.as_slice()
+    }
+
+    pub(crate) fn into_stable_bytes(self) -> StableBytes {
+        self.owner
     }
 }
 
