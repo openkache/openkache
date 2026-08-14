@@ -34,6 +34,8 @@ pub(crate) use storage_port::*;
 pub(crate) use storage_task::*;
 #[allow(unused_imports)]
 pub(crate) use worker::*;
+/// Workload and result contracts for driving bounded runtime batches.
+pub use worker::{BenchmarkBatchStats, BenchmarkOperation};
 
 use self::completion::{CompletionReceiver, CompletionSlab};
 
