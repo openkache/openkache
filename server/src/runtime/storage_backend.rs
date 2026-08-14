@@ -11,7 +11,8 @@ use sha2::{Digest, Sha256};
 
 use super::storage_context;
 use super::storage_port::{
-    StorageAddress, StorageContextFuture, StorageError, StorageMutation, StorageWriteOptions,
+    StorageAddress, StorageContextFuture, StorageError, StorageMutation, StorageValue,
+    StorageWriteOptions,
 };
 
 /// Domain separator for addresses submitted through the generic storage port.
@@ -81,7 +82,7 @@ impl storage_context::StorageBackend for RuntimeStorageBackend<'_> {
     fn set<'a>(
         &'a mut self,
         storage_address: StorageAddress,
-        value: Vec<u8>,
+        value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, StorageMutation> {
         let storage_key = storage_key_for_address(&storage_address);
@@ -89,7 +90,7 @@ impl storage_context::StorageBackend for RuntimeStorageBackend<'_> {
             self.cache
                 .set_encoded_with_options(
                     storage_key,
-                    StoredItemValue::new(value),
+                    StoredItemValue::from_owned_range(value.into_owned_range()),
                     options,
                 )
                 .await
@@ -125,7 +126,7 @@ impl storage_context::StorageBackend for RuntimeStorageBackend<'_> {
         &'a mut self,
         storage_address: StorageAddress,
         expected: Option<&'a [u8]>,
-        replacement: Option<Vec<u8>>,
+        replacement: Option<StorageValue>,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, bool> {
         let storage_key = storage_key_for_address(&storage_address);
@@ -134,7 +135,8 @@ impl storage_context::StorageBackend for RuntimeStorageBackend<'_> {
                 .compare_and_set_encoded_with_options(
                     storage_key,
                     expected,
-                    replacement.map(StoredItemValue::new),
+                    replacement
+                        .map(|value| StoredItemValue::from_owned_range(value.into_owned_range())),
                     options,
                 )
                 .await

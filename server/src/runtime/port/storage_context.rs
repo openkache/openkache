@@ -7,7 +7,7 @@
 use super::storage_port::{
     StorageAddress, StorageBatchOperation, StorageBatchResult, StorageContext,
     StorageContextFuture, StorageError, StorageMutation, StorageResult, StorageTaskIsolation,
-    StorageTaskScheduling, StorageWriteOptions,
+    StorageTaskScheduling, StorageValue, StorageWriteOptions,
 };
 use super::storage_task::StorageTaskMetadata;
 
@@ -26,7 +26,7 @@ pub(in crate::runtime) trait StorageBackend {
     fn set<'a>(
         &'a mut self,
         storage_address: StorageAddress,
-        value: Vec<u8>,
+        value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, StorageMutation>;
 
@@ -39,7 +39,7 @@ pub(in crate::runtime) trait StorageBackend {
         &'a mut self,
         storage_address: StorageAddress,
         expected: Option<&'a [u8]>,
-        replacement: Option<Vec<u8>>,
+        replacement: Option<StorageValue>,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, bool>;
 }
@@ -82,7 +82,7 @@ impl<'a> StorageWorkerContext<'a> {
     async fn set_value(
         &mut self,
         storage_address: StorageAddress,
-        value: Vec<u8>,
+        value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageResult<StorageMutation> {
         self.backend.set(storage_address, value, options).await
@@ -99,7 +99,7 @@ impl<'a> StorageWorkerContext<'a> {
         &mut self,
         storage_address: StorageAddress,
         expected: Option<&[u8]>,
-        replacement: Option<Vec<u8>>,
+        replacement: Option<StorageValue>,
         options: StorageWriteOptions,
     ) -> StorageResult<bool> {
         self.backend
@@ -131,8 +131,13 @@ impl<'a> StorageWorkerContext<'a> {
                     replacement,
                     options,
                 } => StorageBatchResult::CompareAndSet(
-                    self.compare_and_set_value(address, expected.as_deref(), replacement, options)
-                        .await?,
+                    self.compare_and_set_value(
+                        address,
+                        expected.as_ref().map(StorageValue::as_bytes),
+                        replacement,
+                        options,
+                    )
+                    .await?,
                 ),
             };
             results.push(result);
@@ -153,7 +158,7 @@ impl StorageContext for StorageWorkerContext<'_> {
     fn set<'a>(
         &'a mut self,
         storage_address: StorageAddress,
-        value: Vec<u8>,
+        value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, StorageMutation> {
         if let Err(error) = self.mutation_allowed() {
@@ -176,7 +181,7 @@ impl StorageContext for StorageWorkerContext<'_> {
         &'a mut self,
         storage_address: StorageAddress,
         expected: Option<&'a [u8]>,
-        replacement: Option<Vec<u8>>,
+        replacement: Option<StorageValue>,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, bool> {
         if let Err(error) = self.mutation_allowed() {
