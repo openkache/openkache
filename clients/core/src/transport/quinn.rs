@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{BackendConnection, BackendStream, TransportError};
-use crate::protocol::RequestParts;
+use crate::protocol::RequestAttempt;
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Quinn;
@@ -93,9 +93,10 @@ impl BackendConnection for Connection {
 impl BackendStream for Stream {
     async fn write_request(
         &mut self,
-        parts: RequestParts,
+        request: RequestAttempt,
         timeout: Duration,
     ) -> Result<(), TransportError> {
+        let parts = request.as_parts();
         tokio::time::timeout(timeout, async {
             self.send.write_all(&parts.prefix).await?;
             if !parts.payload.is_empty() {
