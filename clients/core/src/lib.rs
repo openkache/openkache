@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
 use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Response, Status};
-use protocol::{GenericRequest, Request};
+use protocol::{DraftV1Request, GenericRequest};
 use request::{RequestAttempt, RequestBuilder, RequestParts};
 use transport::{ClientConnection, ClientLane};
 
@@ -526,7 +526,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Get,
-                Request::new_scoped(
+                DraftV1Request::new_scoped(
                     Opcode::Get,
                     namespace_id,
                     Some(item_id.into_protocol()),
@@ -565,7 +565,7 @@ impl<C: ClientConnection> Core<C> {
         options: SetOptions,
     ) -> Result<SetOutcome> {
         validate_client_namespace_id(namespace_id)?;
-        let request = Request::new_scoped_with_options(
+        let request = DraftV1Request::new_scoped_with_options(
             Opcode::Set,
             namespace_id,
             Some(item_id.into_protocol()),
@@ -602,7 +602,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Delete,
-                Request::new_scoped(
+                DraftV1Request::new_scoped(
                     Opcode::Delete,
                     namespace_id,
                     Some(item_id.into_protocol()),
@@ -632,7 +632,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Stats,
-                Request::new_scoped(Opcode::Stats, namespace_id, None, Vec::new())
+                DraftV1Request::new_scoped(Opcode::Stats, namespace_id, None, Vec::new())
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -652,7 +652,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Sync,
-                Request::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
+                DraftV1Request::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -782,7 +782,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::NamespaceOpen,
-                Request::namespace_open(name, create_if_missing, policy)
+                DraftV1Request::namespace_open(name, create_if_missing, policy)
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -806,7 +806,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::NamespaceUpdatePolicy,
-                Request::namespace_update_policy(namespace_id, expected_revision, policy)
+                DraftV1Request::namespace_update_policy(namespace_id, expected_revision, policy)
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -852,7 +852,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::NamespaceDelete,
-                Request::namespace_delete(namespace_id, expected_revision)
+                DraftV1Request::namespace_delete(namespace_id, expected_revision)
                     .map_err(Error::protocol)?,
             )
             .await?;
