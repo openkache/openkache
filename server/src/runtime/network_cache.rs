@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::observability::NetworkWorkerId;
+use crate::observability::{NetworkWorkerId, Operation};
 use crate::protocol::ItemId;
 use crate::types::StoredItemValue;
 use crate::{Result, SetOutcome, StorageKey};
@@ -94,9 +94,15 @@ impl NetworkWorkerCache {
         &self,
         namespace_id: u64,
         item_id: ItemId,
+        operation: Operation,
     ) -> Result<Option<StoredItemValue>> {
         self.cache
-            .get_async_in_namespace_with_requester(namespace_id, item_id, Some(self.network_worker))
+            .get_async_in_namespace_with_requester(
+                namespace_id,
+                item_id,
+                operation,
+                Some(self.network_worker),
+            )
             .await
     }
 
@@ -106,6 +112,7 @@ impl NetworkWorkerCache {
         item_id: ItemId,
         value: StoredItemValue,
         options: StorageWriteOptions,
+        operation: Operation,
     ) -> Result<SetOutcome> {
         self.cache
             .set_async_in_namespace_with_requester(
@@ -113,6 +120,7 @@ impl NetworkWorkerCache {
                 item_id,
                 value,
                 options,
+                operation,
                 Some(self.network_worker),
             )
             .await
@@ -122,19 +130,25 @@ impl NetworkWorkerCache {
         &self,
         namespace_id: u64,
         item_id: ItemId,
+        operation: Operation,
     ) -> Result<bool> {
         self.cache
             .delete_async_in_namespace_with_requester(
                 namespace_id,
                 item_id,
+                operation,
                 Some(self.network_worker),
             )
             .await
     }
 
-    pub(crate) async fn get_stored(&self, item_id: ItemId) -> Result<Option<StoredItemValue>> {
+    pub(crate) async fn get_stored(
+        &self,
+        item_id: ItemId,
+        operation: Operation,
+    ) -> Result<Option<StoredItemValue>> {
         self.cache
-            .get_async_with_requester(item_id, Some(self.network_worker))
+            .get_async_with_requester(item_id, operation, Some(self.network_worker))
             .await
     }
 
@@ -143,15 +157,22 @@ impl NetworkWorkerCache {
         item_id: ItemId,
         value: StoredItemValue,
         options: StorageWriteOptions,
+        operation: Operation,
     ) -> Result<SetOutcome> {
         self.cache
-            .set_async_with_options_requester(item_id, value, options, Some(self.network_worker))
+            .set_async_with_options_requester(
+                item_id,
+                value,
+                options,
+                operation,
+                Some(self.network_worker),
+            )
             .await
     }
 
-    pub(crate) async fn delete(&self, item_id: ItemId) -> Result<bool> {
+    pub(crate) async fn delete(&self, item_id: ItemId, operation: Operation) -> Result<bool> {
         self.cache
-            .delete_async_with_requester(item_id, Some(self.network_worker))
+            .delete_async_with_requester(item_id, operation, Some(self.network_worker))
             .await
     }
 

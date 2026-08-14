@@ -610,7 +610,13 @@ async fn execute_command(
     match classify_command(command) {
         RespCommandKind::Ping => simple(response, "PONG"),
         RespCommandKind::Get => match command {
-            [_, application_key] => match cache.get_stored(resp_item_id(application_key)).await {
+            [_, application_key] => match cache
+                .get_stored(
+                    resp_item_id(application_key),
+                    Operation::from_opcode(Opcode::Get),
+                )
+                .await
+            {
                 Ok(Some(value)) => bulk(response, Some(&value.bytes)),
                 Ok(None) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
@@ -623,6 +629,7 @@ async fn execute_command(
                     resp_item_id(application_key),
                     StoredItemValue::new(value.to_vec()),
                     StorageWriteOptions::default(),
+                    Operation::from_opcode(Opcode::Set),
                 )
                 .await
             {
@@ -638,7 +645,13 @@ async fn execute_command(
             } else {
                 let mut deleted = 0;
                 for application_key in &command[1..] {
-                    match cache.delete(resp_item_id(application_key)).await {
+                    match cache
+                        .delete(
+                            resp_item_id(application_key),
+                            Operation::from_opcode(Opcode::Delete),
+                        )
+                        .await
+                    {
                         Ok(true) => deleted += 1,
                         Ok(false) => {}
                         Err(cache_error) => {

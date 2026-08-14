@@ -9,7 +9,10 @@ mod reducer;
 
 use crate::observability::Operation;
 use crate::store::{CompletedKeyedJob, KeyedJob, KeyedOperation, KeyedVisibleState};
-use crate::types::{StorageWriteOptions, StoredItemValue};
+use crate::types::{
+    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
+    StoredItemValue,
+};
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
 use super::scheduler::ScheduledTask;
@@ -28,6 +31,33 @@ pub(super) type VisibleState = KeyedVisibleState;
 pub(super) type PreparedJob = KeyedJob;
 pub(super) type CompletedJob = CompletedKeyedJob;
 
+#[derive(Clone, Copy)]
+pub(in crate::runtime) struct WriteMetadata {
+    condition: StorageWriteCondition,
+    expiration: StorageWriteExpiration,
+    eviction: StorageWriteEviction,
+    operation: Operation,
+}
+
+impl WriteMetadata {
+    const fn new(options: StorageWriteOptions, operation: Operation) -> Self {
+        Self {
+            condition: options.condition,
+            expiration: options.expiration,
+            eviction: options.eviction,
+            operation,
+        }
+    }
+
+    const fn options(self) -> StorageWriteOptions {
+        StorageWriteOptions {
+            condition: self.condition,
+            expiration: self.expiration,
+            eviction: self.eviction,
+        }
+    }
+}
+
 /// One keyed storage command routed through a worker lane.
 pub(in crate::runtime) enum Command {
     Task {
@@ -35,56 +65,66 @@ pub(in crate::runtime) enum Command {
         response: WorkerResponseSender,
     },
     Get {
+        operation: Operation,
         response: WorkerResponseSender,
     },
     Set {
         value: StoredItemValue,
-        options: StorageWriteOptions,
+        metadata: WriteMetadata,
         response: WorkerResponseSender,
     },
     Delete {
+        operation: Operation,
         response: WorkerResponseSender,
     },
 }
 
-pub(in crate::runtime) fn storage_task(
-    task: StorageTask,
-    response: WorkerResponseSender,
-) -> Command {
+pub(in crate::runtime) fn storage_task(task: StorageTask, response: WorkerResponseSender) -> Command {
     Command::Task { task, response }
 }
 
-pub(in crate::runtime) fn get(response: WorkerResponseSender) -> Command {
-    Command::Get { response }
+pub(in crate::runtime) fn get(operation: Operation, response: WorkerResponseSender) -> Command {
+    Command::Get {
+        operation,
+        response,
+    }
 }
 
 pub(in crate::runtime) fn set(
+    operation: Operation,
     value: StoredItemValue,
     options: StorageWriteOptions,
     response: WorkerResponseSender,
 ) -> Command {
     Command::Set {
         value,
-        options,
+        metadata: WriteMetadata::new(options, operation),
         response,
     }
 }
 
-pub(in crate::runtime) fn delete(response: WorkerResponseSender) -> Command {
-    Command::Delete { response }
+pub(in crate::runtime) fn delete(operation: Operation, response: WorkerResponseSender) -> Command {
+    Command::Delete {
+        operation,
+        response,
+    }
 }
 
 impl Command {
     fn metadata(&self, cache: &Kvkache) -> KeyedWorkMetadata {
         let (operation, collapsible) = match self {
             Self::Task { .. } => (Operation::unknown(), false),
-            Self::Get { .. } => (Operation::storage_get(), true),
-            Self::Set { value, options, .. } => {
-                let collapsible =
-                    *options == StorageWriteOptions::default() && cache.can_collapse_set(value);
-                (Operation::storage_set(), collapsible)
+            Self::Get { operation, .. } => (*operation, true),
+            Self::Set {
+                value,
+                metadata,
+                ..
+            } => {
+                let collapsible = metadata.options() == StorageWriteOptions::default()
+                    && cache.can_collapse_set(value);
+                (metadata.operation, collapsible)
             }
-            Self::Delete { .. } => (Operation::storage_delete(), true),
+            Self::Delete { operation, .. } => (*operation, true),
         };
         KeyedWorkMetadata {
             operation,
@@ -104,10 +144,16 @@ impl Command {
             Self::Get { response, .. } => (KeyedOperation::Get, response),
             Self::Set {
                 value,
-                options,
+                metadata,
                 response,
                 ..
-            } => (KeyedOperation::Set { value, options }, response),
+            } => (
+                KeyedOperation::Set {
+                    value,
+                    options: metadata.options(),
+                },
+                response,
+            ),
             Self::Delete { response, .. } => (KeyedOperation::Delete, response),
         };
         PreparedKeyedWork {
