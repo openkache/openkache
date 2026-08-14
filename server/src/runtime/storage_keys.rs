@@ -14,7 +14,10 @@ use crate::StorageKey;
 use crate::protocol::ItemId;
 
 pub(crate) fn derive_storage_key(server_cipher: &Aes256, item_id: ItemId) -> StorageKey {
-    let mut bytes = item_id.into_bytes();
+    // Compact v1 currently supplies one storage-width identity. Keep that
+    // compatibility requirement explicit here instead of deriving the
+    // persisted key width from the wire model.
+    let mut bytes: [u8; crate::types::STORAGE_KEY_BYTES] = item_id.into_bytes();
 
     // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks
     // exactly cover the 32-byte digest buffer while preserving its alignment
