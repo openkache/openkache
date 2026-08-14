@@ -9,9 +9,10 @@ use crate::store::{DirectIoBuffer, DirectIoBufferLease};
 
 /// Number of bytes in every server-derived storage key.
 ///
-/// The storage key is the server-side representation of the protocol item ID,
-/// so its size comes from the Smithy-generated protocol contract.
-pub use openkache_protocol::ITEM_ID_BYTES as STORAGE_KEY_BYTES;
+/// This is a storage-format invariant. Protocol adapters may derive this fixed
+/// identity from wire keys of any supported width, but wire model changes must
+/// not resize persisted storage records.
+pub const STORAGE_KEY_BYTES: usize = 32;
 
 /// Variable-length application value associated with an item ID.
 #[repr(transparent)]
