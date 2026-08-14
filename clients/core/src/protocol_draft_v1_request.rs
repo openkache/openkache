@@ -1,5 +1,6 @@
 //! Draft-v1 request construction owned by the Rust client adapter.
 
+use openkache_protocol::compat_v1::MAX_COMPATIBILITY_REQUEST_ITEM_IDS;
 use openkache_protocol::{ItemId, Opcode, WireSegment};
 
 use crate::request::{RequestBuilder, RequestParts, RequestRetryPolicy};
@@ -9,12 +10,14 @@ use super::{
     validate_value_length,
 };
 
+const _: () = assert!(MAX_COMPATIBILITY_REQUEST_ITEM_IDS > 0);
+
 /// A validated draft-v1 request owned by the Rust client adapter.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct DraftV1Request {
     pub(super) opcode: Opcode,
     pub(super) namespace_id: Option<u64>,
-    pub(super) item_ids: Vec<ItemId>,
+    item_ids: [Option<ItemId>; MAX_COMPATIBILITY_REQUEST_ITEM_IDS],
     pub(super) set_options: SetWireOptions,
     pub(super) value: Vec<u8>,
     pub(super) namespace_name: Option<Vec<u8>>,
@@ -41,10 +44,14 @@ impl DraftV1Request {
         set_options: SetWireOptions,
         value: Vec<u8>,
     ) -> Result<Self> {
+        let mut item_ids = [None; MAX_COMPATIBILITY_REQUEST_ITEM_IDS];
+        if let Some(item_id) = item_id {
+            item_ids[0] = Some(item_id);
+        }
         let request = Self {
             opcode,
             namespace_id: Some(namespace_id),
-            item_ids: item_id.into_iter().collect(),
+            item_ids,
             set_options,
             value,
             namespace_name: None,
@@ -65,7 +72,7 @@ impl DraftV1Request {
         let request = Self {
             opcode: Opcode::NamespaceOpen,
             namespace_id: None,
-            item_ids: Vec::new(),
+            item_ids: [None; MAX_COMPATIBILITY_REQUEST_ITEM_IDS],
             set_options: SetWireOptions::NONE,
             value: Vec::new(),
             namespace_name: Some(name.as_ref().to_vec()),
@@ -86,7 +93,7 @@ impl DraftV1Request {
         let request = Self {
             opcode: Opcode::NamespaceUpdatePolicy,
             namespace_id: Some(namespace_id),
-            item_ids: Vec::new(),
+            item_ids: [None; MAX_COMPATIBILITY_REQUEST_ITEM_IDS],
             set_options: SetWireOptions::NONE,
             value: Vec::new(),
             namespace_name: None,
@@ -103,7 +110,7 @@ impl DraftV1Request {
         let request = Self {
             opcode: Opcode::NamespaceDelete,
             namespace_id: Some(namespace_id),
-            item_ids: Vec::new(),
+            item_ids: [None; MAX_COMPATIBILITY_REQUEST_ITEM_IDS],
             set_options: SetWireOptions::NONE,
             value: Vec::new(),
             namespace_name: None,
@@ -118,11 +125,8 @@ impl DraftV1Request {
 
     fn into_parts(self) -> Result<RequestParts> {
         let prefix = compat_v1::encode_prefix(&self)?
-            .ok_or_else(|| invalid_shape(self.opcode, self.item_ids.len(), "draft-v1 request"))?;
-        Ok(RequestParts::new([
-            WireSegment::owned(prefix),
-            WireSegment::owned(self.value),
-        ])?)
+            .ok_or_else(|| invalid_shape(self.opcode, self.item_id_count(), "draft-v1 request"))?;
+        Ok(RequestParts::new(prefix, [WireSegment::owned(self.value)])?)
     }
 
     fn validate(&self) -> Result<()> {
@@ -132,14 +136,26 @@ impl DraftV1Request {
         } else {
             Err(invalid_shape(
                 self.opcode,
-                self.item_ids.len(),
+                self.item_id_count(),
                 "draft-v1 request",
             ))
         }
     }
 
+    pub(super) fn item_ids(&self) -> impl Iterator<Item = &ItemId> {
+        self.item_ids.iter().flatten()
+    }
+
+    pub(super) fn item_id_count(&self) -> usize {
+        self.item_ids().count()
+    }
+
+    pub(super) fn first_item_id(&self) -> Option<&ItemId> {
+        self.item_ids().next()
+    }
+
     pub(super) fn has_non_empty_fields_except_namespace(&self) -> bool {
-        !self.item_ids.is_empty()
+        self.item_id_count() != 0
             || self.set_options != SetWireOptions::NONE
             || !self.value.is_empty()
             || self.namespace_name.is_some()
@@ -149,7 +165,7 @@ impl DraftV1Request {
     }
 
     pub(super) fn has_non_empty_fields_except_namespace_revision(&self) -> bool {
-        !self.item_ids.is_empty()
+        self.item_id_count() != 0
             || self.set_options != SetWireOptions::NONE
             || !self.value.is_empty()
             || self.namespace_name.is_some()
