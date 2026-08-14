@@ -130,6 +130,54 @@ impl AsRef<[u8]> for StorageAddress {
     }
 }
 
+/// Opaque value accepted by the generic storage capability.
+///
+/// The value retains its original allocation and logical byte range so an API
+/// binding can move a large request payload into storage without shifting it
+/// out of its wire prefix.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct StorageValue {
+    owner: OwnedRange,
+}
+
+#[allow(dead_code)]
+impl StorageValue {
+    /// Takes ownership of a complete value buffer.
+    pub(crate) fn from_owned(bytes: Vec<u8>) -> Self {
+        Self {
+            owner: OwnedRange::whole(bytes),
+        }
+    }
+
+    /// Takes ownership of a value buffer while retaining its logical range.
+    pub(crate) fn from_owned_range(bytes: OwnedRange) -> Self {
+        Self { owner: bytes }
+    }
+
+    /// Returns the visible value bytes.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.owner.as_slice()
+    }
+
+    /// Transfers the owned allocation and logical range to the runtime.
+    pub(crate) fn into_owned_range(self) -> OwnedRange {
+        self.owner
+    }
+}
+
+impl From<Vec<u8>> for StorageValue {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::from_owned(bytes)
+    }
+}
+
+impl AsRef<[u8]> for StorageValue {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 /// Runtime-neutral storage failure.
 ///
 /// The storage contract deliberately does not expose the server's concrete
@@ -172,6 +220,16 @@ pub(crate) type StorageContextFuture<'a, T> = Pin<Box<dyn Future<Output = Storag
 pub(crate) type StorageReadFuture<'a> =
     Pin<Box<dyn Future<Output = StorageResult<Option<Vec<u8>>>> + 'a>>;
 
+/// Future returned by a neutral storage mutation.
+#[allow(dead_code)]
+pub(crate) type StorageMutationFuture<'a> =
+    Pin<Box<dyn Future<Output = StorageResult<StorageMutation>> + 'a>>;
+
+/// Future returned by a neutral storage write.
+#[allow(dead_code)]
+pub(crate) type StorageWriteFuture<'a> =
+    Pin<Box<dyn Future<Output = StorageResult<StorageWriteOutcome>> + 'a>>;
+
 /// Typed completion future for the storage-port convenience methods.
 pub(crate) type StorageTypedTaskFuture<'a, T> =
     Pin<Box<dyn Future<Output = StorageResult<T>> + 'a>>;
@@ -198,6 +256,18 @@ pub(crate) fn downcast_storage_output<T: Any + Send>(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageMutation {
     Applied,
+    Unchanged,
+}
+
+/// Result of storing one value.
+///
+/// The neutral port preserves whether storage inserted or replaced a value so
+/// APIs that need create-vs-update semantics do not need a custom task.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StorageWriteOutcome {
+    Created,
+    Replaced,
     Unchanged,
 }
 
@@ -380,6 +450,19 @@ pub(crate) trait StorageContext {
 pub(crate) trait StoragePort: Any + Send + Sync {
     /// Retrieves the value stored at one opaque address.
     fn get<'a>(&'a self, storage_address: StorageAddress) -> StorageReadFuture<'a>;
+
+    /// Stores one opaque value at one opaque address.
+    #[allow(dead_code)]
+    fn set<'a>(
+        &'a self,
+        storage_address: StorageAddress,
+        value: StorageValue,
+        options: StorageWriteOptions,
+    ) -> StorageWriteFuture<'a>;
+
+    /// Deletes the value at one opaque address.
+    #[allow(dead_code)]
+    fn delete<'a>(&'a self, storage_address: StorageAddress) -> StorageMutationFuture<'a>;
 
     /// Submits keyed work to the owner of one storage key.
     fn execute_for_key<'a>(

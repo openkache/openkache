@@ -12,11 +12,12 @@ use super::operation_api::CapabilityKey;
 #[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
     StorageAddress, StorageBatchOperation, StorageBatchResult, StorageContext,
-    StorageContextFuture, StorageError, StorageMutation, StoragePort, StoragePortExt,
-    StorageReadFuture, StorageResult, StorageTask, StorageTaskCancellation, StorageTaskFuture,
-    StorageTaskIsolation, StorageTaskMetadata, StorageTaskOutput, StorageTaskScheduling,
-    StorageTaskScope, StorageTypedTaskFuture, StorageWriteCondition, StorageWriteEviction,
-    StorageWriteExpiration, StorageWriteOptions, downcast_storage_output,
+    StorageContextFuture, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
+    StoragePortExt, StorageReadFuture, StorageResult, StorageTask, StorageTaskCancellation,
+    StorageTaskFuture, StorageTaskIsolation, StorageTaskMetadata, StorageTaskOutput,
+    StorageTaskScheduling, StorageTaskScope, StorageTypedTaskFuture, StorageValue,
+    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteFuture,
+    StorageWriteOptions, StorageWriteOutcome, downcast_storage_output,
 };
 
 /// The generic capability identity used by API modules that need storage.

@@ -15,8 +15,9 @@ use crate::{Result, SetOutcome, StorageKey};
 use super::ThreadedKvkache;
 use super::storage_backend;
 use super::storage_port::{
-    StorageAddress, StorageError, StoragePort, StorageReadFuture, StorageResult, StorageTaskFuture,
-    StorageTaskOutput, StorageTaskScope,
+    StorageAddress, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
+    StorageReadFuture, StorageResult, StorageTaskFuture, StorageTaskOutput, StorageTaskScope,
+    StorageValue, StorageWriteFuture, StorageWriteOptions, StorageWriteOutcome,
 };
 use super::storage_task::StorageTask;
 
@@ -181,6 +182,50 @@ impl StoragePort for NetworkWorkerCache {
                 .get_storage_key_with_requester(storage_key, Some(self.network_worker))
                 .await
                 .map(|value| value.map(StoredItemValue::into_bytes))
+                .map_err(StorageError::from)
+        })
+    }
+
+    fn set<'a>(
+        &'a self,
+        storage_address: StorageAddress,
+        value: StorageValue,
+        options: StorageWriteOptions,
+    ) -> StorageWriteFuture<'a> {
+        let storage_key = storage_backend::storage_key_for_address(&storage_address);
+        let value = StoredItemValue::from_owned_range(value.into_owned_range());
+        let options = storage_backend::protocol_storage_options(options);
+        Box::pin(async move {
+            self.cache
+                .set_storage_key_with_requester(
+                    storage_key,
+                    value,
+                    options,
+                    Some(self.network_worker),
+                )
+                .await
+                .map(|outcome| match outcome {
+                    SetOutcome::Created => StorageWriteOutcome::Created,
+                    SetOutcome::Replaced => StorageWriteOutcome::Replaced,
+                    SetOutcome::NotStored => StorageWriteOutcome::Unchanged,
+                })
+                .map_err(StorageError::from)
+        })
+    }
+
+    fn delete<'a>(&'a self, storage_address: StorageAddress) -> StorageMutationFuture<'a> {
+        let storage_key = storage_backend::storage_key_for_address(&storage_address);
+        Box::pin(async move {
+            self.cache
+                .delete_storage_key_with_requester(storage_key, Some(self.network_worker))
+                .await
+                .map(|deleted| {
+                    if deleted {
+                        StorageMutation::Applied
+                    } else {
+                        StorageMutation::Unchanged
+                    }
+                })
                 .map_err(StorageError::from)
         })
     }

@@ -67,7 +67,7 @@ impl<'a> RuntimeStorageBackend<'a> {
 }
 
 #[allow(dead_code)]
-fn protocol_storage_options(options: StorageWriteOptions) -> SetOptions {
+pub(super) fn protocol_storage_options(options: StorageWriteOptions) -> SetOptions {
     let condition = match options.condition {
         StorageWriteCondition::Any => SetCondition::Any,
         StorageWriteCondition::IfAbsent => SetCondition::IfAbsent,
