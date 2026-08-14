@@ -8,8 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aes::{Aes256, cipher::KeyInit};
-use openkache_protocol::Opcode;
-
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
@@ -1195,11 +1193,13 @@ impl ThreadedKvkache {
     }
 
     pub async fn stats(&self) -> Result<Vec<String>> {
-        self.stats_async_with_requester(None).await
+        self.stats_async_with_requester(Operation::unknown(), None)
+            .await
     }
 
     async fn stats_async_with_requester(
         &self,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<Vec<String>> {
         let mut stats = Vec::with_capacity(self.workers.len());
@@ -1207,7 +1207,7 @@ impl ThreadedKvkache {
             match self
                 .request(
                     thread_id,
-                    Operation::from_opcode(Opcode::Stats),
+                    operation,
                     requester,
                     |response| WorkerRequest::Control(WorkerControlRequest::Stats { response }),
                 )
@@ -1227,15 +1227,20 @@ impl ThreadedKvkache {
     }
 
     pub async fn sync(&self) -> Result<()> {
-        self.sync_async_with_requester(None).await
+        self.sync_async_with_requester(Operation::unknown(), None)
+            .await
     }
 
-    async fn sync_async_with_requester(&self, requester: Option<NetworkWorkerId>) -> Result<()> {
+    async fn sync_async_with_requester(
+        &self,
+        operation: Operation,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<()> {
         for thread_id in 0..self.workers.len() {
             match self
                 .request(
                     thread_id,
-                    Operation::from_opcode(Opcode::Sync),
+                    operation,
                     requester,
                     |response| WorkerRequest::Control(WorkerControlRequest::Sync { response }),
                 )
@@ -1255,12 +1260,14 @@ impl ThreadedKvkache {
     /// Flushes exactly the storage workers that have observed mutations for a namespace.
     #[allow(dead_code)]
     pub(crate) async fn sync_workers(&self, workers: &[usize]) -> Result<()> {
-        self.sync_workers_async_with_requester(workers, None).await
+        self.sync_workers_async_with_requester(workers, Operation::unknown(), None)
+            .await
     }
 
     async fn sync_workers_async_with_requester(
         &self,
         workers: &[usize],
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<()> {
         for &worker in workers {
@@ -1272,7 +1279,7 @@ impl ThreadedKvkache {
             match self
                 .request(
                     worker,
-                    Operation::from_opcode(Opcode::Sync),
+                    operation,
                     requester,
                     |response| WorkerRequest::Control(WorkerControlRequest::Sync { response }),
                 )
