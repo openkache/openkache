@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crossfire::{MAsyncRx, MAsyncTx};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{RESPONSE_FIXED_BYTES, Response, ResponseParts};
+use openkache_protocol::{Response, ResponseHeaderBytes, ResponseParts};
 
 use crate::protocol::RequestParts;
 use crate::{Backend, Error, Operation, Result};
@@ -179,6 +179,11 @@ trait BackendStream {
         timeout: Duration,
     ) -> impl Future<Output = std::result::Result<(), TransportError>>;
 
+    fn read_byte(
+        &mut self,
+        timeout: Duration,
+    ) -> impl Future<Output = std::result::Result<u8, TransportError>>;
+
     fn read_exact(
         &mut self,
         length: usize,
@@ -314,20 +319,20 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
             .stream
             .as_mut()
             .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
-        let mut header_bytes = stream
-            .read_exact(
-                RESPONSE_FIXED_BYTES,
-                deadline.remaining(Operation::ResponseHeaderRead)?,
-            )
-            .await?;
+        let mut header_bytes = ResponseHeaderBytes::new();
         let header = loop {
-            if let Some(header) = Response::decode_header(&header_bytes).map_err(Error::protocol)? {
+            header_bytes
+                .push(
+                    stream
+                        .read_byte(deadline.remaining(Operation::ResponseHeaderRead)?)
+                        .await?,
+                )
+                .map_err(Error::protocol)?;
+            if let Some(header) =
+                Response::decode_header(header_bytes.as_slice()).map_err(Error::protocol)?
+            {
                 break header;
             }
-            let next = stream
-                .read_exact(1, deadline.remaining(Operation::ResponseHeaderRead)?)
-                .await?;
-            header_bytes.extend_from_slice(&next);
         };
         let frame_len = header.frame_len().map_err(Error::protocol)?;
         if frame_len > maximum {

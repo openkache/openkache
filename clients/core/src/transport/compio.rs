@@ -114,6 +114,15 @@ impl BackendStream for Stream {
         result.map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
     }
 
+    async fn read_byte(&mut self, timeout: Duration) -> Result<u8, TransportError> {
+        let BufResult(result, bytes) =
+            compio::runtime::time::timeout(timeout, self.receive.read_exact([0]))
+                .await
+                .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?;
+        result.map_err(|error| TransportError::backend(BACKEND, Operation::StreamRead, error))?;
+        Ok(bytes[0])
+    }
+
     async fn read_exact(
         &mut self,
         length: usize,

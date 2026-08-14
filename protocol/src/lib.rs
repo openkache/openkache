@@ -90,8 +90,8 @@ pub use request::{
     decode_request_frame_header,
 };
 pub use response::{
-    OwnedRange, OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseParts,
-    ResponseSegment,
+    OwnedRange, OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes,
+    ResponseParts, ResponseSegment,
 };
 
 /// The exact fixed-size item identifier carried by the wire protocol.
