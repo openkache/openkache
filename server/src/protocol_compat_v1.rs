@@ -19,6 +19,7 @@ use contract::{
 use super::{
     ItemId, NamespacePolicy, Opcode, ProtocolError, RequestDescriptor, RequestDescriptorModule,
     RequestHeader, Result, SetOptions, WireRequestLayout, WireRequestStep, WireResult,
+    wire_request_layout,
 };
 
 #[path = "protocol_compat_v1_policy.rs"]
@@ -290,39 +291,9 @@ pub(super) fn decode_server_request(
     )?))
 }
 
-// These tables are the compatibility adapter's only knowledge of the
-// historical namespace/item/SET byte prefixes.
-const COMPACT_V1_ITEM_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES
-            + openkache_protocol::NAMESPACE_ID_BYTES
-            + openkache_protocol::ITEM_ID_BYTES,
-    }],
-};
-const COMPACT_V1_ITEM_PAIR_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES
-            + openkache_protocol::NAMESPACE_ID_BYTES
-            + openkache_protocol::ITEM_ID_BYTES * 2,
-    }],
-};
-const COMPACT_V1_SET_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[
-        WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES
-                + openkache_protocol::NAMESPACE_ID_BYTES
-                + contract::SET_FLAGS_BYTES
-                + openkache_protocol::ITEM_ID_BYTES,
-        },
-        WireRequestStep::ConditionalVarUInt {
-            selector_offset: openkache_protocol::OPCODE_BYTES
-                + openkache_protocol::NAMESPACE_ID_BYTES,
-            mask: contract::SET_EXPIRATION_MASK,
-            expected: contract::SET_EXPLICIT_TTL_BITS,
-        },
-        WireRequestStep::ValueLength,
-    ],
-};
+// These tables are the compatibility adapter's only knowledge of historical
+// namespace byte prefixes. Item operations use their API-owned generated
+// request-wire plans.
 const COMPACT_V1_NAMESPACE_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[WireRequestStep::Fixed {
         bytes: openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES,
@@ -374,24 +345,9 @@ pub(super) fn request_frame_layout(opcode: Opcode) -> WireResult<WireRequestLayo
         )
     })?;
     match route {
-        CompactV1RequestRoute::Item => {
-            let item_count = contract::operation_field_count(
-                opcode,
-                contract::OperationFieldDirection::Request,
-                contract::OperationFieldRole::ItemId,
-            );
-            match item_count {
-                1 => Ok(COMPACT_V1_ITEM_LAYOUT),
-                2 => Ok(COMPACT_V1_ITEM_PAIR_LAYOUT),
-                // Protocol-v1 only published one- and two-item compact
-                // routes. Future batches must use a generated repeated-field
-                // layout instead of silently being parsed as one item.
-                _ => Err(openkache_protocol::ProtocolError::InvalidFieldSequence(
-                    "protocol-v1 item route supports one or two item IDs",
-                )),
-            }
+        CompactV1RequestRoute::Item | CompactV1RequestRoute::Set => {
+            Ok(wire_request_layout(opcode))
         }
-        CompactV1RequestRoute::Set => Ok(COMPACT_V1_SET_LAYOUT),
         CompactV1RequestRoute::Namespace => Ok(COMPACT_V1_NAMESPACE_LAYOUT),
         CompactV1RequestRoute::NamespaceOpen => Ok(COMPACT_V1_NAMESPACE_OPEN_LAYOUT),
         CompactV1RequestRoute::NamespaceUpdatePolicy => Ok(COMPACT_V1_NAMESPACE_POLICY_LAYOUT),
