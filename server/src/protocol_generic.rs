@@ -9,7 +9,9 @@ use super::super::operation_contract as contract;
 use super::{
     ProtocolError, Result, WireRequestLayout, WireResult, decode_varuint, validate_value_length,
 };
-use openkache_protocol::{OPCODE_BYTES, Opcode, decode_planned_fields};
+use openkache_protocol::{
+    OPCODE_BYTES, Opcode, OperationLayoutPlan, decode_planned_fields, encode_planned_fields,
+};
 use smallvec::SmallVec;
 
 const INLINE_OPERATION_FIELDS: usize = 8;
@@ -118,35 +120,45 @@ pub(super) fn encode_request_prefix(
     Ok(true)
 }
 
-/// Encodes a generic ordered request from its descriptor-shaped field values.
+/// Encodes a generic request from its descriptor-shaped field values.
 ///
-/// This keeps callers from reimplementing presence-mask/dense layout selection when
-/// constructing a new route-less API request. The adapter validates each field
-/// against its generated width and codec metadata before handing the payload
-/// to the operation-neutral request facade.
+/// This keeps callers from reimplementing presence-mask/dense layout selection
+/// when constructing a new route-less API request.
 pub(super) fn encode_fields(opcode: Opcode, values: Vec<Option<Vec<u8>>>) -> Result<Vec<u8>> {
-    let wire = contract::spec(opcode);
+    encode_fields_with_plan(values, contract::spec(opcode).request)
+}
+
+/// Encodes field values using only operation-neutral generated layout metadata.
+///
+/// The adapter validates each field against its generated width and codec
+/// metadata before handing the payload to the operation-neutral request
+/// facade.
+pub(super) fn encode_fields_with_plan(
+    values: Vec<Option<Vec<u8>>>,
+    plan: OperationLayoutPlan,
+) -> Result<Vec<u8>> {
     if !matches!(
-        wire.request.framing,
-        contract::OperationLayoutFraming::OrderedFields
+        plan.framing,
+        contract::OperationLayoutFraming::Empty
+            | contract::OperationLayoutFraming::OrderedFields
             | contract::OperationLayoutFraming::FieldSequence
     ) {
         return Err(ProtocolError::InvalidFieldSequence(
-            "generic ordered fields require ordered request framing",
+            "generic fields require an encodable request framing",
         ));
     }
-    let plan = wire.request.fields;
-    if values.len() != plan.len() {
+    let fields = plan.fields;
+    if values.len() != fields.len() {
         return Err(ProtocolError::InvalidFieldSequence(
             "generic field values do not match the generated request plan",
         ));
     }
-    if plan.len() > contract::MAX_OPERATION_REQUEST_FIELDS {
+    if fields.len() > contract::MAX_OPERATION_REQUEST_FIELDS {
         return Err(ProtocolError::InvalidFieldSequence(
             "generic request field plan exceeds generated bounds",
         ));
     }
-    for (field, value) in plan.iter().zip(values.iter()) {
+    for (field, value) in fields.iter().zip(values.iter()) {
         let Some(value) = value.as_deref() else {
             if field.required {
                 return Err(ProtocolError::InvalidFieldSequence(
@@ -180,8 +192,7 @@ pub(super) fn encode_fields(opcode: Opcode, values: Vec<Option<Vec<u8>>>) -> Res
     }
     let borrowed: SmallVec<[Option<&[u8]>; INLINE_OPERATION_FIELDS]> =
         values.iter().map(|value| value.as_deref()).collect();
-    openkache_protocol::encode_planned_fields(&borrowed, plan, wire.request.layout)
-        .map_err(Into::into)
+    encode_planned_fields(&borrowed, fields, plan.layout).map_err(Into::into)
 }
 
 /// Validates a semantic request against the generated generic shape.

@@ -510,11 +510,12 @@ impl Request {
         Ok(request)
     }
 
-    /// Creates a route-less request from generated ordered field values.
+    /// Creates a route-less request from generated field values.
     ///
     /// Field presence, codecs, and dense/sequence layout are selected from
     /// the operation contract. API callers provide only the modeled field
-    /// bytes in plan order; compatibility operations intentionally reject this
+    /// bytes in plan order, including an empty list for an empty generic
+    /// operation. Compatibility operations intentionally reject this
     /// constructor and use their typed adapter instead.
     pub fn new_generic_fields(opcode: Opcode, fields: Vec<Option<Vec<u8>>>) -> Result<Self> {
         if !std::ptr::eq(
