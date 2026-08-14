@@ -34,6 +34,13 @@ macro_rules! wire_enum {
 
 include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
+impl Status {
+    /// Returns whether this status represents a server-side error.
+    pub const fn is_error(self) -> bool {
+        (self as u8) >= ERROR_STATUS_MINIMUM
+    }
+}
+
 /// Canonical generated operation metadata shared by all adapters.
 pub mod operation {
     use super::{Opcode, Status};
