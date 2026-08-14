@@ -49,7 +49,7 @@ pub(super) fn install_runtime_capabilities(
 ) -> Arc<dyn CapabilityCatalog> {
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
     let mut registry = CapabilityRegistry::overlay(base);
-    generic::install_storage_port(&mut registry, storage_port);
+    super::storage_port::install(&mut registry, storage_port);
     generic::install_resource_store(&mut registry);
     compatibility::install_compatibility_services(
         &mut registry,
