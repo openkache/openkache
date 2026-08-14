@@ -14,7 +14,7 @@ use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::Opcode;
 use smallvec::SmallVec;
 
-use super::operation_capabilities::CapabilityCatalog;
+use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
 use super::operation_contract as contract;
 use super::operation_contract::OperationStatus;
 use super::operation_handlers::{AuthorizationFn, OperationInputView};
@@ -368,15 +368,21 @@ impl RegistrationBuilder {
 
 /// A self-contained API module contribution.
 ///
-/// The module owns one request projection and its behavior registrations. The
-/// composition root erases only this boundary when it builds the dense
-/// catalogs. Keeping both projections in one value makes adding an API a
-/// single module registration instead of coordinating global tables.
+/// The module owns one request projection, its behavior registrations, and
+/// optional capability-installation and validation hooks. The composition
+/// root supplies typed bootstrap capabilities to module-owned installation;
+/// it does not select hooks by API family.
 #[derive(Clone, Copy)]
 pub(super) struct ApiModule {
     request_descriptor: &'static RequestDescriptor,
     operations: &'static [ServerOperationRegistration],
+    install_capabilities: Option<ModuleCapabilityInstaller>,
+    validate: Option<ModuleValidator>,
 }
+
+pub(super) type ModuleCapabilityInstaller =
+    fn(&mut CapabilityRegistry, &dyn CapabilityCatalog) -> Result<(), &'static str>;
+pub(super) type ModuleValidator = fn() -> Result<(), &'static str>;
 
 impl ApiModule {
     pub(super) const fn new(
@@ -386,7 +392,19 @@ impl ApiModule {
         Self {
             request_descriptor,
             operations,
+            install_capabilities: None,
+            validate: None,
         }
+    }
+
+    pub(super) const fn install_capabilities(mut self, install: ModuleCapabilityInstaller) -> Self {
+        self.install_capabilities = Some(install);
+        self
+    }
+
+    pub(super) const fn validate_with(mut self, validate: ModuleValidator) -> Self {
+        self.validate = Some(validate);
+        self
     }
 
     pub(super) const fn request_descriptor(self) -> &'static RequestDescriptor {
@@ -395,6 +413,24 @@ impl ApiModule {
 
     pub(super) const fn operations(self) -> &'static [ServerOperationRegistration] {
         self.operations
+    }
+
+    fn install(
+        self,
+        registry: &mut CapabilityRegistry,
+        bootstrap: &dyn CapabilityCatalog,
+    ) -> Result<(), &'static str> {
+        if let Some(install) = self.install_capabilities {
+            install(registry, bootstrap)?;
+        }
+        Ok(())
+    }
+
+    fn validate(self) -> Result<(), &'static str> {
+        match self.validate {
+            Some(validate) => validate(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -405,6 +441,8 @@ impl ApiModule {
 pub(super) struct ServerComposition {
     operations: OperationCatalog,
     request_descriptors: [Option<&'static RequestDescriptor>; Opcode::COUNT],
+    modules: [Option<ApiModule>; Opcode::COUNT],
+    module_count: usize,
 }
 
 impl ServerComposition {
@@ -412,10 +450,15 @@ impl ServerComposition {
         Self {
             operations: OperationCatalog::new(),
             request_descriptors: [None; Opcode::COUNT],
+            modules: [None; Opcode::COUNT],
+            module_count: 0,
         }
     }
 
     pub(super) const fn register_module(mut self, module: ApiModule) -> Self {
+        if self.module_count == self.modules.len() {
+            panic!("too many API modules");
+        }
         let registrations = module.operations();
         let mut index = 0;
         while index < registrations.len() {
@@ -427,7 +470,35 @@ impl ServerComposition {
             index += 1;
         }
         self.operations = self.operations.register_module(module);
+        self.modules[self.module_count] = Some(module);
+        self.module_count += 1;
         self
+    }
+
+    pub(super) fn install_capabilities(
+        &'static self,
+        registry: &mut CapabilityRegistry,
+        bootstrap: &dyn CapabilityCatalog,
+    ) -> Result<(), &'static str> {
+        let mut index = 0;
+        while index < self.module_count {
+            self.modules[index]
+                .expect("registered API module is missing")
+                .install(registry, bootstrap)?;
+            index += 1;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_modules(&'static self) -> Result<(), &'static str> {
+        let mut index = 0;
+        while index < self.module_count {
+            self.modules[index]
+                .expect("registered API module is missing")
+                .validate()?;
+            index += 1;
+        }
+        Ok(())
     }
 
     pub(super) fn operation(
@@ -488,16 +559,11 @@ impl OperationCatalog {
         self.register(module.operations())
     }
 
-    fn get(
-        &'static self,
-        opcode: Opcode,
-    ) -> Option<&'static ServerOperationRegistration> {
+    fn get(&'static self, opcode: Opcode) -> Option<&'static ServerOperationRegistration> {
         self.entries[opcode.index()].as_ref()
     }
 
-    fn iter(
-        &'static self,
-    ) -> impl Iterator<Item = &'static ServerOperationRegistration> {
+    fn iter(&'static self) -> impl Iterator<Item = &'static ServerOperationRegistration> {
         self.entries.iter().filter_map(Option::as_ref)
     }
 }
