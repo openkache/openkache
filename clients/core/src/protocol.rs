@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use openkache_protocol::{
     ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES,
-    NAMESPACE_REVISION_BYTES, Opcode, OperationFramePolicy, OperationLayoutFraming,
-    decode_planned_fields, encode_varuint, operation_wire_spec,
+    NAMESPACE_REVISION_BYTES, Opcode, OperationFramePolicy, OperationLayoutFraming, OwnedFrame,
+    WireSegment, decode_planned_fields, encode_varuint, operation_wire_spec,
 };
 
 #[path = "protocol_compat_v1.rs"]
@@ -360,8 +360,23 @@ pub(crate) struct Request {
 /// Owned request pieces ready for a transport write.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct RequestParts {
-    pub(crate) prefix: Vec<u8>,
-    pub(crate) payload: Vec<u8>,
+    frame: OwnedFrame,
+}
+
+impl RequestParts {
+    fn new<I, T>(segments: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<WireSegment>,
+    {
+        Ok(Self {
+            frame: OwnedFrame::new(segments)?,
+        })
+    }
+
+    pub(crate) fn segments(&self) -> &[WireSegment] {
+        self.frame.segments()
+    }
 }
 
 /// One transport write with ownership matched to its replay policy.
@@ -373,12 +388,19 @@ pub(crate) enum RequestAttempt {
 }
 
 impl RequestAttempt {
-    #[cfg(feature = "quic-quinn")]
-    pub(crate) fn as_parts(&self) -> &RequestParts {
+    fn parts(&self) -> &RequestParts {
         match self {
             Self::Once(parts) => parts,
             Self::Replay(parts) => parts,
         }
+    }
+
+    pub(crate) fn segments(&self) -> impl Iterator<Item = &[u8]> {
+        self.parts()
+            .segments()
+            .iter()
+            .map(WireSegment::as_slice)
+            .filter(|segment| !segment.is_empty())
     }
 }
 
@@ -516,10 +538,7 @@ impl Request {
             }
             prefix
         };
-        Ok(RequestParts {
-            prefix,
-            payload: self.value,
-        })
+        RequestParts::new([WireSegment::owned(prefix), WireSegment::owned(self.value)])
     }
 
     fn validate(&self) -> Result<()> {
