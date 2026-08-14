@@ -263,8 +263,7 @@ where
         }
     }
 
-    let mut segments =
-        SmallVec::<[WireSegment; crate::segments::INLINE_SEGMENTS]>::new();
+    let mut segments = SmallVec::<[WireSegment; crate::segments::INLINE_SEGMENTS]>::new();
     match layout {
         OperationFieldLayout::Dense => {
             if values.iter().any(Option::is_none) {
@@ -300,11 +299,9 @@ where
             }
         }
         OperationFieldLayout::OptionalValues => {
-            let optional_codec = optional_codec.ok_or(
-                ProtocolError::InvalidOptionalValues(
-                    "optional-value layout requires an explicit codec",
-                ),
-            )?;
+            let optional_codec = optional_codec.ok_or(ProtocolError::InvalidOptionalValues(
+                "optional-value layout requires an explicit codec",
+            ))?;
             for value in values {
                 let prefix = optional_codec.prefix(value.as_ref().map(WireSegment::len))?;
                 segments.push(WireSegment::inline(
