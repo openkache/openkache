@@ -191,10 +191,7 @@ fn planned_fields_response(
 }
 
 fn operation_value_segment(value: OperationValue) -> ResponseSegment {
-    match value {
-        OperationValue::Inline(value) => ResponseSegment::Inline(value),
-        OperationValue::Owned(value) => ResponseSegment::Owned(value),
-    }
+    value.into_segment()
 }
 
 pub(super) fn validate_response_fields<T: AsRef<[u8]>>(

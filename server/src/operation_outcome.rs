@@ -8,9 +8,7 @@
 use smallvec::SmallVec;
 
 use super::operation_contract::OperationStatus;
-use openkache_protocol::OwnedRange;
-
-const INLINE_OPERATION_VALUE_BYTES: usize = 32;
+use openkache_protocol::{OwnedRange, ResponseSegment};
 
 /// An owned wire value returned by a modeled server operation.
 ///
@@ -18,10 +16,7 @@ const INLINE_OPERATION_VALUE_BYTES: usize = 32;
 /// encoding belongs to the generated contract and API-owned binding. Small
 /// scalar and token values remain inline, while existing application/storage
 /// allocations retain their ownership and logical range.
-pub(super) enum OperationValue {
-    Inline(SmallVec<[u8; INLINE_OPERATION_VALUE_BYTES]>),
-    Owned(OwnedRange),
-}
+pub(super) struct OperationValue(ResponseSegment);
 
 impl OperationValue {
     /// Copies a small API value into allocation-free inline storage.
@@ -30,32 +25,39 @@ impl OperationValue {
     /// that already own a large payload should pass its `Vec` or `OwnedRange`
     /// instead so the existing allocation is preserved.
     pub(super) fn inline(value: &[u8]) -> Self {
-        Self::Inline(SmallVec::from_slice(value))
+        Self(ResponseSegment::inline(value))
     }
 
     pub(super) fn len(&self) -> usize {
         self.as_ref().len()
     }
+
+    pub(super) fn into_segment(self) -> ResponseSegment {
+        self.0
+    }
 }
 
 impl AsRef<[u8]> for OperationValue {
     fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Inline(value) => value,
-            Self::Owned(value) => value.as_ref(),
-        }
+        self.0.as_slice()
     }
 }
 
 impl From<Vec<u8>> for OperationValue {
     fn from(value: Vec<u8>) -> Self {
-        Self::Owned(value.into())
+        Self(ResponseSegment::owned(value))
     }
 }
 
 impl From<OwnedRange> for OperationValue {
     fn from(value: OwnedRange) -> Self {
-        Self::Owned(value)
+        Self(ResponseSegment::Owned(value))
+    }
+}
+
+impl From<ResponseSegment> for OperationValue {
+    fn from(value: ResponseSegment) -> Self {
+        Self(value)
     }
 }
 
