@@ -20,6 +20,14 @@ use super::{
     NamespacePolicy, OverridePolicy, ProtocolError, Result, SetCondition, SetWireOptions,
     append_varuint, invalid_shape, validate_operation_field, validate_value_length,
 };
+use crate::request::{INLINE_REQUEST_PREFIX_BYTES, RequestPrefix};
+
+const MAX_SINGLE_ITEM_PREFIX_BYTES: usize = 1
+    + openkache_protocol::NAMESPACE_ID_BYTES
+    + openkache_protocol::compat_v1::SET_FLAGS_BYTES
+    + ITEM_ID_BYTES
+    + 2 * openkache_protocol::MAX_VARUINT_BYTES;
+const _: () = assert!(MAX_SINGLE_ITEM_PREFIX_BYTES <= INLINE_REQUEST_PREFIX_BYTES);
 
 #[cfg(feature = "ffi")]
 pub(super) fn decode_set_options(flags: u8, ttl_ms: Option<u64>) -> Result<SetWireOptions> {
@@ -170,20 +178,16 @@ pub(super) fn decode_namespace_policy_parts(
     })
 }
 
-pub(super) fn encode_prefix(request: &DraftV1Request) -> Result<Option<Vec<u8>>> {
+pub(super) fn encode_prefix(request: &DraftV1Request) -> Result<Option<RequestPrefix>> {
     let Some(route) = route_for_opcode(request.opcode) else {
         return Ok(None);
     };
-    let mut output = Vec::with_capacity(
-        1 + openkache_protocol::NAMESPACE_ID_BYTES
-            + ITEM_ID_BYTES
-            + 2 * openkache_protocol::MAX_VARUINT_BYTES,
-    );
+    let mut output = RequestPrefix::new();
     output.push(request.opcode as u8);
     match route {
         OperationCompactV1Route::Item => {
             append_namespace_id(&mut output, request.namespace_id)?;
-            for item_id in &request.item_ids {
+            for item_id in request.item_ids() {
                 output.extend_from_slice(item_id.as_bytes());
             }
         }
@@ -191,14 +195,13 @@ pub(super) fn encode_prefix(request: &DraftV1Request) -> Result<Option<Vec<u8>>>
             append_namespace_id(&mut output, request.namespace_id)?;
             output.push(set_flags(request.set_options)?);
             let item_id = request
-                .item_ids
-                .first()
+                .first_item_id()
                 .ok_or_else(|| invalid_shape(request.opcode, 1, "value"))?;
             output.extend_from_slice(item_id.as_bytes());
             if let Some(ttl_ms) = request.set_options.ttl_ms {
-                append_varuint(&mut output, ttl_ms);
+                output.append_varuint(ttl_ms);
             }
-            append_varuint(&mut output, request.value.len() as u64);
+            output.append_varuint(request.value.len() as u64);
         }
         OperationCompactV1Route::Namespace => {
             append_namespace_id(&mut output, request.namespace_id)?;
@@ -266,7 +269,7 @@ pub(super) fn validate_request(request: &DraftV1Request) -> Result<bool> {
                 OperationFieldDirection::Request,
                 OperationFieldRole::Value,
             );
-            if request.item_ids.len() != item_count
+            if request.item_id_count() != item_count
                 || request.namespace_name.is_some()
                 || request.namespace_policy.is_some()
                 || request.expected_revision.is_some()
@@ -317,7 +320,7 @@ pub(super) fn validate_request(request: &DraftV1Request) -> Result<bool> {
                 });
             }
             if request.namespace_id.is_some()
-                || !request.item_ids.is_empty()
+                || request.item_id_count() != 0
                 || request.set_options != SetWireOptions::NONE
                 || !request.value.is_empty()
                 || request.expected_revision.is_some()
@@ -335,7 +338,7 @@ pub(super) fn validate_request(request: &DraftV1Request) -> Result<bool> {
                 .namespace_policy
                 .ok_or(ProtocolError::MissingNamespacePolicy)?
                 .encode()?;
-            if !request.item_ids.is_empty()
+            if request.item_id_count() != 0
                 || request.set_options != SetWireOptions::NONE
                 || !request.value.is_empty()
                 || request.namespace_name.is_some()
@@ -381,12 +384,12 @@ fn set_flags(options: SetWireOptions) -> Result<u8> {
     Ok(condition | expiration | eviction)
 }
 
-fn append_namespace_id(output: &mut Vec<u8>, namespace_id: Option<u64>) -> Result<()> {
+fn append_namespace_id(output: &mut RequestPrefix, namespace_id: Option<u64>) -> Result<()> {
     output.extend_from_slice(&validate_namespace_id(namespace_id)?.to_be_bytes());
     Ok(())
 }
 
-fn append_revision(output: &mut Vec<u8>, revision: Option<u64>) -> Result<()> {
+fn append_revision(output: &mut RequestPrefix, revision: Option<u64>) -> Result<()> {
     output.extend_from_slice(&validate_revision(revision)?.to_be_bytes());
     Ok(())
 }

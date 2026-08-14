@@ -130,6 +130,19 @@ export function compatibility_request_frame_bound(
   ) + contract.max_value_bytes
 }
 
+function compatibility_request_item_id_bound(
+  operations: readonly Wire_Operation[],
+): number {
+  return Math.max(
+    0,
+    ...operations.map((operation) =>
+      (operation.contract.request_plan ?? []).filter(
+        (field) => field.role === "item_id",
+      ).length
+    ),
+  )
+}
+
 /**
  * Renders protocol-v1 flag and semantic constants for compatibility adapters.
  *
@@ -205,6 +218,8 @@ export function render_rust_compatibility_contract(contract: Wire_Contract): str
     return `/// No protocol-v1 compatibility operations are present in this
 /// permissive contract fixture.
 pub const MAX_COMPATIBILITY_REQUEST_FRAME_BYTES: usize = 0;
+/// No compatibility request item-ID fields are present.
+pub const MAX_COMPATIBILITY_REQUEST_ITEM_IDS: usize = 0;
 `
   }
   const compatibility_operations = operations.filter(
@@ -313,6 +328,10 @@ ${constants.join("\n")}
 /// protocol-v1 compatibility adapter.
 pub const MAX_COMPATIBILITY_REQUEST_FRAME_BYTES: usize =
     ${formatted_decimal(compatibility_request_frame_bound(contract))};
+
+/// Maximum item-ID fields in a protocol-v1 compatibility request.
+pub const MAX_COMPATIBILITY_REQUEST_ITEM_IDS: usize =
+    ${formatted_decimal(compatibility_request_item_id_bound(compatibility_operations))};
 
 /// Generated protocol-v1 compatibility projection metadata.
 ///

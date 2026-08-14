@@ -10,7 +10,7 @@ use openkache_protocol::{
     encode_varuint, operation_wire_spec,
 };
 
-use crate::request::{RequestBuilder, RequestParts, RequestRetryPolicy};
+use crate::request::{RequestBuilder, RequestParts, RequestPrefix, RequestRetryPolicy};
 
 #[path = "protocol_compat_v1.rs"]
 mod compat_v1;
@@ -351,17 +351,17 @@ impl GenericRequest {
     }
 
     fn into_parts(self) -> Result<RequestParts> {
-        let mut prefix = Vec::with_capacity(1 + openkache_protocol::MAX_VARUINT_BYTES);
+        let mut prefix = RequestPrefix::new();
         prefix.push(self.opcode as u8);
         let request = operation_wire_spec(self.opcode).request;
         match request.framing {
             OperationLayoutFraming::Empty => {}
             OperationLayoutFraming::Opaque => {
-                append_varuint(&mut prefix, self.value.len() as u64);
+                prefix.append_varuint(self.value.len() as u64);
             }
             OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
                 if request.frame == OperationFramePolicy::LengthDelimited {
-                    append_varuint(&mut prefix, self.value.len() as u64);
+                    prefix.append_varuint(self.value.len() as u64);
                 }
             }
             OperationLayoutFraming::OptionalValues => {
@@ -370,10 +370,7 @@ impl GenericRequest {
                 ));
             }
         }
-        Ok(RequestParts::new([
-            WireSegment::owned(prefix),
-            WireSegment::owned(self.value),
-        ])?)
+        Ok(RequestParts::new(prefix, [WireSegment::owned(self.value)])?)
     }
 
     fn validate(&self) -> Result<()> {
