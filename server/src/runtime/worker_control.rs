@@ -6,9 +6,28 @@
 
 use super::storage_backend::RuntimeStorageBackend;
 use super::storage_context::StorageWorkerContext;
-use super::{Kvkache, StorageTask, StorageTaskCancellation};
-use super::{WorkerControlRequest, WorkerRequest, WorkerResponse};
+use super::worker::{ControlFlow, ControlPort, ResponseSender};
+use super::{Kvkache, StorageTask, StorageTaskCancellation, WorkerResponse};
 use crate::Result;
+
+pub(super) enum ControlRequest<R> {
+    Stats {
+        response: ResponseSender<R>,
+    },
+    Sync {
+        response: ResponseSender<R>,
+    },
+    /// Executes an API-owned storage task after all keyed work is quiescent.
+    ///
+    /// Keyed data-plane work keeps its scheduler and collapse optimizations.
+    /// Extensions use this escape hatch for storage shapes that do not fit one
+    /// keyed lane without adding another worker-owned command variant.
+    StorageTask {
+        task: StorageTask,
+        response: ResponseSender<R>,
+    },
+    Shutdown,
+}
 
 /// Runs one API-owned task against the worker-local backend.
 ///
@@ -25,42 +44,45 @@ pub(super) async fn execute_storage_task(cache: &mut Kvkache, task: StorageTask)
     }
 }
 
-pub(super) async fn process_worker_barrier(
-    cache: &mut Kvkache,
-    request: WorkerRequest,
-    affinity_id: usize,
-) -> Result<bool> {
-    match request {
-        WorkerRequest::Control(WorkerControlRequest::Stats { response }) => {
-            let _ = response.send(Ok(WorkerResponse::Stats(format!(
-                "{} {}",
-                crate::platform::cpu_diagnostic(affinity_id),
-                cache.stats()
-            ))));
-            Ok(false)
-        }
-        WorkerRequest::Control(WorkerControlRequest::Sync { response }) => {
-            let result = cache.sync().await.map(|()| WorkerResponse::Synced);
-            let _ = response.send(result);
-            Ok(false)
-        }
-        WorkerRequest::Control(WorkerControlRequest::StorageTask { task, response }) => {
-            if task.metadata().cancellation() == StorageTaskCancellation::CancelIfDisconnected
-                && response.is_disconnected()
-            {
-                return Ok(false);
+impl ControlPort<ControlRequest<WorkerResponse>> for Kvkache {
+    fn execute_control(
+        &mut self,
+        command: ControlRequest<WorkerResponse>,
+        affinity_id: usize,
+    ) -> impl std::future::Future<Output = Result<ControlFlow>> + '_ {
+        async move {
+            match command {
+                ControlRequest::Stats { response } => {
+                    let stats = format!(
+                        "{} {}",
+                        crate::platform::cpu_diagnostic(affinity_id),
+                        self.stats()
+                    );
+                    let _ = response.send(Ok(WorkerResponse::Stats(stats)));
+                    Ok(ControlFlow::Continue)
+                }
+                ControlRequest::Sync { response } => {
+                    let result = self.sync().await.map(|()| WorkerResponse::Synced);
+                    let _ = response.send(result);
+                    Ok(ControlFlow::Continue)
+                }
+                ControlRequest::StorageTask { task, response } => {
+                    if task.metadata().cancellation()
+                        == StorageTaskCancellation::CancelIfDisconnected
+                        && response.is_disconnected()
+                    {
+                        return Ok(ControlFlow::Continue);
+                    }
+                    let result = execute_storage_task(self, task).await;
+                    let _ = response.send(Ok(result));
+                    Ok(ControlFlow::Continue)
+                }
+                ControlRequest::Shutdown => {
+                    self.sync().await?;
+                    self.checkpoint().await?;
+                    Ok(ControlFlow::Stop)
+                }
             }
-            let result = execute_storage_task(cache, task).await;
-            let _ = response.send(Ok(result));
-            Ok(false)
         }
-        WorkerRequest::Control(WorkerControlRequest::Shutdown) => {
-            cache.sync().await?;
-            cache.checkpoint().await?;
-            Ok(true)
-        }
-        WorkerRequest::Keyed { .. } => Err(crate::KvError::Worker(
-            "keyed request reached the worker barrier path".into(),
-        )),
     }
 }

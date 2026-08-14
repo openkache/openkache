@@ -20,7 +20,6 @@ use super::keyed_compatibility::{
     prepare_collapsed_batch,
 };
 use super::scheduler::KeyScheduler;
-use super::worker_control::process_worker_barrier;
 use super::{DeferredWorkerResponse, WorkerRequest, WorkerResponse, WorkerResponseSender};
 
 pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
@@ -105,64 +104,39 @@ impl BenchmarkBatchStats {
     }
 }
 
-pub(super) enum Request<K, C, R> {
+pub(super) enum Request<K, C, X> {
     /// Keyed data-plane work routed through the per-key scheduler.
     ///
     /// The envelope keeps routing and completion generic at the worker
     /// boundary. API-owned adapters retain their optimized command
     /// implementations behind the keyed-work descriptor.
     Keyed { storage_key: K, command: C },
-    /// Control-plane work is kept separate from keyed data-plane commands.
-    ///
-    /// Stats, sync, extension tasks, and shutdown all require a quiescent
-    /// worker but do not participate in per-key scheduling or collapse.
-    Control(ControlRequest<R>),
+    /// Adapter-owned control work that requires a quiescent worker.
+    Control(X),
 }
 
-pub(super) enum ControlRequest<R> {
-    Stats {
-        response: ResponseSender<R>,
-    },
-    Sync {
-        response: ResponseSender<R>,
-    },
-    /// Executes an API-owned storage task after all keyed work is quiescent.
-    ///
-    /// GET/SET/DELETE keep their keyed scheduler and collapse optimizations.
-    /// Extensions use this escape hatch for batch, CAS, or other storage
-    /// shapes without adding another cache-specific worker enum variant.
-    StorageTask {
-        task: super::StorageTask,
-        response: ResponseSender<R>,
-    },
-    Shutdown,
+pub(super) trait ControlPort<C> {
+    fn execute_control(
+        &mut self,
+        command: C,
+        affinity_id: usize,
+    ) -> impl Future<Output = Result<ControlFlow>> + '_;
 }
 
-pub(super) enum Response<K> {
-    /// API-owned keyed result. The worker only transports this opaque
-    /// projection and never selects a response shape by operation name.
-    Keyed(K),
-    Stats(String),
-    Synced,
-    StorageResult(super::StorageTaskOutput),
-    StorageFailure(super::StorageError),
+pub(super) enum ControlFlow {
+    Continue,
+    Stop,
 }
 
-impl<K> std::fmt::Debug for Response<K> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Keyed(_) => formatter.write_str("Keyed(..)"),
-            Self::Stats(stats) => formatter.debug_tuple("Stats").field(stats).finish(),
-            Self::Synced => formatter.write_str("Synced"),
-            // API-owned task results are intentionally erased at the runtime
-            // boundary and are therefore only identified, never formatted.
-            Self::StorageResult(_) => formatter.write_str("StorageResult(..)"),
-            Self::StorageFailure(error) => formatter
-                .debug_tuple("StorageFailure")
-                .field(error)
-                .finish(),
-        }
-    }
+async fn execute_control_work<L, C>(
+    lifecycle: &mut L,
+    command: C,
+    affinity_id: usize,
+) -> Result<ControlFlow>
+where
+    L: ControlPort<C>,
+{
+    lifecycle.execute_control(command, affinity_id).await
 }
 
 #[derive(Clone, Copy)]
@@ -511,8 +485,11 @@ pub(super) async fn worker_loop(
         }
 
         if inflight.is_empty() && scheduler.is_idle() {
-            if let Some(request) = barrier.take() {
-                if process_worker_barrier(&mut cache, request, affinity_id).await? {
+            if let Some(command) = barrier.take() {
+                if matches!(
+                    execute_control_work(&mut cache, command, affinity_id).await?,
+                    ControlFlow::Stop
+                ) {
                     return Ok(());
                 }
                 continue;
@@ -776,7 +753,7 @@ pub(super) async fn worker_loop(
 
 fn admit_worker_request(
     scheduler: &mut CompatibilityScheduler,
-    barrier: &mut Option<WorkerRequest>,
+    barrier: &mut Option<super::WorkerControlRequest>,
     request: WorkerRequest,
 ) -> Result<()> {
     match request {
@@ -790,8 +767,8 @@ fn admit_worker_request(
                     KvError::Worker("waiting-command slab is full".into())
                 }
             }),
-        request => {
-            *barrier = Some(request);
+        WorkerRequest::Control(command) => {
+            *barrier = Some(command);
             Ok(())
         }
     }

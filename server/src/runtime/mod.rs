@@ -40,11 +40,36 @@ use self::completion::{CompletionReceiver, CompletionSlab};
 #[allow(unused_imports)]
 pub(crate) use crate::storage_backend::{RUNNING_MARKER_FILE, SERVER_KEY_FILE};
 
-pub(in crate::runtime) type WorkerResponse = worker::Response<keyed_compatibility::KeyedResponse>;
+pub(in crate::runtime) enum WorkerResponse {
+    /// API-owned keyed result. The worker transports this opaque projection.
+    Keyed(keyed_compatibility::KeyedResponse),
+    Stats(String),
+    Synced,
+    StorageResult(StorageTaskOutput),
+    StorageFailure(StorageError),
+}
+
+impl std::fmt::Debug for WorkerResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keyed(_) => formatter.write_str("Keyed(..)"),
+            Self::Stats(stats) => formatter.debug_tuple("Stats").field(stats).finish(),
+            Self::Synced => formatter.write_str("Synced"),
+            // API-owned task results are intentionally erased at the runtime
+            // boundary and are therefore only identified, never formatted.
+            Self::StorageResult(_) => formatter.write_str("StorageResult(..)"),
+            Self::StorageFailure(error) => formatter
+                .debug_tuple("StorageFailure")
+                .field(error)
+                .finish(),
+        }
+    }
+}
+
 pub(in crate::runtime) type WorkerResponseSender = worker::ResponseSender<WorkerResponse>;
 pub(in crate::runtime) type WorkerRequest =
-    worker::Request<StorageKey, keyed_compatibility::KeyedCommand, WorkerResponse>;
-pub(in crate::runtime) type WorkerControlRequest = worker::ControlRequest<WorkerResponse>;
+    worker::Request<StorageKey, keyed_compatibility::KeyedCommand, WorkerControlRequest>;
+pub(in crate::runtime) type WorkerControlRequest = worker_control::ControlRequest<WorkerResponse>;
 pub(in crate::runtime) type DeferredWorkerResponse = worker::DeferredResponse<WorkerResponse>;
 
 #[derive(Clone, Copy)]
