@@ -48,7 +48,7 @@ pub(crate) const fn max_request_frame_bytes() -> usize {
 /// A validated variable-length request header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestHeader {
-    adapter: RequestAdapter,
+    descriptor: &'static RequestDescriptor,
     opcode: Opcode,
     encoded_len: usize,
     value_len: usize,
@@ -75,10 +75,10 @@ struct CompatibilityHeaderMetadata {
 /// The header carries this decision so the server hot path does not classify
 /// the opcode a second time after frame admission.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RequestAdapter {
+pub(crate) struct RequestDescriptor {
     name: &'static str,
     request_frame_layout: fn(Opcode) -> WireResult<WireRequestLayout>,
-    decode_header: fn(&[u8], Opcode, RequestAdapter) -> Result<Option<RequestHeader>>,
+    decode_header: fn(&[u8], Opcode, &'static RequestDescriptor) -> Result<Option<RequestHeader>>,
     encode_request_prefix: fn(&Request, &mut Vec<u8>) -> Result<bool>,
     validate_request: fn(&Request) -> Result<()>,
     decode_request: fn(&[u8], RequestHeader) -> Result<Request>,
@@ -86,137 +86,186 @@ pub(crate) struct RequestAdapter {
     decode_server_request: fn(Vec<u8>, RequestHeader) -> Result<ServerRequest>,
 }
 
-impl RequestAdapter {
-    /// Generic generated framing. The adapter owns no domain route metadata.
-    #[allow(non_upper_case_globals)]
-    pub(crate) const Generic: Self = Self {
-        name: "generic",
-        request_frame_layout: generic::request_frame_layout,
-        decode_header: generic::decode_header,
-        encode_request_prefix: generic::encode_request_prefix,
-        validate_request: generic::validate_request,
-        decode_request: generic::decode_request,
-        decode_owned_request: generic::decode_owned_request,
-        decode_server_request: generic::decode_server_request,
-    };
+impl RequestDescriptor {
+    pub(super) const fn new(
+        name: &'static str,
+        request_frame_layout: fn(Opcode) -> WireResult<WireRequestLayout>,
+        decode_header: fn(
+            &[u8],
+            Opcode,
+            &'static RequestDescriptor,
+        ) -> Result<Option<RequestHeader>>,
+        encode_request_prefix: fn(&Request, &mut Vec<u8>) -> Result<bool>,
+        validate_request: fn(&Request) -> Result<()>,
+        decode_request: fn(&[u8], RequestHeader) -> Result<Request>,
+        decode_owned_request: fn(Vec<u8>, RequestHeader) -> Result<Request>,
+        decode_server_request: fn(Vec<u8>, RequestHeader) -> Result<ServerRequest>,
+    ) -> Self {
+        Self {
+            name,
+            request_frame_layout,
+            decode_header,
+            encode_request_prefix,
+            validate_request,
+            decode_request,
+            decode_owned_request,
+            decode_server_request,
+        }
+    }
 
-    /// Historical protocol-v1 compact framing.
-    ///
-    /// This remains a compatibility adapter rather than a generic operation
-    /// variant. A future wire family can add another descriptor without
-    /// changing the request parser's control flow.
-    #[allow(non_upper_case_globals)]
-    pub(crate) const Compatibility: Self = Self {
-        name: "compatibility-v1",
-        request_frame_layout: compat_v1::request_frame_layout,
-        decode_header: compat_v1::decode_header,
-        encode_request_prefix: compat_v1::encode_request_prefix,
-        validate_request: compat_v1::validate_request,
-        decode_request: compat_v1::decode_request,
-        decode_owned_request: compat_v1::decode_owned_request,
-        decode_server_request: compat_v1::decode_server_request,
-    };
-
-    fn request_frame_layout(self, opcode: Opcode) -> WireResult<WireRequestLayout> {
+    fn request_frame_layout(&self, opcode: Opcode) -> WireResult<WireRequestLayout> {
         (self.request_frame_layout)(opcode)
     }
 
-    fn decode_header(self, prefix: &[u8], opcode: Opcode) -> Result<Option<RequestHeader>> {
+    fn decode_header(
+        &'static self,
+        prefix: &[u8],
+        opcode: Opcode,
+    ) -> Result<Option<RequestHeader>> {
         (self.decode_header)(prefix, opcode, self)
     }
 
-    fn encode_request_prefix(self, request: &Request, output: &mut Vec<u8>) -> Result<bool> {
+    fn encode_request_prefix(&self, request: &Request, output: &mut Vec<u8>) -> Result<bool> {
         (self.encode_request_prefix)(request, output)
     }
 
-    fn validate_request(self, request: &Request) -> Result<()> {
+    fn validate_request(&self, request: &Request) -> Result<()> {
         (self.validate_request)(request)
     }
 
-    fn decode_request(self, frame: &[u8], header: RequestHeader) -> Result<Request> {
+    fn decode_request(&self, frame: &[u8], header: RequestHeader) -> Result<Request> {
         (self.decode_request)(frame, header)
     }
 
-    fn decode_owned_request(self, frame: Vec<u8>, header: RequestHeader) -> Result<Request> {
+    fn decode_owned_request(&self, frame: Vec<u8>, header: RequestHeader) -> Result<Request> {
         (self.decode_owned_request)(frame, header)
     }
 
-    fn decode_server_request(self, frame: Vec<u8>, header: RequestHeader) -> Result<ServerRequest> {
+    fn decode_server_request(
+        &self,
+        frame: Vec<u8>,
+        header: RequestHeader,
+    ) -> Result<ServerRequest> {
         (self.decode_server_request)(frame, header)
     }
 }
 
-impl PartialEq for RequestAdapter {
+impl PartialEq for RequestDescriptor {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
     }
 }
 
-impl Eq for RequestAdapter {}
+impl Eq for RequestDescriptor {}
 
-/// Supplies the request adapter selected at the composition boundary.
+/// Supplies the request descriptor selected at the composition boundary.
 ///
 /// The parser consumes this provider result and never needs to know how a
-/// route was classified. The default implementation is generated from the
-/// Smithy compatibility projection; tests and future protocol versions can
-/// supply another provider without changing generic framing code.
-pub(crate) trait FrameLayoutProvider: Send + Sync {
-    fn adapter_for(&self, opcode: Opcode) -> RequestAdapter;
+/// request was classified. Tests and future protocol versions can supply
+/// another provider without changing generic framing code.
+pub(crate) trait RequestDescriptorProvider: Send + Sync {
+    fn descriptor(&self, opcode: Opcode) -> &'static RequestDescriptor;
 }
 
+/// One API module's sparse request-descriptor contribution.
 #[derive(Clone, Copy)]
-struct FrameAdapterRegistration {
-    adapter: RequestAdapter,
-    accepts: fn(Opcode) -> bool,
+pub(super) struct RequestDescriptorModule {
+    entries: [Option<&'static RequestDescriptor>; Opcode::COUNT],
 }
 
-impl FrameAdapterRegistration {
-    const fn new(adapter: RequestAdapter, accepts: fn(Opcode) -> bool) -> Self {
-        Self { adapter, accepts }
+impl RequestDescriptorModule {
+    pub(super) const fn new() -> Self {
+        Self {
+            entries: [None; Opcode::COUNT],
+        }
+    }
+
+    pub(super) const fn register(
+        mut self,
+        opcode: Opcode,
+        descriptor: &'static RequestDescriptor,
+    ) -> Self {
+        let slot = opcode.index();
+        if self.entries[slot].is_some() {
+            panic!("duplicate request descriptor in API module");
+        }
+        self.entries[slot] = Some(descriptor);
+        self
     }
 }
 
-fn accepts_any_opcode(_opcode: Opcode) -> bool {
-    true
+/// Dense opcode-indexed request catalog assembled by the composition root.
+#[derive(Clone, Copy)]
+struct RequestDescriptorCatalog {
+    entries: [Option<&'static RequestDescriptor>; Opcode::COUNT],
 }
 
-/// Generated adapter registry ordered from the most specific projection to
-/// the generic fallback. The parser consumes this table through the provider;
-/// adding another wire family adds one registration and leaves framing logic
-/// unchanged.
-const FRAME_ADAPTER_REGISTRY: &[FrameAdapterRegistration] = &[
-    FrameAdapterRegistration::new(
-        RequestAdapter::Compatibility,
-        compat_v1::compatibility_route_for_opcode,
-    ),
-    FrameAdapterRegistration::new(RequestAdapter::Generic, accepts_any_opcode),
-];
+impl RequestDescriptorCatalog {
+    const fn new() -> Self {
+        Self {
+            entries: [None; Opcode::COUNT],
+        }
+    }
 
-/// Generated provider used by the public server protocol facade.
+    const fn register_module(mut self, module: RequestDescriptorModule) -> Self {
+        let mut index = 0;
+        while index < Opcode::COUNT {
+            if let Some(descriptor) = module.entries[index] {
+                if self.entries[index].is_some() {
+                    panic!("duplicate request descriptor across API modules");
+                }
+                self.entries[index] = Some(descriptor);
+            }
+            index += 1;
+        }
+        self
+    }
+
+    const fn with_fallback(mut self, descriptor: &'static RequestDescriptor) -> Self {
+        let mut index = 0;
+        while index < Opcode::COUNT {
+            if self.entries[index].is_none() {
+                self.entries[index] = Some(descriptor);
+            }
+            index += 1;
+        }
+        self
+    }
+
+    const fn get(&self, opcode: Opcode) -> &'static RequestDescriptor {
+        match self.entries[opcode.index()] {
+            Some(descriptor) => descriptor,
+            None => panic!("modeled operation has no request descriptor"),
+        }
+    }
+}
+
+const REQUEST_DESCRIPTOR_CATALOG: RequestDescriptorCatalog = RequestDescriptorCatalog::new()
+    .register_module(compat_v1::request_descriptor_module())
+    .with_fallback(&generic::REQUEST_DESCRIPTOR);
+
+/// Composed provider used by the public server protocol facade.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct GeneratedFrameLayoutProvider;
+pub(crate) struct ComposedRequestDescriptorProvider;
 
-impl FrameLayoutProvider for GeneratedFrameLayoutProvider {
-    fn adapter_for(&self, opcode: Opcode) -> RequestAdapter {
-        FRAME_ADAPTER_REGISTRY
-            .iter()
-            .find(|registration| (registration.accepts)(opcode))
-            .map(|registration| registration.adapter)
-            .expect("generated frame adapter registry must have a fallback")
+impl RequestDescriptorProvider for ComposedRequestDescriptorProvider {
+    fn descriptor(&self, opcode: Opcode) -> &'static RequestDescriptor {
+        REQUEST_DESCRIPTOR_CATALOG.get(opcode)
     }
 }
 
-const DEFAULT_FRAME_LAYOUT_PROVIDER: GeneratedFrameLayoutProvider = GeneratedFrameLayoutProvider;
+const DEFAULT_REQUEST_DESCRIPTOR_PROVIDER: ComposedRequestDescriptorProvider =
+    ComposedRequestDescriptorProvider;
 
 impl RequestHeader {
     pub(super) const fn generic(
-        adapter: RequestAdapter,
+        descriptor: &'static RequestDescriptor,
         opcode: Opcode,
         encoded_len: usize,
         value_len: usize,
     ) -> Self {
         Self {
-            adapter,
+            descriptor,
             opcode,
             encoded_len,
             value_len,
@@ -225,7 +274,7 @@ impl RequestHeader {
     }
 
     pub(super) const fn compatibility(
-        adapter: RequestAdapter,
+        descriptor: &'static RequestDescriptor,
         opcode: Opcode,
         encoded_len: usize,
         value_len: usize,
@@ -236,7 +285,7 @@ impl RequestHeader {
         has_ttl: bool,
     ) -> Self {
         Self {
-            adapter,
+            descriptor,
             opcode,
             encoded_len,
             value_len,
@@ -328,7 +377,7 @@ pub struct RequestFrame<'a> {
 }
 
 impl<'a> RequestFrame<'a> {
-    fn layout_with<P: FrameLayoutProvider + ?Sized>(
+    fn layout_with<P: RequestDescriptorProvider + ?Sized>(
         prefix: &[u8],
         provider: &P,
     ) -> WireResult<Option<WireRequestLayout>> {
@@ -336,17 +385,17 @@ impl<'a> RequestFrame<'a> {
             return Ok(None);
         };
         let opcode = Opcode::try_from(opcode_byte)?;
-        let layout = provider.adapter_for(opcode).request_frame_layout(opcode)?;
+        let layout = provider.descriptor(opcode).request_frame_layout(opcode)?;
         Ok(Some(layout))
     }
 
     /// Decodes only the frame metadata needed to delimit one request.
     pub fn decode_header(prefix: &[u8]) -> WireResult<Option<RequestFrameHeader>> {
-        Self::decode_header_with(prefix, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::decode_header_with(prefix, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Decodes frame metadata with an explicitly selected layout provider.
-    pub(crate) fn decode_header_with<P: FrameLayoutProvider + ?Sized>(
+    pub(crate) fn decode_header_with<P: RequestDescriptorProvider + ?Sized>(
         prefix: &[u8],
         provider: &P,
     ) -> WireResult<Option<RequestFrameHeader>> {
@@ -358,11 +407,11 @@ impl<'a> RequestFrame<'a> {
 
     /// Reports the complete frame length once enough metadata is available.
     pub fn frame_len(prefix: &[u8]) -> WireResult<Option<usize>> {
-        Self::frame_len_with(prefix, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::frame_len_with(prefix, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Reports frame length with an explicitly selected layout provider.
-    pub(crate) fn frame_len_with<P: FrameLayoutProvider + ?Sized>(
+    pub(crate) fn frame_len_with<P: RequestDescriptorProvider + ?Sized>(
         prefix: &[u8],
         provider: &P,
     ) -> WireResult<Option<usize>> {
@@ -378,12 +427,12 @@ impl<'a> RequestFrame<'a> {
     /// Returns a protocol error when the opcode, generated wire layout, or
     /// complete frame length is invalid.
     pub fn decode(frame: &'a [u8]) -> WireResult<Self> {
-        Self::decode_with(frame, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::decode_with(frame, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Decodes one complete request with an explicitly selected layout
     /// provider.
-    pub(crate) fn decode_with<P: FrameLayoutProvider + ?Sized>(
+    pub(crate) fn decode_with<P: RequestDescriptorProvider + ?Sized>(
         frame: &'a [u8],
         provider: &P,
     ) -> WireResult<Self> {
@@ -505,7 +554,10 @@ impl Request {
     /// facade fields. The operation contract still validates the framing and
     /// generated field shape before the request is returned.
     pub fn new_generic(opcode: Opcode, value: Vec<u8>) -> Result<Self> {
-        if DEFAULT_FRAME_LAYOUT_PROVIDER.adapter_for(opcode) != RequestAdapter::Generic {
+        if !std::ptr::eq(
+            DEFAULT_REQUEST_DESCRIPTOR_PROVIDER.descriptor(opcode),
+            &generic::REQUEST_DESCRIPTOR,
+        ) {
             return Err(ProtocolError::InvalidRequestShape {
                 opcode,
                 expected_item_id: 0,
@@ -534,7 +586,10 @@ impl Request {
     /// bytes in plan order; compatibility operations intentionally reject this
     /// constructor and use their typed adapter instead.
     pub fn new_generic_fields(opcode: Opcode, fields: Vec<Option<Vec<u8>>>) -> Result<Self> {
-        if DEFAULT_FRAME_LAYOUT_PROVIDER.adapter_for(opcode) != RequestAdapter::Generic {
+        if !std::ptr::eq(
+            DEFAULT_REQUEST_DESCRIPTOR_PROVIDER.descriptor(opcode),
+            &generic::REQUEST_DESCRIPTOR,
+        ) {
             return Err(ProtocolError::InvalidRequestShape {
                 opcode,
                 expected_item_id: 0,
@@ -710,10 +765,10 @@ impl Request {
         self.validate()?;
         let mut output = Vec::new();
         output.push(self.opcode as u8);
-        let adapter = DEFAULT_FRAME_LAYOUT_PROVIDER.adapter_for(self.opcode);
-        if !adapter.encode_request_prefix(self, &mut output)? {
+        let descriptor = DEFAULT_REQUEST_DESCRIPTOR_PROVIDER.descriptor(self.opcode);
+        if !descriptor.encode_request_prefix(self, &mut output)? {
             return Err(ProtocolError::InvalidFieldSequence(
-                "request adapter did not encode the modeled operation",
+                "request descriptor did not encode the modeled operation",
             ));
         }
         Ok(output)
@@ -721,22 +776,22 @@ impl Request {
 
     /// Decodes and validates one complete request frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
-        Self::decode_with(frame, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::decode_with(frame, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Decodes and validates one complete request frame with an explicitly
     /// selected layout provider.
-    pub(crate) fn decode_with<P: FrameLayoutProvider + ?Sized>(
+    pub(crate) fn decode_with<P: RequestDescriptorProvider + ?Sized>(
         frame: &[u8],
         provider: &P,
     ) -> Result<Self> {
         let header = Self::validated_header_with(frame, provider)?;
-        header.adapter.decode_request(frame, header)
+        header.descriptor.decode_request(frame, header)
     }
 
     /// Decodes a request while reusing the frame allocation for its value.
     pub fn decode_owned(frame: Vec<u8>) -> Result<Self> {
-        Self::decode_owned_impl(frame, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::decode_owned_impl(frame, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Decodes a server request after the frame boundary has been checked.
@@ -747,27 +802,27 @@ impl Request {
     /// avoiding a second scan on the request hot path.
     #[allow(dead_code)]
     pub(crate) fn decode_owned_for_server(frame: Vec<u8>) -> Result<ServerRequest> {
-        Self::decode_owned_for_server_with(frame, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::decode_owned_for_server_with(frame, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Decodes a server request with an explicitly selected layout provider.
-    pub(crate) fn decode_owned_for_server_with<P: FrameLayoutProvider + ?Sized>(
+    pub(crate) fn decode_owned_for_server_with<P: RequestDescriptorProvider + ?Sized>(
         frame: Vec<u8>,
         provider: &P,
     ) -> Result<ServerRequest> {
         let header = Self::validated_header_with(&frame, provider)?;
-        header.adapter.decode_server_request(frame, header)
+        header.descriptor.decode_server_request(frame, header)
     }
 
-    fn decode_owned_impl<P: FrameLayoutProvider + ?Sized>(
+    fn decode_owned_impl<P: RequestDescriptorProvider + ?Sized>(
         frame: Vec<u8>,
         provider: &P,
     ) -> Result<Self> {
         let header = Self::validated_header_with(&frame, provider)?;
-        header.adapter.decode_owned_request(frame, header)
+        header.descriptor.decode_owned_request(frame, header)
     }
 
-    fn validated_header_with<P: FrameLayoutProvider + ?Sized>(
+    fn validated_header_with<P: RequestDescriptorProvider + ?Sized>(
         frame: &[u8],
         provider: &P,
     ) -> Result<RequestHeader> {
@@ -793,11 +848,11 @@ impl Request {
 
     /// Decodes a request header when enough metadata bytes are available.
     pub fn decode_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-        Self::decode_header_with(prefix, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::decode_header_with(prefix, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Decodes a request header with an explicitly selected layout provider.
-    pub(crate) fn decode_header_with<P: FrameLayoutProvider + ?Sized>(
+    pub(crate) fn decode_header_with<P: RequestDescriptorProvider + ?Sized>(
         prefix: &[u8],
         provider: &P,
     ) -> Result<Option<RequestHeader>> {
@@ -805,16 +860,16 @@ impl Request {
             return Ok(None);
         };
         let opcode = Opcode::try_from(opcode_byte)?;
-        provider.adapter_for(opcode).decode_header(prefix, opcode)
+        provider.descriptor(opcode).decode_header(prefix, opcode)
     }
 
     /// Reports the complete request frame length once metadata is available.
     pub fn frame_len(prefix: &[u8]) -> Result<Option<usize>> {
-        Self::frame_len_with(prefix, &DEFAULT_FRAME_LAYOUT_PROVIDER)
+        Self::frame_len_with(prefix, &DEFAULT_REQUEST_DESCRIPTOR_PROVIDER)
     }
 
     /// Reports frame length with an explicitly selected layout provider.
-    pub(crate) fn frame_len_with<P: FrameLayoutProvider + ?Sized>(
+    pub(crate) fn frame_len_with<P: RequestDescriptorProvider + ?Sized>(
         prefix: &[u8],
         provider: &P,
     ) -> Result<Option<usize>> {
@@ -825,8 +880,8 @@ impl Request {
     }
 
     fn validate(&self) -> Result<()> {
-        DEFAULT_FRAME_LAYOUT_PROVIDER
-            .adapter_for(self.opcode)
+        DEFAULT_REQUEST_DESCRIPTOR_PROVIDER
+            .descriptor(self.opcode)
             .validate_request(self)
     }
 }

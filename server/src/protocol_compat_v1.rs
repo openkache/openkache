@@ -17,13 +17,37 @@ use contract::{
 };
 
 use super::{
-    ItemId, NamespacePolicy, Opcode, ProtocolError, RequestHeader, Result, SetOptions,
-    WireRequestLayout, WireRequestStep, WireResult,
+    ItemId, NamespacePolicy, Opcode, ProtocolError, RequestDescriptor, RequestDescriptorModule,
+    RequestHeader, Result, SetOptions, WireRequestLayout, WireRequestStep, WireResult,
 };
 
 #[path = "protocol_compat_v1_policy.rs"]
 mod policy;
 pub(crate) use policy::decode_namespace_policy;
+
+const REQUEST_DESCRIPTOR: RequestDescriptor = RequestDescriptor::new(
+    "draft-v1",
+    request_frame_layout,
+    decode_header,
+    encode_request_prefix,
+    validate_request,
+    decode_request,
+    decode_owned_request,
+    decode_server_request,
+);
+
+pub(super) const fn request_descriptor_module() -> RequestDescriptorModule {
+    let mut module = RequestDescriptorModule::new();
+    let mut index = 0;
+    while index < Opcode::COUNT {
+        let opcode = Opcode::ALL[index];
+        if openkache_protocol::compat_v1::route_for_opcode(opcode).is_some() {
+            module = module.register(opcode, &REQUEST_DESCRIPTOR);
+        }
+        index += 1;
+    }
+    module
+}
 
 /// Compact request layouts owned by the protocol-v1 compatibility adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,11 +82,6 @@ pub(super) fn compatibility_route(opcode: Opcode) -> Option<CompactV1RequestRout
         }
         OperationCompactV1Route::NamespaceDelete => CompactV1RequestRoute::NamespaceDelete,
     })
-}
-
-/// Predicate used by the protocol adapter registry.
-pub(super) fn compatibility_route_for_opcode(opcode: Opcode) -> bool {
-    compatibility_route(opcode).is_some()
 }
 
 /// Returns the protocol-v1 namespace-name limit for compatibility-owned
@@ -169,7 +188,7 @@ pub(super) fn encode_request_prefix(
 pub(super) fn decode_header(
     prefix: &[u8],
     opcode: Opcode,
-    adapter: super::RequestAdapter,
+    descriptor: &'static RequestDescriptor,
 ) -> Result<Option<RequestHeader>> {
     let route = compatibility_route(opcode).ok_or(ProtocolError::InvalidFieldSequence(
         "opcode has no protocol-v1 compatibility route",
@@ -191,7 +210,7 @@ pub(super) fn decode_header(
             }
             let namespace_id = read_namespace_id(&prefix[openkache_protocol::OPCODE_BYTES..])?;
             Ok(Some(RequestHeader::compatibility(
-                adapter,
+                descriptor,
                 opcode,
                 required,
                 0,
@@ -210,7 +229,7 @@ pub(super) fn decode_header(
             }
             let namespace_id = read_namespace_id(&prefix[openkache_protocol::OPCODE_BYTES..])?;
             Ok(Some(RequestHeader::compatibility(
-                adapter,
+                descriptor,
                 opcode,
                 required,
                 0,
@@ -221,12 +240,14 @@ pub(super) fn decode_header(
                 false,
             )))
         }
-        CompactV1RequestRoute::Set => decode_set_header(prefix, adapter),
-        CompactV1RequestRoute::NamespaceOpen => decode_namespace_open_header(prefix, adapter),
+        CompactV1RequestRoute::Set => decode_set_header(prefix, descriptor),
+        CompactV1RequestRoute::NamespaceOpen => decode_namespace_open_header(prefix, descriptor),
         CompactV1RequestRoute::NamespaceUpdatePolicy => {
-            decode_namespace_update_header(prefix, adapter)
+            decode_namespace_update_header(prefix, descriptor)
         }
-        CompactV1RequestRoute::NamespaceDelete => decode_namespace_delete_header(prefix, adapter),
+        CompactV1RequestRoute::NamespaceDelete => {
+            decode_namespace_delete_header(prefix, descriptor)
+        }
     }
 }
 
@@ -465,7 +486,7 @@ pub(super) fn decode_request_metadata(
 
 pub(super) fn decode_set_header(
     prefix: &[u8],
-    adapter: super::RequestAdapter,
+    descriptor: &'static RequestDescriptor,
 ) -> Result<Option<RequestHeader>> {
     let fixed = openkache_protocol::OPCODE_BYTES
         + openkache_protocol::NAMESPACE_ID_BYTES
@@ -525,7 +546,7 @@ pub(super) fn decode_set_header(
     super::validate_value_length(value_len)?;
     let set_options = SetOptions::decode_set_options(flags, ttl_ms)?;
     Ok(Some(RequestHeader::compatibility(
-        adapter,
+        descriptor,
         Opcode::Set,
         cursor + value_len_bytes,
         value_len,
@@ -539,7 +560,7 @@ pub(super) fn decode_set_header(
 
 pub(super) fn decode_namespace_open_header(
     prefix: &[u8],
-    adapter: super::RequestAdapter,
+    descriptor: &'static RequestDescriptor,
 ) -> Result<Option<RequestHeader>> {
     let fixed = openkache_protocol::OPCODE_BYTES
         + OPEN_FLAGS_BYTES
@@ -571,7 +592,7 @@ pub(super) fn decode_namespace_open_header(
         name_end
     };
     Ok(Some(RequestHeader::compatibility(
-        adapter,
+        descriptor,
         Opcode::NamespaceOpen,
         encoded_len,
         0,
@@ -585,7 +606,7 @@ pub(super) fn decode_namespace_open_header(
 
 pub(super) fn decode_namespace_update_header(
     prefix: &[u8],
-    adapter: super::RequestAdapter,
+    descriptor: &'static RequestDescriptor,
 ) -> Result<Option<RequestHeader>> {
     let fixed = openkache_protocol::OPCODE_BYTES
         + openkache_protocol::NAMESPACE_ID_BYTES
@@ -604,7 +625,7 @@ pub(super) fn decode_namespace_update_header(
         return Ok(None);
     };
     Ok(Some(RequestHeader::compatibility(
-        adapter,
+        descriptor,
         Opcode::NamespaceUpdatePolicy,
         fixed + policy_len,
         0,
@@ -618,7 +639,7 @@ pub(super) fn decode_namespace_update_header(
 
 pub(super) fn decode_namespace_delete_header(
     prefix: &[u8],
-    adapter: super::RequestAdapter,
+    descriptor: &'static RequestDescriptor,
 ) -> Result<Option<RequestHeader>> {
     let fixed = openkache_protocol::OPCODE_BYTES
         + DELETE_FLAGS_BYTES
@@ -644,7 +665,7 @@ pub(super) fn decode_namespace_delete_header(
         return Err(ProtocolError::InvalidRevision);
     }
     Ok(Some(RequestHeader::compatibility(
-        adapter,
+        descriptor,
         Opcode::NamespaceDelete,
         fixed,
         0,

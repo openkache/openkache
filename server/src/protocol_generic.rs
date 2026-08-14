@@ -14,6 +14,17 @@ use smallvec::SmallVec;
 
 const INLINE_OPERATION_FIELDS: usize = 8;
 
+pub(super) const REQUEST_DESCRIPTOR: super::RequestDescriptor = super::RequestDescriptor::new(
+    "generated",
+    request_frame_layout,
+    decode_header,
+    encode_request_prefix,
+    validate_request,
+    decode_request,
+    decode_owned_request,
+    decode_server_request,
+);
+
 pub(super) fn request_frame_layout(opcode: Opcode) -> WireResult<WireRequestLayout> {
     Ok(contract::wire_request_layout(opcode))
 }
@@ -21,7 +32,7 @@ pub(super) fn request_frame_layout(opcode: Opcode) -> WireResult<WireRequestLayo
 pub(super) fn decode_header(
     prefix: &[u8],
     opcode: Opcode,
-    adapter: super::RequestAdapter,
+    descriptor: &'static super::RequestDescriptor,
 ) -> Result<Option<super::RequestHeader>> {
     let plan = contract::operation_wire_spec(opcode).request;
     if plan.frame == contract::OperationFramePolicy::FixedBody {
@@ -34,7 +45,7 @@ pub(super) fn decode_header(
             return Ok(None);
         }
         return Ok(Some(super::RequestHeader::generic(
-            adapter,
+            descriptor,
             opcode,
             OPCODE_BYTES,
             body_len,
@@ -43,7 +54,7 @@ pub(super) fn decode_header(
     let framing = plan.framing;
     match framing {
         contract::OperationLayoutFraming::Empty => Ok(Some(super::RequestHeader::generic(
-            adapter,
+            descriptor,
             opcode,
             OPCODE_BYTES,
             0,
@@ -68,7 +79,7 @@ pub(super) fn decode_header(
                 usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
             validate_value_length(value_len)?;
             Ok(Some(super::RequestHeader::generic(
-                adapter,
+                descriptor,
                 opcode,
                 OPCODE_BYTES + value_len_bytes,
                 value_len,

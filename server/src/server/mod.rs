@@ -18,8 +18,8 @@ use crate::observability::{
 };
 use crate::platform::StorageDeviceKind;
 use crate::protocol::{
-    FrameLayoutProvider, GeneratedFrameLayoutProvider, ItemId, NamespaceDescriptor,
-    NamespacePolicy, Request, Response, ServerRequest,
+    ComposedRequestDescriptorProvider, ItemId, NamespaceDescriptor, NamespacePolicy, Request,
+    RequestDescriptorProvider, Response, ServerRequest,
 };
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
@@ -126,5 +126,5 @@ pub struct KacheServer {
     max_item_bytes: usize,
     observability: ObservabilityService,
     capabilities: Arc<dyn CapabilityCatalog>,
-    frame_layout_provider: Arc<dyn FrameLayoutProvider>,
+    request_descriptor_provider: Arc<dyn RequestDescriptorProvider>,
 }
