@@ -9,7 +9,7 @@ use crossfire::{MAsyncRx, MAsyncTx};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{Response, ResponseHeaderBytes, ResponseParts};
 
-use crate::protocol::RequestParts;
+use crate::protocol::RequestAttempt;
 use crate::{Backend, Error, Operation, Result};
 
 #[cfg(feature = "quic-compio")]
@@ -45,7 +45,7 @@ pub(crate) trait ClientConnection: Sized {
 pub(crate) trait ClientLane {
     fn write_request(
         &mut self,
-        parts: RequestParts,
+        request: RequestAttempt,
         timeout: Duration,
     ) -> impl Future<Output = Result<()>>;
 
@@ -109,10 +109,10 @@ macro_rules! connection_backend {
         impl ClientLane for $lane<'_> {
             async fn write_request(
                 &mut self,
-                parts: RequestParts,
+                request: RequestAttempt,
                 timeout: Duration,
             ) -> Result<()> {
-                self.0.write_request(parts, timeout).await
+                self.0.write_request(request, timeout).await
             }
 
             async fn read_response(
@@ -175,7 +175,7 @@ trait BackendConnection {
 trait BackendStream {
     fn write_request(
         &mut self,
-        parts: RequestParts,
+        request: RequestAttempt,
         timeout: Duration,
     ) -> impl Future<Output = std::result::Result<(), TransportError>>;
 
@@ -305,12 +305,12 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
         }
     }
 
-    async fn write_request(&mut self, parts: RequestParts, timeout: Duration) -> Result<()> {
+    async fn write_request(&mut self, request: RequestAttempt, timeout: Duration) -> Result<()> {
         let stream = self
             .stream
             .as_mut()
             .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
-        stream.write_request(parts, timeout).await?;
+        stream.write_request(request, timeout).await?;
         Ok(())
     }
 

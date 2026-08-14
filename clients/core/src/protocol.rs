@@ -4,6 +4,8 @@
 //! reusable codecs. This module owns Rust client semantics and selects the
 //! compact-v1 adapter only for operations that explicitly join that profile.
 
+use std::sync::Arc;
+
 use openkache_protocol::{
     ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES,
     NAMESPACE_REVISION_BYTES, Opcode, OperationFramePolicy, OperationLayoutFraming,
@@ -341,7 +343,7 @@ fn generated_retry_policy(opcode: Opcode, create_if_missing: bool) -> RequestRet
 }
 
 /// A validated request owned by the Rust client adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Request {
     pub(crate) opcode: Opcode,
     namespace_id: Option<u64>,
@@ -360,6 +362,24 @@ pub(crate) struct Request {
 pub(crate) struct RequestParts {
     pub(crate) prefix: Vec<u8>,
     pub(crate) payload: Vec<u8>,
+}
+
+/// One transport write with ownership matched to its replay policy.
+pub(crate) enum RequestAttempt {
+    /// A non-replayable request moved directly into its only attempt.
+    Once(RequestParts),
+    /// A replayable request retained by the retry loop.
+    Replay(Arc<RequestParts>),
+}
+
+impl RequestAttempt {
+    #[cfg(feature = "quic-quinn")]
+    pub(crate) fn as_parts(&self) -> &RequestParts {
+        match self {
+            Self::Once(parts) => parts,
+            Self::Replay(parts) => parts,
+        }
+    }
 }
 
 impl Request {
