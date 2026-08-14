@@ -21,7 +21,7 @@ use super::operation_outcome::{
 };
 use super::operation_registry::OperationFuture;
 use super::storage_port::{
-    STORAGE_PORT, StorageAddress, StorageError, StoragePortExt, StoragePortHandle,
+    STORAGE_PORT, StorageAddress, StorageError, StoragePortHandle,
 };
 
 /// Application behavior for the route-less example API.
@@ -389,13 +389,8 @@ pub(super) fn storage_read_handler<'a>(context: OperationContext<'a>) -> Operati
             b"storage capability is not installed",
         )));
     };
-    let address = StorageAddress::from_owned_range(key);
-    let task_address = address.clone();
     OperationFuture::pending(Box::pin(async move {
-        match storage
-            .execute_typed_for_key(address, move |worker| Box::pin(worker.get(task_address)))
-            .await
-        {
+        match storage.get(StorageAddress::from_owned_range(key)).await {
             Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value),
             Ok(None) => OperationOutcome::opaque(
                 OperationStatus::NotFound,

@@ -574,6 +574,25 @@ impl ThreadedKvkache {
         .and_then(|response| keyed_compatibility::value_response(response, "get"))
     }
 
+    async fn get_storage_key_with_requester(
+        &self,
+        storage_key: StorageKey,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<Option<StoredItemValue>> {
+        let worker = self.owner(&storage_key);
+        self.request(
+            worker,
+            Operation::unknown(),
+            requester,
+            |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_compatibility::get(response),
+            },
+        )
+        .await
+        .and_then(|response| keyed_compatibility::value_response(response, "storage get"))
+    }
+
     /// Retrieves an item from a namespace-scoped wire identity.
     #[allow(dead_code)]
     pub(crate) async fn get_in_namespace(

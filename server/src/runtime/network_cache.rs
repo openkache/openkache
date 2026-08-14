@@ -15,8 +15,8 @@ use crate::{Result, SetOutcome, StorageKey};
 use super::ThreadedKvkache;
 use super::storage_backend;
 use super::storage_port::{
-    StorageAddress, StorageError, StoragePort, StorageResult, StorageTaskFuture, StorageTaskOutput,
-    StorageTaskScope,
+    StorageAddress, StorageError, StoragePort, StorageReadFuture, StorageResult, StorageTaskFuture,
+    StorageTaskOutput, StorageTaskScope,
 };
 use super::storage_task::StorageTask;
 
@@ -174,6 +174,17 @@ impl NetworkWorkerCache {
 }
 
 impl StoragePort for NetworkWorkerCache {
+    fn get<'a>(&'a self, storage_address: StorageAddress) -> StorageReadFuture<'a> {
+        let storage_key = storage_backend::storage_key_for_address(&storage_address);
+        Box::pin(async move {
+            self.cache
+                .get_storage_key_with_requester(storage_key, Some(self.network_worker))
+                .await
+                .map(|value| value.map(StoredItemValue::into_bytes))
+                .map_err(StorageError::from)
+        })
+    }
+
     fn execute_for_key<'a>(
         &'a self,
         storage_address: StorageAddress,

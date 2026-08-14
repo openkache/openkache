@@ -7,7 +7,6 @@ use std::any::Any;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::Arc;
 
 use openkache_protocol::OwnedRange;
 
@@ -21,35 +20,24 @@ use super::storage_task::{StorageTask, StorageTaskMetadata};
 /// Callers may use fixed- or variable-length identities. Both are normalized
 /// by the runtime adapter, so API contracts do not need to adopt the storage
 /// engine's internal key width or namespace.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct StorageAddress {
-    owner: Arc<Vec<u8>>,
-    start: usize,
-    end: usize,
+    owner: OwnedRange,
 }
 
 impl StorageAddress {
     pub(crate) fn new(bytes: impl AsRef<[u8]>) -> Self {
-        let owner = Arc::new(bytes.as_ref().to_vec());
-        let end = owner.len();
-        Self {
-            owner,
-            start: 0,
-            end,
-        }
+        Self::from_owned(bytes.as_ref().to_vec())
     }
 
     /// Takes ownership of an existing byte buffer without copying it.
     ///
     /// The address may outlive the request frame while a storage task is
-    /// queued, so the buffer is moved into the shared address owner instead
-    /// of borrowing transport memory.
+    /// queued, so the buffer is moved into the address instead of borrowing
+    /// transport memory.
     pub(crate) fn from_owned(bytes: Vec<u8>) -> Self {
-        let end = bytes.len();
         Self {
-            owner: Arc::new(bytes),
-            start: 0,
-            end,
+            owner: OwnedRange::whole(bytes),
         }
     }
 
@@ -60,14 +48,7 @@ impl StorageAddress {
     /// prefix. The returned address still compares and hashes by the visible
     /// range rather than by the hidden frame bytes.
     pub(crate) fn from_owned_range(bytes: OwnedRange) -> Self {
-        let (bytes, range) = bytes.into_parts();
-        let start = range.start;
-        let end = range.end;
-        if start == 0 && end == bytes.len() {
-            return Self::from_owned(bytes);
-        }
-        let owner = Arc::new(bytes);
-        Self { owner, start, end }
+        Self { owner: bytes }
     }
 
     /// Creates an address from a borrowed key without exposing ownership
@@ -101,9 +82,7 @@ impl StorageAddress {
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
-        self.owner
-            .get(self.start..self.end)
-            .expect("storage address range must remain within its owner")
+        self.owner.as_slice()
     }
 }
 
@@ -188,6 +167,10 @@ pub(crate) type StorageTaskFuture<'a> =
 
 /// Future returned by a neutral storage context operation.
 pub(crate) type StorageContextFuture<'a, T> = Pin<Box<dyn Future<Output = StorageResult<T>> + 'a>>;
+
+/// Future returned by a neutral storage read.
+pub(crate) type StorageReadFuture<'a> =
+    Pin<Box<dyn Future<Output = StorageResult<Option<Vec<u8>>>> + 'a>>;
 
 /// Typed completion future for the storage-port convenience methods.
 pub(crate) type StorageTypedTaskFuture<'a, T> =
@@ -395,6 +378,9 @@ pub(crate) trait StorageContext {
 /// the implementation here avoids making the runtime depend on the server
 /// composition module while still hiding worker details from API bindings.
 pub(crate) trait StoragePort: Any + Send + Sync {
+    /// Retrieves the value stored at one opaque address.
+    fn get<'a>(&'a self, storage_address: StorageAddress) -> StorageReadFuture<'a>;
+
     /// Submits keyed work to the owner of one storage key.
     fn execute_for_key<'a>(
         &'a self,
