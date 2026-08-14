@@ -145,6 +145,7 @@ pub(super) struct OperationFieldRecord {
 /// compatibility adapters may use static bytes for canonical tokens.
 pub(super) enum OperationFieldStorage {
     OwnedBytes(Vec<u8>),
+    InlineBytes { bytes: [u8; 8], len: u8 },
     FrameRange { start: usize, end: usize },
     OwnerRange { start: usize, end: usize },
     StaticBytes(&'static [u8]),
@@ -658,9 +659,20 @@ fn sentinel_offsets(field_count: usize) -> SmallVec<[(usize, usize); INLINE_OPER
 }
 
 impl OperationFieldStorage {
+    pub(super) fn inline<const N: usize>(value: [u8; N]) -> Self {
+        assert!(N <= 8, "inline operation fields hold at most eight bytes");
+        let mut bytes = [0; 8];
+        bytes[..N].copy_from_slice(&value);
+        Self::InlineBytes {
+            bytes,
+            len: N as u8,
+        }
+    }
+
     fn as_value<'a>(&'a self, frame: Option<&'a [u8]>) -> Option<&'a [u8]> {
         match self {
             Self::OwnedBytes(value) => Some(value),
+            Self::InlineBytes { bytes, len } => Some(&bytes[..usize::from(*len)]),
             Self::StaticBytes(value) => Some(value),
             Self::FrameRange { start, end } => frame.and_then(|frame| frame.get(*start..*end)),
             Self::OwnerRange { start, end } => frame.and_then(|frame| frame.get(*start..*end)),
