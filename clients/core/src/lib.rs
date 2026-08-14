@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
 use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Response, Status};
-use protocol::Request;
+use protocol::{GenericRequest, Request};
 use request::{RequestAttempt, RequestBuilder, RequestParts};
 use transport::{ClientConnection, ClientLane};
 
@@ -499,7 +499,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Ping,
-                Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?,
+                GenericRequest::new(Opcode::Ping, Vec::new()).map_err(Error::protocol)?,
             )
             .await?;
         expect_status(Operation::Ping, response.status, &[Status::Ok])?;

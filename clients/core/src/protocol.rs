@@ -327,7 +327,108 @@ fn generated_retry_policy(opcode: Opcode, create_if_missing: bool) -> RequestRet
     }
 }
 
-/// A validated request owned by the Rust client adapter.
+/// A validated request using the generated operation framing contract.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct GenericRequest {
+    opcode: Opcode,
+    value: Vec<u8>,
+    retry_policy: RequestRetryPolicy,
+}
+
+impl GenericRequest {
+    pub(crate) fn new(opcode: Opcode, value: Vec<u8>) -> Result<Self> {
+        let request = Self {
+            opcode,
+            value,
+            retry_policy: generated_retry_policy(opcode, false),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn into_parts(self) -> Result<RequestParts> {
+        let mut prefix = Vec::with_capacity(1 + openkache_protocol::MAX_VARUINT_BYTES);
+        prefix.push(self.opcode as u8);
+        let request = operation_wire_spec(self.opcode).request;
+        match request.framing {
+            OperationLayoutFraming::Empty => {}
+            OperationLayoutFraming::Opaque => {
+                append_varuint(&mut prefix, self.value.len() as u64);
+            }
+            OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
+                if request.frame == OperationFramePolicy::LengthDelimited {
+                    append_varuint(&mut prefix, self.value.len() as u64);
+                }
+            }
+            OperationLayoutFraming::OptionalValues => {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "optional-value framing is response-only",
+                ));
+            }
+        }
+        Ok(RequestParts::new([
+            WireSegment::owned(prefix),
+            WireSegment::owned(self.value),
+        ])?)
+    }
+
+    fn validate(&self) -> Result<()> {
+        validate_value_length(self.value.len())?;
+        let request = operation_wire_spec(self.opcode).request;
+        match request.framing {
+            OperationLayoutFraming::Empty if self.value.is_empty() => Ok(()),
+            OperationLayoutFraming::Empty => Err(invalid_shape(self.opcode, 0, "empty body")),
+            OperationLayoutFraming::Opaque => {
+                if let Some(field) = request.fields.first() {
+                    validate_operation_field(field, &self.value)?;
+                }
+                Ok(())
+            }
+            OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
+                if request.fields.len() > MAX_OPERATION_REQUEST_FIELDS {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "generated request field bound is stale",
+                    ));
+                }
+                let mut offsets = [(usize::MAX, usize::MAX); MAX_OPERATION_REQUEST_FIELDS];
+                decode_planned_fields(
+                    &self.value,
+                    request.fields,
+                    request.layout,
+                    &mut offsets[..request.fields.len()],
+                )?;
+                for (index, field) in request.fields.iter().enumerate() {
+                    let (start, end) = offsets[index];
+                    if start == usize::MAX {
+                        if field.required {
+                            return Err(ProtocolError::InvalidFieldSequence(
+                                "required request field is missing",
+                            ));
+                        }
+                    } else {
+                        validate_operation_field(field, &self.value[start..end])?;
+                    }
+                }
+                Ok(())
+            }
+            OperationLayoutFraming::OptionalValues => Err(ProtocolError::InvalidFieldSequence(
+                "optional-value framing is response-only",
+            )),
+        }
+    }
+}
+
+impl RequestBuilder for GenericRequest {
+    fn retry_policy(&self) -> RequestRetryPolicy {
+        self.retry_policy
+    }
+
+    fn into_parts(self) -> crate::Result<RequestParts> {
+        Self::into_parts(self).map_err(crate::Error::protocol)
+    }
+}
+
+/// A validated draft-v1 request owned by the Rust client adapter.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Request {
     pub(crate) opcode: Opcode,
@@ -343,23 +444,6 @@ pub(crate) struct Request {
 }
 
 impl Request {
-    pub(crate) fn new(opcode: Opcode, item_id: Option<ItemId>, value: Vec<u8>) -> Result<Self> {
-        let request = Self {
-            opcode,
-            namespace_id: None,
-            item_ids: item_id.into_iter().collect(),
-            set_options: SetWireOptions::NONE,
-            value,
-            namespace_name: None,
-            namespace_policy: None,
-            expected_revision: None,
-            create_if_missing: false,
-            retry_policy: generated_retry_policy(opcode, false),
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
     pub(crate) fn new_scoped(
         opcode: Opcode,
         namespace_id: u64,
@@ -452,30 +536,8 @@ impl Request {
     }
 
     fn into_parts(self) -> Result<RequestParts> {
-        let prefix = if let Some(prefix) = compat_v1::encode_prefix(&self)? {
-            prefix
-        } else {
-            let mut prefix = Vec::with_capacity(1 + openkache_protocol::MAX_VARUINT_BYTES);
-            prefix.push(self.opcode as u8);
-            let request = operation_wire_spec(self.opcode).request;
-            match request.framing {
-                OperationLayoutFraming::Empty => {}
-                OperationLayoutFraming::Opaque => {
-                    append_varuint(&mut prefix, self.value.len() as u64);
-                }
-                OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
-                    if request.frame == OperationFramePolicy::LengthDelimited {
-                        append_varuint(&mut prefix, self.value.len() as u64);
-                    }
-                }
-                OperationLayoutFraming::OptionalValues => {
-                    return Err(ProtocolError::InvalidFieldSequence(
-                        "optional-value framing is response-only",
-                    ));
-                }
-            }
-            prefix
-        };
+        let prefix = compat_v1::encode_prefix(&self)?
+            .ok_or_else(|| invalid_shape(self.opcode, self.item_ids.len(), "draft-v1 request"))?;
         Ok(RequestParts::new([
             WireSegment::owned(prefix),
             WireSegment::owned(self.value),
@@ -485,58 +547,13 @@ impl Request {
     fn validate(&self) -> Result<()> {
         validate_value_length(self.value.len())?;
         if compat_v1::validate_request(self)? {
-            return Ok(());
-        }
-        if self.namespace_id.is_some()
-            || !self.item_ids.is_empty()
-            || self.set_options != SetWireOptions::NONE
-            || self.namespace_name.is_some()
-            || self.namespace_policy.is_some()
-            || self.expected_revision.is_some()
-            || self.create_if_missing
-        {
-            return Err(invalid_shape(self.opcode, 0, "generic body"));
-        }
-        let request = operation_wire_spec(self.opcode).request;
-        match request.framing {
-            OperationLayoutFraming::Empty if self.value.is_empty() => Ok(()),
-            OperationLayoutFraming::Empty => Err(invalid_shape(self.opcode, 0, "empty body")),
-            OperationLayoutFraming::Opaque => {
-                if let Some(field) = request.fields.first() {
-                    validate_operation_field(field, &self.value)?;
-                }
-                Ok(())
-            }
-            OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
-                if request.fields.len() > MAX_OPERATION_REQUEST_FIELDS {
-                    return Err(ProtocolError::InvalidFieldSequence(
-                        "generated request field bound is stale",
-                    ));
-                }
-                let mut offsets = [(usize::MAX, usize::MAX); MAX_OPERATION_REQUEST_FIELDS];
-                decode_planned_fields(
-                    &self.value,
-                    request.fields,
-                    request.layout,
-                    &mut offsets[..request.fields.len()],
-                )?;
-                for (index, field) in request.fields.iter().enumerate() {
-                    let (start, end) = offsets[index];
-                    if start == usize::MAX {
-                        if field.required {
-                            return Err(ProtocolError::InvalidFieldSequence(
-                                "required request field is missing",
-                            ));
-                        }
-                    } else {
-                        validate_operation_field(field, &self.value[start..end])?;
-                    }
-                }
-                Ok(())
-            }
-            OperationLayoutFraming::OptionalValues => Err(ProtocolError::InvalidFieldSequence(
-                "optional-value framing is response-only",
-            )),
+            Ok(())
+        } else {
+            Err(invalid_shape(
+                self.opcode,
+                self.item_ids.len(),
+                "draft-v1 request",
+            ))
         }
     }
 
