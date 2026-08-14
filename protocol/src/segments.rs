@@ -9,7 +9,7 @@ use crate::{ProtocolError, Result};
 // Keep the common framing/payload pair inline without making every frame
 // carry a large array of segment owners. Longer plans spill metadata only;
 // their payload allocations remain unchanged.
-const INLINE_SEGMENTS: usize = 2;
+pub(crate) const INLINE_SEGMENTS: usize = 2;
 
 /// An owned buffer with a logical byte range.
 ///
@@ -146,6 +146,12 @@ impl OwnedFrame {
     {
         let segments: SmallVec<[WireSegment; INLINE_SEGMENTS]> =
             segments.into_iter().map(Into::into).collect();
+        Self::from_segments(segments)
+    }
+
+    pub(crate) fn from_segments(
+        segments: SmallVec<[WireSegment; INLINE_SEGMENTS]>,
+    ) -> Result<Self> {
         let encoded_len = segments.iter().try_fold(0usize, |total, segment| {
             total
                 .checked_add(segment.len())

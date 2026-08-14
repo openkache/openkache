@@ -5,18 +5,12 @@
 //! primitive for each operation.
 
 use crate::{
-    OperationFieldLayout, OperationFieldPlan, ProtocolError, ResponseSegment, Result,
+    OperationFieldLayout, OperationFieldPlan, OwnedFrame, ProtocolError, Result, WireSegment,
     encode_field_sequence,
 };
 use smallvec::SmallVec;
 
 const INLINE_FIELDS: usize = 8;
-
-/// Value that can be appended to a segmented response without coalescing it.
-pub trait LayoutValue {
-    /// Returns the number of bytes written for this value.
-    fn encoded_len(&self) -> usize;
-}
 
 /// Encodes required fixed-width fields without per-field prefixes.
 pub fn encode_dense_fields(values: &[&[u8]], widths: &[usize]) -> Result<Vec<u8>> {
@@ -210,58 +204,133 @@ pub fn decode_planned_fields(
     decode_layout_fields(payload, layout, &required, &widths, offsets)
 }
 
-/// Encodes a field sequence while retaining ownership of value segments.
-pub fn encode_field_sequence_segments<T, F>(
-    values: SmallVec<[Option<T>; INLINE_FIELDS]>,
-    mut append_value: F,
-) -> Result<SmallVec<[ResponseSegment; INLINE_FIELDS]>>
+/// Encodes generated field-layout metadata while retaining every value owner.
+///
+/// The operation plan owns field order, requiredness, and fixed widths. This
+/// primitive owns only structural layout bytes and never branches on an
+/// opcode, API name, or semantic field role. Optional-value layouts require
+/// the API-selected codec; other layouts ignore it.
+pub fn encode_planned_field_segments<I, T>(
+    values: I,
+    plan: &[OperationFieldPlan],
+    layout: OperationFieldLayout,
+    optional_codec: Option<&crate::OptionalValueCodec>,
+) -> Result<OwnedFrame>
 where
-    T: LayoutValue,
-    F: FnMut(&mut SmallVec<[ResponseSegment; INLINE_FIELDS]>, T),
+    I: IntoIterator<Item = Option<T>>,
+    T: Into<WireSegment>,
 {
-    let mut mask = SmallVec::<[u8; 32]>::new();
-    mask.resize(values.len().saturating_add(7) / 8, 0);
-    let final_present = values.iter().rposition(Option::is_some);
-    for (index, value) in values.iter().enumerate() {
-        if value.is_some() {
-            mask[index / 8] |= 1 << (index % 8);
+    if plan.len() > crate::MAX_OPERATION_FIELDS {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "operation field count exceeds the generated bound",
+        ));
+    }
+    let values: SmallVec<[Option<WireSegment>; INLINE_FIELDS]> = values
+        .into_iter()
+        .take(plan.len().saturating_add(1))
+        .map(|value| value.map(Into::into))
+        .collect();
+    if values.len() != plan.len() {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "field values do not match operation plan",
+        ));
+    }
+    for (value, field) in values.iter().zip(plan) {
+        if layout == OperationFieldLayout::Dense {
+            if !field.required {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "dense operation field is optional",
+                ));
+            }
+            if field.encoded_width == 0 {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "dense operation field has no declared fixed width",
+                ));
+            }
+        }
+        if field.required && value.is_none() {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "required operation field is missing",
+            ));
+        }
+        if let Some(value) = value
+            && field.encoded_width != 0
+            && value.len() != field.encoded_width
+        {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "operation field does not match its declared fixed width",
+            ));
         }
     }
-    let mut segments = SmallVec::new();
-    segments.push(ResponseSegment::Inline(mask));
-    for (index, value) in values.into_iter().enumerate() {
-        let Some(value) = value else {
-            continue;
-        };
-        if Some(index) != final_present {
-            let length = u64::try_from(value.encoded_len())
-                .map_err(|_| ProtocolError::FrameLengthOverflow)?;
-            let (encoded, encoded_len) = crate::encode_varuint(length);
-            segments.push(ResponseSegment::inline(&encoded[..encoded_len]));
-        }
-        append_value(&mut segments, value);
-    }
-    Ok(segments)
-}
 
-/// Encodes an API-configured optional-value sequence while retaining value
-/// ownership.
-pub fn encode_optional_value_segments<T, F>(
-    values: SmallVec<[Option<T>; INLINE_FIELDS]>,
-    codec: &crate::OptionalValueCodec,
-    mut append_value: F,
-) -> Result<SmallVec<[ResponseSegment; INLINE_FIELDS]>>
-where
-    T: LayoutValue,
-    F: FnMut(&mut SmallVec<[ResponseSegment; INLINE_FIELDS]>, T),
-{
-    let mut segments = SmallVec::new();
-    for value in values {
-        let prefix = codec.prefix(value.as_ref().map(LayoutValue::encoded_len))?;
-        segments.push(ResponseSegment::inline(&prefix[..codec.length_bytes()]));
-        if let Some(value) = value {
-            append_value(&mut segments, value);
+    let mut segments = SmallVec::<[WireSegment; crate::segments::INLINE_SEGMENTS]>::new();
+    match layout {
+        OperationFieldLayout::Dense => {
+            if values.iter().any(Option::is_none) {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "dense field is missing",
+                ));
+            }
+            segments.extend(values.into_iter().flatten());
+        }
+        OperationFieldLayout::Sequence => {
+            let mut mask = SmallVec::<[u8; 32]>::new();
+            mask.resize(values.len().saturating_add(7) / 8, 0);
+            let final_present = values.iter().rposition(Option::is_some);
+            for (index, value) in values.iter().enumerate() {
+                if value.is_some() {
+                    mask[index / 8] |= 1 << (index % 8);
+                }
+            }
+            if !mask.is_empty() {
+                segments.push(WireSegment::Inline(mask));
+            }
+            for (index, value) in values.into_iter().enumerate() {
+                let Some(value) = value else {
+                    continue;
+                };
+                if Some(index) != final_present {
+                    let length = u64::try_from(value.len())
+                        .map_err(|_| ProtocolError::FrameLengthOverflow)?;
+                    let (encoded, encoded_len) = crate::encode_varuint(length);
+                    segments.push(WireSegment::inline(&encoded[..encoded_len]));
+                }
+                segments.push(value);
+            }
+        }
+        OperationFieldLayout::OptionalValues => {
+            let optional_codec = optional_codec.ok_or(ProtocolError::InvalidOptionalValues(
+                "optional-value layout requires an explicit codec",
+            ))?;
+            for value in values {
+                let prefix = optional_codec.prefix(value.as_ref().map(WireSegment::len))?;
+                segments.push(WireSegment::inline(
+                    &prefix[8 - optional_codec.length_bytes()..],
+                ));
+                if let Some(value) = value {
+                    segments.push(value);
+                }
+            }
+        }
+        OperationFieldLayout::Empty if values.is_empty() => {}
+        OperationFieldLayout::Empty => {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "empty layout has fields",
+            ));
+        }
+        OperationFieldLayout::Opaque => {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "opaque layout is not field-addressable",
+            ));
         }
     }
-    Ok(segments)
+
+    let frame = OwnedFrame::from_segments(segments)?;
+    if frame.len() > crate::MAX_VALUE_BYTES {
+        return Err(ProtocolError::ValueTooLarge {
+            size: frame.len(),
+            maximum: crate::MAX_VALUE_BYTES,
+        });
+    }
+    Ok(frame)
 }
