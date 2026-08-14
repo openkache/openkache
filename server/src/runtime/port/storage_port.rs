@@ -188,6 +188,67 @@ impl AsRef<[u8]> for StorageValue {
     }
 }
 
+/// Stable ownership for one value returned through the neutral storage port.
+///
+/// Implementations may retain memory segments, pooled read leases, or another
+/// backend owner. The visible byte length must remain unchanged while the
+/// owner is held by a [`StorageReadValue`].
+pub(crate) trait StorageReadOwner: Send + Sync + 'static {
+    fn as_bytes(&self) -> &[u8];
+}
+
+/// One storage-read value with backend-independent byte ownership.
+///
+/// API bindings can inspect or transfer this value without learning which
+/// storage representation keeps its bytes alive.
+pub(crate) struct StorageReadValue {
+    owner: Box<dyn StorageReadOwner>,
+    len: usize,
+}
+
+impl StorageReadValue {
+    pub(crate) fn from_owner(owner: impl StorageReadOwner) -> Self {
+        let len = owner.as_bytes().len();
+        Self {
+            owner: Box::new(owner),
+            len,
+        }
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        let bytes = self.owner.as_bytes();
+        assert_eq!(
+            bytes.len(),
+            self.len,
+            "storage read owner changed its visible length"
+        );
+        bytes
+    }
+}
+
+impl AsRef<[u8]> for StorageReadValue {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for StorageReadValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("StorageReadValue")
+            .field(&self.as_bytes())
+            .finish()
+    }
+}
+
+impl<T: AsRef<[u8]>> PartialEq<T> for StorageReadValue {
+    fn eq(&self, other: &T) -> bool {
+        self.as_bytes() == other.as_ref()
+    }
+}
+
+impl Eq for StorageReadValue {}
+
 /// Runtime-neutral storage failure.
 ///
 /// The storage contract deliberately does not expose the server's concrete
@@ -228,7 +289,7 @@ pub(crate) type StorageContextFuture<'a, T> = Pin<Box<dyn Future<Output = Storag
 
 /// Future returned by a neutral storage read.
 pub(crate) type StorageReadFuture<'a> =
-    Pin<Box<dyn Future<Output = StorageResult<Option<Vec<u8>>>> + 'a>>;
+    Pin<Box<dyn Future<Output = StorageResult<Option<StorageReadValue>>> + 'a>>;
 
 /// Future returned by a neutral storage mutation.
 #[allow(dead_code)]

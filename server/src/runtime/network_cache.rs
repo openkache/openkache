@@ -16,8 +16,9 @@ use super::ThreadedKvkache;
 use super::storage_backend;
 use super::storage_port::{
     StorageAddress, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
-    StorageReadFuture, StorageResult, StorageTaskFuture, StorageTaskOutput, StorageTaskScope,
-    StorageValue, StorageWriteFuture, StorageWriteOptions, StorageWriteOutcome,
+    StorageReadFuture, StorageReadOwner, StorageReadValue, StorageResult, StorageTaskFuture,
+    StorageTaskOutput, StorageTaskScope, StorageValue, StorageWriteFuture, StorageWriteOptions,
+    StorageWriteOutcome,
 };
 use super::storage_task::StorageTask;
 
@@ -206,7 +207,7 @@ impl StoragePort for NetworkWorkerCache {
             self.cache
                 .get_storage_key_with_requester(storage_key, Some(self.network_worker))
                 .await
-                .map(|value| value.map(StoredItemValue::into_bytes))
+                .map(|value| value.map(StorageReadValue::from_owner))
                 .map_err(StorageError::from)
         })
     }
@@ -317,5 +318,11 @@ impl StoragePort for NetworkWorkerCache {
             return Box::pin(async move { Err(StorageError::InvalidRequest(message.into())) });
         }
         Box::pin(async move { self.execute_storage_task_unbound(task).await })
+    }
+}
+
+impl StorageReadOwner for StoredItemValue {
+    fn as_bytes(&self) -> &[u8] {
+        self.as_ref()
     }
 }

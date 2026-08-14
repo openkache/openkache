@@ -14,11 +14,12 @@ use super::operation_capabilities::CapabilityRegistry;
 pub(crate) use super::super::runtime::{
     StorageAddress, StorageBatchOperation, StorageBatchResult, StorageContext,
     StorageContextFuture, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
-    StoragePortExt, StorageReadFuture, StorageResult, StorageTask, StorageTaskCancellation,
-    StorageTaskFuture, StorageTaskIsolation, StorageTaskMetadata, StorageTaskOutput,
-    StorageTaskScheduling, StorageTaskScope, StorageTypedTaskFuture, StorageValue,
-    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteFuture,
-    StorageWriteOptions, StorageWriteOutcome, downcast_storage_output,
+    StoragePortExt, StorageReadFuture, StorageReadOwner, StorageReadValue, StorageResult,
+    StorageTask, StorageTaskCancellation, StorageTaskFuture, StorageTaskIsolation,
+    StorageTaskMetadata, StorageTaskOutput, StorageTaskScheduling, StorageTaskScope,
+    StorageTypedTaskFuture, StorageValue, StorageWriteCondition, StorageWriteEviction,
+    StorageWriteExpiration, StorageWriteFuture, StorageWriteOptions, StorageWriteOutcome,
+    downcast_storage_output,
 };
 
 /// The generic capability identity used by API modules that need storage.
