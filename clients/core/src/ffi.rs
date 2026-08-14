@@ -1030,8 +1030,8 @@ pub unsafe extern "C" fn openkache_client_connect(
 
 /// Connects a native client with the complete shared-core configuration.
 ///
-/// Zero retry and lane limits select shared-core defaults. With a data
-/// client root key, Smithy `NONE` selects the Robust default; without a key it
+/// Zero retry and lane limits select shared-core defaults. With a client root
+/// key, Smithy `NONE` selects the Robust default; without a key it
 /// selects Unprotected. `ROBUST` and `COMPACT` select those profiles
 /// explicitly, and an authenticated profile without a key is rejected.
 ///
