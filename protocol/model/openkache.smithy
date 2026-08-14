@@ -460,9 +460,6 @@ enum Opcode {
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
 
-    @wireOpcode(value: 32)
-    EXPERIMENTAL_STORAGE_READ = "experimental_storage_read"
-
     @wireOpcode(value: 34)
     EXPERIMENTAL_MULTI_RESOURCE_MUTATION = "experimental_multi_resource_mutation"
 
@@ -480,19 +477,6 @@ enum Opcode {
 operation Ping {
     input: PingInput
     output: PingOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "opaque",
-    responseFraming: "opaque",
-    retryMode: "always",
-    successStatuses: ["ok", "not_found"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation ExperimentalStorageRead {
-    input: ExperimentalStorageReadInput
-    output: ExperimentalStorageReadOutput
 }
 
 @operationContract(
@@ -789,20 +773,6 @@ structure SyncInput {
 }
 
 structure SyncOutput {}
-
-structure ExperimentalStorageReadInput {
-    @required
-    @wireCodec(name: "raw_bytes")
-    @operationField(role: "key")
-    key: Value
-}
-
-structure ExperimentalStorageReadOutput {
-    @required
-    @wireCodec(name: "raw_bytes")
-    @operationField(role: "value")
-    value: Value
-}
 
 structure ExperimentalMultiResourceMutationInput {
     @required

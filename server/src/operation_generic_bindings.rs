@@ -18,9 +18,6 @@ use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::{OperationContext, OperationInputView};
 use super::operation_outcome::{OperationError, OperationOutcome, OperationValue};
 use super::operation_registry::OperationFuture;
-use super::storage_port::{
-    STORAGE_PORT, StorageAddress, StorageError, StoragePortHandle,
-};
 
 /// API-owned state used by the multi-resource example.
 ///
@@ -67,19 +64,6 @@ impl ExperimentalResourceStore {
 
 const EXPERIMENTAL_RESOURCE_STORE: CapabilityKey<ExperimentalResourceStore> =
     CapabilityKey::new("openkache.experimental.resource_store");
-
-/// Installs the runtime-neutral storage port used by this API module.
-///
-/// The network loop only forwards the already-created port through the API
-/// composition boundary. It does not need to know which generic operation
-/// consumes storage, and a future API can expose a different capability
-/// without changing the transport path.
-pub(super) fn install_storage_port(
-    registry: &mut CapabilityRegistry,
-    storage: StoragePortHandle,
-) {
-    registry.insert(STORAGE_PORT, storage);
-}
 
 pub(super) fn install_resource_store(registry: &mut CapabilityRegistry) {
     registry.insert(
@@ -169,61 +153,10 @@ pub(super) fn multi_resource_mutation_handler<'a>(
     OperationFuture::ready(outcome)
 }
 
-fn storage_failure(error: StorageError) -> OperationOutcome {
-    let status = match &error {
-        StorageError::InvalidRequest(_) => OperationStatus::InvalidRequest,
-        StorageError::Unavailable(_) => OperationStatus::Overloaded,
-        StorageError::Timeout(_) => OperationStatus::Timeout,
-        StorageError::Worker(_) | StorageError::Backend(_) => OperationStatus::InternalError,
-    };
-    OperationOutcome::error(OperationError::owned_status(
-        status,
-        error.message().as_bytes().to_vec(),
-    ))
-}
-
-/// A small storage-backed example that exercises the neutral storage port.
-///
-/// The API owns only the key/value meaning. Address normalization, worker
-/// affinity, and backend error translation stay below this binding.
-pub(super) fn storage_read_handler<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
-    let storage = context
-        .capability(super::storage_port::STORAGE_PORT)
-        .map(std::sync::Arc::as_ref);
-    let mut input = context.input;
-    let Some(key) = input.take_single_field_bytes_range() else {
-        return OperationFuture::ready(OperationOutcome::invalid_request(
-            b"storage read requires one key field",
-        ));
-    };
-    let Some(storage) = storage else {
-        return OperationFuture::ready(OperationOutcome::error(OperationError::status(
-            OperationStatus::InternalError,
-            b"storage capability is not installed",
-        )));
-    };
-    OperationFuture::pending(Box::pin(async move {
-        match storage.get(StorageAddress::from_owned_range(key)).await {
-            Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value),
-            Ok(None) => OperationOutcome::opaque(
-                OperationStatus::NotFound,
-                OperationValue::inline(b""),
-            ),
-            Err(error) => storage_failure(error),
-        }
-    }))
-}
-
 pub(super) const API: ApiModule = ApiModule::new(crate::protocol::generic_request_descriptor(), &[
     operation_api::RegistrationBuilder::generic(Opcode::Ping, ping_handler)
         .read_only()
         .build(),
-    operation_api::RegistrationBuilder::generic(
-        Opcode::ExperimentalStorageRead,
-        storage_read_handler,
-    )
-    .read_only()
-    .build(),
     operation_api::RegistrationBuilder::generic(
         Opcode::ExperimentalMultiResourceMutation,
         multi_resource_mutation_handler,
