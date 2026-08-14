@@ -112,18 +112,35 @@ impl NamespaceDescriptor {
     /// Encodes the descriptor payload returned by namespace-management
     /// requests.
     pub fn encode(self) -> Result<Vec<u8>> {
+        let mut payload =
+            Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + MAX_POLICY_BYTES);
+        self.encode_into(|bytes| {
+            payload.extend_from_slice(bytes);
+            Ok(())
+        })?;
+        Ok(payload)
+    }
+
+    pub(crate) fn encode_inline(self) -> Result<openkache_protocol::InlineBytes> {
+        let mut payload = openkache_protocol::InlineBytes::new();
+        self.encode_into(|bytes| {
+            payload.try_extend_from_slice(bytes)?;
+            Ok(())
+        })?;
+        Ok(payload)
+    }
+
+    fn encode_into(self, mut append: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
         if self.namespace_id == 0 {
             return Err(ProtocolError::InvalidNamespaceId);
         }
         if self.revision == 0 {
             return Err(ProtocolError::InvalidRevision);
         }
-        let mut payload =
-            Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + MAX_POLICY_BYTES);
-        payload.extend_from_slice(&self.namespace_id.to_be_bytes());
-        payload.extend_from_slice(&self.revision.to_be_bytes());
-        payload.extend_from_slice(&self.policy.encode()?);
-        Ok(payload)
+        append(&self.namespace_id.to_be_bytes())?;
+        append(&self.revision.to_be_bytes())?;
+        self.policy.encode_into(append)?;
+        Ok(())
     }
 
     /// Decodes one complete namespace descriptor payload.

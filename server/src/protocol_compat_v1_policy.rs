@@ -123,6 +123,14 @@ impl NamespacePolicy {
     /// Encodes the historical namespace policy payload.
     pub fn encode(self) -> Result<Vec<u8>> {
         let mut output = Vec::with_capacity(super::super::policy::MAX_POLICY_BYTES);
+        self.encode_into(|bytes| {
+            output.extend_from_slice(bytes);
+            Ok(())
+        })?;
+        Ok(output)
+    }
+
+    pub(crate) fn encode_into(self, mut append: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
         let mut flags = match self.default_expiration {
             ExpirationDefault::NoExpiry => POLICY_NO_EXPIRY,
             ExpirationDefault::FixedTtl { ttl_ms } => {
@@ -143,12 +151,12 @@ impl NamespacePolicy {
         if self.eviction_override == OverridePolicy::Allowed {
             flags |= POLICY_EVICTION_OVERRIDE;
         }
-        output.push(flags);
+        append(&[flags])?;
         if let ExpirationDefault::FixedTtl { ttl_ms } = self.default_expiration {
             let (encoded, length) = encode_varuint(ttl_ms);
-            output.extend_from_slice(&encoded[..length]);
+            append(&encoded[..length])?;
         }
-        Ok(output)
+        Ok(())
     }
 
     /// Decodes one complete policy from the beginning of `input`.

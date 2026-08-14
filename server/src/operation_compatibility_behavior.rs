@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 
-use openkache_protocol::ItemId;
+use openkache_protocol::{ItemId, ResponseSegment};
 
 use super::super::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
@@ -27,10 +27,11 @@ use super::operation_outcome::{
 };
 use super::{KvError, NamespaceError, NamespaceOpenResult};
 
-fn descriptor_payload(descriptor: NamespaceDescriptor) -> Vec<u8> {
+fn descriptor_payload(descriptor: NamespaceDescriptor) -> ResponseSegment {
     descriptor
-        .encode()
+        .encode_inline()
         .expect("validated namespace policy remains encodable")
+        .into()
 }
 
 fn resolve_set_options(
