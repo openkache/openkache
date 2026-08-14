@@ -79,8 +79,8 @@ pub use compact::{
     encode_vu128, read_length_delimited,
 };
 pub use layout::{
-    DenseFields, LayoutValue, decode_planned_fields, encode_dense_fields,
-    encode_field_sequence_segments, encode_optional_value_segments, encode_planned_fields,
+    DenseFields, decode_planned_fields, encode_dense_fields, encode_planned_field_segments,
+    encode_planned_fields,
 };
 pub use optional_values::{
     OptionalValueCodec, OptionalValues, OptionalValuesEncoder, decode_optional_values,
