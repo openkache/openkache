@@ -497,80 +497,100 @@ pub(super) fn handles(opcode: Opcode) -> bool {
         .any(|registration| registration.opcode == opcode)
 }
 
+fn install_capabilities(
+    registry: &mut super::operation_capabilities::CapabilityRegistry,
+    bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
+) -> Result<(), &'static str> {
+    let resources = super::operation_api::downcast_capability(
+        bootstrap,
+        super::operation_runtime_capabilities::SERVER_RUNTIME_RESOURCES,
+    )
+    .ok_or("server runtime bootstrap capability is unavailable")?;
+    install_compatibility_services(
+        registry,
+        resources.cache.clone(),
+        resources.namespaces.clone(),
+        resources.observability.clone(),
+    );
+    Ok(())
+}
+
 pub(super) const API: ApiModule = ApiModule::new(
     crate::protocol::compatibility_request_descriptor(),
     &[
-    RegistrationBuilder::with_decoder(
-        Opcode::Get,
-        super::v1_adapter::adapt_request,
-        get_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .read_only()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Set,
-        super::v1_adapter::adapt_request,
-        set_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Delete,
-        super::v1_adapter::adapt_request,
-        delete_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Stats,
-        super::v1_adapter::adapt_request,
-        stats_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_administrator)
-    .read_only()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Sync,
-        super::v1_adapter::adapt_request,
-        sync_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_administrator)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::NamespaceOpen,
-        super::v1_adapter::adapt_request,
-        namespace_open_handler,
-    )
-    .prepare(prepare_lifecycle)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::NamespaceUpdatePolicy,
-        super::v1_adapter::adapt_request,
-        namespace_update_policy_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::NamespaceDelete,
-        super::v1_adapter::adapt_request,
-        namespace_delete_handler,
-    )
-    .prepare(prepare_lifecycle_and_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::Get,
+            super::v1_adapter::adapt_request,
+            get_handler,
+        )
+        .prepare(prepare_namespace)
+        .authorize(operation_handlers::authorization_none)
+        .read_only()
+        .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::Set,
+            super::v1_adapter::adapt_request,
+            set_handler,
+        )
+        .prepare(prepare_namespace)
+        .authorize(operation_handlers::authorization_none)
+        .mutation()
+        .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::Delete,
+            super::v1_adapter::adapt_request,
+            delete_handler,
+        )
+        .prepare(prepare_namespace)
+        .authorize(operation_handlers::authorization_none)
+        .mutation()
+        .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::Stats,
+            super::v1_adapter::adapt_request,
+            stats_handler,
+        )
+        .prepare(prepare_namespace)
+        .authorize(operation_handlers::authorization_administrator)
+        .read_only()
+        .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::Sync,
+            super::v1_adapter::adapt_request,
+            sync_handler,
+        )
+        .prepare(prepare_namespace)
+        .authorize(operation_handlers::authorization_administrator)
+        .mutation()
+        .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::NamespaceOpen,
+            super::v1_adapter::adapt_request,
+            namespace_open_handler,
+        )
+        .prepare(prepare_lifecycle)
+        .authorize(operation_handlers::authorization_none)
+        .mutation()
+        .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::NamespaceUpdatePolicy,
+            super::v1_adapter::adapt_request,
+            namespace_update_policy_handler,
+        )
+        .prepare(prepare_namespace)
+        .authorize(operation_handlers::authorization_none)
+        .mutation()
+        .build(),
+        RegistrationBuilder::with_decoder(
+            Opcode::NamespaceDelete,
+            super::v1_adapter::adapt_request,
+            namespace_delete_handler,
+        )
+        .prepare(prepare_lifecycle_and_namespace)
+        .authorize(operation_handlers::authorization_none)
+        .mutation()
+        .build(),
     ],
-);
+)
+.install_capabilities(install_capabilities)
+.validate_with(super::v1_adapter::validate_compatibility_routes);

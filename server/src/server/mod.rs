@@ -72,6 +72,8 @@ mod operation_outcome;
 mod operation_registrations;
 #[path = "../operation_registry.rs"]
 mod operation_registry;
+#[path = "../operation_runtime_capabilities.rs"]
+mod operation_runtime_capabilities;
 #[path = "../operation_transport.rs"]
 mod operation_transport;
 #[path = "../storage_port.rs"]

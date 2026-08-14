@@ -1,5 +1,5 @@
 use super::*;
-use super::connection::{NetworkWorkerLimits, run_selected_endpoint};
+use super::connection::{NetworkWorkerLimits, prepare_network_worker, run_selected_endpoint};
 
 impl KacheServer {
     /// Installs API-owned capabilities before the server starts serving.
@@ -412,12 +412,22 @@ async fn run_quic_role(
         reporter.startup_failed(error);
         return None;
     }
+    let capabilities = match prepare_network_worker(cache, &limits) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            limits.observability.network_worker_failed(worker_id);
+            reporter.startup_failed(error.to_owned());
+            return None;
+        }
+    };
+    let mut limits = limits;
+    limits.capabilities = capabilities;
     if !reporter.started() {
         return None;
     }
     limits.observability.network_worker_started(worker_id);
     Some(
-        run_selected_endpoint(endpoint, cache, &access_policy, limits, stop)
+        run_selected_endpoint(endpoint, &access_policy, limits, stop)
             .await
             .map_err(|error| error.to_string()),
     )

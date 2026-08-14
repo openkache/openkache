@@ -13,9 +13,25 @@ pub(super) struct NetworkWorkerLimits {
     pub(super) request_descriptor_provider: Arc<dyn RequestDescriptorProvider>,
 }
 
+pub(super) fn prepare_network_worker(
+    cache: Arc<ThreadedKvkache>,
+    limits: &NetworkWorkerLimits,
+) -> std::result::Result<Arc<dyn CapabilityCatalog>, &'static str> {
+    let network_shard = limits
+        .observability
+        .network_shard(NetworkWorkerId(limits.worker_id));
+    let cache = Arc::new(NetworkWorkerCache::new(cache, network_shard.worker_id()));
+    let capabilities = operation_registrations::install_runtime_capabilities(
+        Arc::clone(&limits.capabilities),
+        Arc::clone(&cache),
+        Arc::clone(&limits.namespaces),
+        Arc::clone(&limits.observability),
+    )?;
+    Ok(capabilities)
+}
+
 pub(super) async fn run_selected_endpoint(
     endpoint: ServerEndpoint,
-    cache: Arc<ThreadedKvkache>,
     access_policy: &AccessPolicy,
     limits: NetworkWorkerLimits,
     stop: AsyncReceiver<()>,
@@ -23,22 +39,21 @@ pub(super) async fn run_selected_endpoint(
     match endpoint {
         #[cfg(feature = "quic-quinn")]
         ServerEndpoint::Quinn(endpoint) => {
-            run_network_worker(endpoint, Arc::clone(&cache), access_policy, limits, stop).await
+            run_network_worker(endpoint, access_policy, limits, stop).await
         }
         #[cfg(feature = "quic-noq")]
         ServerEndpoint::Noq(endpoint) => {
-            run_network_worker(endpoint, Arc::clone(&cache), access_policy, limits, stop).await
+            run_network_worker(endpoint, access_policy, limits, stop).await
         }
         #[cfg(feature = "quic-quiche")]
         ServerEndpoint::Quiche(endpoint) => {
-            run_network_worker(endpoint, Arc::clone(&cache), access_policy, limits, stop).await
+            run_network_worker(endpoint, access_policy, limits, stop).await
         }
     }
 }
 
 async fn run_network_worker<E: TransportEndpoint>(
     endpoint: E,
-    cache: Arc<ThreadedKvkache>,
     access_policy: &AccessPolicy,
     limits: NetworkWorkerLimits,
     stop: AsyncReceiver<()>,
@@ -49,22 +64,12 @@ async fn run_network_worker<E: TransportEndpoint>(
         max_stream_lanes,
         request_budget,
         max_item_bytes,
-        namespaces,
+        namespaces: _,
         observability,
         capabilities,
         request_descriptor_provider,
     } = limits;
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
-    let cache = Arc::new(NetworkWorkerCache::new(
-        Arc::clone(&cache),
-        network_shard.worker_id(),
-    ));
-    let capabilities = operation_registrations::install_runtime_capabilities(
-        capabilities,
-        Arc::clone(&cache),
-        Arc::clone(&namespaces),
-        Arc::clone(&observability),
-    );
     let mut connections = FuturesUnordered::new();
     loop {
         if connections.is_empty() {

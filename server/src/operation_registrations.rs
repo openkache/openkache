@@ -13,6 +13,9 @@ use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{CapabilityCatalog, CapabilityRegistry},
     operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
+    operation_runtime_capabilities::{
+        SERVER_RUNTIME_RESOURCES, ServerRuntimeResources,
+    },
 };
 
 /// Composition-root catalogs assembled from API-owned modules.
@@ -46,17 +49,20 @@ pub(super) fn install_runtime_capabilities(
     cache: Arc<NetworkWorkerCache>,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     observability: Arc<ObservabilityState>,
-) -> Arc<dyn CapabilityCatalog> {
+) -> Result<Arc<dyn CapabilityCatalog>, &'static str> {
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
     let mut registry = CapabilityRegistry::overlay(base);
     super::storage_port::install(&mut registry, storage_port);
-    compatibility::install_compatibility_services(
-        &mut registry,
-        cache,
-        namespaces,
-        observability,
+    let bootstrap = CapabilityRegistry::new().with(
+        SERVER_RUNTIME_RESOURCES,
+        ServerRuntimeResources {
+            cache,
+            namespaces,
+            observability,
+        },
     );
-    Arc::new(registry)
+    SERVER_COMPOSITION.install_capabilities(&mut registry, &bootstrap)?;
+    Ok(Arc::new(registry))
 }
 
 /// Validates the complete server composition in one place.
@@ -68,5 +74,5 @@ pub(super) fn install_runtime_capabilities(
 /// change.
 pub(super) fn validate() -> Result<(), &'static str> {
     super::operation_handlers::validate_handler_registry()?;
-    super::v1_adapter::validate_compatibility_routes()
+    SERVER_COMPOSITION.validate_modules()
 }
