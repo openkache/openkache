@@ -272,6 +272,12 @@ pub(super) fn decode_server_request(
     frame: Vec<u8>,
     header: RequestHeader,
 ) -> Result<super::ServerRequest> {
+    if matches!(
+        compatibility_route(header.opcode),
+        Some(CompactV1RequestRoute::Item | CompactV1RequestRoute::Set)
+    ) {
+        return Ok(super::ServerRequest::Frame { frame, header });
+    }
     Ok(super::ServerRequest::from_request(decode_owned_request(
         frame, header,
     )?))

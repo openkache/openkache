@@ -245,11 +245,7 @@ pub(super) fn decode_server_request(
     frame: Vec<u8>,
     header: super::RequestHeader,
 ) -> Result<super::ServerRequest> {
-    Ok(super::ServerRequest::Generic {
-        opcode: header.opcode,
-        frame,
-        payload_range: (header.encoded_len, header.encoded_len + header.value_len),
-    })
+    Ok(super::ServerRequest::Frame { frame, header })
 }
 
 /// Validates only generated shape metadata for a generic request.

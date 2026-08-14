@@ -5,7 +5,7 @@
 //! the storage behavior. Generic field-envelope examples live in
 //! [`super::operation_generic_bindings`] and do not depend on these adapters.
 
-use openkache_protocol::{ItemId, Opcode};
+use openkache_protocol::{ItemId, Opcode, OwnedRange};
 
 use super::operation_api::{
     ApiModule, PrepareContext, PrepareError, PreparePlan, RegistrationBuilder, ResourceLock,
@@ -45,7 +45,7 @@ pub(super) struct GetInput {
 pub(super) struct SetInput {
     pub(super) namespace_id: u64,
     pub(super) item_id: ItemId,
-    pub(super) value: Vec<u8>,
+    pub(super) value: OwnedRange,
     pub(super) options: SetOptions,
 }
 
@@ -114,12 +114,22 @@ pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'s
     } else if ttl_ms.is_some() {
         return Err(b"SET TTL is only valid with explicit expiration");
     }
+    let namespace_id = required_namespace_id(input, request_fields::SET_NAMESPACE_ID_0)?;
+    let item_id = required_item_id_at(input, request_fields::SET_ITEM_ID_0)?;
+    let value = input
+        .take_owned_bytes_range_at_index(request_fields::SET_VALUE_0)
+        .ok_or(&b"operation requires a value"[..])?;
+    // An empty value has no payload allocation to preserve. Release the
+    // admitted frame instead of retaining its prefix and spare capacity.
+    let value = if value.is_empty() {
+        OwnedRange::whole(Vec::new())
+    } else {
+        value
+    };
     Ok(SetInput {
-        namespace_id: required_namespace_id(input, request_fields::SET_NAMESPACE_ID_0)?,
-        item_id: required_item_id_at(input, request_fields::SET_ITEM_ID_0)?,
-        value: input
-            .take_owned_bytes_at_index(request_fields::SET_VALUE_0)
-            .ok_or(&b"operation requires a value"[..])?,
+        namespace_id,
+        item_id,
+        value,
         options: SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode),
     })
 }
