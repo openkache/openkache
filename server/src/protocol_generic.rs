@@ -14,7 +14,7 @@ use smallvec::SmallVec;
 
 const INLINE_OPERATION_FIELDS: usize = 8;
 
-pub(super) const REQUEST_DESCRIPTOR: super::RequestDescriptor = super::RequestDescriptor::new(
+pub(super) static REQUEST_DESCRIPTOR: super::RequestDescriptor = super::RequestDescriptor::new(
     "generated",
     request_frame_layout,
     decode_header,
