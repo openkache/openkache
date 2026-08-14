@@ -11,7 +11,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use futures_util::lock::Mutex as AsyncMutex;
+use openkache_protocol::Opcode;
 
+use super::super::observability::Operation;
 use super::super::types::{
     StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
     StoredItemValue,
@@ -251,6 +253,7 @@ impl StorageCapability for NetworkWorkerCache {
             self,
             namespace_id,
             item_id,
+            Operation::from_opcode(Opcode::Get),
         ))
     }
 
@@ -267,6 +270,7 @@ impl StorageCapability for NetworkWorkerCache {
             item_id,
             value,
             options,
+            Operation::from_opcode(Opcode::Set),
         ))
     }
 
@@ -279,6 +283,7 @@ impl StorageCapability for NetworkWorkerCache {
             self,
             namespace_id,
             item_id,
+            Operation::from_opcode(Opcode::Delete),
         ))
     }
 

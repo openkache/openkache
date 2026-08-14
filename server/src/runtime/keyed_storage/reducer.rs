@@ -18,6 +18,7 @@ pub(in crate::runtime) struct CollapsedBatch {
 }
 
 pub(in crate::runtime) struct CollapsedMutation {
+    pub(in crate::runtime) telemetry: Operation,
     pub(in crate::runtime) operation: KeyedOperation,
     pub(in crate::runtime) response_index: usize,
 }
@@ -44,22 +45,25 @@ impl CollapsedBatch {
                 }
                 Command::Set {
                     value,
-                    options,
+                    metadata,
                     response,
                 } => {
-                    debug_assert_eq!(options, StorageWriteOptions::default());
+                    debug_assert_eq!(metadata.options(), StorageWriteOptions::default());
                     let outcome = match current {
                         KeyedVisibleState::Missing => SetOutcome::Created,
                         KeyedVisibleState::Present(_) => SetOutcome::Replaced,
                     };
                     current = KeyedVisibleState::Present(value);
-                    last_mutation = Some(response_index);
+                    last_mutation = Some((response_index, metadata.operation));
                     (response, Response::Set(outcome))
                 }
-                Command::Delete { response } => {
+                Command::Delete {
+                    operation,
+                    response,
+                } => {
                     let deleted = matches!(current, KeyedVisibleState::Present(_));
                     current = KeyedVisibleState::Missing;
-                    last_mutation = Some(response_index);
+                    last_mutation = Some((response_index, operation));
                     (response, Response::Deleted(deleted))
                 }
             };
@@ -69,7 +73,7 @@ impl CollapsedBatch {
             });
         }
 
-        let mutation = last_mutation.and_then(|response_index| {
+        let mutation = last_mutation.and_then(|(response_index, telemetry)| {
             let operation = match &current {
                 KeyedVisibleState::Present(value) => KeyedOperation::Set {
                     value: value.clone(),
@@ -79,6 +83,7 @@ impl CollapsedBatch {
                 KeyedVisibleState::Missing => return None,
             };
             Some(CollapsedMutation {
+                telemetry,
                 operation,
                 response_index,
             })
@@ -100,14 +105,9 @@ impl CollapsedBatch {
         let Some(mutation) = self.mutation else {
             return CollapsedKeyedWork::Complete(self.responses);
         };
-        let telemetry = match &mutation.operation {
-            KeyedOperation::Get => Operation::storage_get(),
-            KeyedOperation::Set { .. } => Operation::storage_set(),
-            KeyedOperation::Delete => Operation::storage_delete(),
-        };
         let job = cache.prepare_keyed(storage_key, mutation.operation);
         CollapsedKeyedWork::Prepared {
-            operation: telemetry,
+            operation: mutation.telemetry,
             job,
             responses: self.responses,
             mutation_response_index: mutation.response_index,

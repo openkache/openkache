@@ -548,23 +548,25 @@ impl ThreadedKvkache {
 
     /// Retrieves a value without blocking the caller's async executor thread.
     pub(crate) async fn get_stored(&self, item_id: ItemId) -> Result<Option<StoredItemValue>> {
-        self.get_async_with_requester(item_id, None).await
+        self.get_async_with_requester(item_id, Operation::unknown(), None)
+            .await
     }
 
     async fn get_async_with_requester(
         &self,
         item_id: ItemId,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<Option<StoredItemValue>> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         self.request(
             worker,
-            Operation::from_opcode(Opcode::Get),
+            operation,
             requester,
             |response| WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::get(response),
+                command: keyed_storage::get(operation, response),
             },
         )
         .await
@@ -580,7 +582,7 @@ impl ThreadedKvkache {
         self.request(worker, Operation::unknown(), requester, |response| {
             WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::get(response),
+                command: keyed_storage::get(Operation::unknown(), response),
             }
         })
         .await
@@ -599,7 +601,7 @@ impl ThreadedKvkache {
         self.request(worker, Operation::unknown(), requester, |response| {
             WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::set(value, options, response),
+                command: keyed_storage::set(Operation::unknown(), value, options, response),
             }
         })
         .await
@@ -616,7 +618,7 @@ impl ThreadedKvkache {
         self.request(worker, Operation::unknown(), requester, |response| {
             WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::delete(response),
+                command: keyed_storage::delete(Operation::unknown(), response),
             }
         })
         .await
@@ -630,25 +632,31 @@ impl ThreadedKvkache {
         namespace_id: u64,
         item_id: ItemId,
     ) -> Result<Option<StoredItemValue>> {
-        self.get_async_in_namespace_with_requester(namespace_id, item_id, None)
-            .await
+        self.get_async_in_namespace_with_requester(
+            namespace_id,
+            item_id,
+            Operation::unknown(),
+            None,
+        )
+        .await
     }
 
     async fn get_async_in_namespace_with_requester(
         &self,
         namespace_id: u64,
         item_id: ItemId,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<Option<StoredItemValue>> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         self.request(
             worker,
-            Operation::from_opcode(Opcode::Get),
+            operation,
             requester,
             |response| WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::get(response),
+                command: keyed_storage::get(operation, response),
             },
         )
         .await
@@ -670,8 +678,14 @@ impl ThreadedKvkache {
         value: StoredItemValue,
         options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
-        self.set_async_with_options_requester(item_id, value, options, None)
-            .await
+        self.set_async_with_options_requester(
+            item_id,
+            value,
+            options,
+            Operation::unknown(),
+            None,
+        )
+        .await
     }
 
     async fn set_async_with_options_requester(
@@ -679,17 +693,18 @@ impl ThreadedKvkache {
         item_id: ItemId,
         value: StoredItemValue,
         options: StorageWriteOptions,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         self.request(
             worker,
-            Operation::from_opcode(Opcode::Set),
+            operation,
             requester,
             |response| WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::set(value, options, response),
+                command: keyed_storage::set(operation, value, options, response),
             },
         )
         .await
@@ -705,8 +720,15 @@ impl ThreadedKvkache {
         value: StoredItemValue,
         options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
-        self.set_async_in_namespace_with_requester(namespace_id, item_id, value, options, None)
-            .await
+        self.set_async_in_namespace_with_requester(
+            namespace_id,
+            item_id,
+            value,
+            options,
+            Operation::unknown(),
+            None,
+        )
+        .await
     }
 
     async fn set_async_in_namespace_with_requester(
@@ -715,17 +737,18 @@ impl ThreadedKvkache {
         item_id: ItemId,
         value: StoredItemValue,
         options: StorageWriteOptions,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<SetOutcome> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         self.request(
             worker,
-            Operation::from_opcode(Opcode::Set),
+            operation,
             requester,
             |response| WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::set(value, options, response),
+                command: keyed_storage::set(operation, value, options, response),
             },
         )
         .await
@@ -733,23 +756,25 @@ impl ThreadedKvkache {
     }
 
     pub async fn delete(&self, item_id: ItemId) -> Result<bool> {
-        self.delete_async_with_requester(item_id, None).await
+        self.delete_async_with_requester(item_id, Operation::unknown(), None)
+            .await
     }
 
     async fn delete_async_with_requester(
         &self,
         item_id: ItemId,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<bool> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         self.request(
             worker,
-            Operation::from_opcode(Opcode::Delete),
+            operation,
             requester,
             |response| WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::delete(response),
+                command: keyed_storage::delete(operation, response),
             },
         )
         .await
@@ -763,25 +788,31 @@ impl ThreadedKvkache {
         namespace_id: u64,
         item_id: ItemId,
     ) -> Result<bool> {
-        self.delete_async_in_namespace_with_requester(namespace_id, item_id, None)
-            .await
+        self.delete_async_in_namespace_with_requester(
+            namespace_id,
+            item_id,
+            Operation::unknown(),
+            None,
+        )
+        .await
     }
 
     async fn delete_async_in_namespace_with_requester(
         &self,
         namespace_id: u64,
         item_id: ItemId,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<bool> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         self.request(
             worker,
-            Operation::from_opcode(Opcode::Delete),
+            operation,
             requester,
             |response| WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::delete(response),
+                command: keyed_storage::delete(operation, response),
             },
         )
         .await
@@ -1065,7 +1096,7 @@ impl ThreadedKvkache {
                 BenchmarkOperation::Get(_) => (
                     WorkerRequest::Keyed {
                         storage_key,
-                        command: keyed_storage::get(response_tx),
+                        command: keyed_storage::get(Operation::unknown(), response_tx),
                     },
                     BenchmarkResponseKind::Get,
                 ),
@@ -1073,6 +1104,7 @@ impl ThreadedKvkache {
                     WorkerRequest::Keyed {
                         storage_key,
                         command: keyed_storage::set(
+                            Operation::unknown(),
                             StoredItemValue::new(value),
                             StorageWriteOptions::default(),
                             response_tx,
@@ -1083,7 +1115,7 @@ impl ThreadedKvkache {
                 BenchmarkOperation::Delete(_) => (
                     WorkerRequest::Keyed {
                         storage_key,
-                        command: keyed_storage::delete(response_tx),
+                        command: keyed_storage::delete(Operation::unknown(), response_tx),
                     },
                     BenchmarkResponseKind::Delete,
                 ),

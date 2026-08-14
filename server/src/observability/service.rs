@@ -67,17 +67,6 @@ impl Operation {
         Self(Some(opcode))
     }
 
-    pub(crate) const fn storage_get() -> Self {
-        Self::from_opcode(Opcode::Get)
-    }
-
-    pub(crate) const fn storage_set() -> Self {
-        Self::from_opcode(Opcode::Set)
-    }
-
-    pub(crate) const fn storage_delete() -> Self {
-        Self::from_opcode(Opcode::Delete)
-    }
 }
 
 const fn status_index(status: Status) -> usize {
