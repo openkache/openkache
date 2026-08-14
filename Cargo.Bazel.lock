@@ -1,5 +1,5 @@
 {
-  "checksum": "79453d341f482c6a3427543cc32f3cb17091691d5bb290d8c0013b8810ed0801",
+  "checksum": "5522f0d16a690adde2a910e75cd518513ff0784b91b0fc64cc1d5ea7cde38257",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -16639,6 +16639,18 @@
               ]
             }
           }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
         }
       ],
       "library_target_name": "openkache",
@@ -16660,12 +16672,12 @@
         "deps": {
           "common": [
             {
-              "id": "aes 0.9.1",
-              "target": "aes"
-            },
-            {
               "id": "anstream 1.0.0",
               "target": "anstream"
+            },
+            {
+              "id": "blake3 1.8.5",
+              "target": "blake3"
             },
             {
               "id": "clap 4.6.4",
@@ -16762,8 +16774,25 @@
           ],
           "selects": {}
         },
+        "extra_deps": {
+          "common": [
+            ":build_script_build"
+          ],
+          "selects": {}
+        },
         "edition": "2024",
         "version": "0.1.0"
+      },
+      "build_script_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "compile_data_glob_excludes": [
+          "**/*.rs"
+        ],
+        "data_glob": [
+          "**"
+        ]
       },
       "license": "AGPL-3.0-or-later",
       "license_ids": [
@@ -17060,10 +17089,6 @@
             {
               "id": "serde_json_canonicalizer 0.3.2",
               "target": "serde_json_canonicalizer"
-            },
-            {
-              "id": "smallvec 1.15.2",
-              "target": "smallvec"
             },
             {
               "id": "thiserror 2.0.19",

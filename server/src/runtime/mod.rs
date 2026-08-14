@@ -7,7 +7,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes::{Aes256, cipher::KeyInit};
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
@@ -27,7 +26,9 @@ mod worker_control;
 pub(crate) use network_cache::NetworkWorkerCache;
 pub(crate) use port::{completion, storage_context, storage_port, storage_task};
 #[allow(unused_imports)]
-pub(crate) use storage_keys::{derive_scoped_storage_key, derive_storage_key};
+pub(crate) use storage_keys::{
+    DOMAIN_V2_CONTEXT, derive_domain_key, derive_scoped_storage_key, derive_storage_key,
+};
 pub(crate) use storage_port::*;
 pub(crate) use storage_task::*;
 #[allow(unused_imports)]
@@ -38,7 +39,9 @@ pub use worker::{BenchmarkBatchStats, BenchmarkOperation};
 use self::completion::{CompletionReceiver, CompletionSlab};
 
 #[allow(unused_imports)]
-pub(crate) use crate::storage_backend::{RUNNING_MARKER_FILE, SERVER_KEY_FILE};
+pub(crate) use crate::storage_backend::{
+    RUNNING_MARKER_FILE, SERVER_KEY_FILE, STORAGE_FORMAT_FILE,
+};
 
 pub(in crate::runtime) type WorkerResponse = worker_contract::Response<keyed_storage::Response>;
 pub(in crate::runtime) type WorkerResponseSender = worker_contract::ResponseSender<WorkerResponse>;
@@ -75,7 +78,7 @@ struct PendingBenchmarkRequest<'a> {
 pub struct ThreadedKvkache {
     config: crate::config::AppConfig,
     workers: Vec<WorkerHandle>,
-    server_cipher: Aes256,
+    storage_domain_key: [u8; 32],
     storage_device_kind: crate::platform::StorageDeviceKind,
     observability: Option<Arc<ObservabilityState>>,
 }
@@ -185,7 +188,7 @@ impl ThreadedKvkache {
         lease_ssd_read_buffer: bool,
         observability: Option<Arc<ObservabilityState>>,
     ) -> Result<Self> {
-        let server_cipher = Aes256::new(&server_secret.key.into());
+        let storage_domain_key = storage_keys::derive_domain_key(&server_secret.key);
         let (started_tx, started_rx) = channel::bounded::<
             std::result::Result<crate::platform::StorageDeviceKind, String>,
         >(config.runtime.thread_count);
@@ -347,7 +350,7 @@ impl ThreadedKvkache {
         Ok(Self {
             config,
             workers,
-            server_cipher,
+            storage_domain_key,
             storage_device_kind,
             observability,
         })
@@ -400,16 +403,15 @@ impl ThreadedKvkache {
     }
 
     pub fn owner(&self, storage_key: &StorageKey) -> usize {
-        u64::from_le_bytes(storage_key.as_bytes()[..8].try_into().unwrap()) as usize
-            % self.workers.len()
+        storage_key.routing_hash() as usize % self.workers.len()
     }
 
     fn storage_key(&self, item_id: ItemId) -> StorageKey {
-        storage_keys::derive_storage_key(&self.server_cipher, item_id)
+        storage_keys::derive_storage_key(&self.storage_domain_key, item_id)
     }
 
     fn scoped_storage_key(&self, namespace_id: u64, item_id: ItemId) -> StorageKey {
-        storage_keys::derive_scoped_storage_key(&self.server_cipher, namespace_id, item_id)
+        storage_keys::derive_scoped_storage_key(&self.storage_domain_key, namespace_id, item_id)
     }
 
     /// Returns the storage worker that owns one namespace-scoped item.

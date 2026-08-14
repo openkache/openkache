@@ -29,6 +29,8 @@ pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
 pub(crate) const RUNNING_MARKER_FILE: &str = ".openkache-running";
 #[allow(dead_code)]
 pub(crate) const NAMESPACE_METADATA_FILE: &str = ".openkache-namespaces";
+#[allow(dead_code)]
+pub(crate) const STORAGE_FORMAT_FILE: &str = ".openkache-format";
 pub(crate) const USES_PHYSICAL_STORAGE: bool = backend::USES_PHYSICAL_STORAGE;
 
 #[allow(dead_code)]
@@ -146,6 +148,15 @@ pub(crate) fn load_or_create_server_secret(
     existing_storage: bool,
 ) -> Result<ServerSecret> {
     backend::load_or_create_server_secret(directory, existing_storage)
+}
+
+/// Selects DomainV2 or fails closed before worker storage is opened.
+#[allow(dead_code)]
+pub(crate) fn load_or_create_storage_format(
+    directory: &Path,
+    existing_storage: bool,
+) -> Result<()> {
+    backend::load_or_create_storage_format(directory, existing_storage)
 }
 
 /// Opens the parent directory when the selected backend uses physical files.
@@ -314,6 +325,13 @@ mod backend {
         })
     }
 
+    pub(crate) fn load_or_create_storage_format(
+        _directory: &Path,
+        _existing_storage: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     pub(crate) fn ensure_parent_directory(_path: &Path) -> std::io::Result<()> {
         Ok(())
     }
@@ -367,12 +385,16 @@ mod backend {
     const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
     const SERVER_KEY_VERSION: u32 = 1;
     const SERVER_KEY_FILE_BYTES: usize = 64;
+    const STORAGE_FORMAT_MAGIC: &[u8; 8] = b"OKFORMAT";
+    const STORAGE_FORMAT_VERSION: u32 = 2;
+    const STORAGE_FORMAT_FILE_BYTES: usize = 16;
     const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
     pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) fn startup(config: &AppConfig) -> Result<Startup> {
         fs::create_dir_all(&config.storage.directory)?;
         let existing_storage = existing_storage(config);
+        load_or_create_storage_format(&config.storage.directory, existing_storage)?;
         let server_secret =
             load_or_create_server_secret(&config.storage.directory, existing_storage)?;
         let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
@@ -384,6 +406,7 @@ mod backend {
 
     pub(crate) fn startup_with_server_key(config: &AppConfig) -> Result<bool> {
         fs::create_dir_all(&config.storage.directory)?;
+        load_or_create_storage_format(&config.storage.directory, existing_storage(config))?;
         begin_storage_run(&config.storage.directory)
     }
 
@@ -449,6 +472,56 @@ mod backend {
         Ok(secret)
     }
 
+    pub(crate) fn load_or_create_storage_format(
+        directory: &Path,
+        existing_storage: bool,
+    ) -> Result<()> {
+        let path = directory.join(STORAGE_FORMAT_FILE);
+        match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let metadata = file.metadata()?;
+                if !metadata.file_type().is_file() {
+                    return Err(KvError::Worker(format!(
+                        "storage format marker {} must be a regular file",
+                        path.display()
+                    )));
+                }
+                let mut bytes = Vec::with_capacity(STORAGE_FORMAT_FILE_BYTES);
+                file.read_to_end(&mut bytes)?;
+                if !valid_storage_format(&bytes) {
+                    return Err(KvError::Worker(format!(
+                        "storage format marker {} is invalid or unsupported",
+                        path.display()
+                    )));
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if existing_storage {
+            return Err(KvError::Worker(format!(
+                "storage format marker {} is missing for existing storage; DomainV2 cannot open an unmarked legacy store",
+                path.display()
+            )));
+        }
+
+        let bytes = encode_storage_format();
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::File::open(directory)?.sync_all()?;
+        Ok(())
+    }
+
     pub(crate) fn ensure_parent_directory(path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -457,8 +530,10 @@ mod backend {
     }
 
     pub(crate) fn existing_storage(config: &AppConfig) -> bool {
-        (0..config.runtime.thread_count)
-            .any(|thread_id| config.worker_config(thread_id).data_path.exists())
+        (0..config.runtime.thread_count).any(|thread_id| {
+            let worker = config.worker_config(thread_id);
+            worker.data_path.exists() || worker.large_value_path.exists()
+        })
     }
 
     pub(crate) fn namespace_persistence(directory: &Path) -> NamespacePersistence {
@@ -685,5 +760,22 @@ mod backend {
 
     fn server_key_checksum(bytes: &[u8]) -> u32 {
         crc32fast::hash(bytes)
+    }
+
+    fn encode_storage_format() -> [u8; STORAGE_FORMAT_FILE_BYTES] {
+        let mut bytes = [0; STORAGE_FORMAT_FILE_BYTES];
+        bytes[..8].copy_from_slice(STORAGE_FORMAT_MAGIC);
+        bytes[8..12].copy_from_slice(&STORAGE_FORMAT_VERSION.to_le_bytes());
+        let checksum = crc32fast::hash(&bytes[..12]);
+        bytes[12..].copy_from_slice(&checksum.to_le_bytes());
+        bytes
+    }
+
+    fn valid_storage_format(bytes: &[u8]) -> bool {
+        bytes.len() == STORAGE_FORMAT_FILE_BYTES
+            && &bytes[..8] == STORAGE_FORMAT_MAGIC
+            && u32::from_le_bytes(bytes[8..12].try_into().unwrap()) == STORAGE_FORMAT_VERSION
+            && u32::from_le_bytes(bytes[12..].try_into().unwrap())
+                == crc32fast::hash(&bytes[..12])
     }
 }
