@@ -3,6 +3,8 @@
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
+use openkache_protocol::OwnedRange;
+
 use crate::store::{DirectIoBuffer, DirectIoBufferLease};
 
 /// Number of bytes in every server-derived storage key.
@@ -67,6 +69,10 @@ impl From<&[u8]> for ItemValue {
 /// Opaque client value propagated without server-side decoding.
 pub(crate) enum StoredItemBytes {
     Owned(Arc<Vec<u8>>),
+    RangedOwned {
+        buffer: Arc<Vec<u8>>,
+        range: Range<usize>,
+    },
     Segment {
         segment: Arc<DirectIoBuffer>,
         range: Range<usize>,
@@ -85,6 +91,7 @@ impl StoredItemBytes {
     pub(crate) fn as_slice(&self) -> &[u8] {
         match self {
             Self::Owned(bytes) => bytes,
+            Self::RangedOwned { buffer, range } => &buffer[range.clone()],
             Self::Segment { segment, range } => &segment[range.clone()],
             Self::DirectRead { buffer, range } => &buffer
                 .as_ref()
@@ -98,6 +105,10 @@ impl Clone for StoredItemBytes {
     fn clone(&self) -> Self {
         match self {
             Self::Owned(bytes) => Self::Owned(Arc::clone(bytes)),
+            Self::RangedOwned { buffer, range } => Self::RangedOwned {
+                buffer: Arc::clone(buffer),
+                range: range.clone(),
+            },
             Self::Segment { segment, range } => Self::Segment {
                 segment: Arc::clone(segment),
                 range: range.clone(),
@@ -148,6 +159,21 @@ impl StoredItemValue {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn from_owned_range(bytes: OwnedRange) -> Self {
+        let (buffer, range) = bytes.into_parts();
+        debug_assert!(range.start <= range.end && range.end <= buffer.len());
+        if range.start == 0 && range.end == buffer.len() {
+            return Self::new(buffer);
+        }
+        Self {
+            bytes: StoredItemBytes::RangedOwned {
+                buffer: Arc::new(buffer),
+                range,
+            },
+        }
+    }
+
     pub(crate) fn from_segment(segment: Arc<DirectIoBuffer>, range: Range<usize>) -> Self {
         debug_assert!(range.start <= range.end && range.end <= segment.len());
         Self {
@@ -188,6 +214,19 @@ impl StoredItemValue {
         match self.bytes {
             StoredItemBytes::Owned(bytes) => {
                 Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone())
+            }
+            StoredItemBytes::RangedOwned { buffer, range } => {
+                let mut buffer = match Arc::try_unwrap(buffer) {
+                    Ok(buffer) => buffer,
+                    Err(buffer) => return buffer[range].to_vec(),
+                };
+                if range.start == 0 && range.end == buffer.len() {
+                    return buffer;
+                }
+                let len = range.len();
+                buffer.copy_within(range, 0);
+                buffer.truncate(len);
+                buffer
             }
             StoredItemBytes::Segment { segment, range } => segment[range].to_vec(),
             StoredItemBytes::DirectRead { buffer, range } => {
