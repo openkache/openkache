@@ -37,6 +37,7 @@ enum GenericPayload {
         payload_start: usize,
         payload_end: usize,
     },
+    Projection(OwnedFieldProjection),
 }
 
 impl GenericPayload {
@@ -48,14 +49,51 @@ impl GenericPayload {
                 payload_start,
                 payload_end,
             } => frame.get(*payload_start..*payload_end),
+            Self::Projection(_) => None,
         }
     }
 
-    fn frame(&self) -> Option<&[u8]> {
+    fn owner(&self) -> Option<&[u8]> {
         match self {
             Self::Frame { frame, .. } => Some(frame),
+            Self::Projection(projection) => projection.as_slice(),
             Self::Owned(_) => None,
         }
+    }
+}
+
+/// Owns one buffer behind fields populated by an external projection.
+///
+/// Numeric ranges are relative to the owner's visible bytes. Ownership can be
+/// transferred once without copying or exposing wire framing to handlers.
+struct OwnedFieldProjection {
+    owner: Option<OwnedRange>,
+}
+
+impl OwnedFieldProjection {
+    fn new(owner: OwnedRange) -> Self {
+        Self { owner: Some(owner) }
+    }
+
+    fn as_slice(&self) -> Option<&[u8]> {
+        self.owner.as_ref().map(OwnedRange::as_slice)
+    }
+
+    fn take(&mut self, start: usize, end: usize) -> Option<OwnedRange> {
+        let owner = self.owner.as_ref()?;
+        if start > end || end > owner.len() {
+            return None;
+        }
+        let owner = self.owner.take().expect("owner was present");
+        let (buffer, owner_range) = owner.into_parts();
+        let (Some(absolute_start), Some(absolute_end)) = (
+            owner_range.start.checked_add(start),
+            owner_range.start.checked_add(end),
+        ) else {
+            self.owner = OwnedRange::new(buffer, owner_range);
+            return None;
+        };
+        OwnedRange::new(buffer, absolute_start..absolute_end)
     }
 }
 
@@ -107,6 +145,8 @@ pub(super) struct OperationFieldRecord {
 pub(super) enum OperationFieldStorage {
     OwnedBytes(Vec<u8>),
     FrameRange { start: usize, end: usize },
+    #[allow(dead_code)]
+    OwnerRange { start: usize, end: usize },
     StaticBytes(&'static [u8]),
 }
 
@@ -164,6 +204,24 @@ impl OperationInputView {
             generic_offsets: sentinel_offsets(plan.len()),
             generic_error,
         }
+    }
+
+    /// Builds populated numeric fields over one operation-neutral owner.
+    ///
+    /// Field ranges are relative to the owner's visible bytes. Adapters remain
+    /// responsible for decoding framing and populating generated field slots.
+    #[allow(dead_code)]
+    pub(super) fn from_populated_projection<I>(
+        opcode: Opcode,
+        owner: OwnedRange,
+        fields: I,
+    ) -> OperationInputView
+    where
+        I: IntoIterator<Item = Option<OperationFieldRecord>>,
+    {
+        let mut input = Self::from_populated_parts(opcode, fields);
+        input.generic_payload = Some(GenericPayload::Projection(OwnedFieldProjection::new(owner)));
+        input
     }
 
     /// Builds a generic view directly over the server's owned frame.
@@ -263,6 +321,11 @@ impl OperationInputView {
                                 payload_start,
                                 payload_end,
                             });
+                        }
+                        GenericPayload::Projection(projection) => {
+                            generic_error =
+                                Some("populated projection requires the projection constructor");
+                            generic_payload = Some(GenericPayload::Projection(projection));
                         }
                     }
                 }
@@ -414,7 +477,7 @@ impl OperationInputView {
         let frame = self
             .generic_payload
             .as_ref()
-            .and_then(GenericPayload::frame);
+            .and_then(GenericPayload::owner);
         self.fields
             .get(index)?
             .as_ref()?
@@ -494,6 +557,32 @@ impl OperationInputView {
                     return None;
                 }
                 OwnedRange::new(frame, start..end)
+            }
+            OperationFieldStorage::OwnerRange { start, end } => {
+                let Some(payload) = self.generic_payload.take() else {
+                    self.fields[index]
+                        .as_mut()
+                        .expect("field record remains present")
+                        .value = Some(OperationFieldStorage::OwnerRange { start, end });
+                    return None;
+                };
+                let GenericPayload::Projection(mut projection) = payload else {
+                    self.generic_payload = Some(payload);
+                    self.fields[index]
+                        .as_mut()
+                        .expect("field record remains present")
+                        .value = Some(OperationFieldStorage::OwnerRange { start, end });
+                    return None;
+                };
+                let range = projection.take(start, end);
+                if range.is_none() {
+                    self.generic_payload = Some(GenericPayload::Projection(projection));
+                    self.fields[index]
+                        .as_mut()
+                        .expect("field record remains present")
+                        .value = Some(OperationFieldStorage::OwnerRange { start, end });
+                }
+                range
             }
             other => {
                 self.fields
@@ -575,6 +664,7 @@ impl OperationFieldStorage {
             Self::OwnedBytes(value) => Some(value),
             Self::StaticBytes(value) => Some(value),
             Self::FrameRange { start, end } => frame.and_then(|frame| frame.get(*start..*end)),
+            Self::OwnerRange { start, end } => frame.and_then(|frame| frame.get(*start..*end)),
         }
     }
 }
