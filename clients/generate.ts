@@ -19,6 +19,9 @@ import {
   type Wire_Contract,
   type Wire_Entry,
 } from "../protocol/wire"
+import {
+  derive_operation_client_projection,
+} from "./operation_client_projection"
 
 type Json_Object = Readonly<Record<string, unknown>>
 
@@ -1414,6 +1417,74 @@ pub const SMITHY_${snake_case(enum_.name).toUpperCase()}_${snake_case(member.nam
     .join("\n")
 }
 
+function rust_operation_client_projections(contract: Client_Contract): string {
+  const operations = new Map(
+    (contract.operations ?? []).map((operation) => [
+      operation.name,
+      operation.contract,
+    ]),
+  )
+  const client_operations = new Set(
+    contract.api.operations.map((operation) => operation.name),
+  )
+  const projections = contract.opcodes
+    .map((opcode) => {
+      if (!client_operations.has(opcode.name)) {
+        return `    None, // ${opcode.name} is wire-only.`
+      }
+      const operation = operations.get(opcode.name)
+      if (operation === undefined) {
+        if (contract.operations === undefined) {
+          return `    None, // ${opcode.name} has no permissive-fixture metadata.`
+        }
+        throw new Error(
+          `client operation ${opcode.name} has no protocol operation contract`,
+        )
+      }
+      const projection = derive_operation_client_projection(operation)
+      return `    Some(OperationClientProjection {
+        retry_mode: OperationRetryMode::${pascal_case(projection.retry_mode)},
+    }), // ${opcode.name}`
+    })
+    .join("\n")
+
+  return `/// Generated replay policy owned by the client adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationRetryMode {
+    /// Replay after a connection failure when another attempt remains.
+    Always,
+    /// Never replay after a request may have reached the server.
+    Never,
+    /// Replay only when the request cannot create server state.
+    WhenNotCreating,
+}
+
+/// Client-only metadata for one generated operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationClientProjection {
+    /// Replay policy selected by the modeled client operation.
+    pub retry_mode: OperationRetryMode,
+}
+
+/// Generated client projections in wire-operation order.
+const OPERATION_CLIENT_PROJECTIONS: [Option<OperationClientProjection>; Opcode::COUNT] = [
+${projections}
+];
+
+/// Returns client-only metadata when this client exposes the wire operation.
+///
+/// # Arguments
+///
+/// * \`opcode\` - The generated wire operation identifier.
+///
+/// # Returns
+///
+/// The generated client projection, or \`None\` for a wire-only operation.
+pub const fn operation_client_projection(opcode: Opcode) -> Option<OperationClientProjection> {
+    OPERATION_CLIENT_PROJECTIONS[opcode.index()]
+}`
+}
+
 /** Renders the client-owned Rust defaults, ABI, and value-format declarations. */
 export function render_rust_client(contract: Client_Contract): string {
   const value = contract.value_format
@@ -1485,6 +1556,8 @@ pub const FFI_NAMESPACE_OVERRIDE_${snake_case(entry.name).toUpperCase()}: u32 = 
     )
     .join("\n")
   const descriptor_fields = ffi.namespace_descriptor_fields
+  const operation_client_projections =
+    rust_operation_client_projections(contract)
   const descriptor_offset_constants = descriptor_fields
     .map(
       (field) =>
@@ -1519,6 +1592,8 @@ ${descriptor_fields.map(
 `
   return `// Generated from the OpenKache client Smithy contract. Do not edit.
 
+use openkache_protocol::Opcode;
+
 /// Default maximum number of concurrent request lanes.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = ${formatted_decimal(defaults.max_in_flight)};
 /// Default connection-establishment timeout in milliseconds.
@@ -1543,6 +1618,8 @@ pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.serv
 pub const CLIENT_CERTIFICATE_PEM_TYPE: &str = ${rust_string_literal(defaults.certificate_pem_type)};
 /// Minimum positive setting value when zero selects a default.
 pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.minimum_positive_value)};
+
+${operation_client_projections}
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
