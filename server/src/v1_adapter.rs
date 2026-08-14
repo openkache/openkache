@@ -200,7 +200,7 @@ fn populate_frame_fields(
             ))),
             "ttl_milliseconds" => set_options
                 .ttl_ms
-                .map(|value| OperationFieldStorage::OwnedBytes(value.to_be_bytes().to_vec())),
+                .map(|value| OperationFieldStorage::inline(value.to_be_bytes())),
             "expected_revision" => header
                 .expected_revision_range()
                 .map(|range| OperationFieldStorage::OwnerRange {
@@ -216,7 +216,7 @@ fn populate_frame_fields(
             "default_ttl_milliseconds" => {
                 namespace_policy.and_then(|policy| match policy.default_expiration {
                     crate::protocol::ExpirationDefault::FixedTtl { ttl_ms } => Some(
-                        OperationFieldStorage::OwnedBytes(ttl_ms.to_be_bytes().to_vec()),
+                        OperationFieldStorage::inline(ttl_ms.to_be_bytes()),
                     ),
                     crate::protocol::ExpirationDefault::NoExpiry => None,
                 })
@@ -307,14 +307,14 @@ pub(super) fn populate_request_fields<I>(
         };
         let field = match field_plan.role {
             "namespace_id" => namespace_id
-                .map(|value| OperationFieldStorage::OwnedBytes(value.to_be_bytes().to_vec())),
+                .map(|value| OperationFieldStorage::inline(value.to_be_bytes())),
             "item_id" => item_ids
                 .next()
                 .map(|item_id| OperationFieldStorage::OwnedBytes(item_id.into_bytes().to_vec())),
             "value" => value.take().map(OperationFieldStorage::OwnedBytes),
             "name" => namespace_name.take().map(OperationFieldStorage::OwnedBytes),
             "expected_revision" => expected_revision
-                .map(|value| OperationFieldStorage::OwnedBytes(value.to_be_bytes().to_vec())),
+                .map(|value| OperationFieldStorage::inline(value.to_be_bytes())),
             "condition" => Some(OperationFieldStorage::StaticBytes(set_condition_token(
                 set_options.condition,
             ))),
@@ -326,7 +326,7 @@ pub(super) fn populate_request_fields<I>(
             ))),
             "ttl_milliseconds" => set_options
                 .ttl_ms
-                .map(|value| OperationFieldStorage::OwnedBytes(value.to_be_bytes().to_vec())),
+                .map(|value| OperationFieldStorage::inline(value.to_be_bytes())),
             "create_if_missing" => Some(OperationFieldStorage::StaticBytes(if create_if_missing {
                 b"\x01"
             } else {
@@ -344,7 +344,7 @@ pub(super) fn populate_request_fields<I>(
             "default_ttl_milliseconds" => {
                 namespace_policy.and_then(|policy| match policy.default_expiration {
                     crate::protocol::ExpirationDefault::FixedTtl { ttl_ms } => Some(
-                        OperationFieldStorage::OwnedBytes(ttl_ms.to_be_bytes().to_vec()),
+                        OperationFieldStorage::inline(ttl_ms.to_be_bytes()),
                     ),
                     crate::protocol::ExpirationDefault::NoExpiry => None,
                 })
