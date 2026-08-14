@@ -202,8 +202,10 @@ pub(super) fn decode_header(
                 required,
                 0,
                 Some(namespace_id),
+                Some(openkache_protocol::OPCODE_BYTES),
                 Some(openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES),
                 item_id_count,
+                None,
                 SetOptions::NONE,
                 false,
             )))
@@ -221,8 +223,10 @@ pub(super) fn decode_header(
                 required,
                 0,
                 Some(namespace_id),
+                Some(openkache_protocol::OPCODE_BYTES),
                 None,
                 0,
+                None,
                 SetOptions::NONE,
                 false,
             )))
@@ -272,15 +276,23 @@ pub(super) fn decode_server_request(
     frame: Vec<u8>,
     header: RequestHeader,
 ) -> Result<super::ServerRequest> {
-    if matches!(
-        compatibility_route(header.opcode),
-        Some(CompactV1RequestRoute::Item | CompactV1RequestRoute::Set)
-    ) {
+    if compatibility_route(header.opcode) != Some(CompactV1RequestRoute::NamespaceOpen) {
         return Ok(super::ServerRequest::Frame { frame, header });
     }
     Ok(super::ServerRequest::from_request(decode_owned_request(
         frame, header,
     )?))
+}
+
+pub(super) fn request_namespace_policy(
+    frame: &[u8],
+    header: RequestHeader,
+) -> Option<NamespacePolicy> {
+    let start = header.expected_revision_range()?.end;
+    decode_namespace_policy(frame.get(start..)?)
+        .ok()
+        .flatten()
+        .map(|(policy, _)| policy)
 }
 
 // These tables are the compatibility adapter's only knowledge of historical
@@ -499,8 +511,10 @@ pub(super) fn decode_set_header(
         cursor + value_len_bytes,
         value_len,
         Some(namespace_id),
+        Some(openkache_protocol::OPCODE_BYTES),
         Some(item_id_start),
         1,
+        None,
         set_options,
         has_ttl,
     )))
@@ -546,7 +560,9 @@ pub(super) fn decode_namespace_open_header(
         0,
         None,
         None,
+        None,
         0,
+        None,
         SetOptions::NONE,
         false,
     )))
@@ -578,8 +594,10 @@ pub(super) fn decode_namespace_update_header(
         fixed + policy_len,
         0,
         Some(namespace_id),
+        Some(openkache_protocol::OPCODE_BYTES),
         None,
         0,
+        Some(openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES),
         SetOptions::NONE,
         false,
     )))
@@ -618,8 +636,14 @@ pub(super) fn decode_namespace_delete_header(
         fixed,
         0,
         Some(namespace_id),
+        Some(openkache_protocol::OPCODE_BYTES + DELETE_FLAGS_BYTES),
         None,
         0,
+        Some(
+            openkache_protocol::OPCODE_BYTES
+                + DELETE_FLAGS_BYTES
+                + openkache_protocol::NAMESPACE_ID_BYTES,
+        ),
         SetOptions::NONE,
         false,
     )))

@@ -29,6 +29,13 @@ pub(crate) const fn compatibility_namespace_name_max_bytes() -> usize {
     compat_v1::namespace_name_max_bytes()
 }
 
+pub(crate) fn compatibility_namespace_policy(
+    frame: &[u8],
+    header: RequestHeader,
+) -> Option<NamespacePolicy> {
+    compat_v1::request_namespace_policy(frame, header)
+}
+
 /// Returns the complete request-frame admission ceiling for the composed
 /// server. Generic layouts contribute the normal bound; compatibility
 /// adapters may contribute a larger historical prefix without making that
@@ -64,10 +71,51 @@ pub struct RequestHeader {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompatibilityHeaderMetadata {
     namespace_id: Option<u64>,
-    item_id_start: Option<usize>,
+    field_offsets: CompatibilityFieldOffsets,
     item_id_count: usize,
     set_options: SetOptions,
     has_ttl: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompatibilityFieldOffsets {
+    namespace_id: u16,
+    item_id: u16,
+    expected_revision: u16,
+}
+
+impl CompatibilityFieldOffsets {
+    const MISSING: u16 = u16::MAX;
+
+    const fn new(
+        namespace_id: Option<usize>,
+        item_id: Option<usize>,
+        expected_revision: Option<usize>,
+    ) -> Self {
+        Self {
+            namespace_id: Self::encode(namespace_id),
+            item_id: Self::encode(item_id),
+            expected_revision: Self::encode(expected_revision),
+        }
+    }
+
+    const fn encode(offset: Option<usize>) -> u16 {
+        match offset {
+            Some(offset) => {
+                assert!(offset < Self::MISSING as usize);
+                offset as u16
+            }
+            None => Self::MISSING,
+        }
+    }
+
+    const fn decode(offset: u16) -> Option<usize> {
+        if offset == Self::MISSING {
+            None
+        } else {
+            Some(offset as usize)
+        }
+    }
 }
 
 /// The selected parser boundary for a request frame.
@@ -210,8 +258,10 @@ impl RequestHeader {
         encoded_len: usize,
         value_len: usize,
         namespace_id: Option<u64>,
+        namespace_id_start: Option<usize>,
         item_id_start: Option<usize>,
         item_id_count: usize,
+        expected_revision_start: Option<usize>,
         set_options: SetOptions,
         has_ttl: bool,
     ) -> Self {
@@ -222,7 +272,11 @@ impl RequestHeader {
             value_len,
             compatibility: Some(CompatibilityHeaderMetadata {
                 namespace_id,
-                item_id_start,
+                field_offsets: CompatibilityFieldOffsets::new(
+                    namespace_id_start,
+                    item_id_start,
+                    expected_revision_start,
+                ),
                 item_id_count,
                 set_options,
                 has_ttl,
@@ -276,8 +330,36 @@ impl RequestHeader {
 
     pub(crate) const fn item_id_start(self) -> Option<usize> {
         match self.compatibility {
-            Some(metadata) => metadata.item_id_start,
+            Some(metadata) => CompatibilityFieldOffsets::decode(metadata.field_offsets.item_id),
             None => None,
+        }
+    }
+
+    pub(crate) const fn namespace_id_range(self) -> Option<std::ops::Range<usize>> {
+        match self.compatibility {
+            Some(CompatibilityHeaderMetadata {
+                field_offsets,
+                ..
+            }) => match CompatibilityFieldOffsets::decode(field_offsets.namespace_id) {
+                Some(start) => Some(start..start + NAMESPACE_ID_BYTES),
+                None => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn expected_revision_range(self) -> Option<std::ops::Range<usize>> {
+        match self.compatibility {
+            Some(CompatibilityHeaderMetadata {
+                field_offsets,
+                ..
+            }) => match CompatibilityFieldOffsets::decode(field_offsets.expected_revision) {
+                Some(start) => {
+                    Some(start..start + openkache_protocol::NAMESPACE_REVISION_BYTES)
+                }
+                None => None,
+            },
+            _ => None,
         }
     }
 

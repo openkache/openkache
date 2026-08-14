@@ -133,7 +133,7 @@ fn adapt_compact_frame(frame: Vec<u8>, header: RequestHeader) -> OperationInputV
     let plan = generic_contract::operation_wire_spec(opcode).request.fields;
     let mut fields = SmallVec::<[Option<OperationFieldRecord>; 8]>::with_capacity(plan.len());
     fields.resize_with(plan.len(), || None);
-    populate_frame_fields(plan, &mut fields, header);
+    populate_frame_fields(&frame, plan, &mut fields, header);
     let mut input =
         OperationInputView::from_populated_projection(opcode, OwnedRange::whole(frame), fields);
     input.validate_populated_fields();
@@ -141,6 +141,7 @@ fn adapt_compact_frame(frame: Vec<u8>, header: RequestHeader) -> OperationInputV
 }
 
 fn populate_frame_fields(
+    frame: &[u8],
     plan: &'static [generic_contract::OperationFieldPlan],
     fields: &mut [Option<OperationFieldRecord>],
     header: RequestHeader,
@@ -148,16 +149,30 @@ fn populate_frame_fields(
     let mut item_index = 0_usize;
     let item_start = header.item_id_start();
     let set_options = header.set_options();
+    let needs_policy = plan.iter().any(|field| {
+        matches!(
+            field.role,
+            "default_expiration"
+                | "default_ttl_milliseconds"
+                | "expiration_override"
+                | "default_eviction"
+                | "eviction_override"
+        )
+    });
+    let namespace_policy = needs_policy
+        .then(|| crate::protocol::compatibility_namespace_policy(frame, header))
+        .flatten();
     for (index, field_plan) in plan.iter().enumerate() {
         let Some(slot) = fields.get_mut(index) else {
             break;
         };
         let value = match field_plan.role {
-            "namespace_id" => header.namespace_id().map(|_| OperationFieldStorage::OwnerRange {
-                start: openkache_protocol::OPCODE_BYTES,
-                end: openkache_protocol::OPCODE_BYTES
-                    + openkache_protocol::NAMESPACE_ID_BYTES,
-            }),
+            "namespace_id" => header
+                .namespace_id_range()
+                .map(|range| OperationFieldStorage::OwnerRange {
+                    start: range.start,
+                    end: range.end,
+                }),
             "item_id" => item_start.and_then(|start| {
                 let start = start.checked_add(
                     item_index.checked_mul(openkache_protocol::ITEM_ID_BYTES)?,
@@ -186,6 +201,37 @@ fn populate_frame_fields(
             "ttl_milliseconds" => set_options
                 .ttl_ms
                 .map(|value| OperationFieldStorage::OwnedBytes(value.to_be_bytes().to_vec())),
+            "expected_revision" => header
+                .expected_revision_range()
+                .map(|range| OperationFieldStorage::OwnerRange {
+                    start: range.start,
+                    end: range.end,
+                }),
+            "policy" => None,
+            "default_expiration" => namespace_policy.map(|policy| {
+                OperationFieldStorage::StaticBytes(default_expiration_token(
+                    policy.default_expiration,
+                ))
+            }),
+            "default_ttl_milliseconds" => {
+                namespace_policy.and_then(|policy| match policy.default_expiration {
+                    crate::protocol::ExpirationDefault::FixedTtl { ttl_ms } => Some(
+                        OperationFieldStorage::OwnedBytes(ttl_ms.to_be_bytes().to_vec()),
+                    ),
+                    crate::protocol::ExpirationDefault::NoExpiry => None,
+                })
+            }
+            "expiration_override" => namespace_policy.map(|policy| {
+                OperationFieldStorage::StaticBytes(override_policy_token(
+                    policy.expiration_override,
+                ))
+            }),
+            "default_eviction" => namespace_policy.map(|policy| {
+                OperationFieldStorage::StaticBytes(default_eviction_token(policy.default_eviction))
+            }),
+            "eviction_override" => namespace_policy.map(|policy| {
+                OperationFieldStorage::StaticBytes(override_policy_token(policy.eviction_override))
+            }),
             _ => None,
         };
         *slot = Some(OperationFieldRecord {
