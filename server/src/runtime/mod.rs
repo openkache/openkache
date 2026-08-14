@@ -414,10 +414,13 @@ impl ThreadedKvkache {
         storage_keys::derive_scoped_storage_key(&self.storage_domain_key, namespace_id, item_id)
     }
 
-    /// Returns the storage worker that owns one namespace-scoped item.
-    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
-        let storage_key = self.scoped_storage_key(namespace_id, item_id);
-        self.owner(&storage_key)
+    /// Derives one namespace-scoped storage key.
+    pub(crate) fn namespace_item_storage_key(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> StorageKey {
+        self.scoped_storage_key(namespace_id, item_id)
     }
 
     /// Sends one worker request using a reusable completion slot and bounded timeouts.
@@ -573,52 +576,53 @@ impl ThreadedKvkache {
         .and_then(|response| keyed_storage::value_response(response, "get"))
     }
 
-    async fn get_storage_key_with_requester(
+    pub(crate) async fn get_storage_key_with_requester(
         &self,
         storage_key: StorageKey,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<Option<StoredItemValue>> {
         let worker = self.owner(&storage_key);
-        self.request(worker, Operation::unknown(), requester, |response| {
+        self.request(worker, operation, requester, |response| {
             WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::get(Operation::unknown(), response),
+                command: keyed_storage::get(operation, response),
             }
         })
         .await
         .and_then(|response| keyed_storage::value_response(response, "storage get"))
     }
 
-    #[allow(dead_code)]
-    async fn set_storage_key_with_requester(
+    pub(crate) async fn set_storage_key_with_requester(
         &self,
         storage_key: StorageKey,
         value: StoredItemValue,
         options: StorageWriteOptions,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<SetOutcome> {
         let worker = self.owner(&storage_key);
-        self.request(worker, Operation::unknown(), requester, |response| {
+        self.request(worker, operation, requester, |response| {
             WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::set(Operation::unknown(), value, options, response),
+                command: keyed_storage::set(operation, value, options, response),
             }
         })
         .await
         .and_then(|response| keyed_storage::set_response(response, "storage set"))
     }
 
-    #[allow(dead_code)]
-    async fn delete_storage_key_with_requester(
+    pub(crate) async fn delete_storage_key_with_requester(
         &self,
         storage_key: StorageKey,
+        operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<bool> {
         let worker = self.owner(&storage_key);
-        self.request(worker, Operation::unknown(), requester, |response| {
+        self.request(worker, operation, requester, |response| {
             WorkerRequest::Keyed {
                 storage_key,
-                command: keyed_storage::delete(Operation::unknown(), response),
+                command: keyed_storage::delete(operation, response),
             }
         })
         .await
@@ -648,19 +652,9 @@ impl ThreadedKvkache {
         operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<Option<StoredItemValue>> {
-        let storage_key = self.scoped_storage_key(namespace_id, item_id);
-        let worker = self.owner(&storage_key);
-        self.request(
-            worker,
-            operation,
-            requester,
-            |response| WorkerRequest::Keyed {
-                storage_key,
-                command: keyed_storage::get(operation, response),
-            },
-        )
-        .await
-        .and_then(|response| keyed_storage::value_response(response, "namespace get"))
+        let storage_key = self.namespace_item_storage_key(namespace_id, item_id);
+        self.get_storage_key_with_requester(storage_key, operation, requester)
+            .await
     }
 
     pub async fn set(&self, item_id: ItemId, value: Vec<u8>) -> Result<SetOutcome> {
@@ -740,19 +734,9 @@ impl ThreadedKvkache {
         operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<SetOutcome> {
-        let storage_key = self.scoped_storage_key(namespace_id, item_id);
-        let worker = self.owner(&storage_key);
-        self.request(
-            worker,
-            operation,
-            requester,
-            |response| WorkerRequest::Keyed {
-                storage_key,
-                command: keyed_storage::set(operation, value, options, response),
-            },
-        )
-        .await
-        .and_then(|response| keyed_storage::set_response(response, "namespace set"))
+        let storage_key = self.namespace_item_storage_key(namespace_id, item_id);
+        self.set_storage_key_with_requester(storage_key, value, options, operation, requester)
+            .await
     }
 
     pub async fn delete(&self, item_id: ItemId) -> Result<bool> {
@@ -804,19 +788,9 @@ impl ThreadedKvkache {
         operation: Operation,
         requester: Option<NetworkWorkerId>,
     ) -> Result<bool> {
-        let storage_key = self.scoped_storage_key(namespace_id, item_id);
-        let worker = self.owner(&storage_key);
-        self.request(
-            worker,
-            operation,
-            requester,
-            |response| WorkerRequest::Keyed {
-                storage_key,
-                command: keyed_storage::delete(operation, response),
-            },
-        )
-        .await
-        .and_then(|response| keyed_storage::delete_response(response, "namespace delete"))
+        let storage_key = self.namespace_item_storage_key(namespace_id, item_id);
+        self.delete_storage_key_with_requester(storage_key, operation, requester)
+            .await
     }
 
     pub fn for_trace_benchmark(
