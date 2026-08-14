@@ -11,7 +11,7 @@ use crate::observability::Operation;
 use crate::protocol::SetOptions;
 use crate::store::{
     CompletedKeyedJob, KeyedFinish as StoreKeyedFinish, KeyedJob, KeyedOperation, KeyedOutcome,
-    KeyedVisibleState,
+    KeyedVisibleState, PendingKeyedResult,
 };
 use crate::types::StoredItemValue;
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
@@ -19,6 +19,10 @@ use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 use super::super::scheduler::ScheduledTask;
 use super::super::storage_task::StorageTask;
 use super::super::worker::{ExclusiveWorkPort, ExclusiveWorkResult};
+use super::super::worker_contract::{
+    CapacityCompletion, CollapsedKeyedWork, FinishedKeyedWork, KeyedWorkMetadata, KeyedWorkPort,
+    PreparedKeyedWork,
+};
 use super::super::worker_control::execute_storage_task;
 use super::super::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
 
@@ -48,8 +52,11 @@ pub(in crate::runtime) type CompletedJob = CompletedKeyedJob;
 pub(in crate::runtime) struct KeyedDescriptor {
     pub(in crate::runtime) operation: Operation,
     pub(in crate::runtime) collapsible: fn(&Kvkache, &StorageCommand) -> bool,
-    pub(in crate::runtime) prepare:
-        fn(&mut Kvkache, StorageKey, StorageCommand) -> PreparedKeyedCommand,
+    pub(in crate::runtime) prepare: fn(
+        &mut Kvkache,
+        StorageKey,
+        StorageCommand,
+    ) -> PreparedKeyedWork<WorkerResponse, PreparedJob>,
     pub(in crate::runtime) collapse:
         fn(KeyedVisibleState, Vec<StorageCommand>) -> CollapsedLaneBatch,
     /// Identity for one collapse reducer. Different API adapters must not be
@@ -123,9 +130,9 @@ impl StorageCommand {
         }
     }
 
-    pub(in crate::runtime) fn metadata(&self, cache: &Kvkache) -> KeyedCommandMetadata {
+    pub(in crate::runtime) fn metadata(&self, cache: &Kvkache) -> KeyedWorkMetadata {
         let descriptor = self.descriptor();
-        KeyedCommandMetadata {
+        KeyedWorkMetadata {
             operation: descriptor.operation,
             collapsible: (descriptor.collapsible)(cache, self),
         }
@@ -135,13 +142,9 @@ impl StorageCommand {
         self,
         cache: &mut Kvkache,
         storage_key: StorageKey,
-    ) -> PreparedKeyedCommand {
+    ) -> PreparedKeyedWork<WorkerResponse, PreparedJob> {
         let prepare = self.descriptor().prepare;
         prepare(cache, storage_key, self)
-    }
-
-    pub(in crate::runtime) fn is_collapsible(&self, cache: &Kvkache) -> bool {
-        self.metadata(cache).collapsible
     }
 }
 
@@ -197,22 +200,11 @@ impl ExclusiveWorkPort<StorageCommand> for Kvkache {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::runtime) struct KeyedCommandMetadata {
-    pub(in crate::runtime) operation: Operation,
-    pub(in crate::runtime) collapsible: bool,
-}
-
-pub(in crate::runtime) struct PreparedKeyedCommand {
-    pub(in crate::runtime) response: WorkerResponseSender,
-    pub(in crate::runtime) job: PreparedJob,
-}
-
 fn prepare_command(
     cache: &mut Kvkache,
     storage_key: StorageKey,
     command: StorageCommand,
-) -> PreparedKeyedCommand {
+) -> PreparedKeyedWork<WorkerResponse, PreparedJob> {
     let (operation, response) = match command {
         StorageCommand::Custom { .. } => {
             unreachable!("exclusive storage tasks do not enter the keyed job path")
@@ -225,7 +217,7 @@ fn prepare_command(
         } => (KeyedOperation::Set { value, options }, response),
         StorageCommand::Delete { response } => (KeyedOperation::Delete, response),
     };
-    PreparedKeyedCommand {
+    PreparedKeyedWork {
         response,
         job: cache.prepare_keyed(storage_key, operation),
     }
@@ -380,21 +372,23 @@ impl CollapsedLaneBatch {
         }
     }
 
-    pub(in crate::runtime) fn has_mutation(&self) -> bool {
-        self.operation.is_some()
-    }
-
-    fn into_prepared(self, cache: &mut Kvkache, storage_key: StorageKey) -> PreparedCollapsed {
-        let operation = self
-            .operation
-            .expect("collapsed batch contains a storage mutation");
+    fn into_work(
+        self,
+        cache: &mut Kvkache,
+        storage_key: StorageKey,
+    ) -> CollapsedKeyedWork<WorkerResponse, PreparedJob, VisibleState> {
+        let Some(operation) = self.operation else {
+            return CollapsedKeyedWork::Complete(self.responses);
+        };
         let telemetry_operation = operation.telemetry_operation();
         let job = cache.prepare_keyed(storage_key, operation);
-        PreparedCollapsed {
+        CollapsedKeyedWork::Prepared {
             operation: telemetry_operation,
             job,
             responses: self.responses,
-            mutation_response_index: self.mutation_response_index,
+            mutation_response_index: self
+                .mutation_response_index
+                .expect("a collapsed mutation has a response"),
             success_state: self.success_state,
             failure_state: self.failure_state,
         }
@@ -408,48 +402,23 @@ fn reduce_compatibility_batch(
     CollapsedLaneBatch::reduce(base, commands)
 }
 
-pub(in crate::runtime) struct PreparedCollapsed {
-    pub(in crate::runtime) operation: Operation,
-    pub(in crate::runtime) job: PreparedJob,
-    pub(in crate::runtime) responses: Vec<DeferredWorkerResponse>,
-    pub(in crate::runtime) mutation_response_index: Option<usize>,
-    pub(in crate::runtime) success_state: VisibleState,
-    pub(in crate::runtime) failure_state: VisibleState,
-}
-
-pub(in crate::runtime) fn prepare_collapsed_batch(
-    cache: &mut Kvkache,
-    storage_key: StorageKey,
-    batch: CollapsedLaneBatch,
-) -> PreparedCollapsed {
-    batch.into_prepared(cache, storage_key)
-}
-
 pub(in crate::runtime) fn finish_keyed(
     cache: &mut Kvkache,
     job: CompletedJob,
     include_visible_state: bool,
-) -> KeyedFinish {
+) -> FinishedKeyedWork<WorkerResponse, VisibleState> {
     let StoreKeyedFinish {
         outcome,
         visible_state,
         flush_required,
         pending,
     } = cache.finish_keyed(job, include_visible_state);
-    KeyedFinish {
+    FinishedKeyedWork {
         outcome: outcome.map(worker_response_for_outcome),
         visible_state,
         flush_required,
         pending,
     }
-}
-
-/// Completion projected into the worker's opaque response envelope.
-pub(in crate::runtime) struct KeyedFinish {
-    pub(in crate::runtime) outcome: crate::Result<WorkerResponse>,
-    pub(in crate::runtime) visible_state: Option<VisibleState>,
-    pub(in crate::runtime) flush_required: bool,
-    pub(in crate::runtime) pending: bool,
 }
 
 pub(in crate::runtime) fn worker_response_for_outcome(outcome: KeyedOutcome) -> WorkerResponse {
@@ -462,6 +431,72 @@ pub(in crate::runtime) fn worker_response_for_outcome(outcome: KeyedOutcome) -> 
 
 pub(in crate::runtime) fn pending_response(outcome: KeyedOutcome) -> WorkerResponse {
     worker_response_for_outcome(outcome)
+}
+
+impl KeyedWorkPort<Kvkache, StorageKey> for StorageCommand {
+    type Response = WorkerResponse;
+    type PreparedJob = PreparedJob;
+    type CompletedJob = CompletedJob;
+    type VisibleState = VisibleState;
+    type CapacityCompletion = PendingKeyedResult;
+
+    fn metadata(&self, lifecycle: &Kvkache) -> KeyedWorkMetadata {
+        StorageCommand::metadata(self, lifecycle)
+    }
+
+    fn prepare(
+        self,
+        lifecycle: &mut Kvkache,
+        storage_key: StorageKey,
+    ) -> PreparedKeyedWork<Self::Response, Self::PreparedJob> {
+        StorageCommand::prepare(self, lifecycle, storage_key)
+    }
+
+    fn run(job: Self::PreparedJob) -> impl std::future::Future<Output = Self::CompletedJob> {
+        job.run()
+    }
+
+    fn collapse(
+        lifecycle: &mut Kvkache,
+        storage_key: StorageKey,
+        base: Self::VisibleState,
+        commands: Vec<Self>,
+    ) -> CollapsedKeyedWork<Self::Response, Self::PreparedJob, Self::VisibleState> {
+        let reduce = commands
+            .first()
+            .expect("a collapsed lane contains at least one command")
+            .descriptor()
+            .collapse;
+        reduce(base, commands).into_work(lifecycle, storage_key)
+    }
+
+    fn finish(
+        lifecycle: &mut Kvkache,
+        job: Self::CompletedJob,
+        include_visible_state: bool,
+    ) -> FinishedKeyedWork<Self::Response, Self::VisibleState> {
+        finish_keyed(lifecycle, job, include_visible_state)
+    }
+
+    fn progress_capacity(
+        lifecycle: &mut Kvkache,
+    ) -> crate::Result<(bool, Vec<Self::CapacityCompletion>)> {
+        lifecycle.progress_capacity()
+    }
+
+    fn capacity_completion(
+        completion: Self::CapacityCompletion,
+    ) -> CapacityCompletion<StorageKey, Self::Response, Self::VisibleState> {
+        CapacityCompletion {
+            storage_key: completion.storage_key,
+            outcome: pending_response(completion.outcome),
+            visible_state: completion.visible_state,
+        }
+    }
+
+    fn cancel_pending(lifecycle: &mut Kvkache, storage_key: StorageKey) {
+        lifecycle.cancel_pending_keyed_mutation(storage_key);
+    }
 }
 
 pub(in crate::runtime) fn value_response(
