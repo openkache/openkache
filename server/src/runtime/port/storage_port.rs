@@ -156,7 +156,13 @@ impl StorageValue {
 
     /// Takes ownership of a value buffer while retaining its logical range.
     pub(crate) fn from_owned_range(bytes: OwnedRange) -> Self {
-        Self { owner: bytes }
+        Self {
+            owner: if bytes.is_empty() {
+                OwnedRange::whole(Vec::new())
+            } else {
+                bytes
+            },
+        }
     }
 
     /// Returns the visible value bytes.
@@ -288,7 +294,7 @@ pub(crate) enum StorageBatchOperation {
     },
     Set {
         address: StorageAddress,
-        value: Vec<u8>,
+        value: StorageValue,
         options: StorageWriteOptions,
     },
     Delete {
@@ -296,8 +302,8 @@ pub(crate) enum StorageBatchOperation {
     },
     CompareAndSet {
         address: StorageAddress,
-        expected: Option<Vec<u8>>,
-        replacement: Option<Vec<u8>>,
+        expected: Option<StorageValue>,
+        replacement: Option<StorageValue>,
         options: StorageWriteOptions,
     },
 }
@@ -369,7 +375,7 @@ pub(crate) trait StorageContext {
     fn set<'a>(
         &'a mut self,
         storage_address: StorageAddress,
-        value: Vec<u8>,
+        value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, StorageMutation>;
 
@@ -387,7 +393,7 @@ pub(crate) trait StorageContext {
         &'a mut self,
         storage_address: StorageAddress,
         expected: Option<&'a [u8]>,
-        replacement: Option<Vec<u8>>,
+        replacement: Option<StorageValue>,
         options: StorageWriteOptions,
     ) -> StorageContextFuture<'a, bool>;
 
