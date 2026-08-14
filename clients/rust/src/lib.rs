@@ -19,12 +19,11 @@ use std::time::Duration;
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
-    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
-    CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, ClientRootKey, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
-    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, KeyError,
-    KeyFormat, KeySpace, KeySpec, KeyType, MAX_ITEM_ID_BYTES, MAX_KEY_INPUT_BYTES,
-    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
+    AlpnPolicy, Backend, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity, ClientRootKey,
+    ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection, DeleteOutcome,
+    Endpoint, Error, EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome,
+    ItemId, ItemValue, KeyError, KeyFormat, KeySpace, KeyType, MAX_ITEM_ID_BYTES,
+    MAX_KEY_INPUT_BYTES, NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy,
     PrivateKey, ResolvedKey, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition,
     SetOptions, SetOutcome, TypedInteger, TypedKey, canonical_key_bytes, value, value_envelope,
 };
@@ -412,11 +411,6 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Compatibility spelling for [`Self::key_type`].
-            pub fn key_spec(self, key_spec: KeyType) -> Self {
-                self.key_type(key_spec)
-            }
-
             /// Selects the client-only application-key to Item ID mapping profile.
             pub fn key_format(mut self, key_format: KeyFormat) -> Self {
                 self.inner = self.inner.key_format(key_format);
@@ -582,14 +576,14 @@ impl ClientBuilder {
 #[cfg(feature = "quic-quinn")]
 impl Client {
     /// Connects with data protection, system trust, and default client behavior.
-    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
+    pub async fn connect(endpoint: &str, data_protection_key: ClientRootKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, data_protection_key)
             .connect()
             .await
     }
 
     /// Starts explicit client configuration.
-    pub fn builder(endpoint: Endpoint, data_protection_key: DataProtectionKey) -> ClientBuilder {
+    pub fn builder(endpoint: Endpoint, data_protection_key: ClientRootKey) -> ClientBuilder {
         ClientBuilder {
             inner: SharedClient::builder(endpoint, data_protection_key),
         }
@@ -641,17 +635,14 @@ impl LocalClientBuilder {
 #[cfg(feature = "quic-compio")]
 impl LocalClient {
     /// Connects with data protection, system trust, and default Compio behavior.
-    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
+    pub async fn connect(endpoint: &str, data_protection_key: ClientRootKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, data_protection_key)
             .connect()
             .await
     }
 
     /// Starts explicit Compio client configuration.
-    pub fn builder(
-        endpoint: Endpoint,
-        data_protection_key: DataProtectionKey,
-    ) -> LocalClientBuilder {
+    pub fn builder(endpoint: Endpoint, data_protection_key: ClientRootKey) -> LocalClientBuilder {
         LocalClientBuilder {
             inner: SharedLocalClient::builder(endpoint, data_protection_key),
         }

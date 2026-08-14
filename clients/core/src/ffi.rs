@@ -38,7 +38,7 @@ use crate::key::KeyType;
 use crate::protocol::SetWireOptions;
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
+    Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState, DeleteOutcome,
     Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
     LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
     SetCondition, SetOptions, SetOutcome,
@@ -169,7 +169,7 @@ type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 struct WorkerOptions {
     endpoint: Endpoint,
     certificate: Vec<u8>,
-    data_protection_key: Option<DataProtectionKey>,
+    data_protection_key: Option<ClientRootKey>,
     client_certificate_chain: Vec<u8>,
     client_private_key: Vec<u8>,
     compression: Compression,
@@ -212,7 +212,7 @@ impl FfiClient {
     fn connect(
         endpoint: Endpoint,
         certificate: Vec<u8>,
-        data_protection_key: Option<DataProtectionKey>,
+        data_protection_key: Option<ClientRootKey>,
         client_certificate_chain: Vec<u8>,
         client_private_key: Vec<u8>,
         compression: Compression,
@@ -664,7 +664,7 @@ async fn execute_protected(
         FfiOperation::Get => client
             .get_key_for_ffi(canonical_key.as_slice(), key_type, encryption)
             .await
-            .map(|value| get_result(value, raw_value_result)),
+            .map(|value| get_result(value, opaque_bytes_value_result)),
         FfiOperation::GetJson => client
             .get_key_for_ffi(canonical_key.as_slice(), key_type, encryption)
             .await
@@ -673,7 +673,7 @@ async fn execute_protected(
             .set_key_for_ffi(
                 canonical_key.as_slice(),
                 key_type,
-                Value::Raw(value),
+                Value::OpaqueBytes(value),
                 set_options,
                 encryption,
             )
@@ -918,11 +918,11 @@ fn bytes_result(payload: Vec<u8>) -> FfiResult {
     FfiResult::success(FfiResultKind::Value, payload)
 }
 
-fn raw_value_result(value: Value) -> FfiResult {
+fn opaque_bytes_value_result(value: Value) -> FfiResult {
     match value {
-        Value::Raw(payload) => bytes_result(payload),
+        Value::OpaqueBytes(payload) => bytes_result(payload),
         Value::Cbor(_) | Value::Json(_) => {
-            FfiResult::error("formatted value is not Raw serialization")
+            FfiResult::error("formatted value is not OpaqueBytes serialization")
         }
     }
 }
@@ -953,13 +953,13 @@ fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, cra
         GetOutcome::Found(Value::Json(value)) => crate::value::canonical_json_bytes(&value)
             .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
             .map_err(Into::into),
-        GetOutcome::Found(Value::Raw(payload)) => crate::value::parse_json_input(&payload)
+        GetOutcome::Found(Value::OpaqueBytes(payload)) => crate::value::parse_json_input(&payload)
             .and_then(|value| {
                 crate::value::canonical_json_bytes(&value)
                     .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
             })
             .map_err(Into::into),
-        GetOutcome::Found(Value::Cbor(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
+        GetOutcome::Found(Value::Cbor(_)) => Err(crate::value::Error::ExpectedOpaqueBytes.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
@@ -2284,7 +2284,7 @@ fn copy_utf8(pointer: *const u8, length: usize, name: &str) -> std::result::Resu
 fn copy_data_protection_key(
     pointer: *const u8,
     length: usize,
-) -> std::result::Result<Option<DataProtectionKey>, String> {
+) -> std::result::Result<Option<ClientRootKey>, String> {
     if length == 0 {
         return Ok(None);
     }
@@ -2294,7 +2294,7 @@ fn copy_data_protection_key(
         ));
     }
     let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
-    DataProtectionKey::from_slice(bytes)
+    ClientRootKey::from_slice(bytes)
         .map(Some)
         .map_err(|error| error.to_string())
 }

@@ -18,8 +18,8 @@ use openkache_client::Client;
 #[cfg(feature = "quic-compio")]
 use openkache_client::LocalClient;
 use openkache_client::{
-    Certificate, ClientIdentity, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
-    KeyType, PrivateKey, ServerTrust, SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientRootKey, DeleteOutcome, Endpoint, GetOutcome, KeyType,
+    PrivateKey, ServerTrust, SetOptions, SetOutcome,
 };
 use owo_colors::OwoColorize;
 use reedline::{
@@ -410,9 +410,7 @@ fn endpoint_from_arguments(arguments: &Arguments) -> Result<Endpoint> {
     Endpoint::from_str(address).map_err(CliError::from)
 }
 
-fn data_protection_key_from_arguments(
-    arguments: &Arguments,
-) -> Result<Option<DataProtectionKey>> {
+fn data_protection_key_from_arguments(arguments: &Arguments) -> Result<Option<ClientRootKey>> {
     let encoded = match (
         arguments.data_protection_key.as_deref(),
         arguments.data_protection_key_file.as_deref(),
@@ -433,7 +431,7 @@ fn data_protection_key_from_arguments(
             "data-protection key must not be empty".to_string(),
         ));
     }
-    DataProtectionKey::from_base64(encoded)
+    ClientRootKey::from_base64(encoded)
         .map(Some)
         .map_err(CliError::from)
 }

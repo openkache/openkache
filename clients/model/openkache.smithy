@@ -188,7 +188,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 5
+    abiVersion: 1
 )
 @valueFormat(
     version: 1,

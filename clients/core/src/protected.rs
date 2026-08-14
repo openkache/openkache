@@ -5,10 +5,9 @@ use std::time::Duration;
 
 use crate::value::{Compression, Encryption, Value};
 use crate::{
-    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
-    NamespaceDescriptor, NamespacePolicy, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
-    TypedKey,
+    AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
+    DataProtection, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType, NamespaceDescriptor,
+    NamespacePolicy, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome, TypedKey,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -19,13 +18,13 @@ struct ProtectionSettings {
     compression: Compression,
     encryption: Encryption,
     encryption_explicit: bool,
-    key: Option<DataProtectionKey>,
+    key: Option<ClientRootKey>,
     key_type: KeyType,
     key_format: KeyFormat,
 }
 
 impl ProtectionSettings {
-    fn new(key: DataProtectionKey) -> Self {
+    fn new(key: ClientRootKey) -> Self {
         Self::with_optional_key(Some(key))
     }
 
@@ -33,7 +32,7 @@ impl ProtectionSettings {
         Self::with_optional_key(None)
     }
 
-    fn with_optional_key(key: Option<DataProtectionKey>) -> Self {
+    fn with_optional_key(key: Option<ClientRootKey>) -> Self {
         Self {
             compression: Compression::Disabled,
             encryption: Encryption::Robust,
@@ -171,11 +170,6 @@ macro_rules! protected_builder_methods {
                 self
             }
 
-            /// Compatibility spelling for [`Self::key_type`].
-            pub fn key_spec(self, key_spec: KeyType) -> Self {
-                self.key_type(key_spec)
-            }
-
             /// Selects the client-only key mapping profile.
             pub fn key_format(mut self, key_format: KeyFormat) -> Self {
                 self.protection.key_format = key_format;
@@ -240,9 +234,9 @@ macro_rules! protected_client_methods {
         /// Retrieves, authenticates, and decodes a value for a typed key.
         pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
             match self.get_value(key).await? {
-                GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
+                GetOutcome::Found(Value::OpaqueBytes(value)) => Ok(GetOutcome::Found(value)),
                 GetOutcome::Found(Value::Cbor(_)) | GetOutcome::Found(Value::Json(_)) => {
-                    Err(crate::value::Error::ExpectedRawValue.into())
+                    Err(crate::value::Error::ExpectedOpaqueBytes.into())
                 }
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),
             }
@@ -394,7 +388,8 @@ macro_rules! protected_client_methods {
             plaintext: Vec<u8>,
             options: SetOptions,
         ) -> Result<SetOutcome> {
-            self.set_value(key, Value::Raw(plaintext), options).await
+            self.set_value(key, Value::OpaqueBytes(plaintext), options)
+                .await
         }
 
         /// Serializes, protects, and stores a core logical value.
@@ -402,7 +397,7 @@ macro_rules! protected_client_methods {
         /// # Arguments
         ///
         /// * `key` - Typed key value used for Item ID derivation.
-        /// * `value` - Raw or logical JSON value to encode.
+        /// * `value` - OpaqueBytes or logical JSON value to encode.
         /// * `options` - Existence condition and optional expiration.
         ///
         /// # Returns
@@ -675,12 +670,12 @@ impl ProtectedClientBuilder {
 #[cfg(feature = "quic-quinn")]
 impl ProtectedClient {
     /// Connects with mandatory data protection, system trust, and default client behavior.
-    pub async fn connect(endpoint: &str, key: DataProtectionKey) -> Result<Self> {
+    pub async fn connect(endpoint: &str, key: ClientRootKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, key).connect().await
     }
 
     /// Starts explicit shared client configuration.
-    pub fn builder(endpoint: Endpoint, key: DataProtectionKey) -> ProtectedClientBuilder {
+    pub fn builder(endpoint: Endpoint, key: ClientRootKey) -> ProtectedClientBuilder {
         ProtectedClientBuilder {
             raw: RawClient::builder(endpoint),
             protection: ProtectionSettings::new(key),
@@ -729,12 +724,12 @@ impl LocalProtectedClientBuilder {
 #[cfg(feature = "quic-compio")]
 impl LocalProtectedClient {
     /// Connects with mandatory data protection, system trust, and default Compio behavior.
-    pub async fn connect(endpoint: &str, key: DataProtectionKey) -> Result<Self> {
+    pub async fn connect(endpoint: &str, key: ClientRootKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, key).connect().await
     }
 
     /// Starts explicit shared Compio client configuration.
-    pub fn builder(endpoint: Endpoint, key: DataProtectionKey) -> LocalProtectedClientBuilder {
+    pub fn builder(endpoint: Endpoint, key: ClientRootKey) -> LocalProtectedClientBuilder {
         LocalProtectedClientBuilder {
             raw: LocalRawClient::builder(endpoint),
             protection: ProtectionSettings::new(key),

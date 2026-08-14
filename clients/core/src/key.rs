@@ -552,11 +552,6 @@ impl TypedKey {
         }
     }
 
-    /// Compatibility spelling for callers migrating from `PortableKey`.
-    pub const fn spec(&self) -> KeyType {
-        self.key_type()
-    }
-
     /// Returns the key input length measured by the shared contract.
     pub fn input_len(&self) -> usize {
         match self {
@@ -1004,14 +999,6 @@ pub enum KeyError {
         /// Supplied key type.
         actual: KeyType,
     },
-    /// Compatibility spelling retained for the pre-contract `KeySpec` API.
-    #[error("key type {actual} does not match key spec {expected}")]
-    KeySpecMismatch {
-        /// Configured key type.
-        expected: KeyType,
-        /// Supplied key type.
-        actual: KeyType,
-    },
     /// A mapping profile was paired with an incompatible logical key type.
     #[error("key format {format:?} requires key type bytes, got {key_type:?}")]
     InvalidFormatForKeyType {
@@ -1359,17 +1346,6 @@ impl ClientRootKey {
         Zeroizing::new(self.value_root_key)
     }
 }
-
-/// Backwards-compatible spelling retained while bindings migrate to
-/// [`ClientRootKey`].
-pub type DataProtectionKey = ClientRootKey;
-
-/// Compatibility spelling retained while bindings migrate to [`KeyType`].
-pub type KeySpec = KeyType;
-/// Compatibility spelling retained while bindings migrate to [`TypedInteger`].
-pub type PortableInteger = TypedInteger;
-/// Compatibility spelling retained while bindings migrate to [`TypedKey`].
-pub type PortableKey = TypedKey;
 
 impl TryFrom<&[u8]> for ClientRootKey {
     type Error = Error;

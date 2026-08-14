@@ -43,20 +43,20 @@ The shortest connection path uses system trust and derives the TLS server name
 from the endpoint:
 
 ```rust
-use openkache_client::{Client, DataProtectionKey};
+use openkache_client::{Client, ClientRootKey};
 
-let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let protection_key = ClientRootKey::from_base64(&configured_base64_secret)?;
 let client = Client::connect("cache.example.com:4433", protection_key).await?;
 ```
 
 Use the builder for a pre-resolved address, explicit trust root, or mutual TLS:
 
 ```rust
-use openkache_client::{Certificate, Client, DataProtectionKey, Endpoint};
+use openkache_client::{Certificate, Client, ClientRootKey, Endpoint};
 
 let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
 let certificate = Certificate::from_der(certificate_der)?;
-let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let protection_key = ClientRootKey::from_base64(&configured_base64_secret)?;
 let client = Client::builder(endpoint, protection_key)
     .trust_certificate(certificate)
     .connect()
@@ -85,7 +85,7 @@ let client = Client::builder(endpoint, protection_key)
 
 ## Protect keys and values
 
-`DataProtectionKey` is an application-managed 32-byte random secret. Generate
+`ClientRootKey` is an application-managed 32-byte random secret. Generate
 it with a cryptographically secure random source and store its Base64 form in
 secret storage. Do not hash, truncate, or pad a human-readable password into a
 key.

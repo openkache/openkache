@@ -9,7 +9,7 @@ use napi_derive::napi;
 use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DeleteOutcome, Endpoint,
-    EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeyFormat, KeySpec,
+    EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeyFormat, KeyType,
     NamespaceDescriptor, NamespacePolicy, OverridePolicy, PrivateKey, ProtectedClient, RetryPolicy,
     SetCondition, SetOptions, SetOutcome,
     contract::{
@@ -114,7 +114,7 @@ pub struct NativeNamespaceOpenOutput {
 #[napi]
 pub struct NativeClient {
     client: RwLock<Option<Arc<ProtectedClient>>>,
-    key_type: KeySpec,
+    key_type: KeyType,
 }
 
 #[napi]
@@ -144,10 +144,12 @@ impl NativeClient {
             .map_err(native_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Raw(bytes)) => Ok(Some(Uint8Array::new(bytes))),
-            GetOutcome::Found(Value::Json(_)) | GetOutcome::Found(Value::Cbor(_)) => Err(native_error(
-                "stored value uses canonical JSON serialization, expected raw bytes",
-            )),
+            GetOutcome::Found(Value::OpaqueBytes(bytes)) => Ok(Some(Uint8Array::new(bytes))),
+            GetOutcome::Found(Value::Json(_)) | GetOutcome::Found(Value::Cbor(_)) => Err(
+                native_error(
+                    "stored value uses canonical JSON serialization, expected OpaqueBytes",
+                ),
+            ),
         }
     }
 
@@ -177,17 +179,15 @@ impl NativeClient {
             .get_logical_key_with_profile(self.key_type, key.as_ref(), encryption)
             .await
             .map_err(native_error)?;
-        let GetOutcome::Found(Value::Raw(bytes)) = outcome else {
+        let GetOutcome::Found(Value::OpaqueBytes(bytes)) = outcome else {
             return match outcome {
                 GetOutcome::NotFound => Ok(None),
-                GetOutcome::Found(Value::Raw(_)) => Err(native_error(
+                GetOutcome::Found(Value::OpaqueBytes(_)) => Err(native_error(
                     "stored value does not use the legacy metadata envelope",
                 )),
-                GetOutcome::Found(Value::Json(_)) | GetOutcome::Found(Value::Cbor(_)) => {
-                    Err(native_error(
-                        "stored value does not use the legacy metadata envelope",
-                    ))
-                }
+                GetOutcome::Found(Value::Json(_)) | GetOutcome::Found(Value::Cbor(_)) => Err(
+                    native_error("stored value does not use the legacy metadata envelope"),
+                ),
             };
         };
         let envelope = value_envelope::decode(&bytes).map_err(native_error)?;
@@ -200,7 +200,7 @@ impl NativeClient {
 
     /// Retrieves a core-owned canonical JSON value.
     ///
-    /// Raw-formatted values are rejected instead of being silently coerced.
+    /// OpaqueBytes-formatted values are rejected instead of being silently coerced.
     #[napi(js_name = "get_json")]
     pub async fn get_json(
         &self,
@@ -216,7 +216,7 @@ impl NativeClient {
         match outcome {
             GetOutcome::NotFound => Ok(None),
             GetOutcome::Found(Value::Json(value)) => canonical_json_string(&value),
-            GetOutcome::Found(Value::Raw(payload)) => {
+            GetOutcome::Found(Value::OpaqueBytes(payload)) => {
                 let value = openkache_client_core::value::parse_json_input(&payload)
                     .map_err(native_error)?;
                 canonical_json_string(&value)
@@ -618,7 +618,13 @@ impl NativeClient {
         )?;
         let client = self.active_client()?;
         client
-            .set_logical_key_with_profile(self.key_type, key, Value::Raw(value), options, encryption)
+            .set_logical_key_with_profile(
+                self.key_type,
+                key,
+                Value::OpaqueBytes(value),
+                options,
+                encryption,
+            )
             .await
             .map(map_set_outcome)
             .map_err(native_error)
@@ -725,7 +731,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     .timeouts(timeouts)
     .retry_policy(retry)
     .max_in_flight(max_in_flight)
-    .key_spec(key_spec)
+    .key_type(key_spec)
     .key_format(key_format);
     if let Some(encryption) = encryption {
         builder = builder.encryption(encryption);
@@ -740,11 +746,11 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     })
 }
 
-fn parse_key_spec(value: Option<&str>) -> Result<KeySpec> {
+fn parse_key_spec(value: Option<&str>) -> Result<KeyType> {
     match value.unwrap_or("text") {
-        "integer" => Ok(KeySpec::Integer),
-        "text" => Ok(KeySpec::Text),
-        "bytes" => Ok(KeySpec::Bytes),
+        "integer" => Ok(KeyType::Integer),
+        "text" => Ok(KeyType::Text),
+        "bytes" => Ok(KeyType::Bytes),
         other => Err(invalid_argument(format!(
             "key_spec must be integer, text, or bytes, got {other}"
         ))),

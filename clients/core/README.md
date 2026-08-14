@@ -85,8 +85,7 @@ short ID). `ItemId::from_slice` validates and copies a dynamic buffer. Neither
 hashes the supplied bytes. The pre-freeze
 v1 contract calls the root secret `client_root_key` and binds the selected
 namespace into both Item ID derivation and value AAD. The Rust API retains
-`DataProtectionKey` as a source-compatible alias; it is not a separate wire
-concept.
+`ClientRootKey` as its API name; it is not a separate wire concept.
 
 `ValueCodec` stores its current metadata inside the opaque value. The v1
 container is defined by [`VALUE_FORMAT.md`](../VALUE_FORMAT.md):

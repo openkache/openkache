@@ -10,11 +10,10 @@ The Rust `value_envelope` module and the TypeScript `set_value`/`get_value`
 compatibility methods use a separate legacy metadata envelope (`OKV1` magic
 prefix plus metadata lengths). That legacy format is not this v1 value format;
 it is retained only for migration compatibility and is not described by the
-grammar below. APIs named `Raw` in the formatted client layer are compatibility
-spellings for the v1 `OpaqueBytes` payload selector; they still emit and parse
-this value envelope. In contrast, exact Item ID APIs such as the raw clients'
-`get`/`set` operations bypass this envelope and send the caller's item ID and
-opaque value bytes directly.
+grammar below. Formatted client APIs use the normative `OpaqueBytes` payload
+selector; they still emit and parse this value envelope. In contrast, exact
+Item ID APIs such as the raw clients' `get`/`set` operations bypass this
+envelope and send the caller's item ID and opaque value bytes directly.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by

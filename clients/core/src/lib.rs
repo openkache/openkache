@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
 use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Response, Status};
-use protocol::{Request, RequestAttempt, RequestParts};
+use protocol::{Request, RequestRetryPolicy};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -34,12 +34,10 @@ pub use config::{
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{
-    canonical_key_bytes, ClientRootKey, DataProtectionKey, ItemId, KeyError, KeyFormat, KeySpace,
-    KeySpec, KeyType, PortableInteger, PortableKey, ResolvedKey, TypedInteger, TypedKey,
-    CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
-    MAX_KEY_INPUT_BYTES,
+    CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, ItemId, KeyError, KeyFormat,
+    KeySpace, KeyType, MAX_ITEM_ID_BYTES, MAX_KEY_INPUT_BYTES, ResolvedKey, TypedInteger, TypedKey,
+    canonical_key_bytes,
 };
-pub const ITEM_ID_BYTES: usize = MAX_ITEM_ID_BYTES;
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -384,69 +382,6 @@ struct RequestFailure {
     invalidates_connection: bool,
 }
 
-enum RequestAttempts {
-    Once(Option<Request>),
-    Replay {
-        parts: Option<Arc<RequestParts>>,
-        opcode: Opcode,
-        create_if_missing: bool,
-    },
-}
-
-impl RequestAttempts {
-    fn new(request: Request, replayable: bool) -> Result<Self> {
-        if replayable {
-            let opcode = request.opcode;
-            let create_if_missing = request.create_if_missing;
-            request
-                .into_parts()
-                .map(|parts| Self::Replay {
-                    parts: Some(Arc::new(parts)),
-                    opcode,
-                    create_if_missing,
-                })
-                .map_err(Error::protocol)
-        } else {
-            Ok(Self::Once(Some(request)))
-        }
-    }
-
-    fn next(&mut self, final_attempt: bool) -> Option<PendingRequest> {
-        match self {
-            Self::Once(request) => request.take().map(PendingRequest::Once),
-            Self::Replay {
-                parts,
-                opcode,
-                create_if_missing,
-            } if final_attempt => parts.take().map(|parts| PendingRequest::Replay {
-                parts,
-                opcode: *opcode,
-                create_if_missing: *create_if_missing,
-            }),
-            Self::Replay {
-                parts,
-                opcode,
-                create_if_missing,
-            } => parts
-                .as_ref()
-                .map(|parts| PendingRequest::Replay {
-                    parts: Arc::clone(parts),
-                    opcode: *opcode,
-                    create_if_missing: *create_if_missing,
-                }),
-        }
-    }
-}
-
-enum PendingRequest {
-    Once(Request),
-    Replay {
-        parts: Arc<RequestParts>,
-        opcode: Opcode,
-        create_if_missing: bool,
-    },
-}
-
 impl RequestFailure {
     fn before_send(error: Error) -> Self {
         let invalidates_connection = error.invalidates_connection_before_send();
@@ -536,10 +471,7 @@ impl<C: ClientConnection> Core<C> {
     async fn ping(&self) -> Result<Duration> {
         let started = Instant::now();
         let response = self
-            .request(
-                Operation::Ping,
-                Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?,
-            )
+            .request(Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?)
             .await?;
         expect_status(Operation::Ping, response.status, &[Status::Ok])?;
         if response.payload != b"PONG" {
@@ -564,7 +496,6 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Operation::Get,
                 Request::new_scoped(
                     Opcode::Get,
                     namespace_id,
@@ -608,11 +539,11 @@ impl<C: ClientConnection> Core<C> {
             Opcode::Set,
             namespace_id,
             Some(item_id.into_protocol()),
-            options.into_wire_options()?,
+            options.into_protocol()?,
             value.into_bytes(),
         )
         .map_err(Error::protocol)?;
-        let response = self.request(Operation::Set, request).await?;
+        let response = self.request(request).await?;
         match response.status {
             Status::Created if response.payload.is_empty() => Ok(SetOutcome::Created),
             Status::Replaced if response.payload.is_empty() => Ok(SetOutcome::Replaced),
@@ -640,7 +571,6 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Operation::Delete,
                 Request::new_scoped(
                     Opcode::Delete,
                     namespace_id,
@@ -670,7 +600,6 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Operation::Stats,
                 Request::new_scoped(Opcode::Stats, namespace_id, None, Vec::new())
                     .map_err(Error::protocol)?,
             )
@@ -690,7 +619,6 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Operation::Sync,
                 Request::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
                     .map_err(Error::protocol)?,
             )
@@ -706,7 +634,7 @@ impl<C: ClientConnection> Core<C> {
         }
     }
 
-    async fn request(&self, operation: Operation, request: Request) -> Result<Response> {
+    async fn request(&self, request: Request) -> Result<Response> {
         if self.connection_state() == ConnectionState::Closed {
             return Err(Error::ClientClosed);
         }
@@ -714,16 +642,23 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = request.retry_policy.is_safe();
+        let response_safe = matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats)
+            || (request.opcode == Opcode::NamespaceOpen && !request.create_if_missing);
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
             1
         };
-        let mut attempts = RequestAttempts::new(request, response_safe && max_attempts > 1)?;
+        let operation = operation(request.opcode);
+        let mut request = Some(request);
         for attempt in 1..=max_attempts {
             let connection = self.current_connection()?;
-            let Some(attempt_request) = attempts.next(attempt == max_attempts) else {
+            let attempt_request = if attempt == max_attempts {
+                request.take()
+            } else {
+                request.as_ref().cloned()
+            };
+            let Some(attempt_request) = attempt_request else {
                 return Err(Error::Connection(
                     "request retry state was exhausted before the final attempt".into(),
                 ));
@@ -732,7 +667,7 @@ impl<C: ClientConnection> Core<C> {
                 .request_once(&connection, attempt_request, deadline)
                 .await
             {
-                Ok(response) if response.status.is_error() => {
+                Ok(response) if status_is_error(response.status) => {
                     return Err(Error::Server {
                         code: server_error_code(response.status),
                         message: String::from_utf8_lossy(&response.payload).into_owned(),
@@ -816,14 +751,13 @@ impl<C: ClientConnection> Core<C> {
     ) -> Result<(NamespaceDescriptor, bool)> {
         let response = self
             .request(
-                Operation::NamespaceOpen,
                 Request::namespace_open(name, create_if_missing, policy)
                     .map_err(Error::protocol)?,
             )
             .await?;
         let operation = Operation::NamespaceOpen;
         let status = response.status;
-        if status != Status::Ok && !(create_if_missing && status == Status::Created) {
+        if !matches!(status, Status::Ok | Status::Created) {
             return Err(unexpected_status(operation, status));
         }
         let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
@@ -840,7 +774,6 @@ impl<C: ClientConnection> Core<C> {
     ) -> Result<NamespaceDescriptor> {
         let response = self
             .request(
-                Operation::NamespaceUpdatePolicy,
                 Request::namespace_update_policy(namespace_id, expected_revision, policy)
                     .map_err(Error::protocol)?,
             )
@@ -886,7 +819,6 @@ impl<C: ClientConnection> Core<C> {
     async fn delete_namespace(&self, namespace_id: u64, expected_revision: u64) -> Result<()> {
         let response = self
             .request(
-                Operation::NamespaceDelete,
                 Request::namespace_delete(namespace_id, expected_revision)
                     .map_err(Error::protocol)?,
             )
@@ -914,46 +846,39 @@ impl<C: ClientConnection> Core<C> {
     async fn request_once(
         &self,
         connection: &C,
-        request: PendingRequest,
+        request: Request,
         deadline: transport::Deadline,
     ) -> std::result::Result<Response, RequestFailure> {
+        let opcode = request.opcode;
+        let create_if_missing = request.create_if_missing;
         let mut stream = connection
             .acquire_lane(deadline)
             .await
             .map_err(RequestFailure::before_send)?;
-        let (opcode, create_if_missing, request) = match request {
-            PendingRequest::Once(request) => {
-                let opcode = request.opcode;
-                let create_if_missing = request.create_if_missing;
-                let request = RequestAttempt::Once(
-                    request
-                        .into_parts()
-                        .map_err(Error::protocol)
-                        .map_err(RequestFailure::before_send)?,
-                );
-                (opcode, create_if_missing, request)
-            }
-            PendingRequest::Replay {
-                parts,
-                opcode,
-                create_if_missing,
-            } => (opcode, create_if_missing, RequestAttempt::Replay(parts)),
-        };
+        let parts = request
+            .into_parts()
+            .map_err(Error::protocol)
+            .map_err(RequestFailure::before_send)?;
         let write_timeout = deadline
             .remaining(Operation::RequestWrite)
             .map_err(RequestFailure::before_send)?;
         stream
-            .write_request(request, write_timeout)
+            .write_request_parts(parts, write_timeout)
             .await
             .map_err(RequestFailure::after_send)?;
-        let parts = stream
+        let frame = stream
             .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
             .await
             .map_err(RequestFailure::after_send)?;
-        let response = parts
+        let response = frame
             .into_response()
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
+        // Validate the operation/status/payload contract before returning the lane to
+        // the pool. A status that is not meaningful for this request is a protocol
+        // violation; the lane must be discarded even when the QUIC connection remains
+        // usable. This also prevents a malformed success from being mistaken for a
+        // definitive mutation result.
         if let Err(error) = validate_response_contract(opcode, create_if_missing, &response) {
             return Err(RequestFailure::after_response(error));
         }
@@ -961,7 +886,7 @@ impl<C: ClientConnection> Core<C> {
         // in which case the server terminates the lane. Retiring every error lane is
         // conservative and remains valid for errors that the server could have
         // returned on a reusable lane.
-        if !response.status.is_error() {
+        if !status_is_error(response.status) {
             stream.release();
         }
         Ok(response)
@@ -1353,7 +1278,7 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Retrieves exact encoded bytes for a fixed-size item ID.
+            /// Retrieves exact encoded bytes for an opaque variable-length item ID.
             pub async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
                 self.0.get(item_id).await
             }
@@ -1390,12 +1315,12 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Deletes a fixed-size item ID.
+            /// Deletes an opaque variable-length item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
             }
 
-            /// Deletes a fixed-size item ID in an explicitly supplied namespace.
+            /// Deletes an opaque variable-length item ID in an explicitly supplied namespace.
             pub async fn delete_in_namespace(
                 &self,
                 namespace_id: u64,
@@ -1768,6 +1693,7 @@ fn validate_response_contract(
             ),
             Status::NamespaceNotEmpty => opcode == Opcode::NamespaceDelete,
             Status::UnsupportedOpcode => false,
+            // `Status::try_from` rejects unassigned values before this helper runs.
             Status::Ok
             | Status::NotFound
             | Status::Created
@@ -1852,6 +1778,24 @@ fn unexpected_status(operation: Operation, status: Status) -> Error {
     }
 }
 
+fn server_error_code(status: Status) -> ServerErrorCode {
+    match status {
+        Status::InvalidRequest => ServerErrorCode::InvalidRequest,
+        Status::UnsupportedOpcode => ServerErrorCode::UnsupportedOperation,
+        Status::TooLarge => ServerErrorCode::TooLarge,
+        Status::Overloaded => ServerErrorCode::Overloaded,
+        Status::Timeout => ServerErrorCode::Timeout,
+        Status::Forbidden => ServerErrorCode::Forbidden,
+        Status::InternalError => ServerErrorCode::Internal,
+        Status::NoCapacity => ServerErrorCode::NoCapacity,
+        Status::PolicyConflict => ServerErrorCode::PolicyConflict,
+        Status::Conflict => ServerErrorCode::Conflict,
+        Status::NamespaceNotFound => ServerErrorCode::NamespaceNotFound,
+        Status::NamespaceNotEmpty => ServerErrorCode::NamespaceNotEmpty,
+        _ => ServerErrorCode::Internal,
+    }
+}
+
 fn status_is_error(status: Status) -> bool {
     matches!(
         status,
@@ -1882,23 +1826,5 @@ fn operation(opcode: Opcode) -> Operation {
         Opcode::NamespaceUpdatePolicy => Operation::NamespaceUpdatePolicy,
         Opcode::NamespaceDelete => Operation::NamespaceDelete,
         _ => Operation::RequestWrite,
-    }
-}
-
-fn server_error_code(status: Status) -> ServerErrorCode {
-    match status {
-        Status::InvalidRequest => ServerErrorCode::InvalidRequest,
-        Status::UnsupportedOpcode => ServerErrorCode::UnsupportedOperation,
-        Status::TooLarge => ServerErrorCode::TooLarge,
-        Status::Overloaded => ServerErrorCode::Overloaded,
-        Status::Timeout => ServerErrorCode::Timeout,
-        Status::Forbidden => ServerErrorCode::Forbidden,
-        Status::InternalError => ServerErrorCode::Internal,
-        Status::NoCapacity => ServerErrorCode::NoCapacity,
-        Status::PolicyConflict => ServerErrorCode::PolicyConflict,
-        Status::Conflict => ServerErrorCode::Conflict,
-        Status::NamespaceNotFound => ServerErrorCode::NamespaceNotFound,
-        Status::NamespaceNotEmpty => ServerErrorCode::NamespaceNotEmpty,
-        _ => ServerErrorCode::Internal,
     }
 }

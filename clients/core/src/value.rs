@@ -30,7 +30,7 @@ use crate::contract::{
     VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES, VALUE_FORMAT_VERSION,
     VALUE_FORMAT_VERSION_BYTES,
 };
-use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
+use crate::{ClientRootKey, DATA_PROTECTION_KEY_BYTES, ItemId};
 
 // The selector layout is part of the value contract. Keep these local until
 // the generated client contract exposes the same names across every binding.
@@ -331,9 +331,8 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
 pub enum Value {
     /// Exact application bytes (the v1 `OpaqueBytes` payload format).
     ///
-    /// `Raw` is retained as the Rust API spelling for backwards compatibility;
-    /// it is encoded with the `OpaqueBytes` payload-format selector.
-    Raw(Vec<u8>),
+    /// `OpaqueBytes(Vec<u8>)` is encoded with the `OpaqueBytes` payload selector.
+    OpaqueBytes(Vec<u8>),
     /// Exact CBOR bytes containing one accepted CBOR data item.
     ///
     /// The bytes are kept as supplied so a caller that needs a particular
@@ -450,7 +449,7 @@ impl ValueCodec {
     }
 
     pub(crate) fn compressed_with_key(
-        key: &DataProtectionKey,
+        key: &ClientRootKey,
         compression: Compression,
     ) -> Result<Self> {
         validate_compression(compression)?;
@@ -475,7 +474,7 @@ impl ValueCodec {
     /// # Errors
     ///
     /// Returns an error when the compression level is unsupported.
-    pub fn protected(key: &DataProtectionKey, compression: Compression) -> Result<Self> {
+    pub fn protected(key: &ClientRootKey, compression: Compression) -> Result<Self> {
         Self::protected_with_profile(key, compression, Encryption::Robust)
     }
 
@@ -495,7 +494,7 @@ impl ValueCodec {
     ///
     /// Returns an error for unprotected encryption or an unsupported compression level.
     pub fn protected_with_profile(
-        key: &DataProtectionKey,
+        key: &ClientRootKey,
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
@@ -531,7 +530,7 @@ impl ValueCodec {
         mut key: [u8; ENCRYPTION_KEY_BYTES],
         compression: Compression,
     ) -> Result<Self> {
-        let protection_key = DataProtectionKey::from_bytes(key);
+        let protection_key = ClientRootKey::from_bytes(key);
         key.zeroize();
         Self::protected(&protection_key, compression)
     }
@@ -556,7 +555,7 @@ impl ValueCodec {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        let protection_key = DataProtectionKey::from_bytes(key);
+        let protection_key = ClientRootKey::from_bytes(key);
         key.zeroize();
         Self::protected_with_profile(&protection_key, compression, encryption)
     }
@@ -747,7 +746,11 @@ impl ValueCodec {
         item_id: ItemId,
         plaintext: &[u8],
     ) -> Result<ItemValue> {
-        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext.to_vec()))
+        self.encode_in_namespace(
+            namespace_id,
+            item_id,
+            Value::OpaqueBytes(plaintext.to_vec()),
+        )
     }
 
     /// Encodes owned application bytes as the `OpaqueBytes` payload format.
@@ -776,7 +779,7 @@ impl ValueCodec {
         item_id: ItemId,
         plaintext: Vec<u8>,
     ) -> Result<ItemValue> {
-        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext))
+        self.encode_in_namespace(namespace_id, item_id, Value::OpaqueBytes(plaintext))
     }
 
     /// Authenticates and decodes a formatted value into the core logical model.
@@ -840,8 +843,8 @@ impl ValueCodec {
         encoded: ItemValue,
     ) -> Result<JsonValue> {
         match self.decode_in_namespace(namespace_id, item_id, encoded)? {
-            Value::Raw(payload) => decode_json(&payload),
-            Value::Cbor(_) | Value::Json(_) => Err(Error::ExpectedRawValue),
+            Value::OpaqueBytes(payload) => decode_json(&payload),
+            Value::Cbor(_) | Value::Json(_) => Err(Error::ExpectedOpaqueBytes),
         }
     }
 
@@ -982,8 +985,8 @@ impl ValueCodec {
         encoded: ItemValue,
     ) -> Result<Vec<u8>> {
         match self.decode_in_namespace(namespace_id, item_id, encoded)? {
-            Value::Raw(bytes) => Ok(bytes),
-            Value::Cbor(_) | Value::Json(_) => Err(Error::ExpectedRawValue),
+            Value::OpaqueBytes(bytes) => Ok(bytes),
+            Value::Cbor(_) | Value::Json(_) => Err(Error::ExpectedOpaqueBytes),
         }
     }
 
@@ -995,7 +998,7 @@ impl ValueCodec {
 
     fn serialize_value(&self, value: Value) -> Result<(Vec<u8>, u8)> {
         match value {
-            Value::Raw(bytes) => {
+            Value::OpaqueBytes(bytes) => {
                 if bytes.len() > MAX_VALUE_BYTES {
                     return Err(Error::DecodedValueTooLarge {
                         size: bytes.len(),
@@ -1026,7 +1029,7 @@ impl ValueCodec {
 
     fn deserialize_value(&self, payload_id: u8, serialized: &[u8]) -> Result<Value> {
         match payload_id {
-            PAYLOAD_OPAQUE_BYTES => Ok(Value::Raw(serialized.to_vec())),
+            PAYLOAD_OPAQUE_BYTES => Ok(Value::OpaqueBytes(serialized.to_vec())),
             PAYLOAD_CBOR => {
                 validate_cbor_payload(serialized)?;
                 Ok(Value::Cbor(serialized.to_vec()))
@@ -1246,7 +1249,7 @@ pub enum Error {
     InvalidCbor(String),
     /// The caller requested opaque bytes from another payload format.
     #[error("formatted value is not OpaqueBytes")]
-    ExpectedRawValue,
+    ExpectedOpaqueBytes,
     /// JSON could not be represented by the common logical model.
     #[error("invalid canonical JSON: {0}")]
     InvalidJson(String),

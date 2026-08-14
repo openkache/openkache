@@ -1981,8 +1981,6 @@ _Static_assert(sizeof(openkache_smithy_namespace_descriptor_t) ==
 ${descriptor_offset_asserts}
 
 #define OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES ${contract.max_item_id_bytes}u
-/* Legacy fixed-width name; Item IDs are length-delimited and variable-width. */
-#define OPENKACHE_SMITHY_ITEM_ID_BYTES OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
 #define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v1.alpn)}
 #define OPENKACHE_SMITHY_OPCODE_BYTES ${contract.v1.opcode_bytes}u
@@ -2213,7 +2211,6 @@ ${csharp_api_enum_constants}
 ${csharp_descriptor_offsets}
 
     internal const int MaxItemIdBytes = ${formatted_decimal(contract.max_item_id_bytes)};
-    internal const int ItemIdBytes = MaxItemIdBytes;
     internal const byte SetIfAbsentBits = ${formatted_byte(contract.v1.set_if_absent_flag)};
     internal const byte SetIfPresentBits = ${formatted_byte(contract.v1.set_if_present_flag)};
 
@@ -2337,8 +2334,6 @@ export const SMITHY_${snake_case(enum_.name).toUpperCase()}_${snake_case(member.
 
 /** Maximum number of octets in one length-delimited protocol Item ID. */
 export const SMITHY_MAX_ITEM_ID_BYTES = ${contract.max_item_id_bytes}
-/** @deprecated Use SMITHY_MAX_ITEM_ID_BYTES; Item IDs are variable-width. */
-export const SMITHY_ITEM_ID_BYTES = SMITHY_MAX_ITEM_ID_BYTES
 /** Maximum opaque value bytes accepted by the protocol. */
 export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 /** Width of the request opcode and response status fields. */
@@ -2622,8 +2617,6 @@ const (
 \tSmithyProtocolALPN = ${JSON.stringify(contract.v1.alpn)}
 \t// SmithyMaxItemIDBytes is the maximum length of a protocol Item ID.
 \tSmithyMaxItemIDBytes = ${contract.max_item_id_bytes}
-\t// SmithyItemIDBytes is retained as a source-compatibility alias.
-\tSmithyItemIDBytes = SmithyMaxItemIDBytes
 \t// SmithyMaxValueBytes is the protocol value and payload ceiling.
 \tSmithyMaxValueBytes = ${contract.max_value_bytes}
 \t// SmithyOpcodeBytes and SmithyStatusBytes are fixed opcode/status widths.
@@ -3026,8 +3019,6 @@ SMITHY_RESPONSE_FIXED_BYTES = ${contract.v1.response_fixed_bytes}
 SMITHY_MIN_VARUINT_BYTES = ${contract.v1.min_varuint_bytes}
 SMITHY_MAX_VARUINT_BYTES = ${contract.v1.max_varuint_bytes}
 SMITHY_MAX_ITEM_ID_BYTES = ${contract.max_item_id_bytes}
-# Legacy name retained for source compatibility; Item IDs are variable-width.
-SMITHY_ITEM_ID_BYTES = SMITHY_MAX_ITEM_ID_BYTES
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 SMITHY_NAMESPACE_ID_BYTES = ${contract.v1.namespace_id_bytes}
 SMITHY_NAMESPACE_REVISION_BYTES = ${contract.v1.namespace_revision_bytes}
@@ -3336,8 +3327,6 @@ ${opcodes}
 public enum Smithy_Value_Format: Sendable {
   public static let protocolAlpn: String = ${swift_string_literal(contract.v1.alpn)}
   public static let maxItemIdBytes: Int = ${contract.max_item_id_bytes}
-  @available(*, deprecated, renamed: "maxItemIdBytes")
-  public static let itemIdBytes: Int = maxItemIdBytes
   public static let maxValueBytes: Int = ${contract.max_value_bytes}
   public static let opcodeBytes: Int = ${contract.v1.opcode_bytes}
   public static let statusBytes: Int = ${contract.v1.status_bytes}

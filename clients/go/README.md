@@ -103,7 +103,7 @@ Use `client.Smithy()` when an application needs the generated
 - An empty `DataProtectionKey` selects unprotected values while retaining
   client-side Item ID derivation.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 5 and the extended
+  artifact. The native artifact must have ABI version 1 and the extended
   connect symbol when `Identity` is used.
 
 Protocol operations, Smithy models, and value-format identifiers are generated

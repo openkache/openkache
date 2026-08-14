@@ -609,10 +609,10 @@ private:
     }
 
     static void validate_item_id(std::span<const Byte> item_id) {
-        if (item_id.size() > OPENKACHE_SMITHY_ITEM_ID_BYTES) {
+        if (item_id.size() > OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES) {
             throw Error(
                 "OpenKache item ID exceeds " +
-                std::to_string(OPENKACHE_SMITHY_ITEM_ID_BYTES) + " bytes");
+                std::to_string(OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES) + " bytes");
         }
     }
 

@@ -1,9 +1,7 @@
 //! Shared application-key hiding and value-protection composition.
 
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
-use crate::{
-    ClientRootKey, DataProtectionKey, ItemId, KeyFormat, KeySpace, KeyType, Result, TypedKey,
-};
+use crate::{ClientRootKey, ItemId, KeyFormat, KeySpace, KeyType, Result, TypedKey};
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
@@ -28,7 +26,7 @@ impl DataProtection {
     /// # Errors
     ///
     /// Returns an error when the compression settings are invalid.
-    pub fn new(key: DataProtectionKey, compression: Compression) -> Result<Self> {
+    pub fn new(key: ClientRootKey, compression: Compression) -> Result<Self> {
         Self::with_key_type(key, KeyType::Bytes, compression)
     }
 
@@ -51,15 +49,6 @@ impl DataProtection {
             key_format: KeyFormat::Hash,
             codec,
         })
-    }
-
-    /// Compatibility spelling for [`Self::with_key_type`].
-    pub fn with_key_spec(
-        key: ClientRootKey,
-        key_spec: KeyType,
-        compression: Compression,
-    ) -> Result<Self> {
-        Self::with_key_type(key, key_spec, compression)
     }
 
     /// Creates the default unprotected formatted client.
@@ -115,7 +104,7 @@ impl DataProtection {
     ///
     /// Returns an error for an unprotected profile or invalid compression settings.
     pub fn with_profile(
-        key: DataProtectionKey,
+        key: ClientRootKey,
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
@@ -144,24 +133,9 @@ impl DataProtection {
         })
     }
 
-    /// Compatibility spelling for [`Self::with_profile_and_key_type`].
-    pub fn with_profile_and_key_spec(
-        key: ClientRootKey,
-        key_spec: KeyType,
-        compression: Compression,
-        encryption: Encryption,
-    ) -> Result<Self> {
-        Self::with_profile_and_key_type(key, key_spec, compression, encryption)
-    }
-
     /// Returns the configured typed-key type.
     pub const fn key_type(&self) -> KeyType {
         self.key_type
-    }
-
-    /// Compatibility spelling for [`Self::key_type`].
-    pub const fn key_spec(&self) -> KeyType {
-        self.key_type()
     }
 
     /// Returns the client-owned key mapping profile.
@@ -194,16 +168,6 @@ impl DataProtection {
         })
     }
 
-    /// Compatibility spelling for [`Self::with_key_type_and_format`].
-    pub fn with_key_spec_and_format(
-        key: ClientRootKey,
-        key_spec: KeyType,
-        key_format: KeyFormat,
-        compression: Compression,
-    ) -> Result<Self> {
-        Self::with_key_type_and_format(key, key_spec, key_format, compression)
-    }
-
     /// Creates protection with explicit key mapping and value profile.
     pub fn with_key_type_and_format_profile(
         key: ClientRootKey,
@@ -228,17 +192,6 @@ impl DataProtection {
             key_format,
             codec,
         })
-    }
-
-    /// Compatibility spelling for [`Self::with_key_type_and_format_profile`].
-    pub fn with_key_spec_and_format_profile(
-        key: ClientRootKey,
-        key_spec: KeyType,
-        key_format: KeyFormat,
-        compression: Compression,
-        encryption: Encryption,
-    ) -> Result<Self> {
-        Self::with_key_type_and_format_profile(key, key_spec, key_format, compression, encryption)
     }
 
     /// Creates an unprotected client with an explicit key mapping profile.
@@ -380,7 +333,7 @@ impl DataProtection {
     /// # Arguments
     ///
     /// * `item_id` - Exact item ID bound into authenticated encryption.
-    /// * `value` - Raw or logical JSON value to encode.
+    /// * `value` - OpaqueBytes or logical JSON value to encode.
     ///
     /// # Returns
     ///
@@ -453,7 +406,7 @@ impl DataProtection {
     ///
     /// # Returns
     ///
-    /// The decoded Raw or logical JSON value.
+    /// The decoded OpaqueBytes or logical JSON value.
     ///
     /// # Errors
     ///
@@ -540,7 +493,11 @@ impl DataProtection {
         item_id: ItemId,
         plaintext: &[u8],
     ) -> Result<ItemValue> {
-        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext.to_vec()))
+        self.encode_in_namespace(
+            namespace_id,
+            item_id,
+            Value::OpaqueBytes(plaintext.to_vec()),
+        )
     }
 
     /// Encrypts an owned plaintext value while reusing its allocation when practical.
@@ -569,7 +526,7 @@ impl DataProtection {
         item_id: ItemId,
         plaintext: Vec<u8>,
     ) -> Result<ItemValue> {
-        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext))
+        self.encode_in_namespace(namespace_id, item_id, Value::OpaqueBytes(plaintext))
     }
 
     /// Authenticates, decrypts, and optionally decompresses a stored value.
@@ -599,8 +556,8 @@ impl DataProtection {
         encoded: ItemValue,
     ) -> Result<Vec<u8>> {
         match self.decode_in_namespace(namespace_id, item_id, encoded)? {
-            Value::Raw(bytes) => Ok(bytes),
-            Value::Cbor(_) | Value::Json(_) => Err(crate::value::Error::ExpectedRawValue.into()),
+            Value::OpaqueBytes(bytes) => Ok(bytes),
+            Value::Cbor(_) | Value::Json(_) => Err(crate::value::Error::ExpectedOpaqueBytes.into()),
         }
     }
 }
