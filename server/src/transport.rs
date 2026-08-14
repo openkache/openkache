@@ -2,8 +2,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-#[cfg(feature = "quic-quiche")]
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,7 +13,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use crate::QuicBackend;
 use crate::network_runtime;
 use crate::protocol::RequestFrame as ProtocolRequestFrame;
-use openkache_protocol::{ResponseParts, ResponseSegment};
+use openkache_protocol::ResponseParts;
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+use openkache_protocol::ResponseSegment;
 
 /// Parsed TLS material shared by every reuse-port endpoint.
 pub(super) struct ServerTlsConfig {
