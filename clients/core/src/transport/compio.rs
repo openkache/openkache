@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compio::BufResult;
+use compio::buf::IoVectoredBuf;
 use compio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{BackendConnection, BackendStream, TransportError};
-use crate::protocol::{RequestAttempt, RequestParts};
+use crate::protocol::RequestAttempt;
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Compio;
@@ -24,32 +25,9 @@ pub(super) struct Stream {
     receive: compio_quic::RecvStream,
 }
 
-#[derive(Clone, Copy)]
-enum RequestSegmentKind {
-    Prefix,
-    Payload,
-}
-
-struct ReplayRequestSegment {
-    request: Arc<RequestParts>,
-    kind: RequestSegmentKind,
-}
-
-impl ReplayRequestSegment {
-    // Completion I/O owns each submitted buffer. Keeping the shared request in
-    // every segment lets timeout cancellation drop an attempt without losing
-    // the bytes retained by the retry loop.
-    fn new(request: Arc<RequestParts>, kind: RequestSegmentKind) -> Self {
-        Self { request, kind }
-    }
-}
-
-impl compio::buf::IoBuf for ReplayRequestSegment {
-    fn as_init(&self) -> &[u8] {
-        match self.kind {
-            RequestSegmentKind::Prefix => &self.request.prefix,
-            RequestSegmentKind::Payload => &self.request.payload,
-        }
+impl IoVectoredBuf for RequestAttempt {
+    fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
+        self.segments()
     }
 }
 
@@ -133,34 +111,14 @@ impl BackendStream for Stream {
         request: RequestAttempt,
         timeout: Duration,
     ) -> Result<(), TransportError> {
-        match request {
-            RequestAttempt::Once(parts) => {
-                let BufResult(result, _) = compio::runtime::time::timeout(
-                    timeout,
-                    self.send
-                        .write_vectored_all((parts.prefix, (parts.payload,))),
-                )
-                .await
-                .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?;
-                result.map_err(|error| {
-                    TransportError::backend(BACKEND, Operation::StreamWrite, error)
-                })
-            }
-            RequestAttempt::Replay(parts) => {
-                let prefix =
-                    ReplayRequestSegment::new(Arc::clone(&parts), RequestSegmentKind::Prefix);
-                let payload = ReplayRequestSegment::new(parts, RequestSegmentKind::Payload);
-                let BufResult(result, _) = compio::runtime::time::timeout(
-                    timeout,
-                    self.send.write_vectored_all((prefix, (payload,))),
-                )
-                .await
-                .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?;
-                result.map_err(|error| {
-                    TransportError::backend(BACKEND, Operation::StreamWrite, error)
-                })
-            }
-        }
+        let BufResult(result, _) = compio::runtime::time::timeout(
+            timeout,
+            self.send.write_vectored_all(request),
+        )
+        .await
+        .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?;
+        result
+            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
     }
 
     async fn read_byte(&mut self, timeout: Duration) -> Result<u8, TransportError> {

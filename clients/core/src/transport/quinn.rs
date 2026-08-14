@@ -96,11 +96,9 @@ impl BackendStream for Stream {
         request: RequestAttempt,
         timeout: Duration,
     ) -> Result<(), TransportError> {
-        let parts = request.as_parts();
         tokio::time::timeout(timeout, async {
-            self.send.write_all(&parts.prefix).await?;
-            if !parts.payload.is_empty() {
-                self.send.write_all(&parts.payload).await?;
+            for segment in request.segments() {
+                self.send.write_all(segment).await?;
             }
             Ok::<(), quinn::WriteError>(())
         })
