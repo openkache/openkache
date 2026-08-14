@@ -4,13 +4,13 @@
 //! reusable codecs. This module owns Rust client semantics and selects the
 //! compact-v1 adapter only for operations that explicitly join that profile.
 
-use std::sync::Arc;
-
 use openkache_protocol::{
     ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES,
-    NAMESPACE_REVISION_BYTES, Opcode, OperationFramePolicy, OperationLayoutFraming, OwnedFrame,
-    WireSegment, decode_planned_fields, encode_varuint, operation_wire_spec,
+    NAMESPACE_REVISION_BYTES, Opcode, OperationFramePolicy, OperationLayoutFraming, WireSegment,
+    decode_planned_fields, encode_varuint, operation_wire_spec,
 };
+
+use crate::request::{RequestBuilder, RequestParts, RequestRetryPolicy};
 
 #[path = "protocol_compat_v1.rs"]
 mod compat_v1;
@@ -313,21 +313,6 @@ impl SetWireOptions {
     }
 }
 
-/// Closed replay decision attached by the client adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RequestRetryPolicy {
-    /// The operation is safe to replay.
-    Always,
-    /// The operation must not be replayed automatically.
-    Never,
-}
-
-impl RequestRetryPolicy {
-    pub(crate) const fn is_safe(self) -> bool {
-        matches!(self, Self::Always)
-    }
-}
-
 fn generated_retry_policy(opcode: Opcode, create_if_missing: bool) -> RequestRetryPolicy {
     use crate::contract::OperationRetryMode;
 
@@ -355,53 +340,6 @@ pub(crate) struct Request {
     expected_revision: Option<u64>,
     pub(crate) create_if_missing: bool,
     pub(crate) retry_policy: RequestRetryPolicy,
-}
-
-/// Owned request pieces ready for a transport write.
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct RequestParts {
-    frame: OwnedFrame,
-}
-
-impl RequestParts {
-    fn new<I, T>(segments: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<WireSegment>,
-    {
-        Ok(Self {
-            frame: OwnedFrame::new(segments)?,
-        })
-    }
-
-    pub(crate) fn segments(&self) -> &[WireSegment] {
-        self.frame.segments()
-    }
-}
-
-/// One transport write with ownership matched to its replay policy.
-pub(crate) enum RequestAttempt {
-    /// A non-replayable request moved directly into its only attempt.
-    Once(RequestParts),
-    /// A replayable request retained by the retry loop.
-    Replay(Arc<RequestParts>),
-}
-
-impl RequestAttempt {
-    fn parts(&self) -> &RequestParts {
-        match self {
-            Self::Once(parts) => parts,
-            Self::Replay(parts) => parts,
-        }
-    }
-
-    pub(crate) fn segments(&self) -> impl Iterator<Item = &[u8]> {
-        self.parts()
-            .segments()
-            .iter()
-            .map(WireSegment::as_slice)
-            .filter(|segment| !segment.is_empty())
-    }
 }
 
 impl Request {
@@ -513,7 +451,7 @@ impl Request {
         Ok(request)
     }
 
-    pub(crate) fn into_parts(self) -> Result<RequestParts> {
+    fn into_parts(self) -> Result<RequestParts> {
         let prefix = if let Some(prefix) = compat_v1::encode_prefix(&self)? {
             prefix
         } else {
@@ -538,7 +476,10 @@ impl Request {
             }
             prefix
         };
-        RequestParts::new([WireSegment::owned(prefix), WireSegment::owned(self.value)])
+        Ok(RequestParts::new([
+            WireSegment::owned(prefix),
+            WireSegment::owned(self.value),
+        ])?)
     }
 
     fn validate(&self) -> Result<()> {
@@ -616,6 +557,16 @@ impl Request {
             || self.namespace_name.is_some()
             || self.namespace_policy.is_some()
             || self.create_if_missing
+    }
+}
+
+impl RequestBuilder for Request {
+    fn retry_policy(&self) -> RequestRetryPolicy {
+        self.retry_policy
+    }
+
+    fn into_parts(self) -> crate::Result<RequestParts> {
+        Self::into_parts(self).map_err(crate::Error::protocol)
     }
 }
 

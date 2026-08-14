@@ -9,7 +9,7 @@ use compio::buf::IoVectoredBuf;
 use compio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{BackendConnection, BackendStream, TransportError};
-use crate::protocol::RequestAttempt;
+use crate::request::RequestAttempt;
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Compio;

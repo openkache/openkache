@@ -9,7 +9,7 @@ use crossfire::{MAsyncRx, MAsyncTx};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{Response, ResponseHeaderBytes, ResponseParts};
 
-use crate::protocol::RequestAttempt;
+use crate::request::RequestAttempt;
 use crate::{Backend, Error, Operation, Result};
 
 #[cfg(feature = "quic-compio")]

@@ -13,6 +13,7 @@ mod key;
 mod protected;
 mod protection;
 mod protocol;
+mod request;
 mod transport;
 pub mod value;
 pub mod value_envelope;
@@ -25,7 +26,8 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
 use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Response, Status};
-use protocol::{Request, RequestAttempt, RequestParts};
+use protocol::Request;
+use request::{RequestAttempt, RequestBuilder, RequestParts};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -382,24 +384,23 @@ struct RequestFailure {
     invalidates_connection: bool,
 }
 
-enum RequestAttempts {
-    Once(Option<Request>),
+enum RequestAttempts<R> {
+    Once(Option<R>),
     Replay(Option<Arc<RequestParts>>),
 }
 
-impl RequestAttempts {
-    fn new(request: Request, replayable: bool) -> Result<Self> {
+impl<R: RequestBuilder> RequestAttempts<R> {
+    fn new(request: R, replayable: bool) -> Result<Self> {
         if replayable {
             request
                 .into_parts()
                 .map(|parts| Self::Replay(Some(Arc::new(parts))))
-                .map_err(Error::protocol)
         } else {
             Ok(Self::Once(Some(request)))
         }
     }
 
-    fn next(&mut self, final_attempt: bool) -> Option<PendingRequest> {
+    fn next(&mut self, final_attempt: bool) -> Option<PendingRequest<R>> {
         match self {
             Self::Once(request) => request.take().map(PendingRequest::Once),
             Self::Replay(parts) if final_attempt => parts.take().map(PendingRequest::Replay),
@@ -410,8 +411,8 @@ impl RequestAttempts {
     }
 }
 
-enum PendingRequest {
-    Once(Request),
+enum PendingRequest<R> {
+    Once(R),
     Replay(Arc<RequestParts>),
 }
 
@@ -666,7 +667,11 @@ impl<C: ClientConnection> Core<C> {
         }
     }
 
-    async fn request(&self, operation: Operation, request: Request) -> Result<Response> {
+    async fn request<R: RequestBuilder>(
+        &self,
+        operation: Operation,
+        request: R,
+    ) -> Result<Response> {
         if self.connection_state() == ConnectionState::Closed {
             return Err(Error::ClientClosed);
         }
@@ -674,7 +679,7 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = request.retry_policy.is_safe();
+        let response_safe = request.retry_policy().is_safe();
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
@@ -871,10 +876,10 @@ impl<C: ClientConnection> Core<C> {
         Ok(())
     }
 
-    async fn request_once(
+    async fn request_once<R: RequestBuilder>(
         &self,
         connection: &C,
-        request: PendingRequest,
+        request: PendingRequest<R>,
         deadline: transport::Deadline,
     ) -> std::result::Result<Response, RequestFailure> {
         let mut stream = connection
@@ -885,7 +890,6 @@ impl<C: ClientConnection> Core<C> {
             PendingRequest::Once(request) => RequestAttempt::Once(
                 request
                     .into_parts()
-                    .map_err(Error::protocol)
                     .map_err(RequestFailure::before_send)?,
             ),
             PendingRequest::Replay(parts) => RequestAttempt::Replay(parts),
