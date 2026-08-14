@@ -460,17 +460,8 @@ enum Opcode {
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
 
-    @wireOpcode(value: 14)
-    EXPERIMENTAL_ACKNOWLEDGE = "experimental_acknowledge"
-
-    @wireOpcode(value: 15)
-    EXPERIMENTAL_DENSE = "experimental_dense"
-
     @wireOpcode(value: 32)
     EXPERIMENTAL_STORAGE_READ = "experimental_storage_read"
-
-    @wireOpcode(value: 33)
-    EXPERIMENTAL_PAGE = "experimental_page"
 
     @wireOpcode(value: 34)
     EXPERIMENTAL_MULTI_RESOURCE_MUTATION = "experimental_multi_resource_mutation"
@@ -494,34 +485,6 @@ operation Ping {
 @operationContract(
     scope: "global",
     requestFraming: "opaque",
-    responseFraming: "empty",
-    responseSemantics: "accepted",
-    retryMode: "always",
-    successStatuses: ["accepted"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation ExperimentalAcknowledge {
-    input: ExperimentalAcknowledgeInput
-    output: ExperimentalAcknowledgeOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "ordered_fields",
-    responseFraming: "field_sequence",
-    responseSemantics: "values",
-    retryMode: "always",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation ExperimentalDense {
-    input: ExperimentalDenseInput
-    output: ExperimentalDenseOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "opaque",
     responseFraming: "opaque",
     retryMode: "always",
     successStatuses: ["ok", "not_found"],
@@ -530,20 +493,6 @@ operation ExperimentalDense {
 operation ExperimentalStorageRead {
     input: ExperimentalStorageReadInput
     output: ExperimentalStorageReadOutput
-}
-
-@operationContract(
-    scope: "global",
-    requestFraming: "ordered_fields",
-    responseFraming: "field_sequence",
-    responseSemantics: "page",
-    retryMode: "always",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation ExperimentalPage {
-    input: ExperimentalPageInput
-    output: ExperimentalPageOutput
 }
 
 @operationContract(
@@ -742,10 +691,6 @@ blob ItemId
 blob Value
 blob PongPayload
 
-list ExperimentalPageItems {
-    member: Value
-}
-
 structure PingInput {}
 structure PingOutput {
     @required
@@ -845,41 +790,6 @@ structure SyncInput {
 
 structure SyncOutput {}
 
-structure ExperimentalAcknowledgeInput {
-    @required
-    @operationField(role: "token")
-    @wireCodec(name: "utf8")
-    token: String
-}
-
-structure ExperimentalAcknowledgeOutput {}
-
-structure ExperimentalDenseInput {
-    @required
-    @unsignedLong
-    @operationField(role: "counter")
-    @wireCodec(name: "u64_be")
-    counter: Long
-
-    @required
-    @operationField(role: "enabled")
-    @wireCodec(name: "bool_u8")
-    enabled: Boolean
-}
-
-structure ExperimentalDenseOutput {
-    @required
-    @unsignedLong
-    @operationField(role: "counter")
-    @wireCodec(name: "u64_be")
-    counter: Long
-
-    @required
-    @operationField(role: "enabled")
-    @wireCodec(name: "bool_u8")
-    enabled: Boolean
-}
-
 structure ExperimentalStorageReadInput {
     @required
     @wireCodec(name: "raw_bytes")
@@ -892,21 +802,6 @@ structure ExperimentalStorageReadOutput {
     @wireCodec(name: "raw_bytes")
     @operationField(role: "value")
     value: Value
-}
-
-structure ExperimentalPageInput {
-    @operationField(role: "cursor")
-    cursor: Value
-}
-
-structure ExperimentalPageOutput {
-    @required
-    @operationField(role: "items")
-    @wireCodec(name: "list")
-    items: ExperimentalPageItems
-
-    @operationField(role: "next_cursor")
-    nextCursor: Value
 }
 
 structure ExperimentalMultiResourceMutationInput {
