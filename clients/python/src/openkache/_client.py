@@ -57,6 +57,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_OPERATION_GET_JSON,
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
+    SMITHY_FFI_ENCRYPTION_DEFAULT,
     SMITHY_FFI_RESULT_CREATED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
@@ -112,7 +113,6 @@ from ._generated.smithy_contract import (
     SMITHY_SET_IF_PRESENT_BITS,
     SMITHY_MAX_VARUINT_BYTES,
     SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES,
-    SMITHY_VALUE_ENCRYPTION_NONE,
     SMITHY_VALUE_ENCRYPTION_COMPACT,
     SMITHY_VALUE_ENCRYPTION_ROBUST,
 )
@@ -917,12 +917,6 @@ def _connection_settings(
             "client_root_key must contain exactly "
             f"{SMITHY_VALUE_CLIENT_ROOT_KEY_BYTES} bytes when supplied"
         )
-    if encryption is Encryption.UNPROTECTED and root_key:
-        raise OpenKacheValueError(
-            "connection-level Encryption.UNPROTECTED is not available with "
-            "client_root_key; omit encryption for Robust or use the "
-            "operation-local override"
-        )
     compression = compression or CompressionOptions()
     timeouts = timeouts or ClientTimeouts()
     if encryption is not None and not isinstance(encryption, Encryption):
@@ -957,12 +951,11 @@ def _connection_settings(
         ).encode("utf-8")
     except UnicodeEncodeError as error:
         raise OpenKacheValueError("server_name must contain valid Unicode text") from error
-    # The NONE ABI value is the connection-default sentinel: it selects
-    # Robust when a key is supplied and Unprotected when no key is supplied.
-    # Preserve an explicitly selected authenticated profile without a key so
-    # the shared FFI rejects it instead of silently downgrading.
+    # The generated default sentinel selects Robust with a key and
+    # Unprotected without one. NONE remains an explicit connection-level
+    # Unprotected profile, including when a root key is configured.
     connection_encryption = (
-        SMITHY_VALUE_ENCRYPTION_NONE if encryption is None else encryption
+        SMITHY_FFI_ENCRYPTION_DEFAULT if encryption is None else int(encryption)
     )
     return {
         "address": native_address_bytes,

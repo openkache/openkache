@@ -142,6 +142,8 @@ export interface Ffi_Entry extends Wire_Entry {
 
 export interface Ffi_Contract {
   readonly abi_version: number
+  /** Connection encryption value selecting the configured default. */
+  readonly default_encryption: number
   readonly connection_states: readonly Ffi_Entry[]
   readonly key_formats: readonly Ffi_Entry[]
   readonly key_specs: readonly Ffi_Entry[]
@@ -716,6 +718,13 @@ function ffi_contract(
       "abiVersion",
       `${FFI_CONTRACT_TRAIT_ID}.abiVersion`,
       1,
+      0xffff_ffff,
+    ),
+    default_encryption: integer_member(
+      contract,
+      "defaultEncryption",
+      `${FFI_CONTRACT_TRAIT_ID}.defaultEncryption`,
+      0,
       0xffff_ffff,
     ),
     connection_states: ffi_enum_entries(
@@ -1718,6 +1727,8 @@ ${operation_client_projections}
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
+/// Connection encryption value selecting the configured default.
+pub const FFI_ENCRYPTION_DEFAULT: u32 = ${formatted_decimal(ffi.default_encryption)};
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
@@ -1895,6 +1906,7 @@ export function render_c_contract(contract: Client_Contract): string {
   const descriptor_layout = ffi.namespace_descriptor_layout
   const ffi_defines = [
     `#define OPENKACHE_SMITHY_FFI_ABI_VERSION ${c_unsigned_literal(ffi.abi_version)}`,
+    `#define OPENKACHE_SMITHY_FFI_ENCRYPTION_DEFAULT ${c_unsigned_literal(ffi.default_encryption)}`,
     ...ffi.operations.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
@@ -2205,6 +2217,7 @@ ${csharp_namespace_descriptor_fields}
     internal const int DefaultZstandardMinimumInputBytes = ${formatted_decimal(defaults.zstandard_minimum_input_bytes)};
     internal const int DefaultZstandardMinimumSavingsBytes = ${formatted_decimal(defaults.zstandard_minimum_savings_bytes)};
     internal const uint FfiAbiVersion = ${formatted_decimal(ffi.abi_version)}u;
+    internal const uint FfiEncryptionDefault = ${formatted_decimal(ffi.default_encryption)}u;
 ${csharp_ffi_constants}
 ${csharp_api_enum_constants}
     internal const int FfiNamespaceDescriptorSizeBytes = ${formatted_decimal(descriptor_layout.size_bytes)};
@@ -2388,6 +2401,7 @@ export const SMITHY_POLICY_RESERVED_MASK = ${contract.v1.policy_reserved_mask}
 export const SMITHY_ERROR_STATUS_MINIMUM = ${contract.v1.error_status_minimum}
 /** Native ABI discriminators and namespace descriptor values. */
 export const SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
+export const SMITHY_FFI_ENCRYPTION_DEFAULT = ${contract.ffi.default_encryption}
 ${contract.ffi.operations
   .map(
     (entry) =>
@@ -2685,6 +2699,8 @@ ${contract.opcodes
 const (
 \t// SmithyFFIABIVersion is the native ABI version implemented by the core.
 \tSmithyFFIABIVersion uint32 = ${contract.ffi.abi_version}
+\t// SmithyFFIEncryptionDefault selects the connection's configured value profile.
+\tSmithyFFIEncryptionDefault uint32 = ${contract.ffi.default_encryption}
 ${contract.ffi.operations
   .map(
     (entry) =>
@@ -3071,6 +3087,7 @@ SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(defaults.server_name)}
 SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(defaults.certificate_pem_type)}
 SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
+SMITHY_FFI_ENCRYPTION_DEFAULT = ${contract.ffi.default_encryption}
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
@@ -3429,6 +3446,7 @@ ${swift_namespace_descriptor_fields}
 /// Native ABI identifiers shared by every language adapter.
 public enum Smithy_Native_Contract: Sendable {
   public static let abiVersion: UInt32 = ${ffi.abi_version}
+  public static let encryptionDefault: UInt32 = ${ffi.default_encryption}
 ${swift_native_constants}
   public static let namespaceDescriptorSizeBytes: Int = ${descriptor_layout.size_bytes}
 ${swift_descriptor_offsets}

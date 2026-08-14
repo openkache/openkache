@@ -47,11 +47,11 @@ Rust/C core is the native binary.
 ## API
 
 Construct `openkache::Connect_Options` with the server address and, when
-protection is wanted, a persistent 32-byte client root key, then call
-`openkache::Client::connect`. Omitting both the key and `encryption` selects
-unprotected formatted values; omitting only `encryption` selects Robust when
-the key is present. An explicit Compact or Robust profile without a key is
-rejected. A DER/PEM trust
+protection or root-bound IDs are wanted, a persistent 32-byte client root key,
+then call `openkache::Client::connect`. Omitting `encryption` selects
+unprotected formatted values without a key and Robust with a key. Explicit
+`Encryption::Unprotected` retains root-bound Item IDs while disabling value
+protection; Compact or Robust without a key is rejected. A DER/PEM trust
 certificate is optional; an empty buffer uses system roots. `get` returns
 `std::optional<Bytes>`, `set` returns `Set_Outcome`, and `remove` reports
 whether a value existed. `Set_Options` supports conditional writes,

@@ -93,8 +93,9 @@ struct Namespace_Open_Result {
     bool created;
 };
 
-/// Authenticated-encryption profile for formatted values.
+/// Value-protection profile for formatted values.
 enum class Encryption : std::uint32_t {
+    Unprotected = OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE,
     Compact = OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT,
     Robust = OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST,
 };
@@ -153,8 +154,8 @@ struct Connect_Options {
     std::vector<Byte> client_certificate_chain;
     std::vector<Byte> client_private_key;
     /// Optional value-protection profile. Omitted selects Robust with a key
-    /// and Unprotected without one; an explicit authenticated profile without
-    /// a key is rejected by the shared core.
+    /// and Unprotected without one. Unprotected may be selected with a key to
+    /// retain root-bound Item IDs while disabling value protection.
     std::optional<Encryption> encryption;
     std::uint64_t connect_timeout_ms =
         OPENKACHE_SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS;
@@ -218,7 +219,7 @@ public:
             options.compression_level, options.minimum_input_size, options.minimum_savings,
             options.encryption.has_value()
                 ? static_cast<std::uint32_t>(*options.encryption)
-                : static_cast<std::uint32_t>(OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE),
+                : static_cast<std::uint32_t>(OPENKACHE_CLIENT_ENCRYPTION_DEFAULT),
             options.connect_timeout_ms,
             options.request_timeout_ms, options.retry_max_attempts, options.max_in_flight};
         openkache_client_connect_options_v2_t native_options_v2{

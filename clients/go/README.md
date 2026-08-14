@@ -93,11 +93,12 @@ Use `client.Smithy()` when an application needs the generated
   key for mutual TLS.
 - `Compression`, `Timeouts`, `Retry`, and `MaxInFlight` map directly to core
   settings; zero values select documented core defaults.
-- When `Encryption` is omitted, the shared core selects randomized
-  AES-256-GCM-SIV (Robust) when `ClientRootKey` is supplied and leaves
-  values Unprotected otherwise. Explicit `EncryptionCompact` selects
-  deterministic AES-256-SIV-CMAC; explicit authenticated profiles require a
-  client root key.
+- When `EncryptionExplicit` is false (the default), the shared core selects
+  randomized AES-256-GCM-SIV (Robust) when `ClientRootKey` is supplied and
+  leaves values Unprotected otherwise. Set `EncryptionExplicit: true` with
+  `EncryptionUnprotected` to disable value protection while retaining
+  root-key-bound Item IDs. Explicit `EncryptionCompact` selects deterministic
+  AES-256-SIV-CMAC; explicit authenticated profiles require a client root key.
 - `KeyFormatByteKeyOrHash` preserves byte keys up to 32 bytes as Item IDs and
   hashes longer byte keys; it requires the `Bytes` key representation.
 - An empty `ClientRootKey` selects unprotected values while retaining
@@ -114,6 +115,7 @@ handwritten adapter sources; both files are ignored and must never be staged.
 The C contract header is emitted into `core/generated_local/` and is supplied
 to CGO via the package include path.
 
-When using a pre-ABI-extension native library, `Identity`, `EncryptionCompact`,
-non-default `Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading
-the native library to one that exports `openkache_client_connect_ex`.
+When using a pre-ABI-extension native library, `Identity`, explicit profiles
+that differ from the legacy default, non-default `Retry.MaxAttempts`, and
+non-default `MaxInFlight` require upgrading the native library to one that
+exports `openkache_client_connect_ex`.

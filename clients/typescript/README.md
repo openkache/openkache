@@ -131,10 +131,11 @@ The runtime-neutral codec layer is available from
   request operations.
 - `retry.max_attempts` controls retries for response-safe operations.
 - `max_in_flight` bounds concurrent request lanes on one connection.
-- `encryption` explicitly selects the shared core's `compact` or `robust`
-  authenticated-encryption profile and requires `client_root_key`. When
-  omitted, the shared core selects Robust with a key and Unprotected without
-  one. Operation-local overrides may additionally select `unprotected`.
+- `encryption` selects the shared core's `unprotected`, `compact`, or
+  `robust` value profile. `unprotected` may be used with a
+  `client_root_key` to retain root-bound Item IDs while disabling value
+  protection. When omitted, the shared core selects Robust with a key and
+  Unprotected without one.
 - `key_format` defaults to `hash`; `byte_key_or_hash` requires
   `key_spec: "bytes"` and preserves byte keys up to 32 bytes before hashing
   longer keys.

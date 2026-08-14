@@ -171,12 +171,11 @@ export interface Client_Options {
   /** Maximum concurrent request lanes on one connection. */
   readonly max_in_flight?: number
   /**
-   * Authenticated value-encryption profile; requires `client_root_key`.
-   * When omitted, the shared core uses Robust with a key and Unprotected
-   * without one. Operation-local overrides may additionally select
-   * `unprotected`.
+   * Value-encryption profile. When omitted, the shared core uses Robust with a
+   * key and Unprotected without one. `unprotected` may be selected with a
+   * root key to retain root-bound Item IDs while disabling value protection.
    */
-  readonly encryption?: "compact" | "robust"
+  readonly encryption?: "unprotected" | "compact" | "robust"
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
@@ -1183,11 +1182,12 @@ function validate_options(options: Client_Options): void {
   validate_positive_integer(options.max_in_flight, "max_in_flight")
   if (
     options.encryption !== undefined &&
+    options.encryption !== "unprotected" &&
     options.encryption !== "compact" &&
     options.encryption !== "robust"
   ) {
     throw new OpenKache_Error(
-      `encryption must be compact or robust, got ${String(options.encryption)}`,
+      `encryption must be unprotected, compact, or robust, got ${String(options.encryption)}`,
     )
   }
   if (options.identity !== undefined) {

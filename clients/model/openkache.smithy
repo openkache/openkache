@@ -67,6 +67,14 @@ structure clientDefaults {
 structure ffiContract {
     @required
     abiVersion: Integer
+
+    /// Connection encryption value selecting the configured default.
+    ///
+    /// The value is deliberately outside the value-format selector range so
+    /// `encryptionNone` remains available for an explicit Unprotected
+    /// connection profile.
+    @required
+    defaultEncryption: Long
 }
 
 /// Client-owned v1 value container and protection contract.
@@ -188,7 +196,8 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 1
+    abiVersion: 1,
+    defaultEncryption: 4294967295
 )
 @valueFormat(
     version: 1,

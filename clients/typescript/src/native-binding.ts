@@ -35,7 +35,7 @@ export interface Native_Client_Options {
   readonly request_timeout_ms?: number
   readonly retry_max_attempts?: number
   readonly max_in_flight?: number
-  readonly encryption?: "compact" | "robust"
+  readonly encryption?: Value_Encryption
   readonly key_spec?: "integer" | "text" | "bytes"
   readonly key_format?: "hash" | "byte_key_or_hash"
 }

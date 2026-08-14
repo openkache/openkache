@@ -316,8 +316,11 @@ public struct OpenKacheCompression: Sendable {
     }
 }
 
-/// Authenticated-encryption profile for protected values.
+/// Value-protection profile.
 public enum OpenKacheEncryption: Sendable {
+    /// Leaves values unprotected. A client root key, when supplied, still
+    /// binds client-side Item ID derivation.
+    case unprotected
     /// Deterministic AES-256-SIV-CMAC.
     case compact
     /// Randomized AES-256-GCM-SIV (the recommended profile).
@@ -325,6 +328,8 @@ public enum OpenKacheEncryption: Sendable {
 
     fileprivate var nativeValue: UInt32 {
         switch self {
+        case .unprotected:
+            return UInt32(Smithy_Value_Format.encryptionNone)
         case .compact:
             return UInt32(Smithy_Value_Format.encryptionCompact)
         case .robust:
@@ -365,7 +370,7 @@ public struct OpenKacheClientOptions: Sendable {
     public var keyFormat: OpenKacheKeyFormat
     /// Value compression policy.
     public var compression: OpenKacheCompression
-    /// Optional value authenticated-encryption profile.
+    /// Optional value-protection profile.
     ///
     /// When omitted, the shared core selects the robust profile when a client
     /// root key is configured and leaves values unprotected otherwise.
@@ -519,7 +524,7 @@ private enum NativeBridge {
                                     minimumInputSize: options.compression.minimumInputSize,
                                     minimumSavings: options.compression.minimumSavings,
                                     encryption: options.encryption.map(\.nativeValue)
-                                        ?? UInt32(Smithy_Value_Format.encryptionNone),
+                                        ?? Smithy_Native_Contract.encryptionDefault,
                                     connectTimeoutMs: connectTimeout,
                                     requestTimeoutMs: requestTimeout,
                                     retryMaxAttempts: options.retryMaxAttempts,

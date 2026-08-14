@@ -67,10 +67,13 @@ type CompressionOptions struct {
 // Encryption selects the shared-core value-protection profile.
 //
 // Compact is deterministic for a given item ID. Robust is randomized and is
-// the default profile used by the protected client.
+// the default profile used when a client root key is configured.
 type Encryption uint32
 
 const (
+	// EncryptionUnprotected explicitly disables value protection. The client
+	// root key, when supplied, still binds client-side Item ID derivation.
+	EncryptionUnprotected Encryption = Encryption(SmithyValueEncryptionNone)
 	// EncryptionCompact selects AES-256-SIV-CMAC.
 	EncryptionCompact Encryption = Encryption(SmithyValueEncryptionCompact)
 	// EncryptionRobust selects AES-256-GCM-SIV.
@@ -97,7 +100,7 @@ type RetryPolicy struct {
 	MaxAttempts int
 }
 
-// Options configures a protected OpenKache connection.
+// Options configures an OpenKache connection.
 type Options struct {
 	// Address is the server host and UDP port, such as "127.0.0.1:4433" or
 	// "cache.example.com:4433".
@@ -111,13 +114,16 @@ type Options struct {
 	Identity *Identity
 	// ClientRootKey is the persistent application client root secret.
 	ClientRootKey []byte
-	// Compression is applied before the core's authenticated encryption.
+	// Compression is applied before the selected value-protection profile.
 	Compression CompressionOptions
 	// Encryption selects the shared-core value-protection profile. The zero
-	// value means the option was omitted: the shared core selects Robust when
-	// a client root key is supplied and Unprotected otherwise. An explicit
-	// authenticated profile requires a client root key.
+	// value means the option was omitted unless EncryptionExplicit is true.
+	// Omission selects Robust when a client root key is supplied and
+	// Unprotected otherwise.
 	Encryption Encryption
+	// EncryptionExplicit distinguishes an explicit EncryptionUnprotected value
+	// from the Go zero value, which otherwise means that Encryption was omitted.
+	EncryptionExplicit bool
 	// KeyFormat selects the client-local key mapping profile.
 	KeyFormat KeyFormat
 	// Timeouts bounds native connection and operation work.
@@ -209,12 +215,17 @@ func (o Options) normalize() (normalizedOptions, error) {
 	}
 
 	encryption := o.Encryption
-	encryptionExplicit := encryption != 0
-	if encryption == 0 {
+	encryptionExplicit := o.EncryptionExplicit || encryption != 0
+	if !encryptionExplicit {
 		encryption = EncryptionRobust
 	}
-	if encryption != EncryptionCompact && encryption != EncryptionRobust {
-		return normalizedOptions{}, validationError("encryption", "must be EncryptionCompact or EncryptionRobust")
+	if encryption != EncryptionUnprotected &&
+		encryption != EncryptionCompact &&
+		encryption != EncryptionRobust {
+		return normalizedOptions{}, validationError(
+			"encryption",
+			"must be EncryptionUnprotected, EncryptionCompact, or EncryptionRobust",
+		)
 	}
 	keyFormat := o.KeyFormat
 	if keyFormat == "" {
@@ -447,7 +458,7 @@ type nativeClient interface {
 	close() error
 }
 
-// Client is a concurrency-safe protected OpenKache client.
+// Client is a concurrency-safe OpenKache client.
 //
 // A client may be used by multiple goroutines. Close is permanent and waits
 // for native calls already in flight before releasing the native library.
@@ -456,7 +467,7 @@ type Client struct {
 	native nativeClient
 }
 
-// Connect validates options and establishes a protected OpenKache connection.
+// Connect validates options and establishes an OpenKache connection.
 func Connect(ctx context.Context, options Options) (*Client, error) {
 	if ctx == nil {
 		return nil, validationError("context", "must not be nil")

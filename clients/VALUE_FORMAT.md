@@ -149,9 +149,11 @@ explicitly select an authenticated profile where its connection API exposes
 that choice. Selecting an authenticated protection profile without its
 required key MUST fail; a binding MUST preserve that explicit selection so the
 shared core can reject it rather than silently downgrading to `Unprotected`.
-Operation-local APIs MAY additionally select `Unprotected`. A decoder MUST
-reject a value whose protection ID is disallowed by the caller's configured
-profile and MUST NOT silently downgrade or fall back.
+An explicit `Unprotected` connection or operation profile MAY be used with a
+configured root key; this retains root-bound Item ID derivation while disabling
+value protection. A decoder MUST reject a value whose protection ID is
+disallowed by the caller's configured profile and MUST NOT silently downgrade
+or fall back.
 
 ### 4.2 Compression profiles
 

@@ -31,6 +31,7 @@ pub use crate::contract::{
 };
 pub use crate::contract::{FfiKeyFormat, FfiKeySpec};
 pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
+pub use crate::contract::FFI_ENCRYPTION_DEFAULT;
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
@@ -45,8 +46,6 @@ use crate::{
 };
 use openkache_protocol::compat_v1::NAMESPACE_NAME_MAX_BYTES;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
-/// FFI operation selector meaning "use the connection's configured default".
-pub const FFI_ENCRYPTION_DEFAULT: u32 = u32::MAX;
 
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
@@ -79,7 +78,8 @@ pub struct FfiConnectOptions {
     pub client_private_key: *const u8,
     /// Byte length of [`Self::client_private_key`].
     pub client_private_key_length: usize,
-    /// Optional exact 32-byte client root key. Empty selects unprotected values.
+    /// Optional exact 32-byte client root key. Empty selects unprotected
+    /// values unless an authenticated profile is explicitly requested.
     pub client_root_key: *const u8,
     /// Byte length of [`Self::client_root_key`].
     pub client_root_key_length: usize,
@@ -91,9 +91,10 @@ pub struct FfiConnectOptions {
     pub minimum_input_size: usize,
     /// Minimum compressed-byte savings required.
     pub minimum_savings: usize,
-    /// Value encryption profile: `NONE` (zero) selects the connection default
-    /// when a key is supplied and Unprotected when no key is supplied;
-    /// `ROBUST` (one) and `COMPACT` (two) select those profiles explicitly.
+    /// Value encryption profile: `FFI_ENCRYPTION_DEFAULT` selects Robust with
+    /// a key and Unprotected without one; `NONE` (zero) explicitly selects
+    /// Unprotected; `ROBUST` (one) and `COMPACT` (two) select those profiles
+    /// explicitly.
     pub encryption: u32,
     /// Connection establishment timeout in milliseconds.
     pub connect_timeout_ms: u64,
@@ -1019,7 +1020,7 @@ pub unsafe extern "C" fn openkache_client_connect(
         compression_level,
         minimum_input_size,
         minimum_savings,
-        encryption: VALUE_FORMAT_ENCRYPTION_NONE as u32,
+        encryption: FFI_ENCRYPTION_DEFAULT,
         connect_timeout_ms,
         request_timeout_ms,
         retry_max_attempts: 0,
@@ -1031,9 +1032,10 @@ pub unsafe extern "C" fn openkache_client_connect(
 /// Connects a native client with the complete shared-core configuration.
 ///
 /// Zero retry and lane limits select shared-core defaults. With a client root
-/// key, Smithy `NONE` selects the Robust default; without a key it
-/// selects Unprotected. `ROBUST` and `COMPACT` select those profiles
-/// explicitly, and an authenticated profile without a key is rejected.
+/// key, the default sentinel selects Robust; without a key it selects
+/// Unprotected. `NONE` explicitly selects Unprotected, while `ROBUST` and
+/// `COMPACT` select those profiles explicitly. An authenticated profile
+/// without a key is rejected.
 ///
 /// # Safety
 ///
@@ -1164,15 +1166,10 @@ fn connect_options_with_format(
         options.client_root_key,
         options.client_root_key_length,
     )?;
-    // `NONE` is the ABI's "use the profile default" sentinel: it means
-    // unprotected when no key is supplied and Robust when a key is supplied.
-    // Any explicit authenticated profile without key material must fail rather
-    // than silently downgrading to an unprotected codec.
-    if client_root_key.is_none() && options.encryption != VALUE_FORMAT_ENCRYPTION_NONE as u32 {
-        return Err(
-            "an authenticated value-encryption profile requires a client root key".to_owned(),
-        );
-    }
+    // The default sentinel selects Robust with a root key and Unprotected
+    // without one. `NONE` is an explicit Unprotected profile and therefore
+    // remains valid with a keyed client when callers need keyed IDs without
+    // value confidentiality.
     let client_certificate_chain = copy_bytes(
         options.client_certificate_chain,
         options.client_certificate_chain_length,
@@ -1211,15 +1208,19 @@ fn connect_options_with_format(
         })
     };
     let encryption = match options.encryption {
-        encryption
-            if encryption == VALUE_FORMAT_ENCRYPTION_NONE as u32
-                || encryption == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 =>
-        {
-            Encryption::Robust
-        }
+        FFI_ENCRYPTION_DEFAULT => client_root_key
+            .as_ref()
+            .map_or(Encryption::Unprotected, |_| Encryption::Robust),
+        encryption if encryption == VALUE_FORMAT_ENCRYPTION_NONE as u32 => Encryption::Unprotected,
+        encryption if encryption == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 => Encryption::Robust,
         encryption if encryption == VALUE_FORMAT_ENCRYPTION_COMPACT as u32 => Encryption::Compact,
         encryption => return Err(format!("unsupported encryption profile {encryption}")),
     };
+    if client_root_key.is_none() && encryption != Encryption::Unprotected {
+        return Err(
+            "an authenticated value-encryption profile requires a client root key".to_owned(),
+        );
+    }
     if options.connect_timeout_ms == 0 || options.request_timeout_ms == 0 {
         return Err("client timeouts must be greater than zero milliseconds".to_owned());
     }

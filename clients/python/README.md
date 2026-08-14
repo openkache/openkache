@@ -125,10 +125,10 @@ result = await client.raw.get(
   supplied and Unprotected otherwise. An explicit Compact or Robust profile
   requires a client root key; select Compact only when every client
   sharing the protected entries uses that profile.
-  `Encryption.UNPROTECTED` is valid for a connection without a key and for
-  operation-local overrides; it is rejected as a connection setting when a
-  client root key is supplied because the native connection value `0` is
-  the default-profile sentinel.
+  `Encryption.UNPROTECTED` explicitly selects the unprotected profile and is
+  valid even when a client root key is supplied; this retains root-bound Item
+  ID derivation while disabling value protection. Operation-local overrides
+  use the same profile identifiers.
 - `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
 
 Call `close()` when finished; it is idempotent. The client also supports

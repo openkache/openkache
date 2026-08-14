@@ -106,13 +106,11 @@ Empty values are valid for the protected adapter. Raw item IDs may contain zero
 through `Smithy_Value_Format.maxItemIdBytes` bytes. `clientRootKey` must contain
 exactly 32 persistent random bytes.
 When `encryption` is omitted, the shared core selects Robust with a
-`clientRootKey` and Unprotected without one. Explicit Compact or Robust
-requires a client root key.
+`clientRootKey` and Unprotected without one. Use `.unprotected` to explicitly
+disable value protection while retaining root-key-bound Item IDs. Explicit
+Compact or Robust requires a client root key.
 `OpenKacheKeyFormat.byteKeyOrHash` preserves `Data` keys up to the 32-byte Item
 ID limit and hashes longer keys; use it only with byte-key APIs.
-When `encryption` is omitted, the shared core selects Robust when
-`clientRootKey` is supplied and Unprotected otherwise. An explicit
-authenticated profile requires a client root key.
 `certificate` may be one DER certificate or a PEM chain; omit it to use system
 roots. A numeric address may provide a separate `serverName` for certificate
 verification.

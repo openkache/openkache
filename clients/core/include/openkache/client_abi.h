@@ -127,11 +127,13 @@ typedef enum openkache_client_encryption {
 } openkache_client_encryption_t;
 
 /*
- * Operation-local value-profile selector used by versioned execute entry
- * points. UINT32_MAX means use the connection default; the other values are
- * the openkache_client_encryption_t discriminators.
+ * Value-profile selector used by versioned connection and operation entry
+ * points. UINT32_MAX means use the configured default; the other values are
+ * the openkache_client_encryption_t discriminators. In connection options,
+ * NONE explicitly selects Unprotected, including when a client root key is
+ * supplied.
  */
-#define OPENKACHE_CLIENT_ENCRYPTION_DEFAULT UINT32_MAX
+#define OPENKACHE_CLIENT_ENCRYPTION_DEFAULT OPENKACHE_SMITHY_FFI_ENCRYPTION_DEFAULT
 
 typedef struct openkache_client_connect_options {
     const uint8_t *address;
@@ -174,7 +176,8 @@ uint32_t openkache_client_abi_version(void);
  * `certificate` is one DER-encoded server trust certificate, a PEM chain,
  * or an empty buffer to use system trust roots.
  * `client_root_key` is optional; when supplied it must contain exactly
- * 32 bytes.
+ * 32 bytes. `encryption` uses OPENKACHE_CLIENT_ENCRYPTION_DEFAULT when
+ * omitted, or an explicit openkache_client_encryption_t value otherwise.
  * All input buffers are copied before this call returns.
  */
 openkache_client_result_t *openkache_client_connect(

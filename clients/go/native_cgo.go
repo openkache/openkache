@@ -568,21 +568,21 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		minimumSavings = SmithyDefaultZstandardMinimumSavingsBytes
 	}
 	encryption := options.encryption
-	// An omitted encryption option uses the ABI NONE sentinel. With a key the
-	// core resolves NONE to its Robust default; without a key it resolves to
-	// Unprotected. Preserve explicit Compact/Robust values without a key so the
-	// core rejects them instead of silently downgrading.
+	// An omitted encryption option uses the ABI default sentinel. With a key
+	// the core resolves the sentinel to Robust; without a key it resolves to
+	// Unprotected. Explicit profiles retain their value, including
+	// EncryptionUnprotected.
 	if !options.encryptionExplicit {
-		encryption = Encryption(SmithyValueEncryptionNone)
+		encryption = Encryption(SmithyFFIEncryptionDefault)
 	}
 	hasExtended := C.openkache_go_has_connect_ex(library) != 0
 	useExtended := hasExtended && options.keyFormat == KeyFormatHash
-	requiresProtectedProfile := options.encryptionExplicit &&
-		(len(options.clientRootKey) == 0 || options.encryption != EncryptionRobust)
+	requiresExtendedEncryption := options.encryptionExplicit &&
+		(options.encryption != EncryptionUnprotected || len(options.clientRootKey) != 0)
 	if !hasExtended &&
 		(len(options.identityCertificate) != 0 ||
 			len(options.identityPrivateKey) != 0 ||
-			requiresProtectedProfile ||
+			requiresExtendedEncryption ||
 			options.retryAttempts != SmithyDefaultRetryMaxAttempts ||
 			options.maxInFlight != SmithyDefaultMaxInFlight) {
 		C.free(address)

@@ -1076,10 +1076,11 @@ fn parse_endpoint(address: &str, server_name: &str) -> Result<Endpoint> {
 
 fn parse_encryption(encryption: &str) -> Result<Encryption> {
     match encryption {
+        "unprotected" => Ok(Encryption::Unprotected),
         "robust" => Ok(Encryption::Robust),
         "compact" => Ok(Encryption::Compact),
         value => Err(invalid_argument(format!(
-            "encryption must be compact or robust, got {value}"
+            "encryption must be unprotected, compact, or robust, got {value}"
         ))),
     }
 }
