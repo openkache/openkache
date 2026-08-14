@@ -4,4 +4,4 @@
 //! compatibility behavior lives in this namespace so adding another API does
 //! not add operation branches to the generic runtime.
 
-pub(super) mod draft_v1_keyed;
+pub(in crate::runtime) mod draft_v1_keyed;
