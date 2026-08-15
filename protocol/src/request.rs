@@ -91,13 +91,6 @@ pub enum RequestFrameStep {
     },
     /// Consume and validate exact constant bytes.
     Constant { bytes: &'static [u8] },
-    /// Consume a conditional canonical `vu128`, selected by a previously
-    /// decoded byte.
-    ConditionalVarUInt {
-        selector_offset: usize,
-        mask: u8,
-        expected: u8,
-    },
     /// Consume one byte length followed by that many bytes.
     ByteLength,
     /// Consume one byte length followed by a projected modeled field.
@@ -109,23 +102,6 @@ pub enum RequestFrameStep {
     /// Consume and project the modeled field declared by a preceding
     /// byte-length prefix.
     ByteLengthBodyField { slot: usize, field: usize },
-    /// Consume a fixed prefix and, when the leading byte matches, a canonical
-    /// `vu128`.
-    ByteThenVarUInt {
-        prefix_bytes: usize,
-        mask: u8,
-        expected: u8,
-    },
-    /// Consume a fixed prefix and conditionally consume a canonical `vu128`
-    /// selected by both a selector byte and the prefix's leading byte.
-    ConditionalByteThenVarUInt {
-        selector_offset: usize,
-        mask: u8,
-        expected: u8,
-        prefix_bytes: usize,
-        value_mask: u8,
-        value_expected: u8,
-    },
 }
 
 /// API-owned request metadata used only to delimit one protocol frame.
@@ -599,28 +575,6 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                 }
                 state.cursor = end;
             }
-            RequestFrameStep::ConditionalVarUInt {
-                selector_offset,
-                mask,
-                expected,
-            } => {
-                let Some(&selector) = prefix.get(selector_offset) else {
-                    return Ok(None);
-                };
-                if selector & mask == expected {
-                    let Some((_, encoded_len)) = crate::decode_varuint(
-                        prefix.get(state.cursor..).unwrap_or_default(),
-                        "request conditional integer",
-                    )?
-                    else {
-                        return Ok(None);
-                    };
-                    state.cursor = state
-                        .cursor
-                        .checked_add(encoded_len)
-                        .ok_or(ProtocolError::FrameLengthOverflow)?;
-                }
-            }
             RequestFrameStep::ByteLength => {
                 let Some(&length) = prefix.get(state.cursor) else {
                     return Ok(None);
@@ -711,52 +665,6 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                 }
                 state.cursor = end;
             }
-            RequestFrameStep::ByteThenVarUInt {
-                prefix_bytes,
-                mask,
-                expected,
-            } => {
-                let Some(encoded_len) = decode_byte_then_varuint_len(
-                    &prefix[state.cursor..],
-                    prefix_bytes,
-                    mask,
-                    expected,
-                )?
-                else {
-                    return Ok(None);
-                };
-                state.cursor = state
-                    .cursor
-                    .checked_add(encoded_len)
-                    .ok_or(ProtocolError::FrameLengthOverflow)?;
-            }
-            RequestFrameStep::ConditionalByteThenVarUInt {
-                selector_offset,
-                mask,
-                expected,
-                prefix_bytes,
-                value_mask,
-                value_expected,
-            } => {
-                let Some(&selector) = prefix.get(selector_offset) else {
-                    return Ok(None);
-                };
-                if selector & mask == expected {
-                    let Some(encoded_len) = decode_byte_then_varuint_len(
-                        &prefix[state.cursor..],
-                        prefix_bytes,
-                        value_mask,
-                        value_expected,
-                    )?
-                    else {
-                        return Ok(None);
-                    };
-                    state.cursor = state
-                        .cursor
-                        .checked_add(encoded_len)
-                        .ok_or(ProtocolError::FrameLengthOverflow)?;
-                }
-            }
         }
     }
     Ok(Some(()))
@@ -791,35 +699,6 @@ fn set_request_field_projection(
     }
     *target = projection;
     Ok(())
-}
-
-fn decode_byte_then_varuint_len(
-    input: &[u8],
-    prefix_bytes: usize,
-    mask: u8,
-    expected: u8,
-) -> Result<Option<usize>> {
-    if input.len() < prefix_bytes {
-        return Ok(None);
-    }
-    let Some(&flags) = input.first() else {
-        return Ok(None);
-    };
-    if flags & mask != expected {
-        return Ok(Some(prefix_bytes));
-    }
-    let Some((_, value_len)) = crate::decode_varuint(
-        input.get(prefix_bytes..).unwrap_or_default(),
-        "request conditional integer",
-    )?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(
-        prefix_bytes
-            .checked_add(value_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)?,
-    ))
 }
 
 fn validate_value_length(value_len: usize) -> Result<()> {
