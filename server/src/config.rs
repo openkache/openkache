@@ -626,6 +626,10 @@ pub struct StorageConfig {
     pub stable_ram_segments_per_thread: usize,
     /// Fixed 4 KiB direct-read buffers preallocated by each storage worker.
     pub bucket_read_pool_capacity_per_thread: usize,
+    /// Copy inline values out of direct-read buffers before completing a read.
+    pub copy_ssd_inline_value_once: bool,
+    /// Retain pooled direct-read buffers in completed values instead of copying.
+    pub lease_ssd_read_buffer: bool,
     /// Values larger than this threshold use the large-value tier.
     pub large_value_threshold_kib: usize,
     /// Preallocated worker-local large-value circular file capacity.
@@ -647,6 +651,8 @@ impl Default for StorageConfig {
             max_flushes_in_flight_per_thread: 2,
             stable_ram_segments_per_thread: 2,
             bucket_read_pool_capacity_per_thread: BUCKET_READ_POOL_CAPACITY,
+            copy_ssd_inline_value_once: true,
+            lease_ssd_read_buffer: false,
             large_value_threshold_kib: 20,
             large_value_capacity_mib_per_thread: 64,
             max_item_size_mib: DEFAULT_MAX_ITEM_BYTES / (1024 * 1024),
@@ -934,69 +940,6 @@ impl AppConfig {
         self.worker_config(0).validate()
     }
 
-    pub fn for_trace_benchmark(
-        directory: PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-    ) -> Result<Self> {
-        if cpu_ids.is_empty() || !total_segment_count.is_multiple_of(cpu_ids.len()) {
-            return Err(KvError::InvalidConfig(
-                "trace benchmark total Segment count must divide evenly across workers".into(),
-            ));
-        }
-        let thread_count = cpu_ids.len();
-        let segments_per_thread = total_segment_count / thread_count;
-        let capacity_per_thread = total_table_capacity.div_ceil(thread_count);
-        let config = Self {
-            version: 1,
-            quic: QuicConfig::default(),
-            tls: TlsConfig::default(),
-            network: NetworkConfig::default(),
-            observability: ObservabilityConfig::default(),
-            runtime: RuntimeConfig {
-                thread_count,
-                cpu_ids,
-                event_interval: 31,
-                simulated_io_latency_us: 0,
-            },
-            io_uring: IoUringConfig {
-                entries_per_worker: 256,
-                max_inflight_per_worker: 64,
-                batch_size: 64,
-                ..IoUringConfig::default()
-            },
-            timeouts: TimeoutConfig {
-                input_max_time_us: 30_000_000,
-                output_max_time_us: 30_000_000,
-                read_max_time_us: 5_000_000,
-                write_max_time_us: 30_000_000,
-                request_max_time_us: 30_000_000,
-            },
-            storage: StorageConfig {
-                directory,
-                data_file_pattern: "worker-{thread_id:02}.data".into(),
-                large_value_file_pattern: "worker-{thread_id:02}.large".into(),
-                segments_per_thread,
-                segment_size_mib: 16,
-                blob_segment_size_mib: 64,
-                mutable_segments_per_thread: 3,
-                max_flushes_in_flight_per_thread: 2,
-                stable_ram_segments_per_thread: 2,
-                bucket_read_pool_capacity_per_thread: BUCKET_READ_POOL_CAPACITY,
-                large_value_threshold_kib: 20,
-                large_value_capacity_mib_per_thread: 64,
-                max_item_size_mib: 16,
-            },
-            table: TableConfig {
-                capacity_per_thread,
-                ..TableConfig::default()
-            },
-        };
-        config.validate()?;
-        Ok(config)
-    }
-
     pub fn worker_config(&self, thread_id: usize) -> Config {
         let data_name = expand_thread_pattern(&self.storage.data_file_pattern, thread_id);
         let large_value_name =
@@ -1021,8 +964,8 @@ impl AppConfig {
             max_flushes_in_flight: self.storage.max_flushes_in_flight_per_thread,
             stable_ram_segment_count: self.storage.stable_ram_segments_per_thread,
             bucket_read_pool_capacity: self.storage.bucket_read_pool_capacity_per_thread,
-            copy_ssd_inline_value_once: true,
-            lease_ssd_read_buffer: false,
+            copy_ssd_inline_value_once: self.storage.copy_ssd_inline_value_once,
+            lease_ssd_read_buffer: self.storage.lease_ssd_read_buffer,
             large_value_threshold: self.storage.large_value_threshold_kib * 1024,
             max_item_bytes: self.storage.max_item_size_mib * 1024 * 1024,
             segment_count: self.storage.segments_per_thread,
