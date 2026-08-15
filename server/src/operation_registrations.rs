@@ -13,7 +13,7 @@ use super::operation_execution_state::OperationRuntime;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{CapabilityCatalog, CapabilityEntry, CapabilityList},
-    operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
+    operation_compatibility_module as compatibility, operation_generic_bindings as generic,
     operation_compatibility_services::{
         COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT,
         COMPATIBILITY_STORAGE_PORT, NamespaceCapabilityHandle, ObservabilityCapabilityHandle,

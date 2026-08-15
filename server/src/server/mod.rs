@@ -52,6 +52,8 @@ pub(crate) mod operation_codecs;
 mod operation_compatibility_behavior;
 #[path = "../operation_compatibility_bindings.rs"]
 mod operation_compatibility_bindings;
+#[path = "../operation_compatibility_module.rs"]
+mod operation_compatibility_module;
 #[path = "../operation_compatibility_services.rs"]
 mod operation_compatibility_services;
 #[path = "../operation_dispatch.rs"]

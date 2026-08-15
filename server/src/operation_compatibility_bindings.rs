@@ -5,23 +5,19 @@
 //! the storage behavior. Generic field-envelope examples live in
 //! [`super::operation_generic_bindings`] and do not depend on these adapters.
 
-use std::sync::Arc;
-
-use openkache_protocol::{ItemId, Opcode, OwnedRange};
+use openkache_protocol::{ItemId, OwnedRange};
 
 use super::operation_api::{
-    ApiModule, HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
-    PrepareError, PreparePlan, RegistrationBuilder, ResourceLock, ServerOperationRegistration,
+    HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
+    PrepareError, PreparePlan, ResourceLock,
 };
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
-    COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, COMPATIBILITY_STORAGE_PORT,
     DeleteState, GetState, NamespaceCapability, NamespaceDeleteState, NamespaceOpenState,
     NamespaceUpdateState, SetState, StatsState, SyncState,
 };
 use super::operation_contract::{OperationStatus, request_fields};
-use super::operation_execution_state::OperationStateBindings;
-use super::operation_handlers::{self, OperationContext, OperationInputView};
+use super::operation_handlers::{OperationContext, OperationInputView};
 use super::operation_outcome::OperationOutcome;
 use super::operation_registry::OperationFuture;
 use crate::protocol::{
@@ -34,7 +30,7 @@ const INVALID_EXPECTED_REVISION: &[u8] = b"expected revision must be nonzero";
 const INVALID_SET_TTL: &[u8] = b"SET explicit TTL must be positive";
 const INVALID_NAMESPACE_NAME: &[u8] = b"namespace-open name is not UTF-8";
 
-fn admit_set_header(
+pub(super) fn admit_set_header(
     input: &OperationHeaderView<'_>,
     context: HeaderAdmissionContext<'_>,
 ) -> Result<(), HeaderAdmissionError> {
@@ -377,7 +373,7 @@ fn prepare_namespace_at(
 }
 
 /// Computes an opaque resource handle from the generated GET namespace field.
-fn prepare_get_namespace(
+pub(super) fn prepare_get_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
@@ -389,7 +385,7 @@ fn prepare_get_namespace(
     )
 }
 
-fn prepare_delete_namespace(
+pub(super) fn prepare_delete_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
@@ -401,7 +397,7 @@ fn prepare_delete_namespace(
     )
 }
 
-fn prepare_stats_namespace(
+pub(super) fn prepare_stats_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
@@ -413,7 +409,7 @@ fn prepare_stats_namespace(
     )
 }
 
-fn prepare_sync_namespace(
+pub(super) fn prepare_sync_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
@@ -806,134 +802,3 @@ typed_handler!(
     storage,
     namespaces
 );
-
-fn initialize_module(
-    states: &mut OperationStateBindings<'_>,
-    bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
-) -> Result<(), &'static str> {
-    let storage = super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)
-        .ok_or("compatibility storage port is unavailable")?;
-    let namespaces =
-        super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_NAMESPACE_PORT)
-            .ok_or("compatibility namespace port is unavailable")?;
-    let observability =
-        super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
-            .ok_or("compatibility observability port is unavailable")?;
-    let max_item_bytes = storage.max_item_bytes();
-
-    states.bind(
-        Opcode::Get,
-        Arc::new(GetState {
-            storage: Arc::clone(storage),
-            namespaces: Arc::clone(namespaces),
-        }),
-    )?;
-    states.bind(
-        Opcode::Set,
-        Arc::new(SetState {
-            storage: Arc::clone(storage),
-            namespaces: Arc::clone(namespaces),
-            max_item_bytes,
-        }),
-    )?;
-    states.bind(
-        Opcode::Delete,
-        Arc::new(DeleteState {
-            storage: Arc::clone(storage),
-            namespaces: Arc::clone(namespaces),
-        }),
-    )?;
-    states.bind(
-        Opcode::Stats,
-        Arc::new(StatsState {
-            storage: Arc::clone(storage),
-            namespaces: Arc::clone(namespaces),
-            observability: Arc::clone(observability),
-        }),
-    )?;
-    states.bind(
-        Opcode::Sync,
-        Arc::new(SyncState {
-            storage: Arc::clone(storage),
-            namespaces: Arc::clone(namespaces),
-        }),
-    )?;
-    states.bind(
-        Opcode::NamespaceOpen,
-        Arc::new(NamespaceOpenState {
-            namespaces: Arc::clone(namespaces),
-        }),
-    )?;
-    states.bind(
-        Opcode::NamespaceUpdatePolicy,
-        Arc::new(NamespaceUpdateState {
-            namespaces: Arc::clone(namespaces),
-        }),
-    )?;
-    states.bind(
-        Opcode::NamespaceDelete,
-        Arc::new(NamespaceDeleteState {
-            storage: Arc::clone(storage),
-            namespaces: Arc::clone(namespaces),
-        }),
-    )?;
-    Ok(())
-}
-
-const OPERATIONS: &[ServerOperationRegistration] = &[
-    RegistrationBuilder::new(Opcode::Get, get_handler)
-        .state::<GetState>()
-        .prepare(prepare_get_namespace)
-        .authorize(operation_handlers::authorization_none)
-        .read_only()
-        .build(),
-    RegistrationBuilder::new(Opcode::Set, set_handler)
-        .state::<SetState>()
-        .admit_header(admit_set_header)
-        .prepare(prepare_set)
-        .authorize(operation_handlers::authorization_none)
-        .mutation()
-        .build(),
-    RegistrationBuilder::new(Opcode::Delete, delete_handler)
-        .state::<DeleteState>()
-        .prepare(prepare_delete_namespace)
-        .authorize(operation_handlers::authorization_none)
-        .mutation()
-        .build(),
-    RegistrationBuilder::new(Opcode::Stats, stats_handler)
-        .state::<StatsState>()
-        .prepare(prepare_stats_namespace)
-        .authorize(operation_handlers::authorization_administrator)
-        .read_only()
-        .build(),
-    RegistrationBuilder::new(Opcode::Sync, sync_handler)
-        .state::<SyncState>()
-        .prepare(prepare_sync_namespace)
-        .authorize(operation_handlers::authorization_administrator)
-        .mutation()
-        .build(),
-    RegistrationBuilder::new(Opcode::NamespaceOpen, namespace_open_handler)
-        .state::<NamespaceOpenState>()
-        .prepare(prepare_namespace_open)
-        .authorize(operation_handlers::authorization_none)
-        .mutation()
-        .build(),
-    RegistrationBuilder::new(
-        Opcode::NamespaceUpdatePolicy,
-        namespace_update_policy_handler,
-    )
-    .state::<NamespaceUpdateState>()
-    .prepare(prepare_namespace_update)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::new(Opcode::NamespaceDelete, namespace_delete_handler)
-        .state::<NamespaceDeleteState>()
-        .prepare(prepare_namespace_delete)
-        .authorize(operation_handlers::authorization_none)
-        .mutation()
-        .build(),
-];
-
-pub(super) const API: ApiModule =
-    ApiModule::new(OPERATIONS).install_operation_state(initialize_module);
