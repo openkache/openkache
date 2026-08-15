@@ -21,7 +21,12 @@ export function request_wire_plan(
   operation_location: string,
 ): readonly Wire_Request_Step[] | undefined {
   const raw = contract.requestWire
-  if (raw === undefined) return undefined
+  if (raw === undefined) {
+    if (fields.length === 0) return undefined
+    throw new Error(
+      `${operation_location}.requestWire is required for a non-empty modeled request`,
+    )
+  }
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new Error(`${operation_location}.requestWire must be a non-empty array`)
   }
@@ -212,5 +217,54 @@ export function request_wire_plan(
       }
     })
   }
-  return parse(raw, `${operation_location}.requestWire`)
+  const plan = parse(raw, `${operation_location}.requestWire`)
+  // Coverage is path-insensitive so mutually exclusive conditionals may
+  // project the same field. Runtime projection still rejects duplicate writes
+  // along any decoded path.
+  const projected = new Set<number>()
+  const collect_projected_fields = (steps: readonly Wire_Request_Step[]): void => {
+    for (const step of steps) {
+      switch (step.kind) {
+        case "fixed_field":
+        case "byte_length_field":
+        case "byte_field":
+        case "varuint_field":
+        case "value_length_field":
+        case "trailing_field":
+          projected.add(step.field)
+          break
+        case "packed":
+          for (const field of step.fields) projected.add(field.field)
+          break
+        case "conditional":
+          collect_projected_fields(step.steps)
+          break
+        case "byte_length_prefix_field":
+        case "constant":
+          break
+        default: {
+          const exhaustive_step: never = step
+          throw new Error(`unsupported request wire step ${exhaustive_step}`)
+        }
+      }
+    }
+  }
+  collect_projected_fields(plan)
+  const missing = fields.filter((field) => {
+    // Aggregate parents carry presence metadata; their projected children own
+    // the actual compact bytes.
+    const aggregate_parent = fields.some(
+      (candidate) =>
+        candidate.path.length > field.path.length &&
+        field.path.every((part, index) => candidate.path[index] === part),
+    )
+    return !aggregate_parent && !projected.has(field.index)
+  })
+  if (missing.length !== 0) {
+    throw new Error(
+      `${operation_location}.requestWire must project every modeled request leaf field; ` +
+        `missing ${missing.map((field) => field.path.join(".")).join(", ")}`,
+    )
+  }
+  return plan
 }
