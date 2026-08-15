@@ -14,7 +14,7 @@ use super::super::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
     NamespacePolicy, OverridePolicy, SetOptions, SetOutcome,
 };
-use super::operation_compatibility_bindings::{
+use super::operation_compatibility_decode::{
     GetInput, NamespaceDeleteInput, NamespaceInput, NamespaceOpenInput, NamespaceRevisionInput,
     SetInput,
 };

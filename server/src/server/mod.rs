@@ -50,10 +50,14 @@ mod operation_capabilities;
 pub(crate) mod operation_codecs;
 #[path = "../operation_compatibility_behavior.rs"]
 mod operation_compatibility_behavior;
-#[path = "../operation_compatibility_bindings.rs"]
-mod operation_compatibility_bindings;
+#[path = "../operation_compatibility_decode.rs"]
+mod operation_compatibility_decode;
+#[path = "../operation_compatibility_handlers.rs"]
+mod operation_compatibility_handlers;
 #[path = "../operation_compatibility_module.rs"]
 mod operation_compatibility_module;
+#[path = "../operation_compatibility_prepare.rs"]
+mod operation_compatibility_prepare;
 #[path = "../operation_compatibility_services.rs"]
 mod operation_compatibility_services;
 #[path = "../operation_dispatch.rs"]
