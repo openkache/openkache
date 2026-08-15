@@ -19,13 +19,15 @@ use super::operation_compatibility_bindings::{
     SetInput,
 };
 use super::operation_compatibility_services::{
-    CompatibilityServices, NamespaceCapability, StorageCapability, storage_write_options,
+    NamespaceCapability, ObservabilityCapability, StorageCapability, storage_write_options,
 };
 use super::operation_contract::OperationStatus;
 use super::operation_outcome::{
     OperationBody, OperationError, OperationOutcome, OperationSuccessStatus,
 };
 use super::{KvError, NamespaceError, NamespaceOpenResult};
+
+type BehaviorFuture<'a> = Pin<Box<dyn Future<Output = OperationOutcome> + 'a>>;
 
 fn descriptor_payload(descriptor: NamespaceDescriptor) -> ResponseSegment {
     descriptor
@@ -116,19 +118,6 @@ fn namespace_error(error: NamespaceError, message: &'static [u8]) -> OperationOu
     domain_error(status, message)
 }
 
-fn missing_services() -> OperationOutcome {
-    domain_error(
-        OperationStatus::InternalError,
-        b"operation requires an unavailable capability",
-    )
-}
-
-fn compatibility_services<'a>(
-    services: Option<&'a dyn CompatibilityServices>,
-) -> Result<&'a dyn CompatibilityServices, OperationOutcome> {
-    services.ok_or_else(missing_services)
-}
-
 pub(super) fn mutation_domain_error(is_set: bool, error: KvError) -> OperationOutcome {
     let safe_before_mutation = matches!(
         &error,
@@ -150,30 +139,20 @@ pub(super) fn mutation_domain_error(is_set: bool, error: KvError) -> OperationOu
 }
 
 pub(super) fn get<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    cache: &'a dyn StorageCapability,
+    namespaces: &'a dyn NamespaceCapability,
     decoded: GetInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
-    Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let cache = services.storage();
-        let namespaces = services.namespaces();
-        execute_get(cache, decoded.namespace_id, decoded.item_id, namespaces).await
-    })
+) -> BehaviorFuture<'a> {
+    Box::pin(
+        async move { execute_get(cache, decoded.namespace_id, decoded.item_id, namespaces).await },
+    )
 }
 
 pub(super) fn namespace_open<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceOpenInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
+) -> BehaviorFuture<'a> {
     Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let namespaces = services.namespaces();
         let result = namespaces.open(decoded.name, decoded.create_if_missing, decoded.policy);
         match result {
             Ok((NamespaceOpenResult::Existing, descriptor)) => {
@@ -192,15 +171,10 @@ pub(super) fn namespace_open<'a>(
 }
 
 pub(super) fn namespace_update_policy<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceRevisionInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
+) -> BehaviorFuture<'a> {
     Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let namespaces = services.namespaces();
         let result = namespaces.update(
             decoded.namespace_id,
             decoded.expected_revision,
@@ -219,16 +193,11 @@ pub(super) fn namespace_update_policy<'a>(
 }
 
 pub(super) fn namespace_delete<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    cache: &'a dyn StorageCapability,
+    namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceDeleteInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
+) -> BehaviorFuture<'a> {
     Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let cache = services.storage();
-        let namespaces = services.namespaces();
         let namespace_id = decoded.namespace_id;
         let expected_revision = decoded.expected_revision;
         let tracked_items = match namespaces.tracked_items(namespace_id) {
@@ -265,16 +234,11 @@ pub(super) fn namespace_delete<'a>(
 }
 
 pub(super) fn set<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    cache: &'a dyn StorageCapability,
+    namespaces: &'a dyn NamespaceCapability,
     decoded: SetInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
+) -> BehaviorFuture<'a> {
     Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let cache = services.storage();
-        let namespaces = services.namespaces();
         let namespace_id = decoded.namespace_id;
         let set_options = decoded.options;
         let policy = match namespaces.policy(namespace_id) {
@@ -341,16 +305,11 @@ pub(super) fn set<'a>(
 }
 
 pub(super) fn delete<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    cache: &'a dyn StorageCapability,
+    namespaces: &'a dyn NamespaceCapability,
     decoded: GetInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
+) -> BehaviorFuture<'a> {
     Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let cache = services.storage();
-        let namespaces = services.namespaces();
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
@@ -388,17 +347,12 @@ pub(super) fn delete<'a>(
 }
 
 pub(super) fn stats<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    cache: &'a dyn StorageCapability,
+    namespaces: &'a dyn NamespaceCapability,
+    observability: &'a dyn ObservabilityCapability,
     decoded: NamespaceInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
+) -> BehaviorFuture<'a> {
     Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let cache = services.storage();
-        let namespaces = services.namespaces();
-        let observability = services.observability();
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
@@ -431,16 +385,11 @@ pub(super) fn stats<'a>(
 }
 
 pub(super) fn sync<'a>(
-    server: Option<&'a dyn CompatibilityServices>,
+    cache: &'a dyn StorageCapability,
+    namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceInput,
-) -> Pin<Box<dyn Future<Output = OperationOutcome> + 'a>> {
+) -> BehaviorFuture<'a> {
     Box::pin(async move {
-        let services = match compatibility_services(server) {
-            Ok(services) => services,
-            Err(error) => return error,
-        };
-        let cache = services.storage();
-        let namespaces = services.namespaces();
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
