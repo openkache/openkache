@@ -19,6 +19,7 @@ use crate::storage_runtime::{self, File};
 mod blob;
 mod blob_arena;
 mod bucket;
+mod committed_generation;
 mod direct_store;
 #[allow(dead_code)]
 mod generation_log;
@@ -28,6 +29,7 @@ mod sg_directory;
 pub(crate) use self::blob::*;
 pub(crate) use self::blob_arena::*;
 pub(crate) use self::bucket::*;
+pub(crate) use self::committed_generation::*;
 pub(crate) use self::direct_store::*;
 #[allow(unused_imports)]
 pub(crate) use self::generation_log::*;

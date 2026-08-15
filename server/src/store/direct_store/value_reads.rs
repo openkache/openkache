@@ -5,9 +5,9 @@ use crate::types::StoredItemValue;
 use crate::{BUCKET_BYTES, Config, KvError, Result};
 
 use super::{
-    BlobArena, BlobHandle, BlobRef, DirectIoBuffer, DirectStoreIo, MAX_LEASED_SSD_VALUE_READ_BYTES,
-    MutableGeneration, SsdBacking, StoredValue, decode_stored_value, read_exact_direct,
-    remove_stored_value_tag,
+    BlobArena, BlobHandle, BlobRef, CommittedGenerationState, DirectIoBuffer, DirectStoreIo,
+    MAX_LEASED_SSD_VALUE_READ_BYTES, MutableGeneration, StoredValue, decode_stored_value,
+    read_exact_direct, remove_stored_value_tag,
 };
 
 pub(super) async fn read_owned_extent(
@@ -107,7 +107,7 @@ pub(super) async fn read_ssd_value(
     data: &File,
     large_values: &File,
     config: &Config,
-    backing: &SsdBacking,
+    backing: &CommittedGenerationState,
     encoded: &mut Vec<u8>,
     io: &DirectStoreIo,
 ) -> Result<StoredItemValue> {

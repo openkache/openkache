@@ -15,13 +15,6 @@ pub(crate) struct RamBacking {
 }
 
 #[derive(Debug)]
-pub(crate) struct SsdBacking {
-    pub(crate) sequence: u64,
-    pub(crate) location: GenerationLocation,
-    pub(crate) large_value_location: Option<LargeValueLocation>,
-}
-
-#[derive(Debug)]
 pub(crate) struct JobPin {
     count: Rc<Cell<usize>>,
 }
@@ -59,11 +52,11 @@ pub(crate) enum DirectoryEntry {
         large_value_location: Option<LargeValueLocation>,
     },
     Stable {
-        backing: Rc<SsdBacking>,
+        backing: Rc<CommittedGenerationState>,
         readable: Option<Rc<RamBacking>>,
     },
-    Evicting(Rc<SsdBacking>),
-    Retiring(Rc<SsdBacking>),
+    Evicting(Rc<CommittedGenerationState>),
+    Retiring(Rc<CommittedGenerationState>),
 }
 
 pub(crate) enum ReadBacking {
@@ -73,9 +66,9 @@ pub(crate) enum ReadBacking {
     },
     Ram {
         backing: Rc<RamBacking>,
-        retirement_guard: Option<Rc<SsdBacking>>,
+        retirement_guard: Option<Rc<CommittedGenerationState>>,
     },
-    Ssd(Rc<SsdBacking>),
+    Ssd(Rc<CommittedGenerationState>),
 }
 
 pub(crate) struct SgDirectory {
@@ -189,11 +182,10 @@ impl SgDirectory {
 
     pub(crate) fn publish_stable(
         &mut self,
-        logical_sg_id: u32,
-        location: GenerationLocation,
-        large_value_location: Option<LargeValueLocation>,
+        state: CommittedGenerationState,
         retain_ram: bool,
     ) -> Result<()> {
+        let logical_sg_id = state.location.logical_sg_id;
         let entry = self.entry_mut(logical_sg_id)?;
         let DirectoryEntry::InFlight {
             readable,
@@ -203,22 +195,31 @@ impl SgDirectory {
         else {
             return Err(invalid_transition(logical_sg_id, "InFlight", "Stable"));
         };
-        if *reserved != location {
+        if readable.sequence != state.sequence {
+            return Err(KvError::Worker(format!(
+                "logical SG {logical_sg_id} completed a different generation sequence"
+            )));
+        }
+        if *reserved != state.location {
             return Err(KvError::Worker(format!(
                 "logical SG {logical_sg_id} completed a different physical reservation"
             )));
         }
-        if *reserved_large != large_value_location {
+        if *reserved_large != state.large_value_location {
             return Err(KvError::Worker(format!(
                 "logical SG {logical_sg_id} completed a different large-value reservation"
             )));
         }
+        if state
+            .large_value_location
+            .is_some_and(|location| location.logical_sg_id != logical_sg_id)
+        {
+            return Err(KvError::Worker(format!(
+                "logical SG {logical_sg_id} completed a different large-value generation"
+            )));
+        }
         *entry = DirectoryEntry::Stable {
-            backing: Rc::new(SsdBacking {
-                sequence: readable.sequence,
-                location,
-                large_value_location,
-            }),
+            backing: Rc::new(state),
             readable: retain_ram.then(|| Rc::clone(readable)),
         };
         Ok(())
@@ -232,7 +233,10 @@ impl SgDirectory {
         Ok(readable.take().is_some())
     }
 
-    pub(crate) fn begin_eviction(&mut self, logical_sg_id: u32) -> Result<Rc<SsdBacking>> {
+    pub(crate) fn begin_eviction(
+        &mut self,
+        logical_sg_id: u32,
+    ) -> Result<Rc<CommittedGenerationState>> {
         let entry = self.entry_mut(logical_sg_id)?;
         let DirectoryEntry::Stable { backing, .. } = entry else {
             return Err(invalid_transition(logical_sg_id, "Stable", "Evicting"));
