@@ -1,7 +1,10 @@
 use super::operation_api;
 use super::{ItemId, NamespaceDescriptor, NamespacePolicy};
 use futures_util::lock::Mutex as AsyncMutex;
+use openkache_protocol::OwnedRange;
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -18,10 +21,45 @@ const NAMESPACE_METADATA_MAX_DIRTY_WORKERS: u64 = 1_000_000;
 static NEXT_NAMESPACE_METADATA_TEMP: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+#[derive(Clone, Debug)]
+struct NamespaceName(Arc<OwnedRange>);
+
+impl NamespaceName {
+    fn new(name: OwnedRange) -> Self {
+        Self(Arc::new(name))
+    }
+}
+
+impl AsRef<[u8]> for NamespaceName {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl Borrow<[u8]> for NamespaceName {
+    fn borrow(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
+impl PartialEq for NamespaceName {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for NamespaceName {}
+
+impl Hash for NamespaceName {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state);
+    }
+}
+
 #[derive(Clone)]
 struct NamespaceEntry {
     descriptor: NamespaceDescriptor,
-    name: Vec<u8>,
+    name: NamespaceName,
     items: HashSet<ItemId>,
     dirty_workers: HashSet<usize>,
     operation_lock: Arc<AsyncMutex<()>>,
@@ -57,7 +95,7 @@ pub(crate) struct NamespaceRegistry {
     /// The next never-before-issued ID. `None` means the u64 ID space is exhausted.
     next_id: Option<u64>,
     by_id: HashMap<u64, NamespaceEntry>,
-    by_name: HashMap<Vec<u8>, u64>,
+    by_name: HashMap<NamespaceName, u64>,
     metadata_path: Option<std::path::PathBuf>,
     persistent: bool,
     lifecycle_lock: Arc<AsyncMutex<()>>,
@@ -121,12 +159,13 @@ impl NamespaceRegistry {
 
     pub(crate) fn open(
         &mut self,
-        name: Vec<u8>,
+        name: impl Into<OwnedRange>,
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> std::result::Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError>
     {
-        if let Some(namespace_id) = self.by_name.get(&name).copied() {
+        let name = name.into();
+        if let Some(namespace_id) = self.by_name.get(name.as_slice()).copied() {
             let Some(entry) = self.by_id.get(&namespace_id) else {
                 return Err(NamespaceError::Internal);
             };
@@ -136,6 +175,7 @@ impl NamespaceRegistry {
             return Err(NamespaceError::NotFound);
         }
         let policy = policy.ok_or(NamespaceError::InvalidRequest)?;
+        let name = NamespaceName::new(name);
         let previous_next_id = self.next_id;
         let namespace_id = self.allocate_id()?;
         let descriptor = NamespaceDescriptor {
@@ -148,7 +188,7 @@ impl NamespaceRegistry {
             namespace_id,
             NamespaceEntry {
                 descriptor,
-                name: name.clone(),
+                name,
                 items: HashSet::new(),
                 dirty_workers: HashSet::new(),
                 operation_lock: Arc::new(AsyncMutex::new(())),
@@ -156,8 +196,11 @@ impl NamespaceRegistry {
             },
         );
         if self.persist().is_err() {
-            self.by_id.remove(&namespace_id);
-            self.by_name.remove(&name);
+            let entry = self
+                .by_id
+                .remove(&namespace_id)
+                .expect("new namespace remains registered until persistence completes");
+            self.by_name.remove(entry.name.as_ref());
             self.next_id = previous_next_id;
             return Err(NamespaceError::Internal);
         }
@@ -250,7 +293,7 @@ impl NamespaceRegistry {
         let Some(entry) = self.by_id.remove(&namespace_id) else {
             return Err(NamespaceError::NotFound);
         };
-        self.by_name.remove(&entry.name);
+        self.by_name.remove(entry.name.as_ref());
         if self.persist().is_err() {
             self.by_name.insert(entry.name.clone(), namespace_id);
             self.by_id.insert(namespace_id, entry);
@@ -461,13 +504,13 @@ impl NamespaceRegistry {
         bytes.extend_from_slice(&self.next_id.unwrap_or(0).to_be_bytes());
         bytes.extend_from_slice(&(entries.len() as u64).to_be_bytes());
         for entry in entries {
-            let name_len = u16::try_from(entry.name.len()).map_err(|_| {
+            let name_len = u16::try_from(entry.name.as_ref().len()).map_err(|_| {
                 std::io::Error::new(ErrorKind::InvalidData, "namespace name is too long")
             })?;
             bytes.extend_from_slice(&entry.descriptor.namespace_id.to_be_bytes());
             bytes.extend_from_slice(&entry.descriptor.revision.to_be_bytes());
             bytes.extend_from_slice(&name_len.to_be_bytes());
-            bytes.extend_from_slice(&entry.name);
+            bytes.extend_from_slice(entry.name.as_ref());
             let policy = entry.descriptor.policy.encode().map_err(|error| {
                 std::io::Error::new(ErrorKind::InvalidData, error.to_string())
             })?;
@@ -596,9 +639,10 @@ impl NamespaceRegistry {
                     }
                 }
             }
-            if self.by_id.contains_key(&namespace_id) || self.by_name.contains_key(&name) {
+            if self.by_id.contains_key(&namespace_id) || self.by_name.contains_key(name.as_slice()) {
                 return Err(cursor.invalid("namespace metadata contains duplicate identity"));
             }
+            let name = NamespaceName::new(OwnedRange::whole(name));
             self.by_name.insert(name.clone(), namespace_id);
             self.by_id.insert(
                 namespace_id,

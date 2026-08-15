@@ -56,7 +56,7 @@ pub(super) struct NamespaceInput {
 
 /// Typed input for namespace-open.
 pub(super) struct NamespaceOpenInput {
-    pub(super) name: Vec<u8>,
+    pub(super) name: OwnedRange,
     pub(super) create_if_missing: bool,
     pub(super) policy: Option<NamespacePolicy>,
 }
@@ -160,7 +160,7 @@ pub(super) fn decode_namespace_open(
 ) -> Result<NamespaceOpenInput, &'static [u8]> {
     Ok(NamespaceOpenInput {
         name: input
-            .take_owned_bytes_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
+            .take_owned_bytes_range_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
             .ok_or(&b"namespace-open requires a name"[..])?,
         create_if_missing: input
             .boolean_at_index(Some(request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0))

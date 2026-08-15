@@ -36,6 +36,17 @@ pub(crate) fn compatibility_namespace_policy(
     compat_v1::request_namespace_policy(frame, header)
 }
 
+pub(crate) fn compatibility_namespace_name_range(
+    frame: &[u8],
+    header: RequestHeader,
+) -> Option<std::ops::Range<usize>> {
+    compat_v1::request_namespace_name_range(frame, header)
+}
+
+pub(crate) fn compatibility_create_if_missing(frame: &[u8], header: RequestHeader) -> Option<bool> {
+    compat_v1::request_create_if_missing(frame, header)
+}
+
 /// Returns the complete request-frame admission ceiling for the composed
 /// server. Generic layouts contribute the normal bound; compatibility
 /// adapters may contribute a larger historical prefix without making that
