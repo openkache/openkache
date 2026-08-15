@@ -168,10 +168,6 @@ structure operationContract {
     /// may use an open value such as tenant, partition, or transaction.
     scope: String
 
-    /// Optional protocol-v1 compatibility route. Generic operations omit this
-    /// member and select only a reusable request framing primitive.
-    compactRoute: String
-
     /// Optional declarative request-wire plan for a compact byte contract.
     requestWire: WireRequestSteps
 
@@ -478,7 +474,6 @@ operation Ping {
 
 @operationContract(
     scope: "item",
-    compactRoute: "item",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
         { fixedField: { field: "itemId", bytes: 32 } }
@@ -497,7 +492,6 @@ operation Get {
 
 @operationContract(
     scope: "item",
-    compactRoute: "set",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
         {
@@ -560,7 +554,6 @@ operation Set {
 
 @operationContract(
     scope: "item",
-    compactRoute: "item",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
         { fixedField: { field: "itemId", bytes: 32 } }
@@ -579,7 +572,6 @@ operation Delete {
 
 @operationContract(
     scope: "namespace",
-    compactRoute: "namespace",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } }
     ],
@@ -597,7 +589,6 @@ operation Stats {
 
 @operationContract(
     scope: "namespace",
-    compactRoute: "namespace",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } }
     ],
@@ -615,7 +606,6 @@ operation Sync {
 
 @operationContract(
     scope: "namespace_management",
-    compactRoute: "namespace_open",
     requestWire: [
         {
             packed: {
@@ -709,7 +699,6 @@ operation NamespaceOpen {
 
 @operationContract(
     scope: "namespace_management",
-    compactRoute: "namespace_update_policy",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
         { fixedField: { field: "expectedRevision", bytes: 8 } },
@@ -781,7 +770,6 @@ operation NamespaceUpdatePolicy {
 
 @operationContract(
     scope: "namespace_management",
-    compactRoute: "namespace_delete",
     requestWire: [
         { constant: { hex: "00" } },
         { fixedField: { field: "namespaceId", bytes: 8 } },

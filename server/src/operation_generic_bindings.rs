@@ -19,11 +19,9 @@ fn ping_handler<'a>(_context: OperationContext<'a>) -> OperationFuture<'a> {
     ))
 }
 
-pub(super) const API: ApiModule = ApiModule::new(
-    crate::protocol::generic_request_descriptor(),
-    &[
+pub(super) const API: ApiModule =
+    ApiModule::new(&[
         operation_api::RegistrationBuilder::new(Opcode::Ping, ping_handler)
             .read_only()
             .build(),
-    ],
-);
+    ]);

@@ -1,4 +1,4 @@
-//! Protocol-v1 policy flag codecs.
+//! Draft-v1 compact policy flag codecs.
 //!
 //! Namespace and SET policies are semantic values exposed by the public
 //! protocol facade, but their compact bit layout belongs to the v1 adapter.
@@ -6,8 +6,8 @@
 //! semantics from growing into one compatibility file while preserving one
 //! adapter-owned implementation.
 
-use super::super::super::operation_compatibility_contract as contract;
-use super::super::{
+use super::super::operation_compatibility_contract as contract;
+use super::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy, Opcode,
     OverridePolicy, ProtocolError, Result, SetCondition, SetOptions, decode_varuint,
     encode_varuint,
@@ -23,44 +23,6 @@ use contract::{
 };
 
 impl SetOptions {
-    /// Encodes the historical SET policy flags.
-    pub(crate) fn flags(self) -> Result<u8> {
-        if self.ttl_ms == Some(0) {
-            return Err(ProtocolError::InvalidSetTtl);
-        }
-        let condition = match self.condition {
-            SetCondition::Any => SET_CONDITION_ANY_BITS,
-            SetCondition::IfAbsent => SET_IF_ABSENT_BITS,
-            SetCondition::IfPresent => SET_IF_PRESENT_BITS,
-        };
-        let expiration = match self.expiration_mode {
-            ExpirationMode::Inherit => {
-                if self.ttl_ms.is_some() {
-                    return Err(ProtocolError::UnexpectedSetTtl);
-                }
-                SET_INHERIT_EXPIRATION_BITS
-            }
-            ExpirationMode::NoExpiry => {
-                if self.ttl_ms.is_some() {
-                    return Err(ProtocolError::UnexpectedSetTtl);
-                }
-                SET_NO_EXPIRY_BITS
-            }
-            ExpirationMode::ExplicitTtl => {
-                if self.ttl_ms.is_none() {
-                    return Err(ProtocolError::MissingSetTtl);
-                }
-                SET_EXPLICIT_TTL_BITS
-            }
-        };
-        let eviction = match self.eviction_mode {
-            EvictionMode::Inherit => SET_INHERIT_EVICTION_BITS,
-            EvictionMode::Evictable => SET_EVICTABLE_BITS,
-            EvictionMode::EvictionProtected => SET_EVICTION_PROTECTED_BITS,
-        };
-        Ok(condition | expiration | eviction)
-    }
-
     /// Decodes the historical SET flags and optional TTL.
     pub(crate) fn decode_set_options(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
         if flags & SET_RESERVED_MASK != 0 {
@@ -122,7 +84,7 @@ impl SetOptions {
 impl NamespacePolicy {
     /// Encodes the historical namespace policy payload.
     pub fn encode(self) -> Result<Vec<u8>> {
-        let mut output = Vec::with_capacity(super::super::policy::MAX_POLICY_BYTES);
+        let mut output = Vec::with_capacity(super::policy::MAX_POLICY_BYTES);
         self.encode_into(|bytes| {
             output.extend_from_slice(bytes);
             Ok(())

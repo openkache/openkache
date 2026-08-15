@@ -506,9 +506,8 @@ export interface Wire_Contract {
  * The canonical transport projection for one modeled operation.
  *
  * This is deliberately a descriptor rather than a closed operation-family
- * enum. Historical compact routes and named response routes remain
- * compatibility projections, while generic dispatchers consume only their
- * canonical framing and field plans.
+ * enum. Adapter-owned semantic metadata remains outside this descriptor,
+ * while generic dispatchers consume only canonical framing and field plans.
  */
 export interface Wire_Operation_Descriptor {
   readonly request_framing: Wire_Request_Framing

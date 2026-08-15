@@ -18,6 +18,7 @@ const NAMESPACE_METADATA_V1_VERSION: u32 = 1;
 const NAMESPACE_METADATA_MAX_ENTRIES: u64 = 1_000_000;
 const NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY: u64 = 1_000_000_000;
 const NAMESPACE_METADATA_MAX_DIRTY_WORKERS: u64 = 1_000_000;
+const NAMESPACE_NAME_MAX_BYTES: usize = openkache_protocol::compat_v1::NAMESPACE_NAME_MAX_BYTES;
 static NEXT_NAMESPACE_METADATA_TEMP: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -594,7 +595,7 @@ impl NamespaceRegistry {
                 return Err(cursor.invalid("namespace metadata contains zero identity"));
             }
             let name_len = usize::from(cursor.u16()?);
-            if name_len > crate::protocol::compatibility_namespace_name_max_bytes() {
+            if name_len > NAMESPACE_NAME_MAX_BYTES {
                 return Err(cursor.invalid("namespace metadata name is too long"));
             }
             let name = cursor.take(name_len)?.to_vec();
