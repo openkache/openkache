@@ -250,9 +250,7 @@ function rust_request_layout(contract: Wire_Contract): string {
       (operation) => `    WireRequestLayout {
             steps: &${step_expression(operation)},
             field_count: ${formatted_decimal(
-              operation.contract.request_wire === undefined
-                ? 0
-                : (operation.contract.request_plan?.length ?? 0),
+              operation.contract.request_plan?.length ?? 0,
             )},
         }`,
     )
