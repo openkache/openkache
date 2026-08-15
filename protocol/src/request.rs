@@ -187,6 +187,20 @@ impl<'a> OpaqueRequestFrame<'a> {
         decode_request_frame_header(prefix, layout)
     }
 
+    /// Returns the exact additional prefix bytes needed to complete the next
+    /// unresolved header step.
+    ///
+    /// Zero means that the header is complete. Once the first byte of a
+    /// canonical `vu128` is available, the returned count includes all of its
+    /// remaining bytes instead of advancing one byte at a time. The count
+    /// never includes an opaque terminal body declared by the header.
+    pub fn header_bytes_needed(prefix: &[u8], layout: RequestFrameLayout) -> Result<usize> {
+        match decode_request_frame_metadata_progress::<false>(prefix, layout, &mut [])? {
+            DecodeProgress::Complete(_) => Ok(0),
+            DecodeProgress::Need(additional) => Ok(additional),
+        }
+    }
+
     /// Reports the complete frame length once enough metadata is available.
     pub fn frame_len(prefix: &[u8], layout: RequestFrameLayout) -> Result<Option<usize>> {
         Self::decode_header(prefix, layout)?
@@ -333,16 +347,29 @@ fn decode_request_frame_metadata<const PROJECT_FIELDS: bool>(
     layout: RequestFrameLayout,
     projections: &mut [RequestFieldProjection],
 ) -> Result<Option<RequestFrameHeader>> {
+    decode_request_frame_metadata_progress::<PROJECT_FIELDS>(prefix, layout, projections).map(
+        |progress| match progress {
+            DecodeProgress::Complete(header) => Some(header),
+            DecodeProgress::Need(_) => None,
+        },
+    )
+}
+
+fn decode_request_frame_metadata_progress<const PROJECT_FIELDS: bool>(
+    prefix: &[u8],
+    layout: RequestFrameLayout,
+    projections: &mut [RequestFieldProjection],
+) -> Result<DecodeProgress<RequestFrameHeader>> {
     if prefix.len() < OPCODE_BYTES {
-        return Ok(None);
+        return Ok(DecodeProgress::Need(OPCODE_BYTES - prefix.len()));
     }
     let opcode_byte = prefix[0];
     let opcode = Opcode::try_from(opcode_byte)?;
     let mut state = RequestFrameDecodeState::new();
-    if decode_request_frame_steps::<PROJECT_FIELDS>(prefix, layout.steps, &mut state, projections)?
-        .is_none()
+    if let DecodeProgress::Need(additional) =
+        decode_request_frame_steps::<PROJECT_FIELDS>(prefix, layout.steps, &mut state, projections)?
     {
-        return Ok(None);
+        return Ok(DecodeProgress::Need(additional));
     }
     if state
         .byte_lengths
@@ -353,12 +380,17 @@ fn decode_request_frame_metadata<const PROJECT_FIELDS: bool>(
             "byte-length prefix has no matching body step",
         ));
     }
-    Ok(Some(RequestFrameHeader {
+    Ok(DecodeProgress::Complete(RequestFrameHeader {
         encoded_len: state.cursor,
         body_len: state.body_len,
         opcode,
         body_field: state.body_field,
     }))
+}
+
+enum DecodeProgress<T> {
+    Complete(T),
+    Need(usize),
 }
 
 struct RequestFrameDecodeState {
@@ -423,7 +455,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
     steps: &[RequestFrameStep],
     state: &mut RequestFrameDecodeState,
     projections: &mut [RequestFieldProjection],
-) -> Result<Option<()>> {
+) -> Result<DecodeProgress<()>> {
     for step in steps {
         if state.terminal_body {
             return Err(ProtocolError::InvalidFieldSequence(
@@ -437,7 +469,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     .checked_add(bytes)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
-                    return Ok(None);
+                    return incomplete(prefix.len(), end);
                 }
                 state.cursor = end;
             }
@@ -447,7 +479,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     .checked_add(bytes)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
-                    return Ok(None);
+                    return incomplete(prefix.len(), end);
                 }
                 project_request_field::<PROJECT_FIELDS>(
                     projections,
@@ -465,7 +497,8 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     "request body length",
                 )?
                 else {
-                    return Ok(None);
+                    let end = incomplete_varuint_end(prefix, state.cursor)?;
+                    return incomplete(prefix.len(), end);
                 };
                 let body_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
@@ -481,7 +514,8 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     "request body length",
                 )?
                 else {
-                    return Ok(None);
+                    let end = incomplete_varuint_end(prefix, state.cursor)?;
+                    return incomplete(prefix.len(), end);
                 };
                 let body_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
@@ -498,7 +532,8 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     "request body length",
                 )?
                 else {
-                    return Ok(None);
+                    let end = incomplete_varuint_end(prefix, state.cursor)?;
+                    return incomplete(prefix.len(), end);
                 };
                 let body_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
@@ -518,7 +553,8 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     "request integer",
                 )?
                 else {
-                    return Ok(None);
+                    let end = incomplete_varuint_end(prefix, state.cursor)?;
+                    return incomplete(prefix.len(), end);
                 };
                 state.cursor = state
                     .cursor
@@ -531,7 +567,8 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     "request integer",
                 )?
                 else {
-                    return Ok(None);
+                    let end = incomplete_varuint_end(prefix, state.cursor)?;
+                    return incomplete(prefix.len(), end);
                 };
                 project_request_field::<PROJECT_FIELDS>(
                     projections,
@@ -550,7 +587,10 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
             } => {
                 let offset = state.cursor;
                 let Some(&byte) = prefix.get(offset) else {
-                    return Ok(None);
+                    let end = offset
+                        .checked_add(1)
+                        .ok_or(ProtocolError::FrameLengthOverflow)?;
+                    return incomplete(prefix.len(), end);
                 };
                 if byte & reserved_mask != 0 || byte & constant_bits != constant_bits {
                     return Err(ProtocolError::InvalidRequestPackedBits { offset });
@@ -599,15 +639,13 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     ));
                 }
                 if state.packed_values[selector] == expected
-                    && decode_request_frame_steps::<PROJECT_FIELDS>(
-                        prefix,
-                        steps,
-                        state,
-                        projections,
+                    && let DecodeProgress::Need(additional) = decode_request_frame_steps::<
+                        PROJECT_FIELDS,
+                    >(
+                        prefix, steps, state, projections
                     )?
-                    .is_none()
                 {
-                    return Ok(None);
+                    return Ok(DecodeProgress::Need(additional));
                 }
             }
             RequestFrameStep::Constant { bytes } => {
@@ -616,7 +654,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     .checked_add(bytes.len())
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 let Some(actual) = prefix.get(state.cursor..end) else {
-                    return Ok(None);
+                    return incomplete(prefix.len(), end);
                 };
                 if actual != bytes {
                     return Err(ProtocolError::RequestConstantMismatch {
@@ -627,7 +665,11 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
             }
             RequestFrameStep::ByteLength => {
                 let Some(&length) = prefix.get(state.cursor) else {
-                    return Ok(None);
+                    let end = state
+                        .cursor
+                        .checked_add(1)
+                        .ok_or(ProtocolError::FrameLengthOverflow)?;
+                    return incomplete(prefix.len(), end);
                 };
                 let length = usize::from(length);
                 let end = state
@@ -636,13 +678,17 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     .and_then(|end| end.checked_add(length))
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
-                    return Ok(None);
+                    return incomplete(prefix.len(), end);
                 }
                 state.cursor = end;
             }
             RequestFrameStep::ByteLengthField { field } => {
                 let Some(&length) = prefix.get(state.cursor) else {
-                    return Ok(None);
+                    let end = state
+                        .cursor
+                        .checked_add(1)
+                        .ok_or(ProtocolError::FrameLengthOverflow)?;
+                    return incomplete(prefix.len(), end);
                 };
                 let start = state
                     .cursor
@@ -652,7 +698,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     .checked_add(usize::from(length))
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
-                    return Ok(None);
+                    return incomplete(prefix.len(), end);
                 }
                 project_request_field::<PROJECT_FIELDS>(
                     projections,
@@ -663,7 +709,11 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
             }
             RequestFrameStep::ByteLengthPrefix { slot, .. } => {
                 let Some(&length) = prefix.get(state.cursor) else {
-                    return Ok(None);
+                    let end = state
+                        .cursor
+                        .checked_add(1)
+                        .ok_or(ProtocolError::FrameLengthOverflow)?;
+                    return incomplete(prefix.len(), end);
                 };
                 let stored =
                     state
@@ -704,7 +754,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     .checked_add(length)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
-                    return Ok(None);
+                    return incomplete(prefix.len(), end);
                 }
                 if let RequestFrameStep::ByteLengthBodyField { field, .. } = *step {
                     project_request_field::<PROJECT_FIELDS>(
@@ -717,7 +767,26 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
             }
         }
     }
-    Ok(Some(()))
+    Ok(DecodeProgress::Complete(()))
+}
+
+fn incomplete(available: usize, required: usize) -> Result<DecodeProgress<()>> {
+    let additional = required
+        .checked_sub(available)
+        .filter(|additional| *additional > 0)
+        .ok_or(ProtocolError::InvalidFieldSequence(
+            "incomplete request header did not advance",
+        ))?;
+    Ok(DecodeProgress::Need(additional))
+}
+
+fn incomplete_varuint_end(prefix: &[u8], cursor: usize) -> Result<usize> {
+    let encoded_len = prefix
+        .get(cursor)
+        .map_or(1, |first| vu128::encoded_len(*first));
+    cursor
+        .checked_add(encoded_len)
+        .ok_or(ProtocolError::FrameLengthOverflow)
 }
 
 fn project_request_field<const PROJECT_FIELDS: bool>(
