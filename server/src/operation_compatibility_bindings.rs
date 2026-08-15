@@ -5,13 +5,15 @@
 //! the storage behavior. Generic field-envelope examples live in
 //! [`super::operation_generic_bindings`] and do not depend on these adapters.
 
+use std::sync::Arc;
+
 use openkache_protocol::{ItemId, Opcode, OwnedRange};
 
 use super::operation_api::{
     ApiModule, HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
-    PrepareError, PreparePlan, RegistrationBuilder, ResourceLock,
+    PrepareError, PreparePlan, RegistrationBuilder, ResourceLock, ServerOperationRegistration,
 };
-use super::operation_execution_state::ModuleState;
+use super::operation_execution_state::OperationStateBindings;
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
     COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, COMPATIBILITY_STORAGE_PORT,
@@ -776,8 +778,9 @@ typed_handler!(
 );
 
 fn initialize_module(
+    states: &mut OperationStateBindings<'_>,
     bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
-) -> Result<ModuleState, &'static str> {
+) -> Result<(), &'static str> {
     let storage = super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)
         .ok_or("compatibility storage port is unavailable")?;
     let namespaces =
@@ -787,14 +790,18 @@ fn initialize_module(
         super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
             .ok_or("compatibility observability port is unavailable")?;
     let state = build_compatibility_context(
-        storage.clone(),
-        namespaces.clone(),
-        observability.clone(),
+        Arc::clone(storage),
+        Arc::clone(namespaces),
+        Arc::clone(observability),
     );
-    Ok(ModuleState::new(state))
+    let state = Arc::new(state);
+    for registration in OPERATIONS {
+        states.bind(registration.opcode, Arc::clone(&state))?;
+    }
+    Ok(())
 }
 
-pub(super) const API: ApiModule = ApiModule::new(&[
+const OPERATIONS: &[ServerOperationRegistration] = &[
     RegistrationBuilder::new(Opcode::Get, get_handler)
         .state::<CompatibilityContext>()
         .prepare(prepare_get_namespace)
@@ -847,5 +854,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-])
-.initialize_state::<CompatibilityContext>(initialize_module);
+];
+
+pub(super) const API: ApiModule =
+    ApiModule::new(OPERATIONS).install_operation_state(initialize_module);
