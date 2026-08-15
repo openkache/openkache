@@ -15,7 +15,7 @@ use super::operation_execution_state::ModuleState;
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
     COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, COMPATIBILITY_STORAGE_PORT,
-    CompatibilityContext, CompatibilityResourceResolver, CompatibilityServices,
+    CompatibilityContext, CompatibilityResourceResolver,
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::{self, OperationContext, OperationInputView};
@@ -354,12 +354,8 @@ fn compatibility_resolver<'a>(
         ))
 }
 
-fn compatibility_services<'a>(
-    context: &OperationContext<'a>,
-) -> Option<&'a (dyn CompatibilityServices + Send + Sync)> {
-    context
-        .state::<CompatibilityContext>()
-        .map(|state| state as &(dyn CompatibilityServices + Send + Sync))
+fn compatibility_context<'a>(context: &OperationContext<'a>) -> Option<&'a CompatibilityContext> {
+    context.state()
 }
 
 fn prepare_namespace_at(
@@ -695,9 +691,9 @@ fn missing_module_state<'a>() -> OperationFuture<'a> {
 /// then hand the typed value to behavior. The macro keeps that plumbing in one
 /// place while leaving the decoder and behavior names API-owned.
 macro_rules! typed_handler {
-    ($name:ident, mut $decode:ident, $behavior:path) => {
+    ($name:ident, mut $decode:ident, $behavior:path; $($port:ident),+) => {
         pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
-            let Some(services) = compatibility_services(&context) else {
+            let Some(state) = compatibility_context(&context) else {
                 return missing_module_state();
             };
             let OperationContext { mut input, .. } = context;
@@ -705,12 +701,12 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending($behavior(Some(services), decoded))
+            OperationFuture::pending($behavior($(state.$port.as_ref(),)+ decoded))
         }
     };
-    ($name:ident, $decode:path, $behavior:path) => {
+    ($name:ident, $decode:path, $behavior:path; $($port:ident),+) => {
         pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
-            let Some(services) = compatibility_services(&context) else {
+            let Some(state) = compatibility_context(&context) else {
                 return missing_module_state();
             };
             let OperationContext { input, .. } = context;
@@ -718,35 +714,66 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending($behavior(Some(services), decoded))
+            OperationFuture::pending($behavior($(state.$port.as_ref(),)+ decoded))
         }
     };
 }
 
-typed_handler!(get_handler, decode_get, compatibility_behavior::get);
+typed_handler!(
+    get_handler,
+    decode_get,
+    compatibility_behavior::get;
+    storage,
+    namespaces
+);
 typed_handler!(
     namespace_open_handler,
     mut decode_namespace_open,
-    compatibility_behavior::namespace_open
+    compatibility_behavior::namespace_open;
+    namespaces
 );
 typed_handler!(
     namespace_update_policy_handler,
     decode_namespace_revision,
-    compatibility_behavior::namespace_update_policy
+    compatibility_behavior::namespace_update_policy;
+    namespaces
 );
 typed_handler!(
     namespace_delete_handler,
     decode_namespace_delete,
-    compatibility_behavior::namespace_delete
+    compatibility_behavior::namespace_delete;
+    storage,
+    namespaces
 );
-typed_handler!(set_handler, mut decode_set, compatibility_behavior::set);
+typed_handler!(
+    set_handler,
+    mut decode_set,
+    compatibility_behavior::set;
+    storage,
+    namespaces
+);
 typed_handler!(
     delete_handler,
     decode_delete,
-    compatibility_behavior::delete
+    compatibility_behavior::delete;
+    storage,
+    namespaces
 );
-typed_handler!(stats_handler, decode_stats, compatibility_behavior::stats);
-typed_handler!(sync_handler, decode_sync, compatibility_behavior::sync);
+typed_handler!(
+    stats_handler,
+    decode_stats,
+    compatibility_behavior::stats;
+    storage,
+    namespaces,
+    observability
+);
+typed_handler!(
+    sync_handler,
+    decode_sync,
+    compatibility_behavior::sync;
+    storage,
+    namespaces
+);
 
 fn initialize_module(
     _registry: &mut super::operation_capabilities::CapabilityRegistry,

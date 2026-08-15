@@ -5,7 +5,6 @@
 //! the capabilities used by the currently modeled operations while allowing
 //! future operations to provide a different service bundle.
 
-use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -169,19 +168,6 @@ pub(super) const COMPATIBILITY_NAMESPACE_PORT: CapabilityKey<NamespaceCapability
     CapabilityKey::new("openkache.compatibility.namespace_port");
 pub(super) const COMPATIBILITY_OBSERVABILITY_PORT: CapabilityKey<ObservabilityCapabilityHandle> =
     CapabilityKey::new("openkache.compatibility.observability_port");
-
-/// Compatibility capability set supplied by the composition root.
-///
-/// This is deliberately outside the generic executor. The current compatibility
-/// operations use the cache/namespace implementation through this adapter,
-/// while a new API can use the opaque catalog without adding another method
-/// here. Keeping the compatibility name explicit prevents this compatibility surface
-/// from becoming the default extension point for future APIs.
-pub(super) trait CompatibilityServices: Any + Send + Sync {
-    fn storage(&self) -> &dyn StorageCapability;
-    fn namespaces(&self) -> &dyn NamespaceCapability;
-    fn observability(&self) -> &dyn ObservabilityCapability;
-}
 
 /// Opaque dependencies retained by the current API adapter.
 pub(super) struct CompatibilityContext {
@@ -429,19 +415,5 @@ impl NamespaceCapability for Mutex<NamespaceRegistry> {
 impl ObservabilityCapability for ObservabilityState {
     fn stats_json_fields(&self) -> String {
         ObservabilityState::stats_json_fields(self)
-    }
-}
-
-impl CompatibilityServices for CompatibilityContext {
-    fn storage(&self) -> &dyn StorageCapability {
-        self.storage.as_ref()
-    }
-
-    fn namespaces(&self) -> &dyn NamespaceCapability {
-        self.namespaces.as_ref()
-    }
-
-    fn observability(&self) -> &dyn ObservabilityCapability {
-        self.observability.as_ref()
     }
 }
