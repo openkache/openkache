@@ -17,4 +17,5 @@ export {
   render_rust_operation_contract,
   render_rust_wire,
 } from "./render_rust_contract"
+export { render_rust_request_layout } from "./render_rust_request"
 export { render_rust_server_contract } from "./render_rust_server"

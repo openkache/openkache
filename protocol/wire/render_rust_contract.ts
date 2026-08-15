@@ -18,6 +18,7 @@ import {
   response_payload_bound,
 } from "../wire_descriptor"
 import { fixed_field_width, fixed_plan_width } from "../wire_layout"
+import { render_rust_request_layout } from "./render_rust_request"
 
 function formatted_decimal(value: number): string {
   return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "_")
@@ -425,6 +426,7 @@ ${operation_modules.join("\n")}
       return `        ${rust_string_literal(name)} => Some(${codec_kind_path}::${kind}),`
     })
     .join("\n")
+  const request_wire_contract = render_rust_request_layout(contract)
   return `/// Maximum number of ordered request fields in any modeled operation.
 ///
 /// Server operation views use this generated bound to reject unbounded shapes.
@@ -438,6 +440,8 @@ pub const MAX_OPERATION_REQUEST_FIELDS: usize = ${max_request_fields};
 /// validation; ordinary plans keep their offsets inline and larger valid plans
 /// spill through the same bounded representation.
 pub const MAX_OPERATION_FIELDS: usize = ${max_operation_fields};
+
+${request_wire_contract}
 
 ${field_index_modules("request")}
 ${field_index_modules("response")}
