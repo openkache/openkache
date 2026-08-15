@@ -13,13 +13,14 @@ use super::operation_api::{
     ApiModule, HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
     PrepareError, PreparePlan, RegistrationBuilder, ResourceLock, ServerOperationRegistration,
 };
-use super::operation_execution_state::OperationStateBindings;
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
     COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, COMPATIBILITY_STORAGE_PORT,
-    CompatibilityContext, CompatibilityResourceResolver,
+    DeleteState, GetState, NamespaceCapability, NamespaceDeleteState, NamespaceOpenState,
+    NamespaceUpdateState, SetState, StatsState, SyncState,
 };
 use super::operation_contract::{OperationStatus, request_fields};
+use super::operation_execution_state::OperationStateBindings;
 use super::operation_handlers::{self, OperationContext, OperationInputView};
 use super::operation_outcome::OperationOutcome;
 use super::operation_registry::OperationFuture;
@@ -37,15 +38,12 @@ fn admit_set_header(
     input: &OperationHeaderView<'_>,
     context: HeaderAdmissionContext<'_>,
 ) -> Result<(), HeaderAdmissionError> {
-    let limits = context
-        .state::<CompatibilityContext>()
-        .map(|state| &state.body_limits)
-        .ok_or_else(|| {
-            HeaderAdmissionError::new(
-                OperationStatus::InternalError,
-                b"compatibility module state is unavailable",
-            )
-        })?;
+    let limits = context.state::<SetState>().ok_or_else(|| {
+        HeaderAdmissionError::new(
+            OperationStatus::InternalError,
+            b"compatibility module state is unavailable",
+        )
+    })?;
     let value_len = input
         .declared_body_len(request_fields::op_set::VALUE)
         .ok_or_else(|| {
@@ -62,11 +60,6 @@ fn admit_set_header(
     }
     Ok(())
 }
-
-/// Installs the compatibility adapter's concrete service bundle at the API
-/// composition boundary. The network loop only calls the aggregate operation
-/// registration installer and never reaches into this compatibility surface.
-pub(super) use super::operation_compatibility_services::build_compatibility_context;
 
 impl OperationInputView {
     fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
@@ -339,35 +332,47 @@ pub(super) fn decode_namespace_delete(
 
 fn namespace_resource(
     namespace_id: u64,
-    context: PrepareContext<'_>,
+    namespaces: &dyn NamespaceCapability,
 ) -> std::result::Result<ResourceLock, PrepareError> {
-    compatibility_resolver(context)?.resolve_namespace(&namespace_id.to_be_bytes())
+    namespaces.operation_lock(namespace_id).ok_or_else(|| {
+        PrepareError::resource_unavailable(
+            OperationStatus::NamespaceNotFound,
+            b"namespace does not exist",
+        )
+    })
 }
 
-fn compatibility_resolver<'a>(
+fn operation_state<'a, T: 'static>(
     context: PrepareContext<'a>,
-) -> std::result::Result<&'a CompatibilityResourceResolver, PrepareError> {
+) -> std::result::Result<&'a T, PrepareError> {
     context
-        .state::<CompatibilityContext>()
-        .map(|state| &state.resource_resolver)
+        .state::<T>()
         .ok_or(PrepareError::resource_unavailable(
             OperationStatus::InternalError,
             b"compatibility module state is unavailable",
         ))
 }
 
-fn compatibility_context<'a>(context: &OperationContext<'a>) -> Option<&'a CompatibilityContext> {
-    context.state()
+fn global_resource(
+    namespaces: &dyn NamespaceCapability,
+) -> std::result::Result<ResourceLock, PrepareError> {
+    let shared = namespaces.lifecycle_lock().map_err(|_| {
+        PrepareError::resource_unavailable(
+            OperationStatus::InternalError,
+            b"namespace metadata is unavailable",
+        )
+    })?;
+    Ok(ResourceLock::unconditional(shared))
 }
 
 fn prepare_namespace_at(
     input: &OperationInputView,
-    context: PrepareContext<'_>,
+    namespaces: &dyn NamespaceCapability,
     field_index: usize,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_id = required_namespace_id(input, field_index)
-        .map_err(PrepareError::invalid_request)?;
-    let resource = namespace_resource(namespace_id, context)?;
+    let namespace_id =
+        required_namespace_id(input, field_index).map_err(PrepareError::invalid_request)?;
+    let resource = namespace_resource(namespace_id, namespaces)?;
     Ok(PreparePlan::resource(resource))
 }
 
@@ -376,28 +381,48 @@ fn prepare_get_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    prepare_namespace_at(input, context, request_fields::op_get::NAMESPACE_ID)
+    let state = operation_state::<GetState>(context)?;
+    prepare_namespace_at(
+        input,
+        state.namespaces.as_ref(),
+        request_fields::op_get::NAMESPACE_ID,
+    )
 }
 
 fn prepare_delete_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    prepare_namespace_at(input, context, request_fields::op_delete::NAMESPACE_ID)
+    let state = operation_state::<DeleteState>(context)?;
+    prepare_namespace_at(
+        input,
+        state.namespaces.as_ref(),
+        request_fields::op_delete::NAMESPACE_ID,
+    )
 }
 
 fn prepare_stats_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    prepare_namespace_at(input, context, request_fields::op_stats::NAMESPACE_ID)
+    let state = operation_state::<StatsState>(context)?;
+    prepare_namespace_at(
+        input,
+        state.namespaces.as_ref(),
+        request_fields::op_stats::NAMESPACE_ID,
+    )
 }
 
 fn prepare_sync_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    prepare_namespace_at(input, context, request_fields::op_sync::NAMESPACE_ID)
+    let state = operation_state::<SyncState>(context)?;
+    prepare_namespace_at(
+        input,
+        state.namespaces.as_ref(),
+        request_fields::op_sync::NAMESPACE_ID,
+    )
 }
 
 pub(super) fn prepare_set(
@@ -407,19 +432,17 @@ pub(super) fn prepare_set(
     let namespace_id = required_namespace_id(input, request_fields::op_set::NAMESPACE_ID)
         .map_err(PrepareError::invalid_request)?;
     validate_set_ttl(input).map_err(PrepareError::invalid_request)?;
+    let state = operation_state::<SetState>(context)?;
     Ok(PreparePlan::resource(namespace_resource(
         namespace_id,
-        context,
+        state.namespaces.as_ref(),
     )?))
 }
 
-pub(super) fn prepare_lifecycle(
-    _input: &OperationInputView,
-    context: PrepareContext<'_>,
+fn prepare_lifecycle(
+    namespaces: &dyn NamespaceCapability,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    Ok(PreparePlan::resource(
-        compatibility_resolver(context)?.resolve_global()?,
-    ))
+    Ok(PreparePlan::resource(global_resource(namespaces)?))
 }
 
 pub(super) fn prepare_namespace_open(
@@ -429,7 +452,8 @@ pub(super) fn prepare_namespace_open(
     validate_namespace_open_name(input).map_err(PrepareError::invalid_request)?;
     validate_namespace_policy_ttl(input, NAMESPACE_OPEN_POLICY_FIELDS)
         .map_err(PrepareError::invalid_request)?;
-    prepare_lifecycle(input, context)
+    let state = operation_state::<NamespaceOpenState>(context)?;
+    prepare_lifecycle(state.namespaces.as_ref())
 }
 
 pub(super) fn prepare_namespace_update(
@@ -448,9 +472,10 @@ pub(super) fn prepare_namespace_update(
     .map_err(PrepareError::invalid_request)?;
     validate_namespace_policy_ttl(input, NAMESPACE_UPDATE_POLICY_FIELDS)
         .map_err(PrepareError::invalid_request)?;
+    let state = operation_state::<NamespaceUpdateState>(context)?;
     Ok(PreparePlan::resource(namespace_resource(
         namespace_id,
-        context,
+        state.namespaces.as_ref(),
     )?))
 }
 
@@ -466,10 +491,11 @@ pub(super) fn prepare_namespace_delete(
         request_fields::op_namespace_delete::EXPECTED_REVISION,
     )
     .map_err(PrepareError::invalid_request)?;
-    let resolver = compatibility_resolver(context)?;
-    let resource = resolver.resolve_namespace(&namespace_id.to_be_bytes())?;
+    let state = operation_state::<NamespaceDeleteState>(context)?;
+    let namespaces = state.namespaces.as_ref();
+    let resource = namespace_resource(namespace_id, namespaces)?;
     Ok(PreparePlan::from_resources([
-        resolver.resolve_global()?,
+        global_resource(namespaces)?,
         resource,
     ]))
 }
@@ -577,10 +603,7 @@ fn validate_namespace_open_name(input: &OperationInputView) -> Result<(), &'stat
         .map_err(|_| INVALID_NAMESPACE_NAME)
 }
 
-fn validate_set_ttl_value(
-    explicit_ttl: bool,
-    ttl_ms: Option<u64>,
-) -> Result<(), &'static [u8]> {
+fn validate_set_ttl_value(explicit_ttl: bool, ttl_ms: Option<u64>) -> Result<(), &'static [u8]> {
     match (explicit_ttl, ttl_ms) {
         (true, Some(0)) => Err(INVALID_SET_TTL),
         (true, None) => Err(b"SET explicit TTL is missing"),
@@ -631,8 +654,7 @@ fn decode_namespace_policy(
         }
         return Ok(None);
     };
-    let default_ttl_milliseconds =
-        input.unsigned_long_at_index(fields.default_ttl_milliseconds);
+    let default_ttl_milliseconds = input.unsigned_long_at_index(fields.default_ttl_milliseconds);
     validate_namespace_policy_ttl_value(Some(default_expiration), default_ttl_milliseconds)?;
     let default_expiration = match default_expiration {
         b"no_expiry" => ExpirationDefault::NoExpiry,
@@ -693,9 +715,9 @@ fn missing_module_state<'a>() -> OperationFuture<'a> {
 /// then hand the typed value to behavior. The macro keeps that plumbing in one
 /// place while leaving the decoder and behavior names API-owned.
 macro_rules! typed_handler {
-    ($name:ident, mut $decode:ident, $behavior:path; $($port:ident),+) => {
+    ($name:ident, $state:ty, mut $decode:ident, $behavior:path; $($port:ident),+) => {
         pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
-            let Some(state) = compatibility_context(&context) else {
+            let Some(state) = context.state::<$state>() else {
                 return missing_module_state();
             };
             let OperationContext { mut input, .. } = context;
@@ -706,9 +728,9 @@ macro_rules! typed_handler {
             OperationFuture::pending($behavior($(state.$port.as_ref(),)+ decoded))
         }
     };
-    ($name:ident, $decode:path, $behavior:path; $($port:ident),+) => {
+    ($name:ident, $state:ty, $decode:path, $behavior:path; $($port:ident),+) => {
         pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
-            let Some(state) = compatibility_context(&context) else {
+            let Some(state) = context.state::<$state>() else {
                 return missing_module_state();
             };
             let OperationContext { input, .. } = context;
@@ -723,6 +745,7 @@ macro_rules! typed_handler {
 
 typed_handler!(
     get_handler,
+    GetState,
     decode_get,
     compatibility_behavior::get;
     storage,
@@ -730,18 +753,21 @@ typed_handler!(
 );
 typed_handler!(
     namespace_open_handler,
+    NamespaceOpenState,
     mut decode_namespace_open,
     compatibility_behavior::namespace_open;
     namespaces
 );
 typed_handler!(
     namespace_update_policy_handler,
+    NamespaceUpdateState,
     decode_namespace_revision,
     compatibility_behavior::namespace_update_policy;
     namespaces
 );
 typed_handler!(
     namespace_delete_handler,
+    NamespaceDeleteState,
     decode_namespace_delete,
     compatibility_behavior::namespace_delete;
     storage,
@@ -749,6 +775,7 @@ typed_handler!(
 );
 typed_handler!(
     set_handler,
+    SetState,
     mut decode_set,
     compatibility_behavior::set;
     storage,
@@ -756,6 +783,7 @@ typed_handler!(
 );
 typed_handler!(
     delete_handler,
+    DeleteState,
     decode_delete,
     compatibility_behavior::delete;
     storage,
@@ -763,6 +791,7 @@ typed_handler!(
 );
 typed_handler!(
     stats_handler,
+    StatsState,
     decode_stats,
     compatibility_behavior::stats;
     storage,
@@ -771,6 +800,7 @@ typed_handler!(
 );
 typed_handler!(
     sync_handler,
+    SyncState,
     decode_sync,
     compatibility_behavior::sync;
     storage,
@@ -789,52 +819,101 @@ fn initialize_module(
     let observability =
         super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
             .ok_or("compatibility observability port is unavailable")?;
-    let state = build_compatibility_context(
-        Arc::clone(storage),
-        Arc::clone(namespaces),
-        Arc::clone(observability),
-    );
-    let state = Arc::new(state);
-    for registration in OPERATIONS {
-        states.bind(registration.opcode, Arc::clone(&state))?;
-    }
+    let max_item_bytes = storage.max_item_bytes();
+
+    states.bind(
+        Opcode::Get,
+        Arc::new(GetState {
+            storage: Arc::clone(storage),
+            namespaces: Arc::clone(namespaces),
+        }),
+    )?;
+    states.bind(
+        Opcode::Set,
+        Arc::new(SetState {
+            storage: Arc::clone(storage),
+            namespaces: Arc::clone(namespaces),
+            max_item_bytes,
+        }),
+    )?;
+    states.bind(
+        Opcode::Delete,
+        Arc::new(DeleteState {
+            storage: Arc::clone(storage),
+            namespaces: Arc::clone(namespaces),
+        }),
+    )?;
+    states.bind(
+        Opcode::Stats,
+        Arc::new(StatsState {
+            storage: Arc::clone(storage),
+            namespaces: Arc::clone(namespaces),
+            observability: Arc::clone(observability),
+        }),
+    )?;
+    states.bind(
+        Opcode::Sync,
+        Arc::new(SyncState {
+            storage: Arc::clone(storage),
+            namespaces: Arc::clone(namespaces),
+        }),
+    )?;
+    states.bind(
+        Opcode::NamespaceOpen,
+        Arc::new(NamespaceOpenState {
+            namespaces: Arc::clone(namespaces),
+        }),
+    )?;
+    states.bind(
+        Opcode::NamespaceUpdatePolicy,
+        Arc::new(NamespaceUpdateState {
+            namespaces: Arc::clone(namespaces),
+        }),
+    )?;
+    states.bind(
+        Opcode::NamespaceDelete,
+        Arc::new(NamespaceDeleteState {
+            storage: Arc::clone(storage),
+            namespaces: Arc::clone(namespaces),
+        }),
+    )?;
     Ok(())
 }
 
 const OPERATIONS: &[ServerOperationRegistration] = &[
     RegistrationBuilder::new(Opcode::Get, get_handler)
-        .state::<CompatibilityContext>()
+        .state::<GetState>()
         .prepare(prepare_get_namespace)
         .authorize(operation_handlers::authorization_none)
         .read_only()
         .build(),
     RegistrationBuilder::new(Opcode::Set, set_handler)
-        .state::<CompatibilityContext>()
+        .state::<SetState>()
         .admit_header(admit_set_header)
         .prepare(prepare_set)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::Delete, delete_handler)
-        .state::<CompatibilityContext>()
+        .state::<DeleteState>()
         .prepare(prepare_delete_namespace)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::Stats, stats_handler)
-        .state::<CompatibilityContext>()
+        .state::<StatsState>()
         .prepare(prepare_stats_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .read_only()
         .build(),
     RegistrationBuilder::new(Opcode::Sync, sync_handler)
-        .state::<CompatibilityContext>()
+        .state::<SyncState>()
         .prepare(prepare_sync_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::NamespaceOpen, namespace_open_handler)
-        .state::<CompatibilityContext>()
+        .state::<NamespaceOpenState>()
         .prepare(prepare_namespace_open)
         .authorize(operation_handlers::authorization_none)
         .mutation()
@@ -843,13 +922,13 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
         Opcode::NamespaceUpdatePolicy,
         namespace_update_policy_handler,
     )
-    .state::<CompatibilityContext>()
+    .state::<NamespaceUpdateState>()
     .prepare(prepare_namespace_update)
     .authorize(operation_handlers::authorization_none)
     .mutation()
     .build(),
     RegistrationBuilder::new(Opcode::NamespaceDelete, namespace_delete_handler)
-        .state::<CompatibilityContext>()
+        .state::<NamespaceDeleteState>()
         .prepare(prepare_namespace_delete)
         .authorize(operation_handlers::authorization_none)
         .mutation()
