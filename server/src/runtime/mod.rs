@@ -26,7 +26,7 @@ pub(crate) use network_cache::NetworkWorkerCache;
 pub(crate) use port::{completion, storage_context, storage_port, storage_task};
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{
-    DOMAIN_V2_CONTEXT, derive_domain_key, derive_scoped_storage_key, derive_storage_key,
+    DOMAIN_V2_CONTEXT, derive_domain_key, derive_storage_key, derive_storage_key_for_domain,
 };
 pub(crate) use storage_port::*;
 pub(crate) use storage_task::*;
@@ -407,7 +407,7 @@ impl ThreadedKvkache {
     }
 
     fn storage_key(&self, item_id: ItemId) -> StorageKey {
-        storage_keys::derive_storage_key(&self.storage_domain_key, item_id)
+        storage_keys::derive_storage_key(&self.storage_domain_key, item_id.as_bytes())
     }
 
     /// Derives a storage key from one opaque fixed-width identity.
@@ -415,11 +415,15 @@ impl ThreadedKvkache {
     /// The identity is not a wire key or namespace identifier. The returned
     /// key is valid only for this runtime's server-owned storage domain.
     pub fn storage_key_for_identity(&self, identity: [u8; crate::types::STORAGE_KEY_BYTES]) -> StorageKey {
-        self.storage_key(ItemId::new(identity))
+        storage_keys::derive_storage_key(&self.storage_domain_key, &identity)
     }
 
     fn scoped_storage_key(&self, namespace_id: u64, item_id: ItemId) -> StorageKey {
-        storage_keys::derive_scoped_storage_key(&self.storage_domain_key, namespace_id, item_id)
+        storage_keys::derive_storage_key_for_domain(
+            &self.storage_domain_key,
+            namespace_id,
+            item_id.as_bytes(),
+        )
     }
 
     /// Derives one namespace-scoped storage key.
