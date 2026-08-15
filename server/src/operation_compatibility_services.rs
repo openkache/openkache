@@ -235,7 +235,11 @@ impl StorageCapability for NetworkWorkerCache {
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
     ) -> StorageKey {
-        NetworkWorkerCache::namespace_item_storage_key(self, namespace_id, item_id)
+        NetworkWorkerCache::storage_key_for_domain_identity(
+            self,
+            namespace_id,
+            item_id.as_bytes(),
+        )
     }
 
     fn worker_for(&self, storage_key: &StorageKey) -> usize {

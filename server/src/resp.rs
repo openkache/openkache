@@ -614,33 +614,38 @@ async fn execute_command(
     match classify_command(command) {
         RespCommandKind::Ping => simple(response, "PONG"),
         RespCommandKind::Get => match command {
-            [_, application_key] => match cache
-                .get_stored(
-                    resp_item_id(application_key),
-                    operation_for_opcode(Opcode::Get),
-                )
-                .await
-            {
-                Ok(Some(value)) => bulk(response, Some(&value.bytes)),
-                Ok(None) => bulk(response, None),
-                Err(cache_error) => resp_cache_error(response, cache_error),
-            },
+            [_, application_key] => {
+                let item_id = resp_item_id(application_key);
+                let storage_key = cache.storage_key_for_identity(item_id.as_bytes());
+                match cache
+                    .get_storage_key(storage_key, operation_for_opcode(Opcode::Get))
+                    .await
+                {
+                    Ok(Some(value)) => bulk(response, Some(&value.bytes)),
+                    Ok(None) => bulk(response, None),
+                    Err(cache_error) => resp_cache_error(response, cache_error),
+                }
+            }
             _ => error(response, "wrong number of arguments for GET"),
         },
         RespCommandKind::Set => match command {
-            [_, application_key, value] => match cache
-                .set_with_options(
-                    resp_item_id(application_key),
-                    StoredItemValue::new(value.to_vec()),
-                    StorageWriteOptions::default(),
-                    operation_for_opcode(Opcode::Set),
-                )
-                .await
-            {
-                Ok(SetOutcome::Created | SetOutcome::Replaced) => simple(response, "OK"),
-                Ok(SetOutcome::NotStored) => bulk(response, None),
-                Err(cache_error) => resp_cache_error(response, cache_error),
-            },
+            [_, application_key, value] => {
+                let item_id = resp_item_id(application_key);
+                let storage_key = cache.storage_key_for_identity(item_id.as_bytes());
+                match cache
+                    .set_storage_key(
+                        storage_key,
+                        StoredItemValue::new(value.to_vec()),
+                        StorageWriteOptions::default(),
+                        operation_for_opcode(Opcode::Set),
+                    )
+                    .await
+                {
+                    Ok(SetOutcome::Created | SetOutcome::Replaced) => simple(response, "OK"),
+                    Ok(SetOutcome::NotStored) => bulk(response, None),
+                    Err(cache_error) => resp_cache_error(response, cache_error),
+                }
+            }
             _ => error(response, "SET options are not supported"),
         },
         RespCommandKind::Delete => {
@@ -649,11 +654,10 @@ async fn execute_command(
             } else {
                 let mut deleted = 0;
                 for application_key in &command[1..] {
+                    let item_id = resp_item_id(application_key);
+                    let storage_key = cache.storage_key_for_identity(item_id.as_bytes());
                     match cache
-                        .delete(
-                            resp_item_id(application_key),
-                            operation_for_opcode(Opcode::Delete),
-                        )
+                        .delete_storage_key(storage_key, operation_for_opcode(Opcode::Delete))
                         .await
                     {
                         Ok(true) => deleted += 1,
