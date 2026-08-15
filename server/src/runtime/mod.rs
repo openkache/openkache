@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::channel::{self, Sender};
-use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
 use crate::protocol::ItemId;
 use crate::types::StoredItemValue;
@@ -142,32 +141,44 @@ impl ThreadedKvkache {
             startup.server_secret,
             startup.allow_checkpoint,
             combined_entries,
-            true,
-            false,
             observability,
         )
     }
 
-    fn start_with_server_key(
+    /// Starts storage workers with one caller-owned stable storage identity.
+    ///
+    /// This bypasses the persisted server-secret lifecycle and is intended for
+    /// runtimes whose caller owns identity persistence.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Complete storage-worker configuration.
+    /// * `storage_identity` - Stable secret used to derive storage keys.
+    ///
+    /// # Returns
+    ///
+    /// A running worker set using the supplied storage identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configuration validation, storage startup, or
+    /// worker startup fails.
+    pub fn start_with_storage_identity(
         config: crate::config::AppConfig,
-        server_key: [u8; 32],
-        copy_ssd_inline_value_once: bool,
-        lease_ssd_read_buffer: bool,
+        storage_identity: [u8; 32],
     ) -> Result<Self> {
         config.validate()?;
         let allow_checkpoint = crate::storage_backend::startup_with_server_key(&config)?;
         let mut id = [0; 16];
-        id.copy_from_slice(&server_key[..16]);
+        id.copy_from_slice(&storage_identity[..16]);
         Self::start_with_server_secret(
             config,
             ServerSecret {
                 id,
-                key: server_key,
+                key: storage_identity,
             },
             allow_checkpoint,
             None,
-            copy_ssd_inline_value_once,
-            lease_ssd_read_buffer,
             None,
         )
     }
@@ -177,8 +188,6 @@ impl ThreadedKvkache {
         server_secret: ServerSecret,
         allow_checkpoint: bool,
         combined_entries: Option<u32>,
-        copy_ssd_inline_value_once: bool,
-        lease_ssd_read_buffer: bool,
         observability: Option<Arc<ObservabilityState>>,
     ) -> Result<Self> {
         let storage_domain_key = storage_keys::derive_domain_key(&server_secret.key);
@@ -204,9 +213,7 @@ impl ThreadedKvkache {
                 (None, None)
             };
             let started_tx = started_tx.clone();
-            let mut shard_config = config.worker_config(thread_id);
-            shard_config.copy_ssd_inline_value_once = copy_ssd_inline_value_once;
-            shard_config.lease_ssd_read_buffer = lease_ssd_read_buffer;
+            let shard_config = config.worker_config(thread_id);
             let io_config = config.io_uring.clone();
             let entries = if combined {
                 combined_entries.expect("combined ring capacity was validated")
@@ -792,252 +799,6 @@ impl ThreadedKvkache {
         let storage_key = self.namespace_item_storage_key(namespace_id, item_id);
         self.delete_storage_key_with_requester(storage_key, operation, requester)
             .await
-    }
-
-    pub fn for_trace_benchmark(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-    ) -> Result<Self> {
-        Self::for_trace_benchmark_with_bucket_choices(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-            DEFAULT_BUCKET_CHOICE_COUNT,
-        )
-    }
-
-    /// Starts a deterministic benchmark runtime with a configurable Bucket-choice count.
-    ///
-    /// # Arguments
-    ///
-    /// * `directory` - Fresh storage directory owned by this benchmark instance.
-    /// * `cpu_ids` - One pinned CPU identifier per worker.
-    /// * `total_segment_count` - Segment count divided evenly across workers.
-    /// * `total_table_capacity` - Planned key capacity divided across workers.
-    /// * `bucket_choice_count` - Power-of-two candidate count from 1 through 32.
-    ///
-    /// # Returns
-    ///
-    /// A running worker set whose storage-key secret is fixed for reproducible placement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when benchmark sizing or worker configuration is invalid, or when
-    /// worker startup fails.
-    pub fn for_trace_benchmark_with_bucket_choices(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-        bucket_choice_count: usize,
-    ) -> Result<Self> {
-        Self::for_trace_benchmark_with_bucket_choices_and_read_pool(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-            bucket_choice_count,
-            BUCKET_READ_POOL_CAPACITY,
-        )
-    }
-
-    /// Starts a deterministic benchmark runtime with a configurable Bucket-read pool bound.
-    ///
-    /// # Arguments
-    ///
-    /// * `directory` - Fresh storage directory owned by this benchmark instance.
-    /// * `cpu_ids` - One pinned CPU identifier per worker.
-    /// * `total_segment_count` - Segment count divided evenly across workers.
-    /// * `total_table_capacity` - Planned key capacity divided across workers.
-    /// * `bucket_choice_count` - Power-of-two candidate count from 1 through 32.
-    /// * `bucket_read_pool_capacity` - Fixed 4 KiB read buffers preallocated per worker;
-    ///   zero selects the allocation baseline.
-    ///
-    /// # Returns
-    ///
-    /// A running worker set whose storage-key secret is fixed for reproducible placement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when sizing, placement, Bucket choices, or worker startup is invalid.
-    pub fn for_trace_benchmark_with_bucket_choices_and_read_pool(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-        bucket_choice_count: usize,
-        bucket_read_pool_capacity: usize,
-    ) -> Result<Self> {
-        Self::for_trace_benchmark_with_bucket_choices_read_pool_and_inline_copy(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-            bucket_choice_count,
-            bucket_read_pool_capacity,
-            true,
-        )
-    }
-
-    /// Starts a deterministic benchmark runtime with configurable read-buffer and inline-copy modes.
-    #[allow(clippy::too_many_arguments)]
-    pub fn for_trace_benchmark_with_bucket_choices_read_pool_and_inline_copy(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-        bucket_choice_count: usize,
-        bucket_read_pool_capacity: usize,
-        copy_ssd_inline_value_once: bool,
-    ) -> Result<Self> {
-        Self::for_trace_benchmark_with_bucket_choices_read_pool_and_response_lease(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-            bucket_choice_count,
-            bucket_read_pool_capacity,
-            copy_ssd_inline_value_once,
-            false,
-        )
-    }
-
-    /// Starts a deterministic benchmark runtime with staged stable-SSD GET optimizations.
-    #[allow(clippy::too_many_arguments)]
-    pub fn for_trace_benchmark_with_bucket_choices_read_pool_and_response_lease(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-        bucket_choice_count: usize,
-        bucket_read_pool_capacity: usize,
-        copy_ssd_inline_value_once: bool,
-        lease_ssd_read_buffer: bool,
-    ) -> Result<Self> {
-        Self::for_trace_benchmark_with_simulated_io_latency(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-            bucket_choice_count,
-            bucket_read_pool_capacity,
-            copy_ssd_inline_value_once,
-            lease_ssd_read_buffer,
-            0,
-        )
-    }
-
-    /// Starts a deterministic benchmark runtime with configurable simulated I/O latency.
-    #[allow(clippy::too_many_arguments)]
-    pub fn for_trace_benchmark_with_simulated_io_latency(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-        bucket_choice_count: usize,
-        bucket_read_pool_capacity: usize,
-        copy_ssd_inline_value_once: bool,
-        lease_ssd_read_buffer: bool,
-        simulated_io_latency_us: u64,
-    ) -> Result<Self> {
-        Self::for_trace_benchmark_with_bucket_policy_and_read_pool(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-            bucket_choice_count,
-            crate::config::BucketSelectionPolicy::LeastUsed,
-            bucket_read_pool_capacity,
-            copy_ssd_inline_value_once,
-            lease_ssd_read_buffer,
-            simulated_io_latency_us,
-        )
-    }
-
-    /// Starts a deterministic benchmark runtime with configurable Bucket placement.
-    ///
-    /// # Arguments
-    ///
-    /// * `directory` - Fresh storage directory owned by this benchmark instance.
-    /// * `cpu_ids` - One pinned CPU identifier per worker.
-    /// * `total_segment_count` - Segment count divided evenly across workers.
-    /// * `total_table_capacity` - Planned key capacity divided across workers.
-    /// * `bucket_choice_count` - Power-of-two candidate count from 1 through 32.
-    /// * `bucket_selection_policy` - Whether fitting Items spread or pack across candidates.
-    ///
-    /// # Returns
-    ///
-    /// A running worker set whose storage-key secret is fixed for reproducible placement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when benchmark sizing or worker configuration is invalid, or when
-    /// worker startup fails.
-    pub fn for_trace_benchmark_with_bucket_policy(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-        bucket_choice_count: usize,
-        bucket_selection_policy: crate::config::BucketSelectionPolicy,
-    ) -> Result<Self> {
-        Self::for_trace_benchmark_with_bucket_policy_and_read_pool(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-            bucket_choice_count,
-            bucket_selection_policy,
-            BUCKET_READ_POOL_CAPACITY,
-            true,
-            false,
-            0,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn for_trace_benchmark_with_bucket_policy_and_read_pool(
-        directory: std::path::PathBuf,
-        cpu_ids: Vec<usize>,
-        total_segment_count: usize,
-        total_table_capacity: usize,
-        bucket_choice_count: usize,
-        bucket_selection_policy: crate::config::BucketSelectionPolicy,
-        bucket_read_pool_capacity: usize,
-        copy_ssd_inline_value_once: bool,
-        lease_ssd_read_buffer: bool,
-        simulated_io_latency_us: u64,
-    ) -> Result<Self> {
-        let thread_count = cpu_ids.len();
-        if thread_count == 0 {
-            return Err(KvError::InvalidConfig(
-                "benchmark requires at least one CPU".into(),
-            ));
-        }
-        if total_table_capacity / thread_count.max(1) > 750_000 {
-            return Err(KvError::InvalidConfig(
-                "benchmark window is too large".into(),
-            ));
-        }
-        let mut config = crate::config::AppConfig::for_trace_benchmark(
-            directory,
-            cpu_ids,
-            total_segment_count,
-            total_table_capacity,
-        )?;
-        config.storage.bucket_read_pool_capacity_per_thread = bucket_read_pool_capacity;
-        config.table.bucket_choice_count = bucket_choice_count;
-        config.table.bucket_selection_policy = bucket_selection_policy;
-        config.runtime.simulated_io_latency_us = simulated_io_latency_us;
-        Self::start_with_server_key(
-            config,
-            [0; 32],
-            copy_ssd_inline_value_once,
-            lease_ssd_read_buffer,
-        )
     }
 
     pub async fn stats(&self) -> Result<Vec<String>> {
