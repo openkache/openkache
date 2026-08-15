@@ -20,7 +20,7 @@ pub(super) fn prepare_network_worker(
         .network_shard(NetworkWorkerId(limits.worker_id));
     let cache = Arc::new(NetworkWorkerCache::new(cache, network_shard.worker_id()));
     let runtime = operation_registrations::build_operation_runtime(
-        Arc::clone(&limits.capabilities),
+        limits.capabilities.as_ref(),
         Arc::clone(&cache),
         Arc::clone(&limits.namespaces),
         Arc::clone(&limits.observability),

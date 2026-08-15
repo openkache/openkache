@@ -185,7 +185,6 @@ pub(super) async fn execute_request(
     }
 
     let outcome = (registration.handler)(operation_handlers::OperationContext {
-        capabilities: runtime.capabilities(),
         state,
         input,
     })

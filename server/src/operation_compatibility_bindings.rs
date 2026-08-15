@@ -776,7 +776,6 @@ typed_handler!(
 );
 
 fn initialize_module(
-    _registry: &mut super::operation_capabilities::CapabilityRegistry,
     bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
 ) -> Result<ModuleState, &'static str> {
     let storage = super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)

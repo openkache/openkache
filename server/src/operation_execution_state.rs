@@ -10,7 +10,6 @@ use std::sync::Arc;
 use openkache_protocol::Opcode;
 
 use super::operation_api::ServerOperationRegistration;
-use super::operation_capabilities::CapabilityCatalog;
 
 pub(super) type ErasedOperationState = dyn Any + Send + Sync;
 pub(super) type StateValidator = fn(Option<&ErasedOperationState>) -> bool;
@@ -110,20 +109,15 @@ impl OperationRuntimeBuilder {
         Ok(())
     }
 
-    pub(super) fn finish(
-        self,
-        capabilities: Arc<dyn CapabilityCatalog>,
-    ) -> OperationRuntime {
+    pub(super) fn finish(self) -> OperationRuntime {
         OperationRuntime {
             operations: self.operations,
-            capabilities,
         }
     }
 }
 
 pub(super) struct OperationRuntime {
     operations: [Option<BoundOperation>; Opcode::COUNT],
-    capabilities: Arc<dyn CapabilityCatalog>,
 }
 
 impl OperationRuntime {
@@ -145,7 +139,4 @@ impl OperationRuntime {
             .map(|operation| (operation.registration, operation.state()))
     }
 
-    pub(super) fn capabilities(&self) -> &dyn CapabilityCatalog {
-        self.capabilities.as_ref()
-    }
 }
