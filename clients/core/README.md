@@ -132,8 +132,17 @@ does not provide one.
 ## Core components
 
 - `src/lib.rs` provides raw lifecycle, retries, operations, and stable errors.
+- `src/operation_request.rs` maps client domain values to generated numeric
+  request fields, selects the generated compact layout, and delegates framing
+  to the shared protocol encoder.
+- `src/request.rs` owns request construction and retry state around the
+  protocol-owned `OwnedRequestFrame`. Replayable requests retain one encoded
+  frame, while one-shot requests transfer field owners directly into their
+  transport attempt.
+- `src/protocol.rs` owns client-domain protocol values and semantic response
+  projection without redefining request framing.
 - `src/transport.rs` manages reusable stream lanes and backend-neutral
-  deadlines.
+  deadlines and writes the ordered segments exposed by `OwnedRequestFrame`.
 - `src/config.rs` provides public transport and TLS configuration wrappers.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
