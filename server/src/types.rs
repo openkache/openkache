@@ -17,7 +17,7 @@ pub const STORAGE_KEY_BYTES: usize = 32;
 
 /// Existence condition for a storage mutation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum StorageWriteCondition {
+pub enum StorageWriteCondition {
     #[default]
     Any,
     IfAbsent,
@@ -26,7 +26,7 @@ pub(crate) enum StorageWriteCondition {
 
 /// Concrete expiration selection accepted by storage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum StorageWriteExpiration {
+pub enum StorageWriteExpiration {
     #[default]
     Inherit,
     NoExpiry,
@@ -35,7 +35,7 @@ pub(crate) enum StorageWriteExpiration {
 
 /// Concrete eviction selection accepted by storage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum StorageWriteEviction {
+pub enum StorageWriteEviction {
     #[default]
     Inherit,
     Evictable,
@@ -44,10 +44,13 @@ pub(crate) enum StorageWriteEviction {
 
 /// Operation-neutral policy for storing one value.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct StorageWriteOptions {
-    pub(crate) condition: StorageWriteCondition,
-    pub(crate) expiration: StorageWriteExpiration,
-    pub(crate) eviction: StorageWriteEviction,
+pub struct StorageWriteOptions {
+    /// Required relationship between the key and existing storage state.
+    pub condition: StorageWriteCondition,
+    /// Expiration policy applied to the stored value.
+    pub expiration: StorageWriteExpiration,
+    /// Eviction policy applied to the stored value.
+    pub eviction: StorageWriteEviction,
 }
 
 impl StorageWriteOptions {

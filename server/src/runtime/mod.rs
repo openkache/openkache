@@ -20,6 +20,7 @@ mod port;
 mod scheduler;
 pub(crate) mod storage_backend;
 mod storage_keys;
+mod submission;
 mod worker;
 mod worker_contract;
 mod worker_control;
@@ -35,6 +36,7 @@ pub(crate) use storage_task::*;
 pub(crate) use worker::*;
 /// Workload and result contracts for driving bounded runtime batches.
 pub use worker::{BenchmarkBatchStats, BenchmarkOperation};
+pub use submission::{PendingStorageSubmission, StorageSubmission, SubmittedStorageValue};
 
 use self::completion::{CompletionReceiver, CompletionSlab};
 
@@ -408,6 +410,14 @@ impl ThreadedKvkache {
 
     fn storage_key(&self, item_id: ItemId) -> StorageKey {
         storage_keys::derive_storage_key(&self.storage_domain_key, item_id)
+    }
+
+    /// Derives a storage key from one opaque fixed-width identity.
+    ///
+    /// The identity is not a wire key or namespace identifier. The returned
+    /// key is valid only for this runtime's server-owned storage domain.
+    pub fn storage_key_for_identity(&self, identity: [u8; crate::types::STORAGE_KEY_BYTES]) -> StorageKey {
+        self.storage_key(ItemId::new(identity))
     }
 
     fn scoped_storage_key(&self, namespace_id: u64, item_id: ItemId) -> StorageKey {

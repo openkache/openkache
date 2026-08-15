@@ -178,7 +178,10 @@ pub use protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId, NamespaceDescriptor,
     NamespacePolicy, OverridePolicy, SetCondition, SetOptions,
 };
-pub use types::{ItemValue, StorageKey};
+pub use types::{
+    ItemValue, StorageKey, StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration,
+    StorageWriteOptions,
+};
 
 mod error;
 pub use error::{KvError, Result};
