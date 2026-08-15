@@ -505,18 +505,22 @@ async fn write_with_timeout(
 
 pub(crate) fn operation_for_command(command: &[&[u8]]) -> Operation {
     match classify_command(command) {
-        RespCommandKind::Ping => Operation::from_opcode(Opcode::Ping),
-        RespCommandKind::Get => Operation::from_opcode(Opcode::Get),
-        RespCommandKind::Set => Operation::from_opcode(Opcode::Set),
-        RespCommandKind::Delete => Operation::from_opcode(Opcode::Delete),
-        RespCommandKind::Stats => Operation::from_opcode(Opcode::Stats),
-        RespCommandKind::Sync => Operation::from_opcode(Opcode::Sync),
+        RespCommandKind::Ping => operation_for_opcode(Opcode::Ping),
+        RespCommandKind::Get => operation_for_opcode(Opcode::Get),
+        RespCommandKind::Set => operation_for_opcode(Opcode::Set),
+        RespCommandKind::Delete => operation_for_opcode(Opcode::Delete),
+        RespCommandKind::Stats => operation_for_opcode(Opcode::Stats),
+        RespCommandKind::Sync => operation_for_opcode(Opcode::Sync),
         RespCommandKind::Select
         | RespCommandKind::Client
         | RespCommandKind::Quit
         | RespCommandKind::Unknown
         | RespCommandKind::Empty => Operation::unknown(),
     }
+}
+
+const fn operation_for_opcode(opcode: Opcode) -> Operation {
+    crate::operation_contract::telemetry_operation(opcode)
 }
 
 /// RESP command names are a compatibility adapter concern. Classifying them
@@ -572,7 +576,7 @@ pub(crate) fn status_for_resp_response(
         return openkache_protocol::Status::Ok;
     }
     if response.starts_with(b"$-1\r\n") {
-        return if operation == Operation::from_opcode(Opcode::Set) {
+        return if operation == operation_for_opcode(Opcode::Set) {
             openkache_protocol::Status::NotStored
         } else {
             openkache_protocol::Status::NotFound
@@ -582,7 +586,7 @@ pub(crate) fn status_for_resp_response(
         return openkache_protocol::Status::Ok;
     }
     if response.starts_with(b":") {
-        return if operation == Operation::from_opcode(Opcode::Delete) {
+        return if operation == operation_for_opcode(Opcode::Delete) {
             if response.starts_with(b":0\r\n") {
                 openkache_protocol::Status::NotFound
             } else {
@@ -613,7 +617,7 @@ async fn execute_command(
             [_, application_key] => match cache
                 .get_stored(
                     resp_item_id(application_key),
-                    Operation::from_opcode(Opcode::Get),
+                    operation_for_opcode(Opcode::Get),
                 )
                 .await
             {
@@ -629,7 +633,7 @@ async fn execute_command(
                     resp_item_id(application_key),
                     StoredItemValue::new(value.to_vec()),
                     StorageWriteOptions::default(),
-                    Operation::from_opcode(Opcode::Set),
+                    operation_for_opcode(Opcode::Set),
                 )
                 .await
             {
@@ -648,7 +652,7 @@ async fn execute_command(
                     match cache
                         .delete(
                             resp_item_id(application_key),
-                            Operation::from_opcode(Opcode::Delete),
+                            operation_for_opcode(Opcode::Delete),
                         )
                         .await
                     {
@@ -664,10 +668,7 @@ async fn execute_command(
             }
         }
         RespCommandKind::Stats => match command {
-            [_] => match cache
-                .stats(Operation::from_opcode(Opcode::Stats))
-                .await
-            {
+            [_] => match cache.stats(operation_for_opcode(Opcode::Stats)).await {
                 Ok(stats) => {
                     let stats = stats.join("\n");
                     bulk(response, Some(stats.as_bytes()));
@@ -677,10 +678,7 @@ async fn execute_command(
             _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
         },
         RespCommandKind::Sync => match command {
-            [_] => match cache
-                .sync(Operation::from_opcode(Opcode::Sync))
-                .await
-            {
+            [_] => match cache.sync(operation_for_opcode(Opcode::Sync)).await {
                 Ok(()) => simple(response, "OK"),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
