@@ -9,7 +9,6 @@ use crate::channel::{AsyncReceiver, TryRecvError};
 use crate::observability::{ObservabilityState, Operation, StorageWorkerId};
 use crate::*;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::ItemId;
 
 use super::CoreTask;
 use super::scheduler::{KeyScheduler, ScheduledTask};
@@ -55,48 +54,6 @@ where
     Some(lifecycle.execute_exclusive(work).await)
 }
 
-#[derive(Debug)]
-pub enum BenchmarkOperation {
-    Get(ItemId),
-    Set(ItemId, Vec<u8>),
-    Delete(ItemId),
-}
-
-impl BenchmarkOperation {
-    pub(crate) fn item_id(&self) -> ItemId {
-        match self {
-            Self::Get(item_id) | Self::Delete(item_id) | Self::Set(item_id, _) => *item_id,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct BenchmarkBatchStats {
-    pub operations: usize,
-    pub gets: usize,
-    pub hits: usize,
-    pub sets: usize,
-    pub creates: usize,
-    pub replaces: usize,
-    pub deletes: usize,
-    pub deleted: usize,
-    pub latency_ns: Vec<u64>,
-}
-
-impl BenchmarkBatchStats {
-    pub fn merge(&mut self, mut other: Self) {
-        self.operations += other.operations;
-        self.gets += other.gets;
-        self.hits += other.hits;
-        self.sets += other.sets;
-        self.creates += other.creates;
-        self.replaces += other.replaces;
-        self.deletes += other.deletes;
-        self.deleted += other.deleted;
-        self.latency_ns.append(&mut other.latency_ns);
-    }
-}
-
 pub(super) trait ControlPort<C> {
     fn execute_control(
         &mut self,
@@ -119,13 +76,6 @@ where
     L: ControlPort<C>,
 {
     lifecycle.execute_control(command, affinity_id).await
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum BenchmarkResponseKind {
-    Get,
-    Set,
-    Delete,
 }
 
 struct RunningKeyedCommand<J, R, S> {
