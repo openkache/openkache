@@ -64,7 +64,7 @@ pub(super) fn build_operation_runtime(
     ];
     let bootstrap = CapabilityList::overlay(base, &bootstrap_entries);
     let runtime = SERVER_COMPOSITION.initialize_modules(&bootstrap)?;
-    Ok(Arc::new(runtime.finish()))
+    Ok(Arc::new(runtime))
 }
 
 /// Validates the complete server composition in one place.

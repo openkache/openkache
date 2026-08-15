@@ -18,8 +18,8 @@ use super::operation_capabilities::CapabilityCatalog;
 use super::operation_contract as contract;
 use super::operation_contract::OperationStatus;
 use super::operation_execution_state::{
-    ModuleState, OperationRuntimeBuilder, OperationStateRef, StateValidator, no_operation_state,
-    typed_operation_state,
+    OperationRuntime, OperationStateBindings, OperationStateInstaller, OperationStateRef,
+    StateValidator, no_operation_state, typed_operation_state,
 };
 use super::operation_handlers::{AuthorizationFn, OperationInputView};
 use super::operation_registry::OperationHandler;
@@ -428,36 +428,28 @@ impl RegistrationBuilder {
 #[derive(Clone, Copy)]
 pub(super) struct ApiModule {
     operations: &'static [ServerOperationRegistration],
-    initializer: Option<ModuleInitializer>,
-    state_validator: Option<fn(&ModuleState) -> bool>,
+    state_installer: Option<ModuleStateInstaller>,
 }
 
-pub(super) type ModuleInitializer =
-    fn(&dyn CapabilityCatalog) -> Result<ModuleState, &'static str>;
-
-fn state_is<T: Any>(state: &ModuleState) -> bool {
-    state.is::<T>()
-}
+pub(super) type ModuleStateInstaller = fn(
+    &mut OperationStateBindings<'_>,
+    &dyn CapabilityCatalog,
+) -> Result<(), &'static str>;
 
 impl ApiModule {
     pub(super) const fn new(operations: &'static [ServerOperationRegistration]) -> Self {
         Self {
             operations,
-            initializer: None,
-            state_validator: None,
+            state_installer: None,
         }
     }
 
-    /// Initializes state shared by this module's operations.
-    ///
-    /// The declared type is checked once during worker startup so a wiring
-    /// mismatch cannot survive until request dispatch.
-    pub(super) const fn initialize_state<T: Any + Send + Sync>(
+    /// Installs worker-owned state into exact operation slots.
+    pub(super) const fn install_operation_state(
         mut self,
-        initialize: ModuleInitializer,
+        install: ModuleStateInstaller,
     ) -> Self {
-        self.initializer = Some(initialize);
-        self.state_validator = Some(state_is::<T>);
+        self.state_installer = Some(install);
         self
     }
 
@@ -465,21 +457,15 @@ impl ApiModule {
         self.operations
     }
 
-    fn initialize(
+    fn install_state_into(
         self,
+        states: &mut OperationStateBindings<'_>,
         bootstrap: &dyn CapabilityCatalog,
-    ) -> Result<Option<ModuleState>, &'static str> {
-        let Some(initialize) = self.initializer else {
-            return Ok(None);
-        };
-        let state = initialize(bootstrap)?;
-        if !self
-            .state_validator
-            .is_some_and(|validate| validate(&state))
-        {
-            return Err("API module initialized an unexpected state type");
+    ) -> Result<(), &'static str> {
+        if let Some(install) = self.state_installer {
+            install(states, bootstrap)?;
         }
-        Ok(Some(state))
+        Ok(())
     }
 }
 
@@ -515,16 +501,16 @@ impl ServerComposition {
     pub(super) fn initialize_modules(
         &'static self,
         bootstrap: &dyn CapabilityCatalog,
-    ) -> Result<OperationRuntimeBuilder, &'static str> {
-        let mut runtime = OperationRuntimeBuilder::new();
+    ) -> Result<OperationRuntime, &'static str> {
+        let mut states = OperationStateInstaller::new();
         let mut index = 0;
         while index < self.module_count {
             let module = self.modules[index].expect("registered API module is missing");
-            let state = module.initialize(bootstrap)?;
-            runtime.bind(module.operations(), state)?;
+            let mut bindings = states.for_module(module.operations());
+            module.install_state_into(&mut bindings, bootstrap)?;
             index += 1;
         }
-        Ok(runtime)
+        states.freeze(self.operations())
     }
 
     pub(super) fn operation(
