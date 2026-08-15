@@ -785,10 +785,32 @@ response = status | payload_len | payload
 `payload_len` is present for every response, including responses with an empty
 payload. Responses have no version, request identifier, flags, Item ID, or TTL.
 
+### Explicit request plans
+
+Every operation with a non-empty modeled request MUST declare `requestWire` in
+the Smithy model. The plan composes operation-neutral fixed, packed,
+length-delimited, conditional, constant, and trailing-field primitives.
+Generated frame metadata uses the plan to delimit the request, while generated
+field metadata uses the same plan to encode and project modeled field values.
+
+Explicit plans preserve compact, deterministic bytes without teaching the
+transport, dispatcher, encoder, or projector about operation names or domain
+families. Omitting `requestWire` does not select a generic sequence, dense
+tuple, opaque body, or any other implicit layout.
+
+The historical namespace/item/SET operations express the fixed prefixes
+documented above through `requestWire`, so their bytes remain unchanged. An
+unrelated future operation may compose the same primitives without adding a
+route enum or an operation-name branch.
+
 ### Generic ordered field sequences
 
-New operations that declare `ordered_fields` request framing use a
-transport-neutral presence-mask field sequence:
+The following sequence is a reusable compact payload primitive. It is not an
+automatic top-level request layout, and `requestFraming: "ordered_fields"` does
+not select it by itself. An API may use it inside an API-owned field encoding
+and expose that encoding as a field in its explicit `requestWire` plan.
+
+The transport-neutral presence-mask field sequence is:
 
 ```text
 presence_mask:ceil(field_count / 8) bytes
@@ -807,22 +829,8 @@ a present-empty non-final field; a set final-present bit with no remaining
 bytes is a present-empty final field.
 The unused high bits of the final mask byte MUST be zero. The complete
 sequence MUST remain within the protocol value limit. Requiredness and field
-codecs come from the generated operation descriptor; the generic codec does not
+codecs come from the operation descriptor; the generic codec does not
 interpret field role names.
-
-Operations that must preserve exact request bytes declare `requestWire` in the
-Smithy model. The plan composes operation-neutral fixed, packed,
-length-delimited, conditional, constant, and trailing-field primitives.
-Generated frame metadata uses the plan only to delimit prefix and payload;
-generated field metadata uses the same plan to encode and decode modeled field
-values. The transport, dispatcher, and plan interpreters do not classify the
-operation as a namespace, item, SET, or other domain family.
-
-The historical namespace/item/SET operations express the fixed prefixes
-documented above through `requestWire`, so their bytes remain unchanged. An
-unrelated future operation may compose the same primitives without adding a
-route enum or an operation-name branch. An `ordered_fields` operation without
-`requestWire` continues to use the generic sequence or dense layout.
 
 For two modeled fields, the following vectors are normative:
 
@@ -841,32 +849,30 @@ The non-final length examples use canonical `vu128`; the payload bytes shown as
 reject an unused mask bit, a non-canonical or truncated non-final length, a
 truncated non-final value, or bytes after a mask with no present field.
 
-For a required fixed-width tuple, the generated descriptor MAY select the
-`dense` field layout. A dense payload is the concatenation of the declared
-field bytes with no presence mask or per-field length:
+A dense field tuple is another reusable compact payload primitive. It is the
+concatenation of the declared field bytes with no presence mask or per-field
+length:
 
 ```text
 field_0:value_bytes | field_1:value_bytes | ...
 ```
 
-The dense layout is valid only when every modeled field is required and has an
-exact codec-declared width. A receiver MUST reject truncated, trailing, or
-width-mismatched payloads.
+The dense layout is valid only when every field is required and has an exact
+codec-declared width. It is not selected by omitting `requestWire`. A receiver
+MUST reject truncated, trailing, or width-mismatched payloads.
 
 ### Compact optional-value sequences
 
 The four-octet optional-value sequence is a protocol-v1 compatibility format,
-not a generic layout. Generic operations use `field_sequence`; only the
-compatibility facade/projector uses this format.
+not an implicit generic request layout. Only the compatibility
+facade/projector uses this format for current v1 operations.
 
 Each field is encoded as a four-octet big-endian length followed by that many
 value octets. `FF FF FF FF` is the missing-value sentinel. A zero length is a
 present empty value. Fields retain their modeled order, and the complete
-sequence is bounded by the protocol's maximum value size. The generated
-Any future API may select this layout when its fields are independently
-optional and compact fixed-width prefixes are preferable. If a different wire
-shape is needed, declare a new descriptor layout or an explicitly
-adapter-owned extension; do not add an operation-specific branch.
+sequence is bounded by the protocol's maximum value size. A future API may use
+the codec through an explicit descriptor or inside an adapter-owned field
+encoding. Omitting `requestWire` never selects it.
 
 For two optional values, the compatibility vectors are:
 

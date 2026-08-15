@@ -1,78 +1,59 @@
 # Adding an API operation
 
-Protocol v1 is still an unpublished, evolving draft profile. The transport
-crate intentionally does not generate operation codecs, server adapters, or
-client methods. Every API uses the same explicit implementation boundary.
+Protocol v1 is still an unpublished, evolving draft profile. Each API declares
+its compact wire contract in the shared model and implements its semantics
+behind operation-neutral protocol and server boundaries.
 
 ## Minimal path
 
-1. Document the operation and its shapes in the protocol model if it is part
-   of the shared draft.
-2. Reserve an opcode only when the operation needs a wire-visible assignment.
-   The transport generator emits the opaque assignment; it does not infer the
-   operation body.
-3. Add an API-owned module that implements:
+1. Add the operation, request and response shapes, field codecs, and opcode to
+   the Smithy model.
+2. For every non-empty request, declare `requestWire` with the neutral fixed,
+   packed, conditional, length, constant, and trailing-field primitives.
+   Empty requests are the only requests that omit a wire plan.
+3. Regenerate the contract. Generation emits:
 
-   - request serialization and deserialization;
-   - response serialization and deserialization;
-   - semantic result/status projection;
-   - request frame layout, when the operation is not length-delimited;
-   - resource preparation, authorization, and handler behavior;
-   - client-facing convenience methods, if the API has a client package.
+   - numeric request and response field modules;
+   - operation framing, status, and codec metadata;
+   - the shared request frame layout used by the encoder and projector.
 
-4. Register the module with the generic server/client transport boundary.
-   Registration supplies an opcode, frame delimiter, request decoder, handler,
-   result projector, and retry/commit policy. The transport sees only those
-   callbacks and opaque bytes.
-5. Use the protocol utilities where they match the contract:
-
-   - `decode_varuint` / `encode_varuint`;
-   - `OpaqueRequestFrame` and `ResponseParts`;
-   - `FieldSequence` and field-group helpers;
-   - `DenseFields` for required fixed-width tuples;
-   - `OptionalValueCodec` when the API explicitly specifies a fixed-prefix
-     optional-value table;
-   - borrowed cursors and segmented response values for large payloads.
-
-There is no generated operation plan to update and no built-in handler table to
-extend. Adding an API should be a local module plus one registration entry.
-
-## Choosing a layout
-
-| Contract shape | Suggested primitive |
-| --- | --- |
-| no body | empty request/response |
-| one already-encoded value | opaque body |
-| ordered optional or variable fields | `FieldSequence` |
-| required fixed-width tuple | `DenseFields` |
-| explicit fixed-prefix optional table | `OptionalValueCodec` |
-| nested/repeated values | API codec over shared container cursors |
-
-`OptionalValueCodec` is not a built-in operation family. The API supplies both
-the prefix width and the missing sentinel, so present-empty and missing remain
-distinct without embedding any domain-specific number in generic code.
+4. Add a typed API adapter. It maps domain values to canonical numeric fields
+   and uses the shared request encoder/projector instead of duplicating frame
+   parsing or serialization.
+5. Add the API-owned server binding and handler registration. The binding
+   performs semantic decoding, capability and resource preparation,
+   authorization, behavior, and response projection. The generic server owns
+   admission, scheduling, lifecycle, dispatch, and transport writes.
+6. Add a client-facing method when the API has a client package. Keep retry
+   policy and semantic result mapping in the API adapter, outside the server
+   lifecycle.
 
 ## Boundary rules
 
-The generic server/client layers must not branch on operation names, namespace
-or item roles, domain enums, route families, status meanings, or client ABI
-types. They delimit frames, retain ownership, dispatch a registered decoder,
-and write/read opaque response parts.
+Adding an API must not add an operation-name, API-family, field-role, route, or
+status-meaning branch to generic protocol, transport, scheduler, dispatcher, or
+lifecycle code. Generic code consumes generated numeric metadata and registered
+callbacks.
 
-An API handler must not parse QUIC/RESP details or construct a transport frame.
-It returns an API-owned semantic result which its registration projector maps
-to the selected wire bytes.
+An API handler must not parse transport frames or depend on client types. It
+returns an API-owned semantic result which its response projector maps to the
+declared wire contract.
 
-For large values, keep response segments borrowed or ownership-preserving
-until the transport write. Copy only at a language binding boundary that
-promises an owned value.
+For large byte fields, project borrowed ranges from the owned request frame and
+transfer ownership into storage when needed. Keep response segments borrowed
+or ownership-preserving until the transport write. Copy only at a boundary
+whose contract requires an owned value.
 
 ## Review checklist
 
-- Does the new API compile without editing a generic codec or dispatcher?
+- Does the operation declare an explicit compact request plan?
+- Does it compile without editing a generic codec, scheduler, dispatcher, or
+  lifecycle?
 - Are empty, missing, present-empty, malformed, trailing, and maximum values
   covered?
 - Are nested lists/maps/unions validated without collecting unnecessary
   temporary vectors?
-- Is the wire contract documented before the implementation?
+- Does the typed adapter use generated numeric fields and the shared request
+  encoder/projector?
+- Are large byte fields borrowed or ownership-transferred rather than copied?
 - Can the API be removed by deleting its module and registration entry?
