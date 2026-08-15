@@ -11,9 +11,9 @@ use super::operation_api::{CapabilityKey, capability_id};
 
 /// Type-erased dependencies supplied by the server composition root.
 ///
-/// Implementations keep values alive for the catalog's lifetime and use stable
-/// keys only as an internal registry detail. Consumers pair a key with its
-/// concrete type through the server's typed capability helpers.
+/// Catalog values must outlive the catalog that borrows or owns them. API
+/// bindings should pair stable keys with their concrete types through the
+/// server's typed capability helpers.
 pub trait CapabilityCatalog: Send + Sync {
     /// Returns the dependency registered under one stable composition key.
     fn get(&self, key: &'static str) -> Option<&(dyn Any + Send + Sync)>;
@@ -70,13 +70,15 @@ impl<'a> CapabilityEntry<'a> {
             value,
         }
     }
+
 }
 
 /// Allocation-free capability catalog for a composition root.
 ///
-/// The list is intentionally small and immutable for its borrowed lifetime. A
-/// future API can consume another startup port without changing the dispatcher
-/// or transport adapter.
+/// The list is intentionally small and immutable for its borrowed lifetime. It
+/// can be stack-scoped to one composition call; server-lifetime values belong
+/// in [`CapabilityRegistry`]. A future API can add one entry without changing
+/// the dispatcher or transport adapter.
 pub struct CapabilityList<'a> {
     /// Immutable entries searched by their stable key.
     pub entries: &'a [CapabilityEntry<'a>],

@@ -13,7 +13,8 @@ use super::operation_api::{
 };
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
-    COMPATIBILITY_BODY_LIMITS, COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_SERVICES,
+    COMPATIBILITY_BODY_LIMITS, COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT,
+    COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_SERVICES, COMPATIBILITY_STORAGE_PORT,
     CompatibilityBodyLimits, CompatibilityResourceResolver, CompatibilityServices,
 };
 use super::operation_contract::{OperationStatus, request_fields};
@@ -740,24 +741,17 @@ fn install_capabilities(
     registry: &mut super::operation_capabilities::CapabilityRegistry,
     bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
 ) -> Result<(), &'static str> {
-    let cache = super::operation_api::downcast_capability(
-        bootstrap,
-        super::operation_runtime_ports::NETWORK_WORKER_CACHE,
-    )
-    .ok_or("network worker cache port is unavailable")?;
-    let namespaces = super::operation_api::downcast_capability(
-        bootstrap,
-        super::operation_runtime_ports::NAMESPACE_REGISTRY,
-    )
-    .ok_or("namespace registry port is unavailable")?;
-    let observability = super::operation_api::downcast_capability(
-        bootstrap,
-        super::operation_runtime_ports::OBSERVABILITY_STATE,
-    )
-    .ok_or("observability state port is unavailable")?;
+    let storage = super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)
+        .ok_or("compatibility storage port is unavailable")?;
+    let namespaces =
+        super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_NAMESPACE_PORT)
+            .ok_or("compatibility namespace port is unavailable")?;
+    let observability =
+        super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
+            .ok_or("compatibility observability port is unavailable")?;
     install_compatibility_services(
         registry,
-        cache.clone(),
+        storage.clone(),
         namespaces.clone(),
         observability.clone(),
     );

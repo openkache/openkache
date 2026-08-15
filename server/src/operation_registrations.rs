@@ -15,8 +15,10 @@ use super::{
         CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry,
     },
     operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
-    operation_runtime_ports::{
-        NAMESPACE_REGISTRY, NETWORK_WORKER_CACHE, OBSERVABILITY_STATE,
+    operation_compatibility_services::{
+        COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT,
+        COMPATIBILITY_STORAGE_PORT, NamespaceCapabilityHandle, ObservabilityCapabilityHandle,
+        StorageCapabilityHandle,
     },
 };
 
@@ -47,12 +49,21 @@ pub(super) fn install_runtime_capabilities(
     observability: Arc<ObservabilityState>,
 ) -> Result<Arc<dyn CapabilityCatalog>, &'static str> {
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
+    let compatibility_storage: StorageCapabilityHandle = cache;
+    let compatibility_namespaces: NamespaceCapabilityHandle = namespaces;
+    let compatibility_observability: ObservabilityCapabilityHandle = observability;
     let mut registry = CapabilityRegistry::overlay(base);
     super::storage_port::install(&mut registry, storage_port);
     let bootstrap_entries = [
-        CapabilityEntry::new(NETWORK_WORKER_CACHE, &cache),
-        CapabilityEntry::new(NAMESPACE_REGISTRY, &namespaces),
-        CapabilityEntry::new(OBSERVABILITY_STATE, &observability),
+        CapabilityEntry::new(COMPATIBILITY_STORAGE_PORT, &compatibility_storage),
+        CapabilityEntry::new(
+            COMPATIBILITY_NAMESPACE_PORT,
+            &compatibility_namespaces,
+        ),
+        CapabilityEntry::new(
+            COMPATIBILITY_OBSERVABILITY_PORT,
+            &compatibility_observability,
+        ),
     ];
     let bootstrap = CapabilityList::new(&bootstrap_entries);
     SERVER_COMPOSITION.install_capabilities(&mut registry, &bootstrap)?;
