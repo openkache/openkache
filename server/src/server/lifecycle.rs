@@ -4,9 +4,9 @@ use super::connection::{NetworkWorkerLimits, prepare_network_worker, run_selecte
 impl KacheServer {
     /// Installs API-owned capabilities before the server starts serving.
     ///
-    /// The catalog is carried unchanged through every network worker and
-    /// request lane. Generic dispatch only exposes its opaque lookup surface;
-    /// compatibility services remain supplied by the composition root.
+    /// Each network worker retains the catalog inside its operation runtime.
+    /// Generic dispatch only exposes opaque catalog and module-state views;
+    /// API services remain supplied by the composition root.
     ///
     /// # Arguments
     ///
@@ -386,7 +386,7 @@ async fn run_quic_role(
         reporter.startup_failed(error);
         return None;
     }
-    let capabilities = match prepare_network_worker(cache, &limits) {
+    let runtime = match prepare_network_worker(cache, &limits) {
         Ok(prepared) => prepared,
         Err(error) => {
             limits.observability.network_worker_failed(worker_id);
@@ -394,14 +394,12 @@ async fn run_quic_role(
             return None;
         }
     };
-    let mut limits = limits;
-    limits.capabilities = capabilities;
     if !reporter.started() {
         return None;
     }
     limits.observability.network_worker_started(worker_id);
     Some(
-        run_selected_endpoint(endpoint, &access_policy, limits, stop)
+        run_selected_endpoint(endpoint, &access_policy, limits, runtime, stop)
             .await
             .map_err(|error| error.to_string()),
     )

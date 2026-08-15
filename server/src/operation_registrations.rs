@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use openkache_protocol::Opcode;
 
 use super::operation_api::{ServerComposition, ServerOperationRegistration};
+use super::operation_execution_state::OperationRuntime;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{
@@ -42,12 +43,12 @@ pub(super) fn registered_operations() -> impl Iterator<Item = &'static ServerOpe
 /// concrete runtime handles are available to API installers. The network loop
 /// passes opaque capability state onward and remains independent of operation
 /// names, wire layouts, and client projections.
-pub(super) fn install_runtime_capabilities(
+pub(super) fn build_operation_runtime(
     base: Arc<dyn CapabilityCatalog>,
     cache: Arc<NetworkWorkerCache>,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     observability: Arc<ObservabilityState>,
-) -> Result<Arc<dyn CapabilityCatalog>, &'static str> {
+) -> Result<Arc<OperationRuntime>, &'static str> {
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
     let compatibility_storage: StorageCapabilityHandle = cache;
     let compatibility_namespaces: NamespaceCapabilityHandle = namespaces;
@@ -66,8 +67,9 @@ pub(super) fn install_runtime_capabilities(
         ),
     ];
     let bootstrap = CapabilityList::new(&bootstrap_entries);
-    SERVER_COMPOSITION.install_capabilities(&mut registry, &bootstrap)?;
-    Ok(Arc::new(registry))
+    let runtime = SERVER_COMPOSITION.initialize_modules(&mut registry, &bootstrap)?;
+    let capabilities: Arc<dyn CapabilityCatalog> = Arc::new(registry);
+    Ok(Arc::new(runtime.finish(capabilities)))
 }
 
 /// Validates the complete server composition in one place.

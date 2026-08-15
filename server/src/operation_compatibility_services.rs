@@ -19,7 +19,6 @@ use super::super::types::{
 };
 use super::super::{KvError, SetOutcome};
 use super::operation_api::{CapabilityKey, PrepareError, ResourceLock};
-use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
 use super::operation_contract::{OperationStatus, telemetry_operation};
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
@@ -29,9 +28,7 @@ use super::{
 /// Resource resolver for the compatibility namespace/storage adapter.
 ///
 /// This adapter deliberately owns the only interpretation of the compatibility
-/// eight-byte namespace identity. Generic operations do not pass their opaque
-/// resource keys through this type; they obtain an API-owned resolver from the
-/// capability catalog instead.
+/// eight-byte namespace identity.
 pub(super) struct CompatibilityResourceResolver {
     namespaces: NamespaceCapabilityHandle,
 }
@@ -65,44 +62,18 @@ impl CompatibilityResourceResolver {
     }
 }
 
-/// Catalog key reserved by the compatibility adapter for its resource resolver.
-///
-/// The key is an adapter detail, not part of the generic dispatcher contract.
-pub(super) const COMPATIBILITY_RESOURCE_RESOLVER: CapabilityKey<CompatibilityResourceResolver> =
-    CapabilityKey::new("openkache.compatibility.resource_resolver");
-
 /// Request-body limits owned by the current compatibility API adapter.
 pub(super) struct CompatibilityBodyLimits {
     pub(super) max_item_bytes: usize,
 }
 
-pub(super) const COMPATIBILITY_BODY_LIMITS: CapabilityKey<CompatibilityBodyLimits> =
-    CapabilityKey::new("openkache.compatibility.body_limits");
-
-/// Adds the compatibility adapter's worker-scoped capabilities.
-///
-/// Generic runtime capabilities are installed by the server composition root
-/// before this function is called. This adapter only adds compatibility resolver and
-/// service values.
-pub(super) fn install_compatibility_services(
-    registry: &mut CapabilityRegistry,
+/// Builds the compatibility adapter's worker-scoped context.
+pub(super) fn build_compatibility_context(
     storage: StorageCapabilityHandle,
     namespaces: NamespaceCapabilityHandle,
     observability: ObservabilityCapabilityHandle,
-) {
-    registry.insert(
-        COMPATIBILITY_BODY_LIMITS,
-        CompatibilityBodyLimits {
-            max_item_bytes: storage.max_item_bytes(),
-        },
-    );
-    registry.insert(
-        COMPATIBILITY_RESOURCE_RESOLVER,
-        CompatibilityResourceResolver::new(Arc::clone(&namespaces)),
-    );
-    let services: Arc<dyn CompatibilityServices + Send + Sync> =
-        Arc::new(CompatibilityContext::new(storage, namespaces, observability));
-    registry.insert(COMPATIBILITY_SERVICES, services);
+) -> CompatibilityContext {
+    CompatibilityContext::new(storage, namespaces, observability)
 }
 
 pub(super) type CacheFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, KvError>> + 'a>>;
@@ -212,30 +183,13 @@ pub(super) trait CompatibilityServices: Any + Send + Sync {
     fn observability(&self) -> &dyn ObservabilityCapability;
 }
 
-/// Capability key owned by the compatibility adapter.
-///
-/// The generic operation context only exposes the type-erased capability
-/// catalog. Compatibility bindings opt into this key locally; no compatibility
-/// service type crosses the generic handler or transport boundary.
-pub(super) const COMPATIBILITY_SERVICES: CapabilityKey<
-    Arc<dyn CompatibilityServices + Send + Sync>,
-> = CapabilityKey::new("openkache.compatibility.services");
-
-/// Looks up one API-owned capability without exposing the catalog's type
-/// erasure to every binding.
-#[allow(dead_code)]
-pub(super) fn capability<'a, T: Any>(
-    capabilities: &'a dyn CapabilityCatalog,
-    key: CapabilityKey<T>,
-) -> Option<&'a T> {
-    super::operation_api::downcast_capability(capabilities, key)
-}
-
 /// Opaque dependencies retained by the current API adapter.
 pub(super) struct CompatibilityContext {
     pub(super) storage: StorageCapabilityHandle,
     pub(super) namespaces: NamespaceCapabilityHandle,
     pub(super) observability: ObservabilityCapabilityHandle,
+    pub(super) body_limits: CompatibilityBodyLimits,
+    pub(super) resource_resolver: CompatibilityResourceResolver,
 }
 
 impl CompatibilityContext {
@@ -244,10 +198,16 @@ impl CompatibilityContext {
         namespaces: NamespaceCapabilityHandle,
         observability: ObservabilityCapabilityHandle,
     ) -> Self {
+        let body_limits = CompatibilityBodyLimits {
+            max_item_bytes: storage.max_item_bytes(),
+        };
+        let resource_resolver = CompatibilityResourceResolver::new(Arc::clone(&namespaces));
         Self {
             storage,
             namespaces,
             observability,
+            body_limits,
+            resource_resolver,
         }
     }
 }

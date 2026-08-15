@@ -14,38 +14,39 @@ pub(super) struct NetworkWorkerLimits {
 pub(super) fn prepare_network_worker(
     cache: Arc<ThreadedKvkache>,
     limits: &NetworkWorkerLimits,
-) -> std::result::Result<Arc<dyn CapabilityCatalog>, &'static str> {
+) -> std::result::Result<Arc<operation_execution_state::OperationRuntime>, &'static str> {
     let network_shard = limits
         .observability
         .network_shard(NetworkWorkerId(limits.worker_id));
     let cache = Arc::new(NetworkWorkerCache::new(cache, network_shard.worker_id()));
-    let capabilities = operation_registrations::install_runtime_capabilities(
+    let runtime = operation_registrations::build_operation_runtime(
         Arc::clone(&limits.capabilities),
         Arc::clone(&cache),
         Arc::clone(&limits.namespaces),
         Arc::clone(&limits.observability),
     )?;
-    Ok(capabilities)
+    Ok(runtime)
 }
 
 pub(super) async fn run_selected_endpoint(
     endpoint: ServerEndpoint,
     access_policy: &AccessPolicy,
     limits: NetworkWorkerLimits,
+    runtime: Arc<operation_execution_state::OperationRuntime>,
     stop: AsyncReceiver<()>,
 ) -> std::result::Result<(), TransportError> {
     match endpoint {
         #[cfg(feature = "quic-quinn")]
         ServerEndpoint::Quinn(endpoint) => {
-            run_network_worker(endpoint, access_policy, limits, stop).await
+            run_network_worker(endpoint, access_policy, limits, runtime, stop).await
         }
         #[cfg(feature = "quic-noq")]
         ServerEndpoint::Noq(endpoint) => {
-            run_network_worker(endpoint, access_policy, limits, stop).await
+            run_network_worker(endpoint, access_policy, limits, runtime, stop).await
         }
         #[cfg(feature = "quic-quiche")]
         ServerEndpoint::Quiche(endpoint) => {
-            run_network_worker(endpoint, access_policy, limits, stop).await
+            run_network_worker(endpoint, access_policy, limits, runtime, stop).await
         }
     }
 }
@@ -54,6 +55,7 @@ async fn run_network_worker<E: TransportEndpoint>(
     endpoint: E,
     access_policy: &AccessPolicy,
     limits: NetworkWorkerLimits,
+    runtime: Arc<operation_execution_state::OperationRuntime>,
     stop: AsyncReceiver<()>,
 ) -> std::result::Result<(), TransportError> {
     let NetworkWorkerLimits {
@@ -63,7 +65,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         request_budget,
         namespaces: _,
         observability,
-        capabilities,
+        capabilities: _,
     } = limits;
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
     let mut connections = FuturesUnordered::new();
@@ -78,7 +80,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     connections.push(serve_incoming(
                         incoming, network_shard, access_policy, request_timeout,
                         max_stream_lanes, request_budget.clone(),
-                        Arc::clone(&capabilities),
+                        Arc::clone(&runtime),
                     ));
                 }
                 _ = stopping => break,
@@ -94,7 +96,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     connections.push(serve_incoming(
                         incoming, network_shard, access_policy, request_timeout,
                         max_stream_lanes, request_budget.clone(),
-                        Arc::clone(&capabilities),
+                        Arc::clone(&runtime),
                     ));
                 }
                 _ = completed => {}
@@ -115,7 +117,7 @@ async fn serve_incoming<I: TransportIncoming>(
     request_timeout: Duration,
     max_stream_lanes: usize,
     request_budget: RequestBudget,
-    capabilities: Arc<dyn CapabilityCatalog>,
+    runtime: Arc<operation_execution_state::OperationRuntime>,
 ) {
     match incoming.connect().await {
         Ok(mut connection) => {
@@ -134,7 +136,7 @@ async fn serve_incoming<I: TransportIncoming>(
                 request_timeout,
                 max_stream_lanes,
                 request_budget,
-                capabilities,
+                runtime,
             )
             .await;
             network_shard.connection_finished();
@@ -151,7 +153,7 @@ async fn serve_connection<C: TransportConnection>(
     request_timeout: Duration,
     max_stream_lanes: usize,
     request_budget: RequestBudget,
-    capabilities: Arc<dyn CapabilityCatalog>,
+    runtime: Arc<operation_execution_state::OperationRuntime>,
 ) {
     let mut streams = FuturesUnordered::new();
     loop {
@@ -170,7 +172,7 @@ async fn serve_connection<C: TransportConnection>(
                         authorization.clone(),
                         request_timeout,
                         request_budget.clone(),
-                        Arc::clone(&capabilities),
+                        Arc::clone(&runtime),
                     ));
                 }
                 Err(_) => break,
@@ -190,7 +192,7 @@ async fn serve_connection<C: TransportConnection>(
                             authorization.clone(),
                             request_timeout,
                             request_budget.clone(),
-                            Arc::clone(&capabilities),
+                            Arc::clone(&runtime),
                         ));
                     }
                     Err(_) => break,
@@ -210,7 +212,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     authorization: operation_handlers::AuthorizationContext,
     request_timeout: Duration,
     request_budget: RequestBudget,
-    capabilities: Arc<dyn CapabilityCatalog>,
+    runtime: Arc<operation_execution_state::OperationRuntime>,
 ) {
     let _stream_guard = ActiveStream { network_shard };
     loop {
@@ -223,7 +225,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     operation_dispatch::admit_request_header(
                         header,
                         prefix,
-                        capabilities.as_ref(),
+                        runtime.as_ref(),
                     )
                 },
             )
@@ -289,9 +291,9 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 let request_opcode = input.opcode();
                 let operation: Operation = operation_contract::telemetry_operation(request_opcode);
                 let request_started = std::time::Instant::now();
-                let may_mutate = operation_dispatch::may_mutate(request_opcode);
+                let may_mutate = operation_dispatch::may_mutate(runtime.as_ref(), request_opcode);
                 let response_permit = if let Some(response_budget_bytes) =
-                    operation_dispatch::response_budget_bytes(request_opcode)
+                    operation_dispatch::response_budget_bytes(runtime.as_ref(), request_opcode)
                 {
                     match request_budget
                         .acquire(response_budget_bytes, request_timeout)
@@ -340,7 +342,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     operation_dispatch::execute_request(
                         input,
                         authorization.clone(),
-                        capabilities.as_ref(),
+                        runtime.as_ref(),
                     ),
                 )
                 .await

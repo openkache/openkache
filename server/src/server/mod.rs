@@ -56,6 +56,8 @@ mod operation_compatibility_bindings;
 mod operation_compatibility_services;
 #[path = "../operation_dispatch.rs"]
 pub(crate) mod operation_dispatch;
+#[path = "../operation_execution_state.rs"]
+mod operation_execution_state;
 #[path = "../operation_fields.rs"]
 mod operation_fields;
 #[path = "../operation_generic_bindings.rs"]

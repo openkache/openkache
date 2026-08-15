@@ -1,0 +1,130 @@
+//! Worker-owned operation registrations bound to API module state.
+//!
+//! API modules create opaque state once during worker startup. The runtime
+//! retains that state beside each dense registration so request dispatch can
+//! borrow it without a capability lookup, allocation, or reference-count bump.
+
+use std::any::Any;
+use std::sync::Arc;
+
+use openkache_protocol::Opcode;
+
+use super::operation_api::ServerOperationRegistration;
+use super::operation_capabilities::CapabilityCatalog;
+
+#[derive(Clone)]
+pub(super) struct ModuleState {
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl ModuleState {
+    pub(super) fn new<T>(value: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            value: Arc::new(value),
+        }
+    }
+
+    fn as_ref(&self) -> &(dyn Any + Send + Sync) {
+        self.value.as_ref()
+    }
+
+    pub(super) fn is<T: Any>(&self) -> bool {
+        self.value.is::<T>()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct OperationStateRef<'a> {
+    value: Option<&'a (dyn Any + Send + Sync)>,
+}
+
+impl<'a> OperationStateRef<'a> {
+    pub(super) fn get<T: Any>(&self) -> Option<&'a T> {
+        self.value?.downcast_ref()
+    }
+}
+
+struct BoundOperation {
+    registration: &'static ServerOperationRegistration,
+    state: Option<ModuleState>,
+}
+
+impl BoundOperation {
+    fn state(&self) -> OperationStateRef<'_> {
+        OperationStateRef {
+            value: self.state.as_ref().map(ModuleState::as_ref),
+        }
+    }
+}
+
+pub(super) struct OperationRuntimeBuilder {
+    operations: [Option<BoundOperation>; Opcode::COUNT],
+}
+
+impl OperationRuntimeBuilder {
+    pub(super) const fn new() -> Self {
+        Self {
+            operations: [const { None }; Opcode::COUNT],
+        }
+    }
+
+    pub(super) fn bind(
+        &mut self,
+        registrations: &'static [ServerOperationRegistration],
+        state: Option<ModuleState>,
+    ) -> Result<(), &'static str> {
+        for registration in registrations {
+            let slot = &mut self.operations[registration.opcode.index()];
+            if slot.is_some() {
+                return Err("operation runtime contains a duplicate registration");
+            }
+            *slot = Some(BoundOperation {
+                registration,
+                state: state.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(
+        self,
+        capabilities: Arc<dyn CapabilityCatalog>,
+    ) -> OperationRuntime {
+        OperationRuntime {
+            operations: self.operations,
+            capabilities,
+        }
+    }
+}
+
+pub(super) struct OperationRuntime {
+    operations: [Option<BoundOperation>; Opcode::COUNT],
+    capabilities: Arc<dyn CapabilityCatalog>,
+}
+
+impl OperationRuntime {
+    pub(super) fn registration(
+        &self,
+        opcode: Opcode,
+    ) -> Option<&'static ServerOperationRegistration> {
+        self.operations[opcode.index()]
+            .as_ref()
+            .map(|operation| operation.registration)
+    }
+
+    pub(super) fn operation(
+        &self,
+        opcode: Opcode,
+    ) -> Option<(&'static ServerOperationRegistration, OperationStateRef<'_>)> {
+        self.operations[opcode.index()]
+            .as_ref()
+            .map(|operation| (operation.registration, operation.state()))
+    }
+
+    pub(super) fn capabilities(&self) -> &dyn CapabilityCatalog {
+        self.capabilities.as_ref()
+    }
+}
