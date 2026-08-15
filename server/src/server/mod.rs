@@ -54,7 +54,6 @@ mod operation_compatibility_behavior;
 mod operation_compatibility_bindings;
 #[path = "../operation_compatibility_services.rs"]
 mod operation_compatibility_services;
-pub(crate) use operation_compatibility_services::storage_write_options;
 #[path = "../operation_dispatch.rs"]
 pub(crate) mod operation_dispatch;
 #[path = "../operation_fields.rs"]
@@ -82,12 +81,6 @@ pub use operation_api::CapabilityKey;
 pub use operation_capabilities::{
     CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry, EmptyCapabilityCatalog,
 };
-
-pub(crate) const fn request_descriptor(
-    opcode: openkache_protocol::Opcode,
-) -> &'static crate::protocol::RequestDescriptor {
-    operation_registrations::request_descriptor(opcode)
-}
 
 #[path = "network_roles.rs"]
 mod network_roles;

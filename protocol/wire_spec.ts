@@ -6,11 +6,11 @@ import {
   type Wire_Entry,
   type Wire_Operation,
   type Wire_Operation_Field_Plan,
+  type Wire_Request_Step,
 } from "./wire"
 import {
   derive_wire_compatibility_response_semantics,
   derive_wire_compatibility_retry_mode,
-  derive_wire_compatibility_route,
   derive_wire_compatibility_scope,
 } from "./compatibility_v1"
 
@@ -34,11 +34,41 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
   }
   const request_layout = (operation: Wire_Operation): string => {
     const request_plan = operation.contract.request_plan ?? []
-    const plan_item_count = request_plan.filter((field) => field.role === "item_id").length
     const descriptor = derive_wire_operation_descriptor(operation.contract)
-    const layout = derive_wire_compatibility_route(operation.contract) ??
-      descriptor.request_framing
-    switch (layout) {
+    const field_name = (index: number): string =>
+      request_plan[index]?.path.join(".") ?? `field[${index}]`
+    const step_layout = (step: Wire_Request_Step): string => {
+      switch (step.kind) {
+        case "fixed_field":
+          return `${field_name(step.field)} (${step.bytes} bytes)`
+        case "packed":
+          return `packed(${step.fields.map((field) => field_name(field.field)).join(", ")})`
+        case "byte_length_field":
+          return `u8 length + ${field_name(step.field)}`
+        case "byte_length_prefix_field":
+          return `u8 length(${field_name(step.field)})`
+        case "byte_field":
+          return field_name(step.field)
+        case "varuint_field":
+          return `vu128(${field_name(step.field)})`
+        case "value_length_field":
+          return `vu128 length(${field_name(step.field)})`
+        case "conditional":
+          return `if ${field_name(step.field)}=${step.equals}: ${
+            step.steps.map(step_layout).join(" + ")
+          }`
+        case "constant":
+          return `constant 0x${
+            step.bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("")
+          }`
+        case "trailing_field":
+          return `vu128 length + ${field_name(step.field)}`
+      }
+    }
+    if (operation.contract.request_wire !== undefined) {
+      return `opcode + ${operation.contract.request_wire.map(step_layout).join(" + ")}`
+    }
+    switch (descriptor.request_framing) {
       case "empty":
         return "opcode only"
       case "opaque":
@@ -47,20 +77,6 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
         return descriptor.request_frame === "fixed_body"
           ? "opcode + fixed-width dense body"
           : "opcode + field_sequence_len + ordered field sequence"
-      case "item":
-        return `opcode + namespace ID + ${plan_item_count} item ID${plan_item_count === 1 ? "" : "s"}`
-      case "set":
-        return `opcode + namespace ID + flags + ${plan_item_count} item ID${plan_item_count === 1 ? "" : "s"} + value`
-      case "namespace":
-        return "opcode + namespace ID"
-      case "namespace_open":
-        return "opcode + flags + name + optional policy"
-      case "namespace_update_policy":
-        return "opcode + namespace ID + revision + policy"
-      case "namespace_delete":
-        return "opcode + flags + namespace ID + revision"
-      default:
-        return `opcode + ${descriptor.request_framing} request framing`
     }
   }
   const response_payload = (operation: Wire_Operation): string => {

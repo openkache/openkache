@@ -15,20 +15,14 @@ use super::operation_compatibility_services::{
     COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_SERVICES, CompatibilityResourceResolver,
     CompatibilityServices,
 };
-use super::operation_contract::OperationStatus;
+use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::{self, OperationContext, OperationInputView};
 use super::operation_outcome::OperationOutcome;
 use super::operation_registry::OperationFuture;
-// This file is included below `server`, so the contract facade lives two
-// module levels above it. Keeping that boundary explicit also lets the
-// private source-copy test crate use the same path without a composition-root
-// re-export.
-use super::super::operation_compatibility_contract as contract;
 use crate::protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy,
     OverridePolicy, SetCondition, SetOptions,
 };
-use contract::request_fields;
 
 const INVALID_NAMESPACE_ID: &[u8] = b"namespace identity must be nonzero";
 const INVALID_EXPECTED_REVISION: &[u8] = b"expected revision must be nonzero";
@@ -172,23 +166,23 @@ fn required_item_id_at(
 
 pub(super) fn decode_get(input: &OperationInputView) -> Result<GetInput, &'static [u8]> {
     Ok(GetInput {
-        namespace_id: required_namespace_id(input, request_fields::GET_NAMESPACE_ID_0)?,
-        item_id: required_item_id_at(input, request_fields::GET_ITEM_ID_0)?,
+        namespace_id: required_namespace_id(input, request_fields::op_get::NAMESPACE_ID)?,
+        item_id: required_item_id_at(input, request_fields::op_get::ITEM_ID)?,
     })
 }
 
 fn decode_set_fields(input: &OperationInputView) -> Result<SetFields, &'static [u8]> {
-    let condition = decode_set_condition(input, request_fields::SET_CONDITION_0)?;
-    let expiration_mode = decode_expiration_mode(input, request_fields::SET_EXPIRATION_MODE_0)?;
-    let eviction_mode = decode_eviction_mode(input, request_fields::SET_EVICTION_MODE_0)?;
+    let condition = decode_set_condition(input, request_fields::op_set::CONDITION)?;
+    let expiration_mode = decode_expiration_mode(input, request_fields::op_set::EXPIRATION_MODE)?;
+    let eviction_mode = decode_eviction_mode(input, request_fields::op_set::EVICTION_MODE)?;
     let ttl_ms = input
-        .unsigned_long_at_index_result(Some(request_fields::SET_TTL_MILLISECONDS_0))
+        .unsigned_long_at_index_result(Some(request_fields::op_set::TTL_MILLISECONDS))
         .map_err(|_| &b"SET TTL is malformed"[..])?;
     validate_set_ttl_value(expiration_mode == ExpirationMode::ExplicitTtl, ttl_ms)?;
-    let namespace_id = required_namespace_id(input, request_fields::SET_NAMESPACE_ID_0)?;
-    let item_id = required_item_id_at(input, request_fields::SET_ITEM_ID_0)?;
+    let namespace_id = required_namespace_id(input, request_fields::op_set::NAMESPACE_ID)?;
+    let item_id = required_item_id_at(input, request_fields::op_set::ITEM_ID)?;
     input
-        .bytes_at_index(request_fields::SET_VALUE_0)
+        .bytes_at_index(request_fields::op_set::VALUE)
         .ok_or(&b"operation requires a value"[..])?;
     Ok(SetFields {
         namespace_id,
@@ -204,7 +198,7 @@ pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'s
         options,
     } = decode_set_fields(input)?;
     let value = input
-        .take_owned_bytes_range_at_index(request_fields::SET_VALUE_0)
+        .take_owned_bytes_range_at_index(request_fields::op_set::VALUE)
         .ok_or(&b"operation requires a value"[..])?;
     // An empty value has no payload allocation to preserve. Release the
     // admitted frame instead of retaining its prefix and spare capacity.
@@ -223,8 +217,8 @@ pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'s
 
 pub(super) fn decode_delete(input: &OperationInputView) -> Result<GetInput, &'static [u8]> {
     Ok(GetInput {
-        namespace_id: required_namespace_id(input, request_fields::DELETE_NAMESPACE_ID_0)?,
-        item_id: required_item_id_at(input, request_fields::DELETE_ITEM_ID_0)?,
+        namespace_id: required_namespace_id(input, request_fields::op_delete::NAMESPACE_ID)?,
+        item_id: required_item_id_at(input, request_fields::op_delete::ITEM_ID)?,
     })
 }
 
@@ -238,11 +232,11 @@ fn decode_namespace(
 }
 
 fn decode_stats(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
-    decode_namespace(input, request_fields::STATS_NAMESPACE_ID_0)
+    decode_namespace(input, request_fields::op_stats::NAMESPACE_ID)
 }
 
 fn decode_sync(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
-    decode_namespace(input, request_fields::SYNC_NAMESPACE_ID_0)
+    decode_namespace(input, request_fields::op_sync::NAMESPACE_ID)
 }
 
 pub(super) fn decode_namespace_open(
@@ -253,7 +247,7 @@ pub(super) fn decode_namespace_open(
         policy,
     } = decode_namespace_open_fields(input)?;
     let name = input
-        .take_owned_bytes_range_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
+        .take_owned_bytes_range_at_index(request_fields::op_namespace_open::NAME)
         .ok_or(&b"namespace-open requires a name"[..])?;
     Ok(NamespaceOpenInput {
         name,
@@ -267,7 +261,7 @@ fn decode_namespace_open_fields(
 ) -> Result<NamespaceOpenFields, &'static [u8]> {
     validate_namespace_open_name(input)?;
     let create_if_missing = input
-        .boolean_at_index(Some(request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0))
+        .boolean_at_index(Some(request_fields::op_namespace_open::CREATE_IF_MISSING))
         .map_err(|_| &b"namespace-open create flag is malformed"[..])?
         .unwrap_or(false);
     let policy = decode_namespace_open_policy(input)?;
@@ -283,11 +277,11 @@ pub(super) fn decode_namespace_revision(
     Ok(NamespaceRevisionInput {
         namespace_id: required_namespace_id(
             input,
-            request_fields::NAMESPACE_UPDATE_POLICY_NAMESPACE_ID_0,
+            request_fields::op_namespace_update_policy::NAMESPACE_ID,
         )?,
         expected_revision: required_expected_revision(
             input,
-            request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0,
+            request_fields::op_namespace_update_policy::EXPECTED_REVISION,
         )?,
         policy: decode_namespace_update_policy(input)?
             .ok_or(&b"namespace policy is required"[..])?,
@@ -300,11 +294,11 @@ pub(super) fn decode_namespace_delete(
     Ok(NamespaceDeleteInput {
         namespace_id: required_namespace_id(
             input,
-            request_fields::NAMESPACE_DELETE_NAMESPACE_ID_0,
+            request_fields::op_namespace_delete::NAMESPACE_ID,
         )?,
         expected_revision: required_expected_revision(
             input,
-            request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0,
+            request_fields::op_namespace_delete::EXPECTED_REVISION,
         )?,
     })
 }
@@ -335,40 +329,57 @@ fn compatibility_services<'a>(
         .map(std::sync::Arc::as_ref)
 }
 
-/// Computes an opaque resource handle from the typed namespace identity used
-/// by the API binding. The dispatcher never infers this identity from fields.
-pub(super) fn prepare_namespace(
+fn prepare_namespace_at(
     input: &OperationInputView,
     context: PrepareContext<'_>,
+    field_index: usize,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_field_index = namespace_field_index(input.opcode)
-        .ok_or_else(|| PrepareError::invalid_request(b"operation has no namespace identity"))?;
-    let namespace_id = required_namespace_id(input, namespace_field_index)
+    let namespace_id = required_namespace_id(input, field_index)
         .map_err(PrepareError::invalid_request)?;
     let resource = namespace_resource(namespace_id, context)?;
     Ok(PreparePlan::resource(resource))
+}
+
+/// Computes an opaque resource handle from the generated GET namespace field.
+fn prepare_get_namespace(
+    input: &OperationInputView,
+    context: PrepareContext<'_>,
+) -> std::result::Result<PreparePlan, PrepareError> {
+    prepare_namespace_at(input, context, request_fields::op_get::NAMESPACE_ID)
+}
+
+fn prepare_delete_namespace(
+    input: &OperationInputView,
+    context: PrepareContext<'_>,
+) -> std::result::Result<PreparePlan, PrepareError> {
+    prepare_namespace_at(input, context, request_fields::op_delete::NAMESPACE_ID)
+}
+
+fn prepare_stats_namespace(
+    input: &OperationInputView,
+    context: PrepareContext<'_>,
+) -> std::result::Result<PreparePlan, PrepareError> {
+    prepare_namespace_at(input, context, request_fields::op_stats::NAMESPACE_ID)
+}
+
+fn prepare_sync_namespace(
+    input: &OperationInputView,
+    context: PrepareContext<'_>,
+) -> std::result::Result<PreparePlan, PrepareError> {
+    prepare_namespace_at(input, context, request_fields::op_sync::NAMESPACE_ID)
 }
 
 pub(super) fn prepare_set(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_id = required_namespace_id(input, request_fields::SET_NAMESPACE_ID_0)
+    let namespace_id = required_namespace_id(input, request_fields::op_set::NAMESPACE_ID)
         .map_err(PrepareError::invalid_request)?;
     validate_set_ttl(input).map_err(PrepareError::invalid_request)?;
     Ok(PreparePlan::resource(namespace_resource(
         namespace_id,
         context,
     )?))
-}
-
-fn namespace_field_index(opcode: openkache_protocol::Opcode) -> Option<usize> {
-    contract::operation_field_index(
-        opcode,
-        contract::OperationFieldDirection::Request,
-        contract::OperationFieldRole::NamespaceId,
-        0,
-    )
 }
 
 pub(super) fn prepare_lifecycle(
@@ -396,12 +407,12 @@ pub(super) fn prepare_namespace_update(
 ) -> std::result::Result<PreparePlan, PrepareError> {
     let namespace_id = required_namespace_id(
         input,
-        request_fields::NAMESPACE_UPDATE_POLICY_NAMESPACE_ID_0,
+        request_fields::op_namespace_update_policy::NAMESPACE_ID,
     )
     .map_err(PrepareError::invalid_request)?;
     required_expected_revision(
         input,
-        request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0,
+        request_fields::op_namespace_update_policy::EXPECTED_REVISION,
     )
     .map_err(PrepareError::invalid_request)?;
     validate_namespace_policy_ttl(input, NAMESPACE_UPDATE_POLICY_FIELDS)
@@ -417,11 +428,11 @@ pub(super) fn prepare_namespace_delete(
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
     let namespace_id =
-        required_namespace_id(input, request_fields::NAMESPACE_DELETE_NAMESPACE_ID_0)
+        required_namespace_id(input, request_fields::op_namespace_delete::NAMESPACE_ID)
             .map_err(PrepareError::invalid_request)?;
     required_expected_revision(
         input,
-        request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0,
+        request_fields::op_namespace_delete::EXPECTED_REVISION,
     )
     .map_err(PrepareError::invalid_request)?;
     let resolver = compatibility_resolver(context)?;
@@ -486,19 +497,20 @@ struct NamespacePolicyFieldIndexes {
 }
 
 const NAMESPACE_OPEN_POLICY_FIELDS: NamespacePolicyFieldIndexes = NamespacePolicyFieldIndexes {
-    default_expiration: request_fields::NAMESPACE_OPEN_DEFAULT_EXPIRATION_0,
-    default_ttl_milliseconds: request_fields::NAMESPACE_OPEN_DEFAULT_TTL_MILLISECONDS_0,
-    expiration_override: request_fields::NAMESPACE_OPEN_EXPIRATION_OVERRIDE_0,
-    default_eviction: request_fields::NAMESPACE_OPEN_DEFAULT_EVICTION_0,
-    eviction_override: request_fields::NAMESPACE_OPEN_EVICTION_OVERRIDE_0,
+    default_expiration: request_fields::op_namespace_open::POLICY_DEFAULT_EXPIRATION,
+    default_ttl_milliseconds: request_fields::op_namespace_open::POLICY_DEFAULT_TTL_MILLISECONDS,
+    expiration_override: request_fields::op_namespace_open::POLICY_EXPIRATION_OVERRIDE,
+    default_eviction: request_fields::op_namespace_open::POLICY_DEFAULT_EVICTION,
+    eviction_override: request_fields::op_namespace_open::POLICY_EVICTION_OVERRIDE,
 };
 
 const NAMESPACE_UPDATE_POLICY_FIELDS: NamespacePolicyFieldIndexes = NamespacePolicyFieldIndexes {
-    default_expiration: request_fields::NAMESPACE_UPDATE_POLICY_DEFAULT_EXPIRATION_0,
-    default_ttl_milliseconds: request_fields::NAMESPACE_UPDATE_POLICY_DEFAULT_TTL_MILLISECONDS_0,
-    expiration_override: request_fields::NAMESPACE_UPDATE_POLICY_EXPIRATION_OVERRIDE_0,
-    default_eviction: request_fields::NAMESPACE_UPDATE_POLICY_DEFAULT_EVICTION_0,
-    eviction_override: request_fields::NAMESPACE_UPDATE_POLICY_EVICTION_OVERRIDE_0,
+    default_expiration: request_fields::op_namespace_update_policy::POLICY_DEFAULT_EXPIRATION,
+    default_ttl_milliseconds:
+        request_fields::op_namespace_update_policy::POLICY_DEFAULT_TTL_MILLISECONDS,
+    expiration_override: request_fields::op_namespace_update_policy::POLICY_EXPIRATION_OVERRIDE,
+    default_eviction: request_fields::op_namespace_update_policy::POLICY_DEFAULT_EVICTION,
+    eviction_override: request_fields::op_namespace_update_policy::POLICY_EVICTION_OVERRIDE,
 };
 
 fn decode_namespace_open_policy(
@@ -516,18 +528,18 @@ fn decode_namespace_update_policy(
 fn validate_set_ttl(input: &OperationInputView) -> Result<(), &'static [u8]> {
     let expiration_mode = required_token(
         input,
-        request_fields::SET_EXPIRATION_MODE_0,
+        request_fields::op_set::EXPIRATION_MODE,
         b"SET expiration mode is missing",
     )?;
     let ttl_ms = input
-        .unsigned_long_at_index_result(Some(request_fields::SET_TTL_MILLISECONDS_0))
+        .unsigned_long_at_index_result(Some(request_fields::op_set::TTL_MILLISECONDS))
         .map_err(|_| &b"SET TTL is malformed"[..])?;
     validate_set_ttl_value(expiration_mode == b"explicit_ttl", ttl_ms)
 }
 
 fn validate_namespace_open_name(input: &OperationInputView) -> Result<(), &'static [u8]> {
     let name = input
-        .bytes_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
+        .bytes_at_index(request_fields::op_namespace_open::NAME)
         .ok_or(&b"namespace-open requires a name"[..])?;
     std::str::from_utf8(name)
         .map(|_| ())
@@ -712,49 +724,49 @@ fn install_capabilities(
     Ok(())
 }
 
-pub(super) const API: ApiModule = ApiModule::new(
-    crate::protocol::compatibility_request_descriptor(),
-    &[
-        RegistrationBuilder::new(Opcode::Get, get_handler)
-        .prepare(prepare_namespace)
+pub(super) const API: ApiModule = ApiModule::new(&[
+    RegistrationBuilder::new(Opcode::Get, get_handler)
+        .prepare(prepare_get_namespace)
         .authorize(operation_handlers::authorization_none)
         .read_only()
         .build(),
-        RegistrationBuilder::new(Opcode::Set, set_handler)
+    RegistrationBuilder::new(Opcode::Set, set_handler)
         .prepare(prepare_set)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-        RegistrationBuilder::new(Opcode::Delete, delete_handler)
-        .prepare(prepare_namespace)
+    RegistrationBuilder::new(Opcode::Delete, delete_handler)
+        .prepare(prepare_delete_namespace)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-        RegistrationBuilder::new(Opcode::Stats, stats_handler)
-        .prepare(prepare_namespace)
+    RegistrationBuilder::new(Opcode::Stats, stats_handler)
+        .prepare(prepare_stats_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .read_only()
         .build(),
-        RegistrationBuilder::new(Opcode::Sync, sync_handler)
-        .prepare(prepare_namespace)
+    RegistrationBuilder::new(Opcode::Sync, sync_handler)
+        .prepare(prepare_sync_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .mutation()
         .build(),
-        RegistrationBuilder::new(Opcode::NamespaceOpen, namespace_open_handler)
+    RegistrationBuilder::new(Opcode::NamespaceOpen, namespace_open_handler)
         .prepare(prepare_namespace_open)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-        RegistrationBuilder::new(Opcode::NamespaceUpdatePolicy, namespace_update_policy_handler)
-        .prepare(prepare_namespace_update)
-        .authorize(operation_handlers::authorization_none)
-        .mutation()
-        .build(),
-        RegistrationBuilder::new(Opcode::NamespaceDelete, namespace_delete_handler)
+    RegistrationBuilder::new(
+        Opcode::NamespaceUpdatePolicy,
+        namespace_update_policy_handler,
+    )
+    .prepare(prepare_namespace_update)
+    .authorize(operation_handlers::authorization_none)
+    .mutation()
+    .build(),
+    RegistrationBuilder::new(Opcode::NamespaceDelete, namespace_delete_handler)
         .prepare(prepare_namespace_delete)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-    ],
-)
+])
 .install_capabilities(install_capabilities);

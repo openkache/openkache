@@ -17,14 +17,14 @@ export function render_rust_server_contract(contract: Wire_Contract): string {
   return `// Generated from the OpenKache Smithy operation contract. Do not edit.
 
 use openkache_protocol::Status;
-// The server consumes only the canonical wire projection.  Keep the
-// Client-result/retry and execution-scope metadata belongs to the respective
+// The server consumes only the canonical wire projection. Client-result/retry
+// and execution-scope metadata belongs to the respective
 // adapters; it is intentionally absent from this server contract surface.
 pub use openkache_protocol::operation::{
     operation_registry, operation_wire_spec, wire_codec_kind,
     MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS,
     request_fields,
-    OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
+    OperationFieldPlan, OperationLayoutFraming,
     OperationWireSpec, WireCodecCardinality, WireCodecDescriptor, WireCodecKind,
     WireCodecLengthEncoding, WireCodecWidth, WIRE_CODEC_DESCRIPTORS,
     WIRE_CODEC_NAMES,

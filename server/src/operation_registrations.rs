@@ -1,8 +1,8 @@
 //! API module composition.
 //!
-//! API-owned modules contribute behavior, semantic request descriptors, and
-//! capabilities. Runtime frame admission uses the generated wire layout
-//! directly and reaches this composition only after projection.
+//! API-owned modules contribute behavior and capabilities. Runtime frame
+//! admission uses the generated wire layout directly and reaches this
+//! composition only after projection.
 
 use std::sync::{Arc, Mutex};
 
@@ -30,12 +30,6 @@ pub(super) fn server_operation(opcode: Opcode) -> Option<&'static ServerOperatio
 pub(super) fn registered_operations() -> impl Iterator<Item = &'static ServerOperationRegistration>
 {
     SERVER_COMPOSITION.operations()
-}
-
-pub(super) const fn request_descriptor(
-    opcode: Opcode,
-) -> &'static crate::protocol::RequestDescriptor {
-    SERVER_COMPOSITION.request_descriptor(opcode)
 }
 
 /// Installs the capabilities owned by the currently registered API modules.

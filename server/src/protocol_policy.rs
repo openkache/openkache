@@ -1,12 +1,11 @@
 //! Public namespace and item policy values used by the v1 compatibility API.
 //!
-//! The policy types are semantic server values. Their historical flag-byte
-//! encoding remains in [`super::compat_v1`], while request framing and generic
-//! operation parsing stay in [`super`]'s other protocol modules.
+//! The policy types are semantic server values. Their historical compact
+//! encoding remains isolated in [`super::policy_codec`].
 
 use super::super::operation_compatibility_contract::POLICY_FLAGS_BYTES;
 
-use super::{ProtocolError, Result, compat_v1};
+use super::{ProtocolError, Result, policy_codec};
 use openkache_protocol::{NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES};
 
 pub(super) const MAX_POLICY_BYTES: usize =
@@ -160,7 +159,7 @@ impl NamespaceDescriptor {
         if revision == 0 {
             return Err(ProtocolError::InvalidRevision);
         }
-        let (policy, policy_len) = compat_v1::decode_namespace_policy(&input[fixed..])?
+        let (policy, policy_len) = policy_codec::decode_namespace_policy(&input[fixed..])?
             .ok_or(ProtocolError::MissingNamespacePolicy)?;
         if fixed + policy_len != input.len() {
             return Err(ProtocolError::FrameLength {

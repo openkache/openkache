@@ -19,8 +19,6 @@ use super::operation_contract as contract;
 use super::operation_contract::OperationStatus;
 use super::operation_handlers::{AuthorizationFn, OperationInputView};
 use super::operation_registry::OperationHandler;
-use crate::protocol::RequestDescriptor;
-
 /// Downcasts one API-owned capability without exposing the catalog's
 /// type-erasure details to a binding.
 const CAPABILITY_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -342,12 +340,11 @@ impl RegistrationBuilder {
 
 /// A self-contained API module contribution.
 ///
-/// The module owns behavior registrations, the descriptor used by the public
-/// semantic request facade, and optional capability installation. Runtime
-/// frame projection is generated independently of API modules.
+/// The module owns behavior registrations and optional capability
+/// installation. Runtime frame projection is generated independently of API
+/// modules.
 #[derive(Clone, Copy)]
 pub(super) struct ApiModule {
-    request_descriptor: &'static RequestDescriptor,
     operations: &'static [ServerOperationRegistration],
     install_capabilities: Option<ModuleCapabilityInstaller>,
 }
@@ -356,12 +353,8 @@ pub(super) type ModuleCapabilityInstaller =
     fn(&mut CapabilityRegistry, &dyn CapabilityCatalog) -> Result<(), &'static str>;
 
 impl ApiModule {
-    pub(super) const fn new(
-        request_descriptor: &'static RequestDescriptor,
-        operations: &'static [ServerOperationRegistration],
-    ) -> Self {
+    pub(super) const fn new(operations: &'static [ServerOperationRegistration]) -> Self {
         Self {
-            request_descriptor,
             operations,
             install_capabilities: None,
         }
@@ -370,10 +363,6 @@ impl ApiModule {
     pub(super) const fn install_capabilities(mut self, install: ModuleCapabilityInstaller) -> Self {
         self.install_capabilities = Some(install);
         self
-    }
-
-    pub(super) const fn request_descriptor(self) -> &'static RequestDescriptor {
-        self.request_descriptor
     }
 
     pub(super) const fn operations(self) -> &'static [ServerOperationRegistration] {
@@ -390,17 +379,14 @@ impl ApiModule {
         }
         Ok(())
     }
-
 }
 
 /// Server catalogs assembled together from API-owned module contributions.
 ///
-/// Registering one module installs its behavior and public semantic request
-/// descriptor together. The descriptor catalog is not used by runtime frame
-/// admission.
+/// Registering one module installs its behavior and optional capabilities.
+/// Generated metadata remains the sole runtime frame-admission contract.
 pub(super) struct ServerComposition {
     operations: OperationCatalog,
-    request_descriptors: [Option<&'static RequestDescriptor>; Opcode::COUNT],
     modules: [Option<ApiModule>; Opcode::COUNT],
     module_count: usize,
 }
@@ -409,7 +395,6 @@ impl ServerComposition {
     pub(super) const fn new() -> Self {
         Self {
             operations: OperationCatalog::new(),
-            request_descriptors: [None; Opcode::COUNT],
             modules: [None; Opcode::COUNT],
             module_count: 0,
         }
@@ -418,16 +403,6 @@ impl ServerComposition {
     pub(super) const fn register_module(mut self, module: ApiModule) -> Self {
         if self.module_count == self.modules.len() {
             panic!("too many API modules");
-        }
-        let registrations = module.operations();
-        let mut index = 0;
-        while index < registrations.len() {
-            let slot = registrations[index].opcode.index();
-            if self.request_descriptors[slot].is_some() {
-                panic!("duplicate request descriptor across API modules");
-            }
-            self.request_descriptors[slot] = Some(module.request_descriptor());
-            index += 1;
         }
         self.operations = self.operations.register_module(module);
         self.modules[self.module_count] = Some(module);
@@ -461,16 +436,6 @@ impl ServerComposition {
         &'static self,
     ) -> impl Iterator<Item = &'static ServerOperationRegistration> {
         self.operations.iter()
-    }
-
-    pub(super) const fn request_descriptor(
-        &'static self,
-        opcode: Opcode,
-    ) -> &'static RequestDescriptor {
-        match self.request_descriptors[opcode.index()] {
-            Some(descriptor) => descriptor,
-            None => panic!("modeled operation has no request descriptor"),
-        }
     }
 }
 
