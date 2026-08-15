@@ -11,10 +11,14 @@ use openkache_protocol::Opcode;
 use super::operation_api::{ServerComposition, ServerOperationRegistration};
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
-    operation_capabilities::{CapabilityCatalog, CapabilityRegistry},
+    operation_capabilities::{
+        CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry,
+    },
     operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
-    operation_runtime_capabilities::{
-        SERVER_RUNTIME_RESOURCES, ServerRuntimeResources,
+    operation_compatibility_services::{
+        COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT,
+        COMPATIBILITY_STORAGE_PORT, NamespaceCapabilityHandle, ObservabilityCapabilityHandle,
+        StorageCapabilityHandle,
     },
 };
 
@@ -35,9 +39,9 @@ pub(super) fn registered_operations() -> impl Iterator<Item = &'static ServerOpe
 /// Installs the capabilities owned by the currently registered API modules.
 ///
 /// This is deliberately the only server composition function that knows which
-/// concrete runtime handles are needed by the compatibility adapters. The network
-/// loop passes opaque capability state onward and remains independent of
-/// operation names, wire layouts, and client projections.
+/// concrete runtime handles are available to API installers. The network loop
+/// passes opaque capability state onward and remains independent of operation
+/// names, wire layouts, and client projections.
 pub(super) fn install_runtime_capabilities(
     base: Arc<dyn CapabilityCatalog>,
     cache: Arc<NetworkWorkerCache>,
@@ -45,16 +49,23 @@ pub(super) fn install_runtime_capabilities(
     observability: Arc<ObservabilityState>,
 ) -> Result<Arc<dyn CapabilityCatalog>, &'static str> {
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
+    let compatibility_storage: StorageCapabilityHandle = cache;
+    let compatibility_namespaces: NamespaceCapabilityHandle = namespaces;
+    let compatibility_observability: ObservabilityCapabilityHandle = observability;
     let mut registry = CapabilityRegistry::overlay(base);
     super::storage_port::install(&mut registry, storage_port);
-    let bootstrap = CapabilityRegistry::new().with(
-        SERVER_RUNTIME_RESOURCES,
-        ServerRuntimeResources {
-            cache,
-            namespaces,
-            observability,
-        },
-    );
+    let bootstrap_entries = [
+        CapabilityEntry::typed(COMPATIBILITY_STORAGE_PORT, &compatibility_storage),
+        CapabilityEntry::typed(
+            COMPATIBILITY_NAMESPACE_PORT,
+            &compatibility_namespaces,
+        ),
+        CapabilityEntry::typed(
+            COMPATIBILITY_OBSERVABILITY_PORT,
+            &compatibility_observability,
+        ),
+    ];
+    let bootstrap = CapabilityList::new(&bootstrap_entries);
     SERVER_COMPOSITION.install_capabilities(&mut registry, &bootstrap)?;
     Ok(Arc::new(registry))
 }

@@ -33,11 +33,11 @@ use super::{
 /// resource keys through this type; they obtain an API-owned resolver from the
 /// capability catalog instead.
 pub(super) struct CompatibilityResourceResolver {
-    namespaces: Arc<Mutex<NamespaceRegistry>>,
+    namespaces: NamespaceCapabilityHandle,
 }
 
 impl CompatibilityResourceResolver {
-    pub(super) fn new(namespaces: Arc<Mutex<NamespaceRegistry>>) -> Self {
+    pub(super) fn new(namespaces: NamespaceCapabilityHandle) -> Self {
         Self { namespaces }
     }
 
@@ -86,25 +86,22 @@ pub(super) const COMPATIBILITY_BODY_LIMITS: CapabilityKey<CompatibilityBodyLimit
 /// service values.
 pub(super) fn install_compatibility_services(
     registry: &mut CapabilityRegistry,
-    cache: Arc<NetworkWorkerCache>,
-    namespaces: Arc<Mutex<NamespaceRegistry>>,
-    observability: Arc<ObservabilityState>,
+    storage: StorageCapabilityHandle,
+    namespaces: NamespaceCapabilityHandle,
+    observability: ObservabilityCapabilityHandle,
 ) {
     registry.insert(
         COMPATIBILITY_BODY_LIMITS,
         CompatibilityBodyLimits {
-            max_item_bytes: cache.max_item_bytes(),
+            max_item_bytes: storage.max_item_bytes(),
         },
     );
-    let services: Arc<dyn CompatibilityServices + Send + Sync> = Arc::new(ServerContext::new(
-        Arc::clone(&cache),
-        Arc::clone(&namespaces),
-        observability,
-    ));
     registry.insert(
         COMPATIBILITY_RESOURCE_RESOLVER,
-        CompatibilityResourceResolver::new(namespaces),
+        CompatibilityResourceResolver::new(Arc::clone(&namespaces)),
     );
+    let services: Arc<dyn CompatibilityServices + Send + Sync> =
+        Arc::new(CompatibilityContext::new(storage, namespaces, observability));
     registry.insert(COMPATIBILITY_SERVICES, services);
 }
 
@@ -115,7 +112,8 @@ pub(super) type CacheFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, KvErr
 /// This is an adapter contract over the current key/value worker. Generic API
 /// modules should register their own capability types when they need richer
 /// commands; the dispatcher and wire layers do not grow a cache-command enum.
-pub(super) trait StorageCapability {
+pub(super) trait StorageCapability: Send + Sync {
+    fn max_item_bytes(&self) -> usize;
     fn namespace_item_storage_key(
         &self,
         namespace_id: u64,
@@ -138,7 +136,7 @@ pub(super) trait StorageCapability {
 }
 
 /// Namespace metadata capability exposed to the current storage behavior.
-pub(super) trait NamespaceCapability {
+pub(super) trait NamespaceCapability: Send + Sync {
     fn operation_lock(&self, namespace_id: u64) -> Option<ResourceLock>;
     fn lifecycle_lock(&self) -> Result<Arc<AsyncMutex<()>>, NamespaceError>;
     fn exists(&self, namespace_id: u64) -> bool;
@@ -186,9 +184,20 @@ pub(super) trait NamespaceCapability {
     ) -> Result<(), NamespaceError>;
 }
 
-pub(super) trait ObservabilityCapability {
+pub(super) trait ObservabilityCapability: Send + Sync {
     fn stats_json_fields(&self) -> String;
 }
+
+pub(super) type StorageCapabilityHandle = Arc<dyn StorageCapability>;
+pub(super) type NamespaceCapabilityHandle = Arc<dyn NamespaceCapability>;
+pub(super) type ObservabilityCapabilityHandle = Arc<dyn ObservabilityCapability>;
+
+pub(super) const COMPATIBILITY_STORAGE_PORT: CapabilityKey<StorageCapabilityHandle> =
+    CapabilityKey::new("openkache.compatibility.storage_port");
+pub(super) const COMPATIBILITY_NAMESPACE_PORT: CapabilityKey<NamespaceCapabilityHandle> =
+    CapabilityKey::new("openkache.compatibility.namespace_port");
+pub(super) const COMPATIBILITY_OBSERVABILITY_PORT: CapabilityKey<ObservabilityCapabilityHandle> =
+    CapabilityKey::new("openkache.compatibility.observability_port");
 
 /// Compatibility capability set supplied by the composition root.
 ///
@@ -222,21 +231,21 @@ pub(super) fn capability<'a, T: Any>(
     super::operation_api::downcast_capability(capabilities, key)
 }
 
-/// Server-owned dependencies for the current composition.
-pub(super) struct ServerContext {
-    pub(super) cache: Arc<NetworkWorkerCache>,
-    pub(super) namespaces: Arc<Mutex<NamespaceRegistry>>,
-    pub(super) observability: Arc<ObservabilityState>,
+/// Opaque dependencies retained by the current API adapter.
+pub(super) struct CompatibilityContext {
+    pub(super) storage: StorageCapabilityHandle,
+    pub(super) namespaces: NamespaceCapabilityHandle,
+    pub(super) observability: ObservabilityCapabilityHandle,
 }
 
-impl ServerContext {
-    pub(super) const fn new(
-        cache: Arc<NetworkWorkerCache>,
-        namespaces: Arc<Mutex<NamespaceRegistry>>,
-        observability: Arc<ObservabilityState>,
+impl CompatibilityContext {
+    pub(super) fn new(
+        storage: StorageCapabilityHandle,
+        namespaces: NamespaceCapabilityHandle,
+        observability: ObservabilityCapabilityHandle,
     ) -> Self {
         Self {
-            cache,
+            storage,
             namespaces,
             observability,
         }
@@ -244,6 +253,10 @@ impl ServerContext {
 }
 
 impl StorageCapability for NetworkWorkerCache {
+    fn max_item_bytes(&self) -> usize {
+        NetworkWorkerCache::max_item_bytes(self)
+    }
+
     fn namespace_item_storage_key(
         &self,
         namespace_id: u64,
@@ -459,9 +472,9 @@ impl ObservabilityCapability for ObservabilityState {
     }
 }
 
-impl CompatibilityServices for ServerContext {
+impl CompatibilityServices for CompatibilityContext {
     fn storage(&self) -> &dyn StorageCapability {
-        self.cache.as_ref()
+        self.storage.as_ref()
     }
 
     fn namespaces(&self) -> &dyn NamespaceCapability {

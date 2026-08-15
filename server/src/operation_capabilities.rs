@@ -10,9 +10,9 @@ use super::operation_api::{CapabilityKey, capability_id};
 
 /// Type-erased API-owned dependencies supplied by the server composition root.
 ///
-/// Implementations should keep values owned for the server lifetime and use
-/// stable keys only as an internal registry detail. API bindings should pair a
-/// key with their concrete type through the server's typed capability helpers.
+/// Catalog values must outlive the catalog that borrows or owns them. API
+/// bindings should pair stable keys with their concrete types through the
+/// server's typed capability helpers.
 pub trait CapabilityCatalog: Send + Sync {
     /// Returns the dependency registered under one stable composition key.
     fn get(&self, key: &'static str) -> Option<&(dyn Any + Send + Sync)>;
@@ -55,13 +55,31 @@ impl<'a> CapabilityEntry<'a> {
             value,
         }
     }
+
+    /// Creates an entry whose value type is checked against its capability key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Typed identity owned by the capability consumer.
+    /// * `value` - Capability value that remains valid for the catalog lifetime.
+    ///
+    /// # Returns
+    ///
+    /// A borrowed, type-erased entry that retains the key's stable identity.
+    pub fn typed<T>(key: CapabilityKey<T>, value: &'a T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self::new(key.name(), value)
+    }
 }
 
 /// Allocation-free capability catalog for a composition root.
 ///
-/// The list is intentionally small and immutable for a server lifetime. A
-/// future API can add one entry at composition time without changing the
-/// compatibility service trait, dispatcher, or transport adapter.
+/// The list is intentionally small and immutable for its borrowed lifetime. It
+/// can be stack-scoped to one composition call; server-lifetime values belong
+/// in [`CapabilityRegistry`]. A future API can add one entry without changing
+/// the dispatcher or transport adapter.
 pub struct CapabilityList<'a> {
     /// Immutable entries searched by their stable key.
     pub entries: &'a [CapabilityEntry<'a>],
