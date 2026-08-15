@@ -770,32 +770,38 @@ fn initialize_module(
 
 pub(super) const API: ApiModule = ApiModule::new(&[
     RegistrationBuilder::new(Opcode::Get, get_handler)
+        .state::<CompatibilityContext>()
         .prepare(prepare_get_namespace)
         .authorize(operation_handlers::authorization_none)
         .read_only()
         .build(),
     RegistrationBuilder::new(Opcode::Set, set_handler)
+        .state::<CompatibilityContext>()
         .admit_header(admit_set_header)
         .prepare(prepare_set)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::Delete, delete_handler)
+        .state::<CompatibilityContext>()
         .prepare(prepare_delete_namespace)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::Stats, stats_handler)
+        .state::<CompatibilityContext>()
         .prepare(prepare_stats_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .read_only()
         .build(),
     RegistrationBuilder::new(Opcode::Sync, sync_handler)
+        .state::<CompatibilityContext>()
         .prepare(prepare_sync_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::NamespaceOpen, namespace_open_handler)
+        .state::<CompatibilityContext>()
         .prepare(prepare_namespace_open)
         .authorize(operation_handlers::authorization_none)
         .mutation()
@@ -804,11 +810,13 @@ pub(super) const API: ApiModule = ApiModule::new(&[
         Opcode::NamespaceUpdatePolicy,
         namespace_update_policy_handler,
     )
+    .state::<CompatibilityContext>()
     .prepare(prepare_namespace_update)
     .authorize(operation_handlers::authorization_none)
     .mutation()
     .build(),
     RegistrationBuilder::new(Opcode::NamespaceDelete, namespace_delete_handler)
+        .state::<CompatibilityContext>()
         .prepare(prepare_namespace_delete)
         .authorize(operation_handlers::authorization_none)
         .mutation()

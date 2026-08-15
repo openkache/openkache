@@ -18,7 +18,8 @@ use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
 use super::operation_contract as contract;
 use super::operation_contract::OperationStatus;
 use super::operation_execution_state::{
-    ModuleState, OperationRuntimeBuilder, OperationStateRef,
+    ModuleState, OperationRuntimeBuilder, OperationStateRef, StateValidator, no_operation_state,
+    typed_operation_state,
 };
 use super::operation_handlers::{AuthorizationFn, OperationInputView};
 use super::operation_registry::OperationHandler;
@@ -337,6 +338,7 @@ pub(super) struct ServerOperationRegistration {
     pub(super) prepare: PrepareFn,
     pub(super) authorization: AuthorizationFn,
     pub(super) policy: ServerOperationPolicy,
+    pub(super) state_validator: StateValidator,
 }
 
 /// Const-friendly registration builder used by API-owned modules.
@@ -368,6 +370,7 @@ impl RegistrationBuilder {
                 prepare: prepare_none,
                 authorization: super::operation_handlers::authorization_none,
                 policy: ServerOperationPolicy::READ_ONLY,
+                state_validator: no_operation_state,
             },
         }
     }
@@ -399,6 +402,15 @@ impl RegistrationBuilder {
     /// Retains the default read-only commit policy explicitly.
     pub(super) const fn read_only(mut self) -> Self {
         self.registration.policy = ServerOperationPolicy::READ_ONLY;
+        self
+    }
+
+    /// Declares the concrete worker-local state required by this operation.
+    ///
+    /// State is validated once during worker construction. Request callbacks
+    /// only borrow the already-resolved value from the dense opcode slot.
+    pub(super) const fn state<T: Any + Send + Sync>(mut self) -> Self {
+        self.registration.state_validator = typed_operation_state::<T>;
         self
     }
 

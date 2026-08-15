@@ -12,9 +12,22 @@ use openkache_protocol::Opcode;
 use super::operation_api::ServerOperationRegistration;
 use super::operation_capabilities::CapabilityCatalog;
 
+pub(super) type ErasedOperationState = dyn Any + Send + Sync;
+pub(super) type StateValidator = fn(Option<&ErasedOperationState>) -> bool;
+
+pub(super) fn no_operation_state(state: Option<&ErasedOperationState>) -> bool {
+    state.is_none()
+}
+
+pub(super) fn typed_operation_state<T: Any + Send + Sync>(
+    state: Option<&ErasedOperationState>,
+) -> bool {
+    state.is_some_and(|state| state.is::<T>())
+}
+
 #[derive(Clone)]
 pub(super) struct ModuleState {
-    value: Arc<dyn Any + Send + Sync>,
+    value: Arc<ErasedOperationState>,
 }
 
 impl ModuleState {
@@ -27,7 +40,7 @@ impl ModuleState {
         }
     }
 
-    fn as_ref(&self) -> &(dyn Any + Send + Sync) {
+    fn as_ref(&self) -> &ErasedOperationState {
         self.value.as_ref()
     }
 
@@ -76,11 +89,19 @@ impl OperationRuntimeBuilder {
         registrations: &'static [ServerOperationRegistration],
         state: Option<ModuleState>,
     ) -> Result<(), &'static str> {
+        let mut seen = [false; Opcode::COUNT];
         for registration in registrations {
-            let slot = &mut self.operations[registration.opcode.index()];
-            if slot.is_some() {
+            if !(registration.state_validator)(state.as_ref().map(ModuleState::as_ref)) {
+                return Err("operation state is missing or has the wrong type");
+            }
+            let index = registration.opcode.index();
+            if seen[index] || self.operations[index].is_some() {
                 return Err("operation runtime contains a duplicate registration");
             }
+            seen[index] = true;
+        }
+        for registration in registrations {
+            let slot = &mut self.operations[registration.opcode.index()];
             *slot = Some(BoundOperation {
                 registration,
                 state: state.clone(),
