@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
-use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Response, Status};
+use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Response, Status, operation_wire_spec};
 use protocol::OperationRequest;
-use request::{PendingRequest, RequestAttempt, RequestAttempts, RequestBuilder};
+use request::{PendingRequest, RequestAttempt, RequestAttempts, RequestBuilder, RequestContext};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -156,33 +156,54 @@ impl std::fmt::Display for Operation {
 }
 
 /// Programmatic category for a server-side failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum ServerErrorCode {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ServerErrorCode(Status);
+
+#[allow(non_upper_case_globals)]
+impl ServerErrorCode {
     /// The request was malformed or violated an operation constraint.
-    InvalidRequest,
+    pub const InvalidRequest: Self = Self(Status::InvalidRequest);
     /// The server does not implement the requested operation.
-    UnsupportedOperation,
+    pub const UnsupportedOperation: Self = Self(Status::UnsupportedOpcode);
     /// The request exceeded a protocol or server size limit.
-    TooLarge,
+    pub const TooLarge: Self = Self(Status::TooLarge);
     /// The server could not accept more work.
-    Overloaded,
+    pub const Overloaded: Self = Self(Status::Overloaded);
     /// The server-side operation exceeded its deadline.
-    Timeout,
+    pub const Timeout: Self = Self(Status::Timeout);
     /// The authenticated identity is not authorized for the operation.
-    Forbidden,
+    pub const Forbidden: Self = Self(Status::Forbidden);
     /// The server encountered an internal failure.
-    Internal,
+    pub const Internal: Self = Self(Status::InternalError);
     /// The request could not be admitted because protected items consume available capacity.
-    NoCapacity,
+    pub const NoCapacity: Self = Self(Status::NoCapacity);
     /// The request selected an item policy disallowed by its namespace.
-    PolicyConflict,
+    pub const PolicyConflict: Self = Self(Status::PolicyConflict);
     /// An optimistic namespace revision did not match.
-    Conflict,
+    pub const Conflict: Self = Self(Status::Conflict);
     /// The requested namespace does not exist.
-    NamespaceNotFound,
+    pub const NamespaceNotFound: Self = Self(Status::NamespaceNotFound);
     /// Namespace deletion raced an in-flight namespace operation.
-    NamespaceNotEmpty,
+    pub const NamespaceNotEmpty: Self = Self(Status::NamespaceNotEmpty);
+
+    const fn from_status(status: Status) -> Self {
+        Self(status)
+    }
+
+    /// Returns the stable numeric protocol code.
+    pub const fn as_u8(self) -> u8 {
+        self.0 as u8
+    }
+}
+
+impl std::fmt::Debug for ServerErrorCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self.0 {
+            Status::UnsupportedOpcode => "UnsupportedOperation",
+            Status::InternalError => "Internal",
+            status => return status.fmt(formatter),
+        })
+    }
 }
 
 /// All client-level failures.
@@ -232,7 +253,7 @@ pub enum Error {
         /// Human-readable server payload.
         message: String,
     },
-    /// A successful response had an invalid status or payload shape.
+    /// A response had an inapplicable status or invalid payload shape.
     #[error("unexpected {operation} response: {message}")]
     UnexpectedResponse {
         /// Operation whose response was invalid.
@@ -402,6 +423,14 @@ impl RequestFailure {
             invalidates_connection,
         }
     }
+
+    fn after_response(error: Error) -> Self {
+        Self {
+            error,
+            may_have_reached_server: true,
+            invalidates_connection: false,
+        }
+    }
 }
 
 impl<C: ClientConnection> Core<C> {
@@ -464,16 +493,17 @@ impl<C: ClientConnection> Core<C> {
 
     async fn ping(&self) -> Result<Duration> {
         let started = Instant::now();
-        let response = self
-            .request(Operation::Ping, OperationRequest::ping())
-            .await?;
-        expect_status(Operation::Ping, response.status, &[Status::Ok])?;
-        if response.payload != b"PONG" {
-            return Err(Error::UnexpectedResponse {
-                operation: Operation::Ping,
-                message: "payload is not PONG".into(),
-            });
-        }
+        self.request(OperationRequest::ping(), |response| {
+            expect_status(Operation::Ping, response.status, &[Status::Ok])?;
+            if response.payload != b"PONG" {
+                return Err(Error::UnexpectedResponse {
+                    operation: Operation::Ping,
+                    message: "payload is not PONG".into(),
+                });
+            }
+            Ok(())
+        })
+        .await?;
         Ok(started.elapsed())
     }
 
@@ -488,22 +518,20 @@ impl<C: ClientConnection> Core<C> {
         item_id: ItemId,
     ) -> Result<GetOutcome<ItemValue>> {
         validate_client_namespace_id(namespace_id)?;
-        let response = self
-            .request(
-                Operation::Get,
-                OperationRequest::get(namespace_id, item_id.into_protocol())
-                    .map_err(Error::protocol)?,
-            )
-            .await?;
-        match response.status {
-            Status::Ok => Ok(GetOutcome::Found(ItemValue::new(response.payload))),
-            Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
-            Status::NotFound => Err(Error::UnexpectedResponse {
-                operation: Operation::Get,
-                message: "NotFound response must have an empty payload".into(),
-            }),
-            status => Err(unexpected_status(Operation::Get, status)),
-        }
+        self.request(
+            OperationRequest::get(namespace_id, item_id.into_protocol())
+                .map_err(Error::protocol)?,
+            |response| match response.status {
+                Status::Ok => Ok(GetOutcome::Found(ItemValue::new(response.payload))),
+                Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
+                Status::NotFound => Err(Error::UnexpectedResponse {
+                    operation: Operation::Get,
+                    message: "NotFound response must have an empty payload".into(),
+                }),
+                status => Err(unexpected_status(Operation::Get, status)),
+            },
+        )
+        .await
     }
 
     async fn set(
@@ -532,8 +560,7 @@ impl<C: ClientConnection> Core<C> {
             value.into_bytes(),
         )
         .map_err(Error::protocol)?;
-        let response = self.request(Operation::Set, request).await?;
-        match response.status {
+        self.request(request, |response| match response.status {
             Status::Created if response.payload.is_empty() => Ok(SetOutcome::Created),
             Status::Replaced if response.payload.is_empty() => Ok(SetOutcome::Replaced),
             Status::NotStored if response.payload.is_empty() => Ok(SetOutcome::NotStored),
@@ -544,7 +571,8 @@ impl<C: ClientConnection> Core<C> {
                 })
             }
             status => Err(unexpected_status(Operation::Set, status)),
-        }
+        })
+        .await
     }
 
     async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
@@ -558,22 +586,20 @@ impl<C: ClientConnection> Core<C> {
         item_id: ItemId,
     ) -> Result<DeleteOutcome> {
         validate_client_namespace_id(namespace_id)?;
-        let response = self
-            .request(
-                Operation::Delete,
-                OperationRequest::delete(namespace_id, item_id.into_protocol())
-                    .map_err(Error::protocol)?,
-            )
-            .await?;
-        match response.status {
-            Status::Deleted if response.payload.is_empty() => Ok(DeleteOutcome::Deleted),
-            Status::NotFound if response.payload.is_empty() => Ok(DeleteOutcome::NotFound),
-            Status::Deleted | Status::NotFound => Err(Error::UnexpectedResponse {
-                operation: Operation::Delete,
-                message: "DELETE domain responses must have an empty payload".into(),
-            }),
-            status => Err(unexpected_status(Operation::Delete, status)),
-        }
+        self.request(
+            OperationRequest::delete(namespace_id, item_id.into_protocol())
+                .map_err(Error::protocol)?,
+            |response| match response.status {
+                Status::Deleted if response.payload.is_empty() => Ok(DeleteOutcome::Deleted),
+                Status::NotFound if response.payload.is_empty() => Ok(DeleteOutcome::NotFound),
+                Status::Deleted | Status::NotFound => Err(Error::UnexpectedResponse {
+                    operation: Operation::Delete,
+                    message: "DELETE domain responses must have an empty payload".into(),
+                }),
+                status => Err(unexpected_status(Operation::Delete, status)),
+            },
+        )
+        .await
     }
 
     async fn stats(&self) -> Result<String> {
@@ -583,16 +609,17 @@ impl<C: ClientConnection> Core<C> {
 
     async fn stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
         validate_client_namespace_id(namespace_id)?;
-        let response = self
-            .request(
-                Operation::Stats,
-                OperationRequest::stats(namespace_id).map_err(Error::protocol)?,
-            )
-            .await?;
-        expect_status(Operation::Stats, response.status, &[Status::Ok])?;
-        validate_stats_payload(&response.payload)?;
-        String::from_utf8(response.payload)
-            .map_err(|error| Error::Protocol(format!("STATS response is not UTF-8: {error}")))
+        self.request(
+            OperationRequest::stats(namespace_id).map_err(Error::protocol)?,
+            |response| {
+                expect_status(Operation::Stats, response.status, &[Status::Ok])?;
+                validate_stats_payload(&response.payload)?;
+                String::from_utf8(response.payload).map_err(|error| {
+                    Error::Protocol(format!("STATS response is not UTF-8: {error}"))
+                })
+            },
+        )
+        .await
     }
 
     async fn sync(&self) -> Result<()> {
@@ -602,28 +629,31 @@ impl<C: ClientConnection> Core<C> {
 
     async fn sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
         validate_client_namespace_id(namespace_id)?;
-        let response = self
-            .request(
-                Operation::Sync,
-                OperationRequest::sync(namespace_id).map_err(Error::protocol)?,
-            )
-            .await?;
-        expect_status(Operation::Sync, response.status, &[Status::Ok])?;
-        if response.payload.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::UnexpectedResponse {
-                operation: Operation::Sync,
-                message: "SYNC success responses must have an empty payload".into(),
-            })
-        }
+        self.request(
+            OperationRequest::sync(namespace_id).map_err(Error::protocol)?,
+            |response| {
+                expect_status(Operation::Sync, response.status, &[Status::Ok])?;
+                if response.payload.is_empty() {
+                    Ok(())
+                } else {
+                    Err(Error::UnexpectedResponse {
+                        operation: Operation::Sync,
+                        message: "SYNC success responses must have an empty payload".into(),
+                    })
+                }
+            },
+        )
+        .await
     }
 
-    async fn request<R: RequestBuilder>(
+    async fn request<R, T>(
         &self,
-        operation: Operation,
         request: R,
-    ) -> Result<Response> {
+        mut decode: impl FnMut(Response) -> Result<T>,
+    ) -> Result<T>
+    where
+        R: RequestBuilder,
+    {
         if self.connection_state() == ConnectionState::Closed {
             return Err(Error::ClientClosed);
         }
@@ -631,7 +661,12 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = request.retry_policy().is_safe();
+        let context = request.context();
+        let (success_statuses, error_statuses) = {
+            let wire = operation_wire_spec(context.opcode);
+            (wire.success_statuses, wire.error_statuses)
+        };
+        let response_safe = context.retry_policy.is_safe();
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
@@ -646,16 +681,18 @@ impl<C: ClientConnection> Core<C> {
                 ));
             };
             match self
-                .request_once(&connection, attempt_request, deadline)
+                .request_once(
+                    &connection,
+                    attempt_request,
+                    context,
+                    success_statuses,
+                    error_statuses,
+                    &mut decode,
+                    deadline,
+                )
                 .await
             {
-                Ok(response) if response.status.is_error() => {
-                    return Err(Error::Server {
-                        code: server_error_code(response.status),
-                        message: String::from_utf8_lossy(&response.payload).into_owned(),
-                    });
-                }
-                Ok(response) => return Ok(response),
+                Ok(result) => return result,
                 Err(failure) => {
                     if failure.invalidates_connection {
                         self.mark_disconnected(&connection);
@@ -666,7 +703,7 @@ impl<C: ClientConnection> Core<C> {
                     }
                     if !response_safe && failure.may_have_reached_server {
                         return Err(Error::AmbiguousOutcome {
-                            operation,
+                            operation: context.operation,
                             cause: Box::new(failure.error),
                         });
                     }
@@ -731,22 +768,24 @@ impl<C: ClientConnection> Core<C> {
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> Result<(NamespaceDescriptor, bool)> {
-        let response = self
+        let (descriptor, created) = self
             .request(
-                Operation::NamespaceOpen,
                 OperationRequest::namespace_open(name, create_if_missing, policy)
                     .map_err(Error::protocol)?,
+                |response| {
+                    let status = response.status;
+                    if status != Status::Ok && !(create_if_missing && status == Status::Created) {
+                        return Err(unexpected_status(Operation::NamespaceOpen, status));
+                    }
+                    let descriptor =
+                        decode_namespace_descriptor(Operation::NamespaceOpen, &response.payload)?;
+                    Ok((descriptor, status == Status::Created))
+                },
             )
             .await?;
-        let operation = Operation::NamespaceOpen;
-        let status = response.status;
-        if status != Status::Ok && !(create_if_missing && status == Status::Created) {
-            return Err(unexpected_status(operation, status));
-        }
-        let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
         self.namespace_id
             .store(descriptor.namespace_id, Ordering::Release);
-        Ok((descriptor, status == Status::Created))
+        Ok((descriptor, created))
     }
 
     async fn update_namespace_policy(
@@ -755,44 +794,51 @@ impl<C: ClientConnection> Core<C> {
         expected_revision: u64,
         policy: NamespacePolicy,
     ) -> Result<NamespaceDescriptor> {
-        let response = self
+        let descriptor = self
             .request(
-                Operation::NamespaceUpdatePolicy,
                 OperationRequest::namespace_update_policy(namespace_id, expected_revision, policy)
                     .map_err(Error::protocol)?,
+                |response| {
+                    expect_status(
+                        Operation::NamespaceUpdatePolicy,
+                        response.status,
+                        &[Status::Ok],
+                    )?;
+                    let descriptor = decode_namespace_descriptor(
+                        Operation::NamespaceUpdatePolicy,
+                        &response.payload,
+                    )?;
+                    if descriptor.namespace_id != namespace_id {
+                        return Err(Error::UnexpectedResponse {
+                            operation: Operation::NamespaceUpdatePolicy,
+                            message: format!(
+                                "descriptor namespace ID {} does not match requested namespace ID {namespace_id}",
+                                descriptor.namespace_id
+                            ),
+                        });
+                    }
+                    let expected_next_revision =
+                        expected_revision.checked_add(1).ok_or_else(|| {
+                            Error::UnexpectedResponse {
+                                operation: Operation::NamespaceUpdatePolicy,
+                                message:
+                                    "successful policy update cannot follow the maximum revision"
+                                        .into(),
+                            }
+                        })?;
+                    if descriptor.revision != expected_next_revision {
+                        return Err(Error::UnexpectedResponse {
+                            operation: Operation::NamespaceUpdatePolicy,
+                            message: format!(
+                                "descriptor revision {} does not follow expected revision {expected_revision}",
+                                descriptor.revision
+                            ),
+                        });
+                    }
+                    Ok(descriptor)
+                },
             )
             .await?;
-        expect_status(
-            Operation::NamespaceUpdatePolicy,
-            response.status,
-            &[Status::Ok],
-        )?;
-        let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
-        if descriptor.namespace_id != namespace_id {
-            return Err(Error::UnexpectedResponse {
-                operation: Operation::NamespaceUpdatePolicy,
-                message: format!(
-                    "descriptor namespace ID {} does not match requested namespace ID {namespace_id}",
-                    descriptor.namespace_id
-                ),
-            });
-        }
-        let expected_next_revision =
-            expected_revision
-                .checked_add(1)
-                .ok_or_else(|| Error::UnexpectedResponse {
-                    operation: Operation::NamespaceUpdatePolicy,
-                    message: "successful policy update cannot follow the maximum revision".into(),
-                })?;
-        if descriptor.revision != expected_next_revision {
-            return Err(Error::UnexpectedResponse {
-                operation: Operation::NamespaceUpdatePolicy,
-                message: format!(
-                    "descriptor revision {} does not follow expected revision {expected_revision}",
-                    descriptor.revision
-                ),
-            });
-        }
         if self.namespace_id.load(Ordering::Acquire) == namespace_id {
             self.namespace_id
                 .store(descriptor.namespace_id, Ordering::Release);
@@ -801,24 +847,27 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn delete_namespace(&self, namespace_id: u64, expected_revision: u64) -> Result<()> {
-        let response = self
-            .request(
-                Operation::NamespaceDelete,
-                OperationRequest::namespace_delete(namespace_id, expected_revision)
-                    .map_err(Error::protocol)?,
-            )
-            .await?;
-        expect_status(
-            Operation::NamespaceDelete,
-            response.status,
-            &[Status::Deleted],
-        )?;
-        if !response.payload.is_empty() {
-            return Err(Error::UnexpectedResponse {
-                operation: Operation::NamespaceDelete,
-                message: "NAMESPACE_DELETE success responses must have an empty payload".into(),
-            });
-        }
+        self.request(
+            OperationRequest::namespace_delete(namespace_id, expected_revision)
+                .map_err(Error::protocol)?,
+            |response| {
+                expect_status(
+                    Operation::NamespaceDelete,
+                    response.status,
+                    &[Status::Deleted],
+                )?;
+                if response.payload.is_empty() {
+                    Ok(())
+                } else {
+                    Err(Error::UnexpectedResponse {
+                        operation: Operation::NamespaceDelete,
+                        message: "NAMESPACE_DELETE success responses must have an empty payload"
+                            .into(),
+                    })
+                }
+            },
+        )
+        .await?;
         let _ = self.namespace_id.compare_exchange(
             namespace_id,
             0,
@@ -828,12 +877,19 @@ impl<C: ClientConnection> Core<C> {
         Ok(())
     }
 
-    async fn request_once<R: RequestBuilder>(
+    async fn request_once<R, T>(
         &self,
         connection: &C,
         request: PendingRequest<R>,
+        context: RequestContext,
+        success_statuses: &'static [Status],
+        error_statuses: &'static [Status],
+        decode: &mut impl FnMut(Response) -> Result<T>,
         deadline: transport::Deadline,
-    ) -> std::result::Result<Response, RequestFailure> {
+    ) -> std::result::Result<Result<T>, RequestFailure>
+    where
+        R: RequestBuilder,
+    {
         let mut stream = connection
             .acquire_lane(deadline)
             .await
@@ -859,14 +915,23 @@ impl<C: ClientConnection> Core<C> {
             .into_response()
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
-        // Error responses may be emitted while the server is still parsing a request,
-        // in which case the server terminates the lane. Retiring every error lane is
-        // conservative and remains valid for errors that the server could have
-        // returned on a reusable lane.
-        if !response.status.is_error() {
-            stream.release();
+        if error_statuses.contains(&response.status) {
+            // A server may reject a request before consuming its complete frame
+            // and close the lane. Retiring every confirmed error lane is safe.
+            return Ok(Err(Error::Server {
+                code: ServerErrorCode::from_status(response.status),
+                message: String::from_utf8_lossy(&response.payload).into_owned(),
+            }));
         }
-        Ok(response)
+        if !success_statuses.contains(&response.status) {
+            return Err(RequestFailure::after_response(unexpected_status(
+                context.operation,
+                response.status,
+            )));
+        }
+        let decoded = decode(response).map_err(RequestFailure::after_response)?;
+        stream.release();
+        Ok(Ok(decoded))
     }
 
     fn mark_disconnected(&self, failed: &Arc<C>) {
@@ -1636,27 +1701,19 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn decode_namespace_descriptor(
+    operation: Operation,
+    payload: &[u8],
+) -> Result<NamespaceDescriptor> {
+    NamespaceDescriptor::decode(payload).map_err(|error| Error::UnexpectedResponse {
+        operation,
+        message: format!("invalid namespace descriptor: {error}"),
+    })
+}
+
 fn unexpected_status(operation: Operation, status: Status) -> Error {
     Error::UnexpectedResponse {
         operation,
         message: format!("unexpected status {status:?}"),
-    }
-}
-
-fn server_error_code(status: Status) -> ServerErrorCode {
-    match status {
-        Status::InvalidRequest => ServerErrorCode::InvalidRequest,
-        Status::UnsupportedOpcode => ServerErrorCode::UnsupportedOperation,
-        Status::TooLarge => ServerErrorCode::TooLarge,
-        Status::Overloaded => ServerErrorCode::Overloaded,
-        Status::Timeout => ServerErrorCode::Timeout,
-        Status::Forbidden => ServerErrorCode::Forbidden,
-        Status::InternalError => ServerErrorCode::Internal,
-        Status::NoCapacity => ServerErrorCode::NoCapacity,
-        Status::PolicyConflict => ServerErrorCode::PolicyConflict,
-        Status::Conflict => ServerErrorCode::Conflict,
-        Status::NamespaceNotFound => ServerErrorCode::NamespaceNotFound,
-        Status::NamespaceNotEmpty => ServerErrorCode::NamespaceNotEmpty,
-        _ => ServerErrorCode::Internal,
     }
 }

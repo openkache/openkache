@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use openkache_protocol::OwnedRequestFrame;
+use openkache_protocol::{Opcode, OwnedRequestFrame};
 
-use crate::Result;
+use crate::{Operation, Result};
 
 /// Closed replay decision attached by an API adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,9 +21,17 @@ impl RequestRetryPolicy {
     }
 }
 
+/// API-owned identity and retry semantics for one request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RequestContext {
+    pub(crate) opcode: Opcode,
+    pub(crate) operation: Operation,
+    pub(crate) retry_policy: RequestRetryPolicy,
+}
+
 /// API-owned construction deferred until the request lifecycle needs a wire frame.
 pub(crate) trait RequestBuilder: Sized {
-    fn retry_policy(&self) -> RequestRetryPolicy;
+    fn context(&self) -> RequestContext;
 
     fn into_frame(self) -> Result<OwnedRequestFrame>;
 }
