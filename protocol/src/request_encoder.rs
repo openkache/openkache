@@ -147,18 +147,36 @@ impl EncodePlan {
                         }
                         assigned_mask |= packed.mask;
                         let value = self.use_field(fields, packed.field)?;
-                        let selected = packed
-                            .values
-                            .iter()
-                            .find(|candidate| candidate.bytes == value.as_slice())
-                            .ok_or_else(|| {
-                                invalid_layout("packed request field has no canonical mapping")
-                            })?;
-                        if selected.bits & !packed.mask != 0 {
-                            return Err(invalid_layout(
-                                "packed request value exceeds its field mask",
-                            ));
+                        let mut selected = None;
+                        for (index, candidate) in packed.values.iter().enumerate() {
+                            if candidate.bits & !packed.mask != 0 {
+                                return Err(invalid_layout(
+                                    "packed request value exceeds its field mask",
+                                ));
+                            }
+                            if packed.values[..index]
+                                .iter()
+                                .any(|previous| previous.bits == candidate.bits)
+                            {
+                                return Err(invalid_layout(
+                                    "packed request field has duplicate wire bits",
+                                ));
+                            }
+                            if packed.values[..index]
+                                .iter()
+                                .any(|previous| previous.bytes == candidate.bytes)
+                            {
+                                return Err(invalid_layout(
+                                    "packed request field has duplicate canonical bytes",
+                                ));
+                            }
+                            if candidate.bytes == value.as_slice() {
+                                selected = Some(candidate);
+                            }
                         }
+                        let selected = selected.ok_or_else(|| {
+                            invalid_layout("packed request field has no canonical mapping")
+                        })?;
                         encoded |= selected.bits;
                         self.selectors.assign(packed.slot, selected.bits)?;
                     }
