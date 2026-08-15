@@ -240,6 +240,7 @@ pub use cli::Command;
 
 pub(crate) mod store;
 pub(crate) use store::*;
+pub use store::SetOutcome;
 
 pub mod runtime;
 pub use runtime::*;
