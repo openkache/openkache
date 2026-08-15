@@ -15,20 +15,18 @@ mod keyed_storage;
 mod network_cache;
 mod port;
 mod scheduler;
-pub(crate) mod storage_backend;
 mod storage_keys;
 mod submission;
 mod worker;
 mod worker_contract;
 mod worker_control;
 pub(crate) use network_cache::NetworkWorkerCache;
-pub(crate) use port::{completion, storage_context, storage_port, storage_task};
+pub(crate) use port::{completion, storage_port};
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{
     DOMAIN_V2_CONTEXT, derive_domain_key, derive_storage_key, derive_storage_key_for_domain,
 };
 pub(crate) use storage_port::*;
-pub(crate) use storage_task::*;
 #[allow(unused_imports)]
 pub(crate) use worker::*;
 pub use submission::{PendingStorageSubmission, StorageSubmission, SubmittedStorageValue};
@@ -500,57 +498,6 @@ impl ThreadedKvkache {
             }
         }
         result
-    }
-
-    /// Runs API-owned storage work without adding an operation-specific worker
-    /// command or response variant.
-    #[allow(dead_code)]
-    async fn execute_storage_task_with_requester(
-        &self,
-        worker: usize,
-        requester: Option<NetworkWorkerId>,
-        task: StorageTask,
-    ) -> StorageResult<StorageTaskOutput> {
-        let operation = Operation::unknown();
-        let response = self
-            .request(worker, operation, requester, |response| {
-                WorkerRequest::Control(WorkerControlRequest::StorageTask { task, response })
-            })
-            .await
-            .map_err(StorageError::from)?;
-        match response {
-            WorkerResponse::StorageResult(result) => Ok(result),
-            WorkerResponse::StorageFailure(error) => Err(error),
-            response => Err(StorageError::Worker(format!(
-                "unexpected storage task response: {response:?}"
-            ))),
-        }
-    }
-
-    async fn execute_storage_task_for_key_with_requester(
-        &self,
-        worker: usize,
-        storage_key: StorageKey,
-        requester: Option<NetworkWorkerId>,
-        task: StorageTask,
-    ) -> StorageResult<StorageTaskOutput> {
-        let operation = Operation::unknown();
-        let response = self
-            .request(worker, operation, requester, |response| {
-                WorkerRequest::Keyed {
-                    storage_key,
-                    command: keyed_storage::storage_task(task, response),
-                }
-            })
-            .await
-            .map_err(StorageError::from)?;
-        match response {
-            WorkerResponse::StorageResult(result) => Ok(result),
-            WorkerResponse::StorageFailure(error) => Err(error),
-            response => Err(StorageError::Worker(format!(
-                "unexpected keyed storage task response: {response:?}"
-            ))),
-        }
     }
 
     pub async fn get(&self, storage_key: StorageKey) -> Result<Option<Vec<u8>>> {

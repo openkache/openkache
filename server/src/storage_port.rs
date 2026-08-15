@@ -10,15 +10,14 @@ use std::sync::Arc;
 use super::operation_api::CapabilityKey;
 
 #[allow(unused_imports)]
+pub(crate) use super::super::types::{
+    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration,
+};
+#[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
-    StorageAddress, StorageBatchOperation, StorageBatchResult, StorageContext,
-    StorageContextFuture, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
-    StoragePortExt, StorageReadFuture, StorageReadOwner, StorageReadValue, StorageResult,
-    StorageTask, StorageTaskCancellation, StorageTaskFuture, StorageTaskIsolation,
-    StorageTaskMetadata, StorageTaskOutput, StorageTaskScheduling, StorageTaskScope,
-    StorageTypedTaskFuture, StorageValue, StorageWriteCondition, StorageWriteEviction,
-    StorageWriteExpiration, StorageWriteFuture, StorageWriteOptions, StorageWriteOutcome,
-    downcast_storage_output,
+    StorageAddress, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
+    StorageReadFuture, StorageReadOwner, StorageReadValue, StorageResult, StorageValue,
+    StorageWriteFuture, StorageWriteOptions, StorageWriteOutcome,
 };
 
 /// The generic capability identity used by API modules that need storage.

@@ -33,9 +33,6 @@ impl CollapsedBatch {
         for command in commands {
             let response_index = responses.len();
             let (response, value) = match command {
-                Command::Task { .. } => {
-                    unreachable!("exclusive storage tasks are never collapsed")
-                }
                 Command::Get { response, .. } => {
                     let value = match &current {
                         KeyedVisibleState::Missing => Response::Value(None),

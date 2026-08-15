@@ -2,24 +2,50 @@
 //!
 //! This adapter carries requester identity for telemetry and exposes both the
 //! neutral keyed cache calls and the [`StoragePort`] through one
-//! network-owned handle. Worker lifecycle and key derivation stay in sibling
-//! runtime modules.
+//! network-owned handle. Worker lifecycle stays in sibling runtime modules;
+//! generic address hashing lives here at the adapter boundary.
 
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use crate::observability::{NetworkWorkerId, Operation};
 use crate::types::StoredItemValue;
-use crate::{Result, SetOutcome, StorageKey};
+use crate::{KvError, Result, SetOutcome, StorageKey};
 
 use super::ThreadedKvkache;
-use super::storage_backend;
 use super::storage_port::{
     StorageAddress, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
-    StorageReadFuture, StorageReadOwner, StorageReadValue, StorageResult, StorageTaskFuture,
-    StorageTaskOutput, StorageTaskScope, StorageValue, StorageWriteFuture, StorageWriteOptions,
-    StorageWriteOutcome,
+    StorageReadFuture, StorageReadOwner, StorageReadValue, StorageValue, StorageWriteFuture,
+    StorageWriteOptions, StorageWriteOutcome,
 };
-use super::storage_task::StorageTask;
+
+const GENERIC_STORAGE_ADDRESS_DOMAIN: &[u8] = b"openkache/generic-storage-address/v1\0";
+
+impl From<KvError> for StorageError {
+    fn from(error: KvError) -> Self {
+        match error {
+            KvError::InvalidRequest(message) => Self::InvalidRequest(message),
+            KvError::Worker(message) => Self::Worker(message),
+            KvError::Timeout(message) => Self::Timeout(message.into()),
+            KvError::CapacityExhausted { resource } => {
+                Self::Unavailable(format!("{resource} capacity is exhausted"))
+            }
+            KvError::NoCapacity => Self::Unavailable("storage has no writable capacity".into()),
+            error => Self::Backend(error.to_string()),
+        }
+    }
+}
+
+fn storage_key_for_address(address: &StorageAddress) -> StorageKey {
+    let mut hasher = Sha256::new();
+    hasher.update(GENERIC_STORAGE_ADDRESS_DOMAIN);
+    hasher.update(address.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; crate::types::STORAGE_KEY_BYTES];
+    bytes.copy_from_slice(&digest[..crate::types::STORAGE_KEY_BYTES]);
+    StorageKey::new(bytes)
+}
 
 /// A network-worker-owned view of the storage runtime and its request shard.
 #[derive(Clone)]
@@ -40,51 +66,7 @@ impl NetworkWorkerCache {
         self.cache.max_item_bytes()
     }
 
-    /// Runs API-owned storage work on one worker without adding an
-    /// operation-specific worker command or response variant.
-    #[allow(dead_code)]
-    async fn execute_storage_task(
-        &self,
-        worker: usize,
-        task: StorageTask,
-    ) -> StorageResult<StorageTaskOutput> {
-        self.cache
-            .execute_storage_task_with_requester(worker, Some(self.network_worker), task)
-            .await
-    }
-
-    /// Runs an API-owned task on the worker selected by its storage key.
-    #[allow(dead_code)]
-    async fn execute_storage_task_for_key(
-        &self,
-        storage_key: StorageKey,
-        task: StorageTask,
-    ) -> StorageResult<StorageTaskOutput> {
-        let worker = self.worker_for(&storage_key);
-        self.cache
-            .execute_storage_task_for_key_with_requester(
-                worker,
-                storage_key,
-                Some(self.network_worker),
-                task,
-            )
-            .await
-    }
-
-    /// Runs an API-owned task on a deterministic worker when it has no key.
-    #[allow(dead_code)]
-    async fn execute_storage_task_unbound(
-        &self,
-        task: StorageTask,
-    ) -> StorageResult<StorageTaskOutput> {
-        let worker = self.network_worker.index() % self.cache.workers.len();
-        self.cache
-            .execute_storage_task_with_requester(worker, Some(self.network_worker), task)
-            .await
-    }
-
-    /// Routes an API-owned opaque storage key using the runtime routing hash.
-    #[allow(dead_code)]
+    /// Routes a storage key using the runtime routing hash.
     pub(crate) fn worker_for(&self, storage_key: &StorageKey) -> usize {
         self.cache.owner(storage_key)
     }
@@ -168,7 +150,7 @@ impl NetworkWorkerCache {
 
 impl StoragePort for NetworkWorkerCache {
     fn get<'a>(&'a self, storage_address: StorageAddress) -> StorageReadFuture<'a> {
-        let storage_key = storage_backend::storage_key_for_address(&storage_address);
+        let storage_key = storage_key_for_address(&storage_address);
         Box::pin(async move {
             self.cache
                 .get_storage_key_with_requester(
@@ -188,7 +170,7 @@ impl StoragePort for NetworkWorkerCache {
         value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageWriteFuture<'a> {
-        let storage_key = storage_backend::storage_key_for_address(&storage_address);
+        let storage_key = storage_key_for_address(&storage_address);
         let value = StoredItemValue::from_owned_range(value.into_owned_range());
         Box::pin(async move {
             self.cache
@@ -210,7 +192,7 @@ impl StoragePort for NetworkWorkerCache {
     }
 
     fn delete<'a>(&'a self, storage_address: StorageAddress) -> StorageMutationFuture<'a> {
-        let storage_key = storage_backend::storage_key_for_address(&storage_address);
+        let storage_key = storage_key_for_address(&storage_address);
         Box::pin(async move {
             self.cache
                 .delete_storage_key_with_requester(
@@ -230,70 +212,6 @@ impl StoragePort for NetworkWorkerCache {
         })
     }
 
-    fn execute_for_key<'a>(
-        &'a self,
-        storage_address: StorageAddress,
-        task: StorageTask,
-    ) -> StorageTaskFuture<'a> {
-        if let Err(message) = task
-            .metadata()
-            .validate_submission(StorageTaskScope::SingleKey)
-        {
-            return Box::pin(async move { Err(StorageError::InvalidRequest(message.into())) });
-        }
-        Box::pin(async move {
-            self.execute_storage_task_for_key(
-                storage_backend::storage_key_for_address(&storage_address),
-                task,
-            )
-            .await
-        })
-    }
-
-    fn execute_for_keys<'a>(
-        &'a self,
-        storage_addresses: &'a [StorageAddress],
-        task: StorageTask,
-    ) -> StorageTaskFuture<'a> {
-        if let Err(message) = task
-            .metadata()
-            .validate_submission(StorageTaskScope::KeySet)
-        {
-            return Box::pin(async move { Err(StorageError::InvalidRequest(message.into())) });
-        }
-        let Some(first) = storage_addresses.first() else {
-            return Box::pin(async {
-                Err(StorageError::InvalidRequest(
-                    "storage task requires at least one key".into(),
-                ))
-            });
-        };
-        let worker = self.worker_for(&storage_backend::storage_key_for_address(first));
-        if storage_addresses.iter().skip(1).any(|storage_address| {
-            self.worker_for(&storage_backend::storage_key_for_address(storage_address)) != worker
-        }) {
-            return Box::pin(async {
-                Err(StorageError::Worker(
-                    "multi-key storage task crosses worker boundaries".into(),
-                ))
-            });
-        }
-        Box::pin(async move {
-            self.cache
-                .execute_storage_task_with_requester(worker, Some(self.network_worker), task)
-                .await
-        })
-    }
-
-    fn execute_unbound<'a>(&'a self, task: StorageTask) -> StorageTaskFuture<'a> {
-        if let Err(message) = task
-            .metadata()
-            .validate_submission(StorageTaskScope::Unbound)
-        {
-            return Box::pin(async move { Err(StorageError::InvalidRequest(message.into())) });
-        }
-        Box::pin(async move { self.execute_storage_task_unbound(task).await })
-    }
 }
 
 impl StorageReadOwner for StoredItemValue {

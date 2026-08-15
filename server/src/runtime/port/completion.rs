@@ -54,12 +54,6 @@ impl<T> Default for AtomicSlot<T> {
 }
 
 impl<T> AtomicSlot<T> {
-    fn is_disconnected(&self, expected_generation: u64) -> bool {
-        let current = self.generation_and_state.load(Ordering::Acquire);
-        generation(current) != expected_generation
-            || matches!(state(current), FREE | DISCONNECTED | WRITING_CANCELLED)
-    }
-
     fn activate(&self) -> Option<u64> {
         let current = self.generation_and_state.load(Ordering::Acquire);
         debug_assert_eq!(state(current), FREE);
@@ -408,13 +402,6 @@ enum SenderStorage<T> {
 }
 
 impl<T> SenderStorage<T> {
-    fn is_disconnected(&self) -> bool {
-        match self {
-            Self::Indexed { pool, id } => pool.slot(*id).is_disconnected(id.generation),
-            Self::Overflow { slot, generation } => slot.is_disconnected(*generation),
-        }
-    }
-
     fn complete(&self, value: T) -> Result<(), T> {
         let (slot, generation) = match self {
             Self::Indexed { pool, id } => (pool.slot(*id), id.generation),
@@ -446,10 +433,6 @@ pub(in crate::runtime) struct CompletionSender<T> {
 }
 
 impl<T> CompletionSender<T> {
-    pub(in crate::runtime) fn is_disconnected(&self) -> bool {
-        self.storage.is_disconnected()
-    }
-
     pub(in crate::runtime) fn send(mut self, value: T) -> Result<(), T> {
         let result = self.storage.complete(value);
         self.finished = true;

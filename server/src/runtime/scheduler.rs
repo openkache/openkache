@@ -13,7 +13,6 @@ pub(super) trait ScheduledTask {
     type CollapseGroup: Copy + Eq;
 
     fn collapse_group(&self) -> Self::CollapseGroup;
-    fn is_exclusive(&self) -> bool;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,15 +166,6 @@ where
             .is_some_and(|lane| lane.waiting_head.is_some())
     }
 
-    pub(super) fn ready_is_exclusive(&self) -> bool {
-        let Some(storage_key) = self.ready.front() else {
-            return false;
-        };
-        let lane = self.lanes.get(storage_key).expect("ready key has a lane");
-        let head = lane.waiting_head.expect("ready lane has a waiting command");
-        self.waiting.get(head).is_exclusive()
-    }
-
     /// Removes the next fair command and records its reducer family.
     pub(super) fn take_ready(&mut self) -> Option<(K, T)> {
         let key = self.ready.pop_front()?;
@@ -195,13 +185,6 @@ where
         }
         lane.state = LaneState::Running { collapse_group };
         Some((key, command))
-    }
-
-    pub(super) fn take_ready_exclusive(&mut self) -> Option<(K, T)> {
-        if !self.ready_is_exclusive() {
-            return None;
-        }
-        self.take_ready()
     }
 
     pub(super) fn enqueue(
