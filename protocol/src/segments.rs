@@ -10,9 +10,122 @@ use crate::{ProtocolError, Result};
 // carry a large array of segment owners. Longer plans spill metadata only;
 // their payload allocations remain unchanged.
 pub(crate) const INLINE_SEGMENTS: usize = 2;
+const INLINE_REQUEST_PREFIX_BYTES: usize = 64;
 
 /// Owned wire frame using the common two-segment inline storage.
 pub type OwnedFrame = SegmentFrame<[WireSegment; INLINE_SEGMENTS]>;
+
+/// One ownership-preserving encoded request frame.
+///
+/// Common request prefixes remain contiguous and inline. Payload and other
+/// retained owners follow as ordered segments without coalescing their bytes.
+#[derive(Debug, Eq, PartialEq)]
+pub struct OwnedRequestFrame {
+    prefix: RequestPrefix,
+    suffix: OwnedFrame,
+    encoded_len: usize,
+}
+
+impl OwnedRequestFrame {
+    pub(crate) fn from_parts(
+        prefix: RequestPrefix,
+        suffix: SmallVec<[WireSegment; INLINE_SEGMENTS]>,
+    ) -> Result<Self> {
+        let suffix = OwnedFrame::from_segments(suffix)?;
+        let encoded_len = prefix
+            .as_slice()
+            .len()
+            .checked_add(suffix.len())
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        Ok(Self {
+            prefix,
+            suffix,
+            encoded_len,
+        })
+    }
+
+    /// Returns the ordered non-empty byte segments.
+    pub fn segments(&self) -> impl Iterator<Item = &[u8]> {
+        std::iter::once(self.prefix.as_slice())
+            .chain(self.suffix.segments().iter().map(WireSegment::as_slice))
+            .filter(|segment| !segment.is_empty())
+    }
+
+    /// Returns the checked complete frame length.
+    pub const fn len(&self) -> usize {
+        self.encoded_len
+    }
+
+    /// Returns whether the complete frame is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.encoded_len == 0
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<OwnedRequestFrame>() <= 192);
+
+/// Contiguous request prefix with inline storage for every common layout.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum RequestPrefix {
+    Inline {
+        bytes: [u8; INLINE_REQUEST_PREFIX_BYTES],
+        len: u8,
+    },
+    Owned(Vec<u8>),
+}
+
+impl RequestPrefix {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        if capacity <= INLINE_REQUEST_PREFIX_BYTES {
+            Self::Inline {
+                bytes: [0; INLINE_REQUEST_PREFIX_BYTES],
+                len: 0,
+            }
+        } else {
+            Self::Owned(Vec::with_capacity(capacity))
+        }
+    }
+
+    pub(crate) fn try_extend_from_slice(&mut self, suffix: &[u8]) -> Result<()> {
+        match self {
+            Self::Inline { bytes, len } => {
+                let start = usize::from(*len);
+                let end = start
+                    .checked_add(suffix.len())
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if end > INLINE_REQUEST_PREFIX_BYTES {
+                    return Err(ProtocolError::FrameLength {
+                        expected: INLINE_REQUEST_PREFIX_BYTES,
+                        actual: end,
+                    });
+                }
+                bytes[start..end].copy_from_slice(suffix);
+                *len = u8::try_from(end).expect("inline request prefix length fits in u8");
+            }
+            Self::Owned(bytes) => {
+                let required = bytes
+                    .len()
+                    .checked_add(suffix.len())
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if required > bytes.capacity() {
+                    return Err(ProtocolError::FrameLength {
+                        expected: bytes.capacity(),
+                        actual: required,
+                    });
+                }
+                bytes.extend_from_slice(suffix);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { bytes, len } => &bytes[..usize::from(*len)],
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
 
 /// An owned buffer with a logical byte range.
 ///

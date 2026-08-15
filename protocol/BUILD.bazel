@@ -64,6 +64,7 @@ rust_library(
         "src/layout.rs",
         "src/optional_values.rs",
         "src/request.rs",
+        "src/request_encoder.rs",
         "src/response.rs",
         "src/segments.rs",
     ],

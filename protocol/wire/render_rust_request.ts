@@ -137,7 +137,10 @@ function request_wire_steps(
         )
         state.next_byte_length_slot += 1
         state.byte_length_slots.set(step.field, slot)
-        return `WireRequestStep::ByteLengthPrefix { slot: ${slot} }`
+        return `WireRequestStep::ByteLengthPrefix {
+                slot: ${slot},
+                field: ${step.field},
+            }`
       }
       case "byte_field": {
         const slot = state.byte_length_slots.get(step.field)

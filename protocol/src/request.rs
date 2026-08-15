@@ -6,7 +6,7 @@
 
 use crate::{MAX_VALUE_BYTES, OPCODE_BYTES, Opcode, ProtocolError, Result};
 
-const MAX_REQUEST_FRAME_STATE_SLOTS: usize = 8;
+pub(super) const MAX_REQUEST_FRAME_STATE_SLOTS: usize = 8;
 const EMPTY_BYTE_LENGTH: u16 = u16::MAX;
 const NO_REQUEST_FIELD: usize = usize::MAX;
 
@@ -95,8 +95,9 @@ pub enum RequestFrameStep {
     ByteLength,
     /// Consume one byte length followed by a projected modeled field.
     ByteLengthField { field: usize },
-    /// Consume one byte length and retain it for a later body step.
-    ByteLengthPrefix { slot: usize },
+    /// Consume one modeled field's byte length and retain it for a later body
+    /// step.
+    ByteLengthPrefix { slot: usize, field: usize },
     /// Consume the body declared by a preceding byte-length prefix.
     ByteLengthBody { slot: usize },
     /// Consume and project the modeled field declared by a preceding
@@ -611,7 +612,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                 )?;
                 state.cursor = end;
             }
-            RequestFrameStep::ByteLengthPrefix { slot } => {
+            RequestFrameStep::ByteLengthPrefix { slot, .. } => {
                 let Some(&length) = prefix.get(state.cursor) else {
                     return Ok(None);
                 };
