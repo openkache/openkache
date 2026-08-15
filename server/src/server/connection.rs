@@ -291,7 +291,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         ) {
             Ok(request) => {
                 let request_opcode = request.opcode();
-                let operation = Operation::from_opcode(request_opcode);
+                let operation: Operation = operation_contract::telemetry_operation(request_opcode);
                 let request_started = std::time::Instant::now();
                 let may_mutate = operation_dispatch::may_mutate(request_opcode);
                 let response_permit = if let Some(response_budget_bytes) =

@@ -7,6 +7,8 @@
 
 use openkache_protocol::Opcode;
 
+use crate::observability::Operation;
+
 // Keep only the generic server-facing generated contract behind this facade.
 // Compatibility adapters import `operation_compatibility_contract` instead,
 // so generic handlers cannot accidentally acquire the compatibility role vocabulary
@@ -16,8 +18,7 @@ pub(super) use crate::contract::{
     MAX_OPERATION_REQUEST_FIELDS, OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
     OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES,
     WireCodecCardinality, WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding,
-    WireCodecWidth, operation_registry, operation_wire_spec, wire_codec_kind,
-    wire_request_layout,
+    WireCodecWidth, operation_registry, operation_wire_spec, wire_codec_kind, wire_request_layout,
 };
 // Future generated generic bindings consume field indexes through this neutral
 // facade even when the currently registered generic API has no fields.
@@ -25,6 +26,26 @@ pub(super) use crate::contract::{
 pub(super) use crate::contract::request_fields;
 
 pub(super) const MAX_FIELDS: usize = crate::contract::MAX_OPERATION_FIELDS;
+
+const _: () = assert!(Opcode::COUNT <= u8::MAX as usize);
+
+const fn operation_names() -> [&'static str; Opcode::COUNT + 1] {
+    let mut names = ["unknown"; Opcode::COUNT + 1];
+    let mut index = 0;
+    while index < Opcode::COUNT {
+        names[index] = Opcode::NAMES[index];
+        index += 1;
+    }
+    names
+}
+
+pub(super) const OPERATION_NAMES: [&str; Opcode::COUNT + 1] = operation_names();
+
+/// Projects one generated operation into the neutral telemetry catalog.
+#[inline]
+pub(super) const fn telemetry_operation(opcode: Opcode) -> Operation {
+    Operation::from_generated_index(opcode.index() as u8)
+}
 
 #[inline]
 pub(super) const fn spec(opcode: Opcode) -> OperationWireSpec {

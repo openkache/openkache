@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::{Opcode, OwnedRange};
 
-use super::super::observability::Operation;
 use super::super::types::{
     StorageKey, StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration,
     StorageWriteOptions, StoredItemValue,
@@ -21,7 +20,7 @@ use super::super::types::{
 use super::super::{KvError, SetOutcome};
 use super::operation_api::{CapabilityKey, PrepareError, ResourceLock};
 use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
-use super::operation_contract::OperationStatus;
+use super::operation_contract::{OperationStatus, telemetry_operation};
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
     NetworkWorkerCache, ObservabilityState, SetReservation,
@@ -250,7 +249,7 @@ impl StorageCapability for NetworkWorkerCache {
         Box::pin(NetworkWorkerCache::get_storage_key(
             self,
             storage_key,
-            Operation::from_opcode(Opcode::Get),
+            telemetry_operation(Opcode::Get),
         ))
     }
 
@@ -265,7 +264,7 @@ impl StorageCapability for NetworkWorkerCache {
             storage_key,
             value,
             options,
-            Operation::from_opcode(Opcode::Set),
+            telemetry_operation(Opcode::Set),
         ))
     }
 
@@ -273,14 +272,14 @@ impl StorageCapability for NetworkWorkerCache {
         Box::pin(NetworkWorkerCache::delete_storage_key(
             self,
             storage_key,
-            Operation::from_opcode(Opcode::Delete),
+            telemetry_operation(Opcode::Delete),
         ))
     }
 
     fn stats<'a>(&'a self) -> CacheFuture<'a, Vec<String>> {
         Box::pin(NetworkWorkerCache::stats(
             self,
-            Operation::from_opcode(Opcode::Stats),
+            telemetry_operation(Opcode::Stats),
         ))
     }
 
@@ -288,7 +287,7 @@ impl StorageCapability for NetworkWorkerCache {
         Box::pin(NetworkWorkerCache::sync_workers(
             self,
             workers,
-            Operation::from_opcode(Opcode::Sync),
+            telemetry_operation(Opcode::Sync),
         ))
     }
 }

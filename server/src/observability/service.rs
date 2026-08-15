@@ -8,48 +8,37 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use openkache_protocol::{Opcode, Status};
+use openkache_protocol::Status;
 
 use super::http::{MetricsEndpoint, MetricsEndpointHandle};
 use super::lifecycle::{Lifecycle, LifecycleCell};
 use super::shard::{NetworkShard, NetworkWorkerId, StorageShard, StorageWorkerId};
+pub(super) use crate::operation_contract::OPERATION_NAMES;
 
 pub(super) const HISTOGRAM_BUCKETS_US: [u64; 12] = [
     1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_000_000,
     5_000_000, 10_000_000,
 ];
 
-const fn operation_names() -> [&'static str; Opcode::COUNT + 1] {
-    let mut names = ["unknown"; Opcode::COUNT + 1];
-    let mut index = 0;
-    while index < Opcode::COUNT {
-        names[index] = Opcode::NAMES[index];
-        index += 1;
-    }
-    names
-}
-
-pub(super) const OPERATION_NAMES: [&str; Opcode::COUNT + 1] = operation_names();
-
 pub(super) const STATUS_NAMES: [&str; Status::COUNT] = Status::NAMES;
 
 /// An operation metric key plus the transport-only unknown bucket used by
 /// adapters that cannot resolve a modeled opcode.
 ///
-/// The key wraps the generated `Opcode` instead of duplicating its variants.
-/// Metrics arrays are indexed by `Opcode::index()`, so sparse wire assignments
-/// and Smithy enum reordering cannot silently corrupt telemetry. Built-in
-/// command names are deliberately not part of this generic observability
-/// primitive; protocol adapters resolve their own command vocabulary before
-/// creating a key.
+/// The key is a dense, fixed-width index selected by an API adapter. Operation
+/// names and wire assignments remain outside observability and runtime code.
+/// Built-in command names are deliberately not part of this generic primitive;
+/// protocol adapters resolve their vocabulary before creating a key.
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Operation(Option<Opcode>);
+pub(crate) struct Operation(u8);
 
 impl Operation {
     const COUNT: usize = OPERATION_NAMES.len();
+    const UNKNOWN_INDEX: u8 = (Self::COUNT - 1) as u8;
 
     pub(crate) const fn unknown() -> Self {
-        Self(None)
+        Self(Self::UNKNOWN_INDEX)
     }
 
     pub(crate) const fn name(self) -> &'static str {
@@ -57,16 +46,12 @@ impl Operation {
     }
 
     pub(crate) const fn index(self) -> usize {
-        match self.0 {
-            Some(opcode) => opcode.index(),
-            None => Opcode::COUNT,
-        }
+        self.0 as usize
     }
 
-    pub(crate) const fn from_opcode(opcode: Opcode) -> Self {
-        Self(Some(opcode))
+    pub(crate) const fn from_generated_index(index: u8) -> Self {
+        Self(index)
     }
-
 }
 
 const fn status_index(status: Status) -> usize {
