@@ -50,11 +50,11 @@ pub mod operation {
 pub use operation::{
     MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS, MAX_REQUEST_FRAME_BYTES,
     OPERATION_CODEC_NAMES, OperationFieldLayout, OperationFieldPlan, OperationFramePolicy,
-    OperationLayoutFraming, OperationLayoutPlan, OperationRequestFraming,
-    OperationResponseFraming, OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES,
-    WireCodecCardinality, WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding,
-    WireCodecWidth, operation_registry, operation_wire_spec, request_fields, response_fields,
-    wire_codec_kind, wire_request_layout,
+    OperationLayoutFraming, OperationLayoutPlan, OperationRequestFraming, OperationResponseFraming,
+    OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES, WireCodecCardinality,
+    WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding, WireCodecWidth,
+    operation_registry, operation_wire_spec, request_fields, response_fields, wire_codec_kind,
+    wire_request_layout,
 };
 
 /// Draft-v1 compatibility constants and field projections.
@@ -70,6 +70,7 @@ pub mod layout;
 pub mod optional_values;
 /// Operation-neutral request frame delimiting.
 pub mod request;
+mod request_encoder;
 /// Operation-neutral response framing and owned response buffers.
 pub mod response;
 /// Operation-neutral ownership for ordered wire byte segments.
@@ -93,12 +94,13 @@ pub use request::{
     RequestFramePackedField, RequestFramePackedValue, RequestFrameStep,
     decode_request_frame_header, project_request_frame,
 };
+pub use request_encoder::encode_request_frame;
 pub use response::{
     OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes, ResponseParts,
 };
 pub use segments::{
-    InlineBytes, OwnedFrame, OwnedRange, ResponseSegment, SegmentFrame, StableByteOwner,
-    StableBytes, WireByteOwner, WireSegment,
+    InlineBytes, OwnedFrame, OwnedRange, OwnedRequestFrame, ResponseSegment, SegmentFrame,
+    StableByteOwner, StableBytes, WireByteOwner, WireSegment,
 };
 
 /// The exact fixed-size item identifier carried by the wire protocol.
