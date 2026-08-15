@@ -10,12 +10,12 @@ use std::time::Instant;
 
 use super::{
     BLOB_ITEM_THRESHOLD_BYTES, BlobArena, BlobHandle, BlobRef, BucketHashSequence,
-    CAPACITY_CHECK_INTERVAL, DirectIoBuffer, DirectIoBufferLease, DirectIoBufferPool,
-    GenerationLocation, GenerationLog, GenerationReservation, INLINE_VALUE_TAG,
+    CAPACITY_CHECK_INTERVAL, CommittedGenerationState, DirectIoBuffer, DirectIoBufferLease,
+    DirectIoBufferPool, GenerationLocation, GenerationLog, GenerationReservation, INLINE_VALUE_TAG,
     ITEM_EXPIRATION_BYTES, ITEM_FIXED_BYTES, Item, ItemState, JobPin, LargeValueLocation,
     LargeValueLog, MutableSegment, RamBacking, ReadBacking, ResourceGuard, STORED_BLOB_REF_BYTES,
     STORED_LARGE_VALUE_REF_BYTES, STORED_VALUE_TAG_BYTES, SegmentFlushReason, SetOutcome,
-    SgDirectory, SsdBacking, StoredValue, Table, TableLocation, bucket_hash, decode_stored_value,
+    SgDirectory, StoredValue, Table, TableLocation, bucket_hash, decode_stored_value,
     encode_blob_handle, encode_blob_ref, encode_inline_value, encode_large_value_handle,
     encode_large_value_ref, find_item_in_bucket, find_item_state_and_value_range,
     item_offsets_bytes, items, open_direct_file, read_exact_direct, remove_stored_value_tag,
@@ -123,13 +123,10 @@ impl DirectStoreIo {
 }
 
 struct FlushCompletion {
-    logical_sg_id: u32,
-    location: GenerationLocation,
-    large_value_location: Option<LargeValueLocation>,
     reason: SegmentFlushReason,
     fill_used_bytes: u64,
     blob_logical_len: usize,
-    result: Result<u64>,
+    result: Result<(CommittedGenerationState, u64)>,
 }
 
 type FlushFuture = Pin<Box<dyn Future<Output = FlushCompletion>>>;
@@ -168,7 +165,7 @@ struct EvictableLocation {
 
 struct EvictionWork {
     victim: GenerationLocation,
-    reader_guard: Option<Rc<SsdBacking>>,
+    reader_guard: Option<Rc<CommittedGenerationState>>,
     current: Option<EvictionExtent>,
     prefetched: Option<EvictionExtent>,
     read: Option<EvictionReadFuture>,

@@ -9,9 +9,9 @@ use futures_util::future::FutureExt;
 use futures_util::stream::StreamExt;
 
 use super::{
-    BlobArena, BlobHandle, BlobRef, ClosingFlush, DirectIoBuffer, FlushCompletion,
-    GenerationLocation, GenerationReservation, Kvkache, LargeValueLocation, MutableGeneration,
-    MutableSegment, PreparedFlush, RamBacking, SegmentFlushReason, StoredValue,
+    BlobArena, BlobHandle, BlobRef, ClosingFlush, CommittedGenerationState, DirectIoBuffer,
+    FlushCompletion, GenerationLocation, GenerationReservation, Kvkache, LargeValueLocation,
+    MutableGeneration, MutableSegment, PreparedFlush, RamBacking, SegmentFlushReason, StoredValue,
     decode_stored_value, encode_blob_ref, encode_large_value_ref, rewrite_segment_values,
     storage_operation_error, write_all_direct,
 };
@@ -264,21 +264,24 @@ impl Kvkache {
     }
 
     fn complete_flush(&mut self, completion: FlushCompletion) -> Result<()> {
-        let physical_bytes = completion
+        let (state, physical_bytes) = completion
             .result
             .map_err(|error| storage_operation_error(&self.resource_guard, error))?;
         self.io
             .data_written
             .set(self.io.data_written.get() + physical_bytes);
         let retain_ram = self.config.stable_ram_segment_count != 0;
-        self.directory.publish_stable(
-            completion.logical_sg_id,
-            completion.location,
-            completion.large_value_location,
-            retain_ram,
-        )?;
+        let logical_sg_id = state.location.logical_sg_id;
+        let generation_capacity_bytes = state.location.record_len
+            + state
+                .large_value_location
+                .map_or(0, |location| u64::from(location.padded_len));
+        let large_value_logical_bytes = state
+            .large_value_location
+            .map_or(0, |location| u64::from(location.logical_len));
+        self.directory.publish_stable(state, retain_ram)?;
         if retain_ram {
-            self.stable_ram_segments.push_back(completion.logical_sg_id);
+            self.stable_ram_segments.push_back(logical_sg_id);
             while self.stable_ram_segments.len() > self.config.stable_ram_segment_count {
                 let logical_sg_id = self
                     .stable_ram_segments
@@ -294,13 +297,8 @@ impl Kvkache {
         }
         self.generation_fill_used_bytes += completion.fill_used_bytes
             + completion.blob_logical_len as u64
-            + completion
-                .large_value_location
-                .map_or(0, |location| u64::from(location.logical_len));
-        self.generation_fill_capacity_bytes += completion.location.record_len
-            + completion
-                .large_value_location
-                .map_or(0, |location| u64::from(location.padded_len));
+            + large_value_logical_bytes;
+        self.generation_fill_capacity_bytes += generation_capacity_bytes;
         Ok(())
     }
 
@@ -389,8 +387,12 @@ impl Kvkache {
         location: GenerationLocation,
         large_value_location: Option<LargeValueLocation>,
     ) -> Result<()> {
-        self.directory
-            .publish_inflight(prepared.logical_sg_id, location, large_value_location)?;
+        let readable = self.directory.publish_inflight(
+            prepared.logical_sg_id,
+            location,
+            large_value_location,
+        )?;
+        let sequence = readable.sequence;
         let file = self.data.clone();
         let large_values = self.large_values.clone();
         let config = self.config.clone();
@@ -408,11 +410,18 @@ impl Kvkache {
                     prepared.large_value_physical_len,
                     prepared.segment_write,
                 )
-                .await;
+                .await
+                .map(|physical_bytes| {
+                    (
+                        CommittedGenerationState {
+                            sequence,
+                            location,
+                            large_value_location,
+                        },
+                        physical_bytes,
+                    )
+                });
                 FlushCompletion {
-                    logical_sg_id: prepared.logical_sg_id,
-                    location,
-                    large_value_location,
                     reason: prepared.reason,
                     fill_used_bytes: prepared.fill_used_bytes,
                     blob_logical_len: prepared.blob_logical_len,

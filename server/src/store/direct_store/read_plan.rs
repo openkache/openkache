@@ -13,9 +13,10 @@ use crate::{BUCKET_BYTES, Config, KvError, Result, StorageKey};
 
 use super::policy::item_state_is_live_now;
 use super::{
-    DirectIoBuffer, DirectIoBufferLease, DirectStoreIo, INLINE_VALUE_TAG, Item, ItemState, JobPin,
-    MutableValueHandle, RamBacking, STORED_VALUE_TAG_BYTES, SsdBacking, StoredValue, TableLocation,
-    bucket_hash, decode_stored_value, find_item_state_and_value_range, read_exact_direct,
+    CommittedGenerationState, DirectIoBuffer, DirectIoBufferLease, DirectStoreIo, INLINE_VALUE_TAG,
+    Item, ItemState, JobPin, MutableValueHandle, RamBacking, STORED_VALUE_TAG_BYTES, StoredValue,
+    TableLocation, bucket_hash, decode_stored_value, find_item_state_and_value_range,
+    read_exact_direct,
 };
 
 #[derive(Clone, Copy)]
@@ -44,9 +45,9 @@ pub(super) enum PreparedReadBacking {
     },
     Ram {
         backing: Rc<RamBacking>,
-        _retirement_guard: Option<Rc<SsdBacking>>,
+        _retirement_guard: Option<Rc<CommittedGenerationState>>,
     },
-    Ssd(Rc<SsdBacking>),
+    Ssd(Rc<CommittedGenerationState>),
 }
 
 pub(super) struct PreparedReadCandidate {
