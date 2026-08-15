@@ -341,7 +341,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     request_timeout,
                     operation_dispatch::execute_request(
                         input,
-                        authorization.clone(),
+                        &authorization,
                         runtime.as_ref(),
                     ),
                 )

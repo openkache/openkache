@@ -124,7 +124,7 @@ pub(super) fn response_budget_bytes(runtime: &OperationRuntime, opcode: Opcode) 
 /// status selection and response framing stay in `operation_transport`.
 pub(super) async fn execute_request(
     input: operation_handlers::OperationInputView,
-    authorization: operation_handlers::AuthorizationContext,
+    authorization: &operation_handlers::AuthorizationContext,
     runtime: &OperationRuntime,
 ) -> Option<operation_transport::OperationResponse> {
     let opcode = input.opcode();
@@ -135,7 +135,7 @@ pub(super) async fn execute_request(
             b"modeled operation has no server registration",
         ));
     };
-    if !operation_handlers::authorization_allowed(registration, authorization.clone()) {
+    if !operation_handlers::authorization_allowed(registration, authorization) {
         return Some(operation_transport::contract_error_response_status(
             opcode,
             super::operation_contract::OperationStatus::Forbidden,

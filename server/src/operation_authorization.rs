@@ -121,7 +121,7 @@ pub(super) fn authorization_administrator(authorization: &AuthorizationContext) 
 /// generated helper or operation-name branch is required.
 pub(super) fn authorization_allowed(
     registration: &super::operation_api::ServerOperationRegistration,
-    authorization: AuthorizationContext,
+    authorization: &AuthorizationContext,
 ) -> bool {
-    (registration.authorization)(&authorization)
+    (registration.authorization)(authorization)
 }
