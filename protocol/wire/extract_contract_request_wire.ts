@@ -1,6 +1,7 @@
 /** Parses declarative operation request-wire primitives. */
 
 import {
+  effective_field_codec,
   MAX_GENERATED_NESTED_CODEC_DEPTH,
   type Wire_Operation_Field_Plan,
   type Wire_Request_Step,
@@ -37,7 +38,9 @@ export function request_wire_plan(
     value: string,
     location: string,
   ): void => {
-    const allowed = field.shape === "Boolean" ? ["false", "true"] : field.enum_values
+    const allowed = effective_field_codec(field) === "bool_u8"
+      ? ["false", "true"]
+      : field.enum_values
     if (allowed !== undefined && !allowed.includes(value)) {
       throw new Error(`${location} must be one of the modeled values: ${allowed.join(", ")}`)
     }
@@ -82,6 +85,11 @@ export function request_wire_plan(
             const packed = object_value(raw_field, field_location)
             const name = string_member(packed, "field", field_location)
             const field = resolve_field(name, `${field_location}.field`)
+            if (!["bool_u8", "enum"].includes(effective_field_codec(field) ?? "")) {
+              throw new Error(
+                `${field_location}.field must use the canonical bool_u8 or enum codec`,
+              )
+            }
             const mask = integer_member(packed, "mask", field_location, 1, 0xff)
             if ((occupied & mask) !== 0) {
               throw new Error(`${field_location}.mask overlaps another packed field`)
@@ -135,6 +143,14 @@ export function request_wire_plan(
         case "byteField": {
           const name = string_member(value, "field", `${step_location}.${kind}`)
           const field = resolve_field(name, `${step_location}.${kind}.field`)
+          if (
+            kind === "varuintField" &&
+            effective_field_codec(field) !== "u64_be"
+          ) {
+            throw new Error(
+              `${step_location}.${kind}.field must use the canonical u64_be codec`,
+            )
+          }
           return kind === "byteLengthField"
             ? { kind: "byte_length_field", field: field.index }
             : kind === "varuintField"

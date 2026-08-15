@@ -88,9 +88,9 @@ pub use optional_values::{
     optional_values_max_encoded_len,
 };
 pub use request::{
-    OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFramePackedField,
-    RequestFrameStep,
-    decode_request_frame_header,
+    OpaqueRequestFrame, RequestFieldProjection, RequestFrameHeader, RequestFrameLayout,
+    RequestFramePackedField, RequestFramePackedValue, RequestFrameStep,
+    decode_request_frame_header, project_request_frame,
 };
 pub use response::{
     OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes, ResponseParts,
