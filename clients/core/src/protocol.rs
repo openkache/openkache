@@ -1,23 +1,19 @@
 //! Client-owned domain values and request projection.
 //!
 //! The neutral protocol crate owns operation identifiers, frame plans, and
-//! reusable codecs. This module owns Rust client semantics and selects the
-//! compact-v1 adapter only for operations that explicitly join that profile.
+//! reusable codecs. This module owns Rust client semantics and the remaining
+//! compact-v1 response projections.
 
-use openkache_protocol::{
-    MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES,
-    Opcode, OperationFramePolicy, OperationLayoutFraming, WireSegment, decode_planned_fields,
-    operation_wire_spec,
-};
+use openkache_protocol::{NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES, Opcode};
 
-use crate::request::{RequestBuilder, RequestParts, RequestPrefix, RequestRetryPolicy};
+use crate::request::RequestRetryPolicy;
 
 #[path = "protocol_compat_v1.rs"]
 mod compat_v1;
-#[path = "protocol_draft_v1_request.rs"]
-mod draft_v1_request;
+#[path = "operation_request.rs"]
+mod operation_request;
 
-pub(crate) use draft_v1_request::DraftV1Request;
+pub(crate) use operation_request::OperationRequest;
 
 /// Client-side protocol validation failures.
 #[derive(Debug, thiserror::Error)]
@@ -31,19 +27,6 @@ pub enum ProtocolError {
     /// SET combines mutually exclusive existence conditions.
     #[error("if-absent and if-present conditions cannot be combined")]
     ConflictingSetConditions,
-    /// A generated field codec rejected its value.
-    #[error("invalid operation field codec: {0}")]
-    InvalidFieldCodec(String),
-    /// A request does not match its generated or compatibility shape.
-    #[error("{opcode:?} requires request shape ({expected_item_ids} item IDs, {expected_value})")]
-    InvalidRequestShape {
-        /// Operation whose request was invalid.
-        opcode: Opcode,
-        /// Required number of item identifiers.
-        expected_item_ids: usize,
-        /// Required value shape.
-        expected_value: &'static str,
-    },
     /// SET carries a zero TTL.
     #[error("SET TTL must be greater than zero milliseconds")]
     InvalidSetTtl,
@@ -56,9 +39,6 @@ pub enum ProtocolError {
     /// SET flags do not represent one valid option tuple.
     #[error("SET options are invalid")]
     InvalidSetOptions,
-    /// A scoped request omitted its namespace ID.
-    #[error("namespace ID is missing")]
-    MissingNamespaceId,
     /// Namespace IDs must be non-zero.
     #[error("namespace ID must be a positive non-zero u64")]
     InvalidNamespaceId,
@@ -77,9 +57,6 @@ pub enum ProtocolError {
     /// Namespace revisions must be non-zero.
     #[error("namespace revision must be positive")]
     InvalidRevision,
-    /// A generic request uses a response-only or otherwise invalid layout.
-    #[error("invalid operation field sequence: {0}")]
-    InvalidFieldSequence(&'static str),
 }
 
 type Result<T> = std::result::Result<T, ProtocolError>;
@@ -280,7 +257,7 @@ impl NamespacePolicy {
     }
 }
 
-/// Client-side representation of compact-v1 SET policy bits.
+/// Client-side SET policy selection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SetWireOptions {
     pub(crate) condition: SetCondition,
@@ -290,13 +267,6 @@ pub(crate) struct SetWireOptions {
 }
 
 impl SetWireOptions {
-    pub(crate) const NONE: Self = Self {
-        condition: SetCondition::Any,
-        expiration_mode: ExpirationMode::Inherit,
-        ttl_ms: None,
-        eviction_mode: EvictionMode::Inherit,
-    };
-
     pub(crate) const fn with_policies(
         condition: SetCondition,
         expiration_mode: ExpirationMode,
@@ -331,129 +301,6 @@ fn generated_retry_policy(opcode: Opcode, create_if_missing: bool) -> RequestRet
     }
 }
 
-/// A validated request using the generated operation framing contract.
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct GenericRequest {
-    opcode: Opcode,
-    value: Vec<u8>,
-    retry_policy: RequestRetryPolicy,
-}
-
-impl GenericRequest {
-    pub(crate) fn new(opcode: Opcode, value: Vec<u8>) -> Result<Self> {
-        let request = Self {
-            opcode,
-            value,
-            retry_policy: generated_retry_policy(opcode, false),
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    fn into_parts(self) -> Result<RequestParts> {
-        let mut prefix = RequestPrefix::new();
-        prefix.push(self.opcode as u8);
-        let request = operation_wire_spec(self.opcode).request;
-        match request.framing {
-            OperationLayoutFraming::Empty => {}
-            OperationLayoutFraming::Opaque => {
-                prefix.append_varuint(self.value.len() as u64);
-            }
-            OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
-                if request.frame == OperationFramePolicy::LengthDelimited {
-                    prefix.append_varuint(self.value.len() as u64);
-                }
-            }
-            OperationLayoutFraming::OptionalValues => {
-                return Err(ProtocolError::InvalidFieldSequence(
-                    "optional-value framing is response-only",
-                ));
-            }
-        }
-        Ok(RequestParts::new(prefix, [WireSegment::owned(self.value)])?)
-    }
-
-    fn validate(&self) -> Result<()> {
-        validate_value_length(self.value.len())?;
-        let request = operation_wire_spec(self.opcode).request;
-        match request.framing {
-            OperationLayoutFraming::Empty if self.value.is_empty() => Ok(()),
-            OperationLayoutFraming::Empty => Err(invalid_shape(self.opcode, 0, "empty body")),
-            OperationLayoutFraming::Opaque => {
-                if let Some(field) = request.fields.first() {
-                    validate_operation_field(field, &self.value)?;
-                }
-                Ok(())
-            }
-            OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
-                if request.fields.len() > MAX_OPERATION_REQUEST_FIELDS {
-                    return Err(ProtocolError::InvalidFieldSequence(
-                        "generated request field bound is stale",
-                    ));
-                }
-                let mut offsets = [(usize::MAX, usize::MAX); MAX_OPERATION_REQUEST_FIELDS];
-                decode_planned_fields(
-                    &self.value,
-                    request.fields,
-                    request.layout,
-                    &mut offsets[..request.fields.len()],
-                )?;
-                for (index, field) in request.fields.iter().enumerate() {
-                    let (start, end) = offsets[index];
-                    if start == usize::MAX {
-                        if field.required {
-                            return Err(ProtocolError::InvalidFieldSequence(
-                                "required request field is missing",
-                            ));
-                        }
-                    } else {
-                        validate_operation_field(field, &self.value[start..end])?;
-                    }
-                }
-                Ok(())
-            }
-            OperationLayoutFraming::OptionalValues => Err(ProtocolError::InvalidFieldSequence(
-                "optional-value framing is response-only",
-            )),
-        }
-    }
-}
-
-impl RequestBuilder for GenericRequest {
-    fn retry_policy(&self) -> RequestRetryPolicy {
-        self.retry_policy
-    }
-
-    fn into_parts(self) -> crate::Result<RequestParts> {
-        Self::into_parts(self).map_err(crate::Error::protocol)
-    }
-}
-
-fn validate_operation_field(
-    field: &openkache_protocol::OperationFieldPlan,
-    payload: &[u8],
-) -> Result<()> {
-    if field.encoded_width != 0 && payload.len() != field.encoded_width {
-        return Err(ProtocolError::InvalidFieldSequence(
-            "operation field does not match its declared fixed width",
-        ));
-    }
-    openkache_protocol::codec::validate_field_codecs_with_nested_widths(
-        payload,
-        field.codecs,
-        field.nested_codecs,
-        field.nested_widths,
-        field.nested_enum_values,
-        field.nested_union_tags,
-        field.enum_values,
-        field.union_tags,
-        openkache_protocol::wire_codec_kind,
-    )
-    .map_err(|error| {
-        ProtocolError::InvalidFieldCodec(String::from_utf8_lossy(error.message()).into_owned())
-    })
-}
-
 fn read_u64_be(input: &[u8]) -> Result<u64> {
     let bytes: [u8; NAMESPACE_ID_BYTES] = input
         .get(..NAMESPACE_ID_BYTES)
@@ -464,27 +311,4 @@ fn read_u64_be(input: &[u8]) -> Result<u64> {
         .try_into()
         .expect("slice length checked");
     Ok(u64::from_be_bytes(bytes))
-}
-
-fn validate_value_length(value_len: usize) -> Result<()> {
-    if value_len > MAX_VALUE_BYTES {
-        return Err(openkache_protocol::ProtocolError::ValueTooLarge {
-            size: value_len,
-            maximum: MAX_VALUE_BYTES,
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn invalid_shape(
-    opcode: Opcode,
-    expected_item_ids: usize,
-    expected_value: &'static str,
-) -> ProtocolError {
-    ProtocolError::InvalidRequestShape {
-        opcode,
-        expected_item_ids,
-        expected_value,
-    }
 }

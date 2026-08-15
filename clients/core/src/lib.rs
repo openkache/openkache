@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
-use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Response, Status};
-use protocol::{DraftV1Request, GenericRequest};
-use request::{RequestAttempt, RequestBuilder, RequestParts};
+use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Response, Status};
+use protocol::OperationRequest;
+use request::{PendingRequest, RequestAttempt, RequestAttempts, RequestBuilder};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -384,38 +384,6 @@ struct RequestFailure {
     invalidates_connection: bool,
 }
 
-enum RequestAttempts<R> {
-    Once(Option<R>),
-    Replay(Option<Arc<RequestParts>>),
-}
-
-impl<R: RequestBuilder> RequestAttempts<R> {
-    fn new(request: R, replayable: bool) -> Result<Self> {
-        if replayable {
-            request
-                .into_parts()
-                .map(|parts| Self::Replay(Some(Arc::new(parts))))
-        } else {
-            Ok(Self::Once(Some(request)))
-        }
-    }
-
-    fn next(&mut self, final_attempt: bool) -> Option<PendingRequest<R>> {
-        match self {
-            Self::Once(request) => request.take().map(PendingRequest::Once),
-            Self::Replay(parts) if final_attempt => parts.take().map(PendingRequest::Replay),
-            Self::Replay(parts) => parts
-                .as_ref()
-                .map(|parts| PendingRequest::Replay(Arc::clone(parts))),
-        }
-    }
-}
-
-enum PendingRequest<R> {
-    Once(R),
-    Replay(Arc<RequestParts>),
-}
-
 impl RequestFailure {
     fn before_send(error: Error) -> Self {
         let invalidates_connection = error.invalidates_connection_before_send();
@@ -497,10 +465,7 @@ impl<C: ClientConnection> Core<C> {
     async fn ping(&self) -> Result<Duration> {
         let started = Instant::now();
         let response = self
-            .request(
-                Operation::Ping,
-                GenericRequest::new(Opcode::Ping, Vec::new()).map_err(Error::protocol)?,
-            )
+            .request(Operation::Ping, OperationRequest::ping())
             .await?;
         expect_status(Operation::Ping, response.status, &[Status::Ok])?;
         if response.payload != b"PONG" {
@@ -526,13 +491,8 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Get,
-                DraftV1Request::new_scoped(
-                    Opcode::Get,
-                    namespace_id,
-                    Some(item_id.into_protocol()),
-                    Vec::new(),
-                )
-                .map_err(Error::protocol)?,
+                OperationRequest::get(namespace_id, item_id.into_protocol())
+                    .map_err(Error::protocol)?,
             )
             .await?;
         match response.status {
@@ -565,10 +525,9 @@ impl<C: ClientConnection> Core<C> {
         options: SetOptions,
     ) -> Result<SetOutcome> {
         validate_client_namespace_id(namespace_id)?;
-        let request = DraftV1Request::new_scoped_with_options(
-            Opcode::Set,
+        let request = OperationRequest::set(
             namespace_id,
-            Some(item_id.into_protocol()),
+            item_id.into_protocol(),
             options.into_wire_options()?,
             value.into_bytes(),
         )
@@ -602,13 +561,8 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Delete,
-                DraftV1Request::new_scoped(
-                    Opcode::Delete,
-                    namespace_id,
-                    Some(item_id.into_protocol()),
-                    Vec::new(),
-                )
-                .map_err(Error::protocol)?,
+                OperationRequest::delete(namespace_id, item_id.into_protocol())
+                    .map_err(Error::protocol)?,
             )
             .await?;
         match response.status {
@@ -632,8 +586,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Stats,
-                DraftV1Request::new_scoped(Opcode::Stats, namespace_id, None, Vec::new())
-                    .map_err(Error::protocol)?,
+                OperationRequest::stats(namespace_id).map_err(Error::protocol)?,
             )
             .await?;
         expect_status(Operation::Stats, response.status, &[Status::Ok])?;
@@ -652,8 +605,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::Sync,
-                DraftV1Request::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
-                    .map_err(Error::protocol)?,
+                OperationRequest::sync(namespace_id).map_err(Error::protocol)?,
             )
             .await?;
         expect_status(Operation::Sync, response.status, &[Status::Ok])?;
@@ -782,7 +734,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::NamespaceOpen,
-                DraftV1Request::namespace_open(name, create_if_missing, policy)
+                OperationRequest::namespace_open(name, create_if_missing, policy)
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -806,7 +758,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::NamespaceUpdatePolicy,
-                DraftV1Request::namespace_update_policy(namespace_id, expected_revision, policy)
+                OperationRequest::namespace_update_policy(namespace_id, expected_revision, policy)
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -852,7 +804,7 @@ impl<C: ClientConnection> Core<C> {
         let response = self
             .request(
                 Operation::NamespaceDelete,
-                DraftV1Request::namespace_delete(namespace_id, expected_revision)
+                OperationRequest::namespace_delete(namespace_id, expected_revision)
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -887,11 +839,9 @@ impl<C: ClientConnection> Core<C> {
             .await
             .map_err(RequestFailure::before_send)?;
         let request = match request {
-            PendingRequest::Once(request) => RequestAttempt::Once(
-                request
-                    .into_parts()
-                    .map_err(RequestFailure::before_send)?,
-            ),
+            PendingRequest::Once(request) => {
+                RequestAttempt::Once(request.into_frame().map_err(RequestFailure::before_send)?)
+            }
             PendingRequest::Replay(parts) => RequestAttempt::Replay(parts),
         };
         let write_timeout = deadline
