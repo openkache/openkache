@@ -10,7 +10,8 @@ use openkache_protocol::Opcode;
 
 use super::operation_api::{ApiModule, RegistrationBuilder, ServerOperationRegistration};
 use super::operation_capabilities::CapabilityCatalog;
-use super::operation_compatibility_bindings as bindings;
+use super::operation_compatibility_handlers as handlers;
+use super::operation_compatibility_prepare as prepare;
 use super::operation_compatibility_services::{
     COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, COMPATIBILITY_STORAGE_PORT,
     DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
@@ -93,58 +94,58 @@ fn initialize_module(
 }
 
 const OPERATIONS: &[ServerOperationRegistration] = &[
-    RegistrationBuilder::new(Opcode::Get, bindings::get_handler)
+    RegistrationBuilder::new(Opcode::Get, handlers::get_handler)
         .state::<GetState>()
-        .prepare(bindings::prepare_get_namespace)
+        .prepare(prepare::prepare_get_namespace)
         .authorize(operation_handlers::authorization_none)
         .read_only()
         .build(),
-    RegistrationBuilder::new(Opcode::Set, bindings::set_handler)
+    RegistrationBuilder::new(Opcode::Set, handlers::set_handler)
         .state::<SetState>()
-        .admit_header(bindings::admit_set_header)
-        .prepare(bindings::prepare_set)
+        .admit_header(prepare::admit_set_header)
+        .prepare(prepare::prepare_set)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-    RegistrationBuilder::new(Opcode::Delete, bindings::delete_handler)
+    RegistrationBuilder::new(Opcode::Delete, handlers::delete_handler)
         .state::<DeleteState>()
-        .prepare(bindings::prepare_delete_namespace)
+        .prepare(prepare::prepare_delete_namespace)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-    RegistrationBuilder::new(Opcode::Stats, bindings::stats_handler)
+    RegistrationBuilder::new(Opcode::Stats, handlers::stats_handler)
         .state::<StatsState>()
-        .prepare(bindings::prepare_stats_namespace)
+        .prepare(prepare::prepare_stats_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .read_only()
         .build(),
-    RegistrationBuilder::new(Opcode::Sync, bindings::sync_handler)
+    RegistrationBuilder::new(Opcode::Sync, handlers::sync_handler)
         .state::<SyncState>()
-        .prepare(bindings::prepare_sync_namespace)
+        .prepare(prepare::prepare_sync_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .mutation()
         .build(),
-    RegistrationBuilder::new(Opcode::NamespaceOpen, bindings::namespace_open_handler)
+    RegistrationBuilder::new(Opcode::NamespaceOpen, handlers::namespace_open_handler)
         .state::<NamespaceOpenState>()
-        .prepare(bindings::prepare_namespace_open)
+        .prepare(prepare::prepare_namespace_open)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(
         Opcode::NamespaceUpdatePolicy,
-        bindings::namespace_update_policy_handler,
+        handlers::namespace_update_policy_handler,
     )
     .state::<NamespaceUpdateState>()
-    .prepare(bindings::prepare_namespace_update)
+    .prepare(prepare::prepare_namespace_update)
     .authorize(operation_handlers::authorization_none)
     .mutation()
     .build(),
     RegistrationBuilder::new(
         Opcode::NamespaceDelete,
-        bindings::namespace_delete_handler,
+        handlers::namespace_delete_handler,
     )
     .state::<NamespaceDeleteState>()
-    .prepare(bindings::prepare_namespace_delete)
+    .prepare(prepare::prepare_namespace_delete)
     .authorize(operation_handlers::authorization_none)
     .mutation()
     .build(),

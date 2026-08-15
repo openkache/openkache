@@ -1,4 +1,4 @@
-//! API-owned decode/encode trampolines for namespace/item compatibility behavior.
+//! API-owned field decoding for namespace/item compatibility behavior.
 //!
 //! The shared dispatcher supplies a generated field view. This module turns
 //! protocol-v1 namespace and SET projections into the typed values expected by
@@ -7,19 +7,8 @@
 
 use openkache_protocol::{ItemId, OwnedRange};
 
-use super::operation_api::{
-    HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
-    PrepareError, PreparePlan, ResourceLock,
-};
-use super::operation_compatibility_behavior as compatibility_behavior;
-use super::operation_compatibility_services::{
-    DeleteState, GetState, NamespaceCapability, NamespaceDeleteState, NamespaceOpenState,
-    NamespaceUpdateState, SetState, StatsState, SyncState,
-};
-use super::operation_contract::{OperationStatus, request_fields};
-use super::operation_handlers::{OperationContext, OperationInputView};
-use super::operation_outcome::OperationOutcome;
-use super::operation_registry::OperationFuture;
+use super::operation_contract::request_fields;
+use super::operation_handlers::OperationInputView;
 use crate::protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy,
     OverridePolicy, SetCondition, SetOptions,
@@ -29,33 +18,6 @@ const INVALID_NAMESPACE_ID: &[u8] = b"namespace identity must be nonzero";
 const INVALID_EXPECTED_REVISION: &[u8] = b"expected revision must be nonzero";
 const INVALID_SET_TTL: &[u8] = b"SET explicit TTL must be positive";
 const INVALID_NAMESPACE_NAME: &[u8] = b"namespace-open name is not UTF-8";
-
-pub(super) fn admit_set_header(
-    input: &OperationHeaderView<'_>,
-    context: HeaderAdmissionContext<'_>,
-) -> Result<(), HeaderAdmissionError> {
-    let limits = context.state::<SetState>().ok_or_else(|| {
-        HeaderAdmissionError::new(
-            OperationStatus::InternalError,
-            b"compatibility module state is unavailable",
-        )
-    })?;
-    let value_len = input
-        .declared_body_len(request_fields::op_set::VALUE)
-        .ok_or_else(|| {
-            HeaderAdmissionError::new(
-                OperationStatus::InvalidRequest,
-                b"SET value declaration is unavailable",
-            )
-        })?;
-    if value_len > limits.max_item_bytes {
-        return Err(HeaderAdmissionError::new(
-            OperationStatus::TooLarge,
-            b"SET value exceeds the configured item limit",
-        ));
-    }
-    Ok(())
-}
 
 impl OperationInputView {
     fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
@@ -141,7 +103,7 @@ struct NamespaceOpenFields {
     policy: Option<NamespacePolicy>,
 }
 
-fn required_namespace_id(
+pub(super) fn required_namespace_id(
     input: &OperationInputView,
     field_index: usize,
 ) -> Result<u64, &'static [u8]> {
@@ -153,7 +115,7 @@ fn required_namespace_id(
     )
 }
 
-fn required_expected_revision(
+pub(super) fn required_expected_revision(
     input: &OperationInputView,
     field_index: usize,
 ) -> Result<u64, &'static [u8]> {
@@ -254,11 +216,11 @@ fn decode_namespace(
     })
 }
 
-fn decode_stats(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
+pub(super) fn decode_stats(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
     decode_namespace(input, request_fields::op_stats::NAMESPACE_ID)
 }
 
-fn decode_sync(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
+pub(super) fn decode_sync(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
     decode_namespace(input, request_fields::op_sync::NAMESPACE_ID)
 }
 
@@ -324,176 +286,6 @@ pub(super) fn decode_namespace_delete(
             request_fields::op_namespace_delete::EXPECTED_REVISION,
         )?,
     })
-}
-
-fn namespace_resource(
-    namespace_id: u64,
-    namespaces: &dyn NamespaceCapability,
-) -> std::result::Result<ResourceLock, PrepareError> {
-    namespaces.operation_lock(namespace_id).ok_or_else(|| {
-        PrepareError::resource_unavailable(
-            OperationStatus::NamespaceNotFound,
-            b"namespace does not exist",
-        )
-    })
-}
-
-fn operation_state<'a, T: 'static>(
-    context: PrepareContext<'a>,
-) -> std::result::Result<&'a T, PrepareError> {
-    context
-        .state::<T>()
-        .ok_or(PrepareError::resource_unavailable(
-            OperationStatus::InternalError,
-            b"compatibility module state is unavailable",
-        ))
-}
-
-fn global_resource(
-    namespaces: &dyn NamespaceCapability,
-) -> std::result::Result<ResourceLock, PrepareError> {
-    let shared = namespaces.lifecycle_lock().map_err(|_| {
-        PrepareError::resource_unavailable(
-            OperationStatus::InternalError,
-            b"namespace metadata is unavailable",
-        )
-    })?;
-    Ok(ResourceLock::unconditional(shared))
-}
-
-fn prepare_namespace_at(
-    input: &OperationInputView,
-    namespaces: &dyn NamespaceCapability,
-    field_index: usize,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_id =
-        required_namespace_id(input, field_index).map_err(PrepareError::invalid_request)?;
-    let resource = namespace_resource(namespace_id, namespaces)?;
-    Ok(PreparePlan::resource(resource))
-}
-
-/// Computes an opaque resource handle from the generated GET namespace field.
-pub(super) fn prepare_get_namespace(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let state = operation_state::<GetState>(context)?;
-    prepare_namespace_at(
-        input,
-        state.namespaces.as_ref(),
-        request_fields::op_get::NAMESPACE_ID,
-    )
-}
-
-pub(super) fn prepare_delete_namespace(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let state = operation_state::<DeleteState>(context)?;
-    prepare_namespace_at(
-        input,
-        state.namespaces.as_ref(),
-        request_fields::op_delete::NAMESPACE_ID,
-    )
-}
-
-pub(super) fn prepare_stats_namespace(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let state = operation_state::<StatsState>(context)?;
-    prepare_namespace_at(
-        input,
-        state.namespaces.as_ref(),
-        request_fields::op_stats::NAMESPACE_ID,
-    )
-}
-
-pub(super) fn prepare_sync_namespace(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let state = operation_state::<SyncState>(context)?;
-    prepare_namespace_at(
-        input,
-        state.namespaces.as_ref(),
-        request_fields::op_sync::NAMESPACE_ID,
-    )
-}
-
-pub(super) fn prepare_set(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_id = required_namespace_id(input, request_fields::op_set::NAMESPACE_ID)
-        .map_err(PrepareError::invalid_request)?;
-    validate_set_ttl(input).map_err(PrepareError::invalid_request)?;
-    let state = operation_state::<SetState>(context)?;
-    Ok(PreparePlan::resource(namespace_resource(
-        namespace_id,
-        state.namespaces.as_ref(),
-    )?))
-}
-
-fn prepare_lifecycle(
-    namespaces: &dyn NamespaceCapability,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    Ok(PreparePlan::resource(global_resource(namespaces)?))
-}
-
-pub(super) fn prepare_namespace_open(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    validate_namespace_open_name(input).map_err(PrepareError::invalid_request)?;
-    validate_namespace_policy_ttl(input, NAMESPACE_OPEN_POLICY_FIELDS)
-        .map_err(PrepareError::invalid_request)?;
-    let state = operation_state::<NamespaceOpenState>(context)?;
-    prepare_lifecycle(state.namespaces.as_ref())
-}
-
-pub(super) fn prepare_namespace_update(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_id = required_namespace_id(
-        input,
-        request_fields::op_namespace_update_policy::NAMESPACE_ID,
-    )
-    .map_err(PrepareError::invalid_request)?;
-    required_expected_revision(
-        input,
-        request_fields::op_namespace_update_policy::EXPECTED_REVISION,
-    )
-    .map_err(PrepareError::invalid_request)?;
-    validate_namespace_policy_ttl(input, NAMESPACE_UPDATE_POLICY_FIELDS)
-        .map_err(PrepareError::invalid_request)?;
-    let state = operation_state::<NamespaceUpdateState>(context)?;
-    Ok(PreparePlan::resource(namespace_resource(
-        namespace_id,
-        state.namespaces.as_ref(),
-    )?))
-}
-
-pub(super) fn prepare_namespace_delete(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_id =
-        required_namespace_id(input, request_fields::op_namespace_delete::NAMESPACE_ID)
-            .map_err(PrepareError::invalid_request)?;
-    required_expected_revision(
-        input,
-        request_fields::op_namespace_delete::EXPECTED_REVISION,
-    )
-    .map_err(PrepareError::invalid_request)?;
-    let state = operation_state::<NamespaceDeleteState>(context)?;
-    let namespaces = state.namespaces.as_ref();
-    let resource = namespace_resource(namespace_id, namespaces)?;
-    Ok(PreparePlan::from_resources([
-        global_resource(namespaces)?,
-        resource,
-    ]))
 }
 
 fn required_token<'a>(
@@ -578,7 +370,7 @@ fn decode_namespace_update_policy(
     decode_namespace_policy(input, NAMESPACE_UPDATE_POLICY_FIELDS)
 }
 
-fn validate_set_ttl(input: &OperationInputView) -> Result<(), &'static [u8]> {
+pub(super) fn validate_set_ttl(input: &OperationInputView) -> Result<(), &'static [u8]> {
     let expiration_mode = required_token(
         input,
         request_fields::op_set::EXPIRATION_MODE,
@@ -590,7 +382,9 @@ fn validate_set_ttl(input: &OperationInputView) -> Result<(), &'static [u8]> {
     validate_set_ttl_value(expiration_mode == b"explicit_ttl", ttl_ms)
 }
 
-fn validate_namespace_open_name(input: &OperationInputView) -> Result<(), &'static [u8]> {
+pub(super) fn validate_namespace_open_name(
+    input: &OperationInputView,
+) -> Result<(), &'static [u8]> {
     let name = input
         .bytes_at_index(request_fields::op_namespace_open::NAME)
         .ok_or(&b"namespace-open requires a name"[..])?;
@@ -617,6 +411,18 @@ fn validate_namespace_policy_ttl(
         .unsigned_long_at_index_result(Some(fields.default_ttl_milliseconds))
         .map_err(|_| &b"namespace TTL is malformed"[..])?;
     validate_namespace_policy_ttl_value(default_expiration, ttl_ms)
+}
+
+pub(super) fn validate_namespace_open_policy_ttl(
+    input: &OperationInputView,
+) -> Result<(), &'static [u8]> {
+    validate_namespace_policy_ttl(input, NAMESPACE_OPEN_POLICY_FIELDS)
+}
+
+pub(super) fn validate_namespace_update_policy_ttl(
+    input: &OperationInputView,
+) -> Result<(), &'static [u8]> {
+    validate_namespace_policy_ttl(input, NAMESPACE_UPDATE_POLICY_FIELDS)
 }
 
 fn validate_namespace_policy_ttl_value(
@@ -689,116 +495,3 @@ fn decode_override_policy(
         _ => Err(b"namespace override policy is malformed"),
     }
 }
-
-fn invalid_input<'a>(message: &'static [u8]) -> OperationFuture<'a> {
-    OperationFuture::ready(OperationOutcome::invalid_request(message))
-}
-
-fn missing_module_state<'a>() -> OperationFuture<'a> {
-    OperationFuture::ready(OperationOutcome::error(
-        super::operation_outcome::OperationError::status(
-            OperationStatus::InternalError,
-            b"compatibility module state is unavailable",
-        ),
-    ))
-}
-
-/// Builds a typed API binding from a generated field decoder and an
-/// API-owned behavior function.
-///
-/// Every compatibility operation follows the same boundary: decode the
-/// generated view, map malformed domain input to a transport-neutral error,
-/// then hand the typed value to behavior. The macro keeps that plumbing in one
-/// place while leaving the decoder and behavior names API-owned.
-macro_rules! typed_handler {
-    ($name:ident, $state:ty, mut $decode:ident, $behavior:path; $($port:ident),+) => {
-        pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
-            let Some(state) = context.state::<$state>() else {
-                return missing_module_state();
-            };
-            let OperationContext { mut input, .. } = context;
-            let decoded = match $decode(&mut input) {
-                Ok(input) => input,
-                Err(message) => return invalid_input(message),
-            };
-            OperationFuture::pending($behavior($(state.$port.as_ref(),)+ decoded))
-        }
-    };
-    ($name:ident, $state:ty, $decode:path, $behavior:path; $($port:ident),+) => {
-        pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
-            let Some(state) = context.state::<$state>() else {
-                return missing_module_state();
-            };
-            let OperationContext { input, .. } = context;
-            let decoded = match $decode(&input) {
-                Ok(input) => input,
-                Err(message) => return invalid_input(message),
-            };
-            OperationFuture::pending($behavior($(state.$port.as_ref(),)+ decoded))
-        }
-    };
-}
-
-typed_handler!(
-    get_handler,
-    GetState,
-    decode_get,
-    compatibility_behavior::get;
-    storage,
-    namespaces
-);
-typed_handler!(
-    namespace_open_handler,
-    NamespaceOpenState,
-    mut decode_namespace_open,
-    compatibility_behavior::namespace_open;
-    namespaces
-);
-typed_handler!(
-    namespace_update_policy_handler,
-    NamespaceUpdateState,
-    decode_namespace_revision,
-    compatibility_behavior::namespace_update_policy;
-    namespaces
-);
-typed_handler!(
-    namespace_delete_handler,
-    NamespaceDeleteState,
-    decode_namespace_delete,
-    compatibility_behavior::namespace_delete;
-    storage,
-    namespaces
-);
-typed_handler!(
-    set_handler,
-    SetState,
-    mut decode_set,
-    compatibility_behavior::set;
-    storage,
-    namespaces
-);
-typed_handler!(
-    delete_handler,
-    DeleteState,
-    decode_delete,
-    compatibility_behavior::delete;
-    storage,
-    namespaces
-);
-typed_handler!(
-    stats_handler,
-    StatsState,
-    decode_stats,
-    compatibility_behavior::stats;
-    storage,
-    namespaces,
-    observability
-);
-typed_handler!(
-    sync_handler,
-    SyncState,
-    decode_sync,
-    compatibility_behavior::sync;
-    storage,
-    namespaces
-);
