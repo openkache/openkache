@@ -409,6 +409,26 @@ export interface Wire_Operation_Field_Plan {
   readonly enum_values?: readonly string[]
 }
 
+/**
+ * Resolves one field's explicit codec or its canonical primitive default.
+ *
+ * @param field - Flattened modeled field metadata.
+ * @returns The effective codec, or `undefined` when the field has no supported default.
+ */
+export function effective_field_codec(
+  field: Wire_Operation_Field_Plan,
+): Wire_Codec_Name | undefined {
+  const explicit = field.codecs?.[0]
+  if (explicit !== undefined) {
+    return WIRE_CODEC_NAMES.includes(explicit as Wire_Codec_Name)
+      ? explicit as Wire_Codec_Name
+      : undefined
+  }
+  if (field.shape === "Long") return "u64_be"
+  if (field.enum_values !== undefined) return "enum"
+  return DEFAULT_SHAPE_CODECS[field.shape]
+}
+
 /** One protocol opcode and its Smithy semantic operation contract. */
 export interface Wire_Operation {
   readonly contract: Wire_Operation_Contract

@@ -899,8 +899,7 @@ function operation_shape_field_plan(
             ),
           )
         }
-        const enum_values = !codecs.includes("enum") ||
-            member_shape === undefined ||
+        const enum_values = member_shape === undefined ||
             shape_type(
               object_value(member_shape, `Smithy AST.shapes.${member_target}`),
               `Smithy AST.shapes.${member_target}`,
