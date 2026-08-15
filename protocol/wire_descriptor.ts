@@ -153,12 +153,16 @@ function request_wire_step_bound(
   return bound
 }
 
-/** Returns the maximum complete frame size for an explicit request-wire plan. */
+/**
+ * Returns the maximum complete frame size for one modeled request.
+ *
+ * Every request carries an opcode even when its body plan is absent or empty.
+ */
 export function request_wire_frame_bound(
   contract: Pick<Wire_Contract, "max_value_bytes" | "v1">,
   operation: Pick<Wire_Operation, "contract">,
 ): number {
   const plan = operation.contract.request_wire
-  if (plan === undefined) return 0
-  return contract.v1.opcode_bytes + request_wire_step_bound(contract, plan)
+  return contract.v1.opcode_bytes +
+    (plan === undefined ? 0 : request_wire_step_bound(contract, plan))
 }

@@ -272,7 +272,6 @@ impl PreparePlan {
 #[derive(Clone, Copy)]
 pub(super) struct ServerOperationRegistration {
     pub(super) opcode: Opcode,
-    pub(super) decode: super::operation_handlers::RequestDecoder,
     pub(super) handler: OperationHandler,
     pub(super) prepare: PrepareFn,
     pub(super) authorization: AuthorizationFn,
@@ -286,48 +285,23 @@ pub(super) struct ServerOperationRegistration {
 /// register a handler with:
 ///
 /// ```text
-/// RegistrationBuilder::generic(opcode, handler)
+/// RegistrationBuilder::new(opcode, handler)
 ///     .prepare(prepare)
 ///     .authorize(authorize)
 ///     .mutation()
 ///     .build()
 /// ```
-///
-/// Compatibility adapters use the same builder and replace only their request
-/// decoder. The dispatch loop never needs a second registration family.
 #[derive(Clone, Copy)]
 pub(super) struct RegistrationBuilder {
     registration: ServerOperationRegistration,
 }
 
 impl RegistrationBuilder {
-    /// Starts a route-less generic registration with safe read-only defaults.
-    pub(super) const fn generic(opcode: Opcode, handler: OperationHandler) -> Self {
-        Self::new(opcode, super::operation_handlers::decode_request, handler)
-    }
-
-    /// Starts a registration with an API-owned request projection.
-    ///
-    /// This is the only customization needed by a compatibility adapter or a
-    /// future wire-family adapter. The remaining behavior hooks are shared
-    /// with generic operations.
-    pub(super) const fn with_decoder(
-        opcode: Opcode,
-        decode: super::operation_handlers::RequestDecoder,
-        handler: OperationHandler,
-    ) -> Self {
-        Self::new(opcode, decode, handler)
-    }
-
-    const fn new(
-        opcode: Opcode,
-        decode: super::operation_handlers::RequestDecoder,
-        handler: OperationHandler,
-    ) -> Self {
+    /// Starts one operation registration with safe read-only defaults.
+    pub(super) const fn new(opcode: Opcode, handler: OperationHandler) -> Self {
         Self {
             registration: ServerOperationRegistration {
                 opcode,
-                decode,
                 handler,
                 prepare: prepare_none,
                 authorization: super::operation_handlers::authorization_none,
@@ -368,21 +342,18 @@ impl RegistrationBuilder {
 
 /// A self-contained API module contribution.
 ///
-/// The module owns one request projection, its behavior registrations, and
-/// optional capability-installation and validation hooks. The composition
-/// root supplies typed bootstrap capabilities to module-owned installation;
-/// it does not select hooks by API family.
+/// The module owns behavior registrations, the descriptor used by the public
+/// semantic request facade, and optional capability installation. Runtime
+/// frame projection is generated independently of API modules.
 #[derive(Clone, Copy)]
 pub(super) struct ApiModule {
     request_descriptor: &'static RequestDescriptor,
     operations: &'static [ServerOperationRegistration],
     install_capabilities: Option<ModuleCapabilityInstaller>,
-    validate: Option<ModuleValidator>,
 }
 
 pub(super) type ModuleCapabilityInstaller =
     fn(&mut CapabilityRegistry, &dyn CapabilityCatalog) -> Result<(), &'static str>;
-pub(super) type ModuleValidator = fn() -> Result<(), &'static str>;
 
 impl ApiModule {
     pub(super) const fn new(
@@ -393,17 +364,11 @@ impl ApiModule {
             request_descriptor,
             operations,
             install_capabilities: None,
-            validate: None,
         }
     }
 
     pub(super) const fn install_capabilities(mut self, install: ModuleCapabilityInstaller) -> Self {
         self.install_capabilities = Some(install);
-        self
-    }
-
-    pub(super) const fn validate_with(mut self, validate: ModuleValidator) -> Self {
-        self.validate = Some(validate);
         self
     }
 
@@ -426,18 +391,13 @@ impl ApiModule {
         Ok(())
     }
 
-    fn validate(self) -> Result<(), &'static str> {
-        match self.validate {
-            Some(validate) => validate(),
-            None => Ok(()),
-        }
-    }
 }
 
 /// Server catalogs assembled together from API-owned module contributions.
 ///
-/// Registering one module installs both its behavior and request projection,
-/// so an operation cannot be added to only one hot-path lookup table.
+/// Registering one module installs its behavior and public semantic request
+/// descriptor together. The descriptor catalog is not used by runtime frame
+/// admission.
 pub(super) struct ServerComposition {
     operations: OperationCatalog,
     request_descriptors: [Option<&'static RequestDescriptor>; Opcode::COUNT],
@@ -485,17 +445,6 @@ impl ServerComposition {
             self.modules[index]
                 .expect("registered API module is missing")
                 .install(registry, bootstrap)?;
-            index += 1;
-        }
-        Ok(())
-    }
-
-    pub(super) fn validate_modules(&'static self) -> Result<(), &'static str> {
-        let mut index = 0;
-        while index < self.module_count {
-            self.modules[index]
-                .expect("registered API module is missing")
-                .validate()?;
             index += 1;
         }
         Ok(())

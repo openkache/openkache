@@ -21,23 +21,6 @@ impl KacheServer {
         self
     }
 
-    /// Replaces the request-descriptor provider at the composition
-    /// boundary.
-    ///
-    /// The network workers and request lanes retain the provider as an opaque
-    /// dependency. This hook is crate-visible because descriptor implementations
-    /// are protocol composition concerns, not part of the public cache API;
-    /// it still lets an additional wire family or an integration fixture
-    /// select its descriptor without changing the parser or server lifecycle.
-    #[allow(dead_code)]
-    pub(crate) fn with_request_descriptor_provider<P>(mut self, provider: P) -> Self
-    where
-        P: RequestDescriptorProvider + 'static,
-    {
-        self.request_descriptor_provider = Arc::new(provider);
-        self
-    }
-
     /// Binds a server with an explicit SSD cache configuration.
     ///
     /// # Arguments
@@ -163,7 +146,6 @@ impl KacheServer {
             max_item_bytes,
             observability,
             capabilities: Arc::new(EmptyCapabilityCatalog),
-            request_descriptor_provider: Arc::new(ComposedRequestDescriptorProvider),
         })
     }
 
@@ -240,11 +222,8 @@ impl KacheServer {
             max_item_bytes,
             observability: observability_service,
             capabilities,
-            request_descriptor_provider,
             ..
         } = self;
-        let request_descriptor_provider: Arc<dyn RequestDescriptorProvider> =
-            request_descriptor_provider;
         let observability = observability_service.state();
         let (started_tx, started_rx) =
             channel::bounded::<std::result::Result<(), String>>(network.worker_count);
@@ -273,7 +252,6 @@ impl KacheServer {
                 namespaces: Arc::clone(&namespaces),
                 observability: Arc::clone(&observability),
                 capabilities: Arc::clone(&capabilities),
-                request_descriptor_provider: Arc::clone(&request_descriptor_provider),
             };
             let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
             let role = QuicNetworkRole {

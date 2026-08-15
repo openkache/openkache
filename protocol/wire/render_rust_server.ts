@@ -2,6 +2,7 @@
 
 import {
   derive_wire_operation_descriptor,
+  request_wire_frame_bound,
 } from "../wire_descriptor"
 import { effective_field_codec } from "../wire_types"
 import { fixed_plan_width } from "../wire_layout"
@@ -282,6 +283,12 @@ pub const fn wire_request_layout(opcode: Opcode) -> WireRequestLayout {
 
 /** Renders generic operation metadata for the server-owned adapter. */
 export function render_rust_server_contract(contract: Wire_Contract): string {
+  const max_request_frame_bytes = Math.max(
+    0,
+    ...(contract.operations ?? []).map((operation) =>
+      request_wire_frame_bound(contract, operation)
+    ),
+  )
   const operation_status_variants = contract.statuses
     .map((status) => `    ${status.name},`)
     .join("\n")
@@ -321,6 +328,10 @@ ${operation_status_wire_arms}
         }
     }
 }
+
+/// Maximum complete generated request frame across all modeled operations.
+pub const MAX_REQUEST_FRAME_BYTES: usize =
+    ${formatted_decimal(max_request_frame_bytes)};
 
 /// Aggregate payload ceiling for generic request layouts.
 ///
