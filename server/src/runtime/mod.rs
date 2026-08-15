@@ -1,8 +1,7 @@
 //! Multi-threaded KV cache runtime. [`ThreadedKvkache`] manages a pool of
 //! thread-per-core workers, each running the selected storage event loop. Handles
-//! request routing by key hash, benchmark batch execution, and graceful shutdown.
+//! request routing by key hash and graceful shutdown.
 
-use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,11 +33,9 @@ pub(crate) use storage_port::*;
 pub(crate) use storage_task::*;
 #[allow(unused_imports)]
 pub(crate) use worker::*;
-/// Workload and result contracts for driving bounded runtime batches.
-pub use worker::{BenchmarkBatchStats, BenchmarkOperation};
 pub use submission::{PendingStorageSubmission, StorageSubmission, SubmittedStorageValue};
 
-use self::completion::{CompletionReceiver, CompletionSlab};
+use self::completion::CompletionSlab;
 
 #[allow(unused_imports)]
 pub(crate) use crate::storage_backend::{
@@ -69,12 +66,6 @@ struct WorkerHandle {
 enum CoreTask {
     Run(Box<dyn FnOnce() + Send + 'static>),
     Shutdown,
-}
-
-struct PendingBenchmarkRequest<'a> {
-    response: CompletionReceiver<'a, Result<WorkerResponse>>,
-    kind: BenchmarkResponseKind,
-    started: std::time::Instant,
 }
 
 pub struct ThreadedKvkache {
@@ -1047,135 +1038,6 @@ impl ThreadedKvkache {
             copy_ssd_inline_value_once,
             lease_ssd_read_buffer,
         )
-    }
-
-    pub async fn run_benchmark_batch(
-        &self,
-        operations: Vec<BenchmarkOperation>,
-        max_outstanding_per_worker: usize,
-    ) -> Result<BenchmarkBatchStats> {
-        if max_outstanding_per_worker == 0 {
-            return Err(KvError::InvalidConfig(
-                "benchmark max outstanding per worker must be non-zero".into(),
-            ));
-        }
-        let max_outstanding = max_outstanding_per_worker
-            .checked_mul(self.workers.len())
-            .ok_or_else(|| KvError::InvalidConfig("benchmark window is too large".into()))?;
-        let mut pending = VecDeque::with_capacity(max_outstanding);
-        let mut stats = BenchmarkBatchStats {
-            latency_ns: Vec::with_capacity(operations.len()),
-            ..BenchmarkBatchStats::default()
-        };
-
-        for operation in operations {
-            if pending.len() == max_outstanding {
-                self.finish_benchmark_request(pending.pop_front().unwrap(), &mut stats)
-                    .await?;
-            }
-            let storage_key = self.storage_key(operation.item_id());
-            let worker = self.owner(&storage_key);
-            let (response_tx, response_rx) = self.workers[worker].completions.register();
-            let (request, kind) = match operation {
-                BenchmarkOperation::Get(_) => (
-                    WorkerRequest::Keyed {
-                        storage_key,
-                        command: keyed_storage::get(Operation::unknown(), response_tx),
-                    },
-                    BenchmarkResponseKind::Get,
-                ),
-                BenchmarkOperation::Set(_, value) => (
-                    WorkerRequest::Keyed {
-                        storage_key,
-                        command: keyed_storage::set(
-                            Operation::unknown(),
-                            StoredItemValue::new(value),
-                            StorageWriteOptions::default(),
-                            response_tx,
-                        ),
-                    },
-                    BenchmarkResponseKind::Set,
-                ),
-                BenchmarkOperation::Delete(_) => (
-                    WorkerRequest::Keyed {
-                        storage_key,
-                        command: keyed_storage::delete(Operation::unknown(), response_tx),
-                    },
-                    BenchmarkResponseKind::Delete,
-                ),
-            };
-            let started = std::time::Instant::now();
-            crate::network_runtime::timeout(
-                Duration::from_micros(self.config.timeouts.input_max_time_us),
-                self.workers[worker].sender.send_async_network(request),
-            )
-            .await
-            .map_err(|_| KvError::Timeout("benchmark request input"))?
-            .map_err(|_| KvError::Worker("benchmark request queue disconnected".into()))?;
-            pending.push_back(PendingBenchmarkRequest {
-                response: response_rx,
-                kind,
-                started,
-            });
-        }
-        while let Some(request) = pending.pop_front() {
-            self.finish_benchmark_request(request, &mut stats).await?;
-        }
-        Ok(stats)
-    }
-
-    async fn finish_benchmark_request(
-        &self,
-        pending: PendingBenchmarkRequest<'_>,
-        stats: &mut BenchmarkBatchStats,
-    ) -> Result<()> {
-        let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
-        let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
-        let remaining = request_limit
-            .saturating_sub(pending.started.elapsed())
-            .min(output_limit);
-        let response =
-            crate::network_runtime::timeout(remaining, pending.response.recv_async_network())
-                .await
-                .map_err(|_| KvError::Timeout("benchmark request output"))?
-                .map_err(|_| KvError::Worker("benchmark worker response disconnected".into()))??;
-        stats.operations += 1;
-        stats
-            .latency_ns
-            .push(pending.started.elapsed().as_nanos() as u64);
-        match (pending.kind, response) {
-            (
-                BenchmarkResponseKind::Get,
-                WorkerResponse::Data(keyed_storage::Response::Value(value)),
-            ) => {
-                stats.gets += 1;
-                stats.hits += value.is_some() as usize;
-            }
-            (
-                BenchmarkResponseKind::Set,
-                WorkerResponse::Data(keyed_storage::Response::Set(outcome)),
-            ) => {
-                stats.sets += 1;
-                match outcome {
-                    SetOutcome::Created => stats.creates += 1,
-                    SetOutcome::Replaced => stats.replaces += 1,
-                    SetOutcome::NotStored => {}
-                }
-            }
-            (
-                BenchmarkResponseKind::Delete,
-                WorkerResponse::Data(keyed_storage::Response::Deleted(deleted)),
-            ) => {
-                stats.deletes += 1;
-                stats.deleted += deleted as usize;
-            }
-            (_, response) => {
-                return Err(KvError::Worker(format!(
-                    "unexpected benchmark response: {response:?}"
-                )));
-            }
-        }
-        Ok(())
     }
 
     pub async fn stats(&self) -> Result<Vec<String>> {
