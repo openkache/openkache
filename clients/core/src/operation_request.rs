@@ -9,7 +9,8 @@ use openkache_protocol::{
     encode_request_frame, wire_request_layout,
 };
 
-use crate::request::{RequestBuilder, RequestRetryPolicy};
+use crate::Operation;
+use crate::request::{RequestBuilder, RequestContext};
 
 use super::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy,
@@ -19,18 +20,17 @@ use super::{
 /// One client request expressed only as generated numeric fields.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct OperationRequest {
-    opcode: Opcode,
+    context: RequestContext,
     fields: [Option<WireSegment>; MAX_OPERATION_REQUEST_FIELDS],
-    retry_policy: RequestRetryPolicy,
 }
 
 impl OperationRequest {
     pub(crate) fn ping() -> Self {
-        Self::new(Opcode::Ping, false)
+        Self::new(Opcode::Ping, Operation::Ping, false)
     }
 
     pub(crate) fn get(namespace_id: u64, item_id: ItemId) -> Result<Self> {
-        let mut request = Self::new(Opcode::Get, false);
+        let mut request = Self::new(Opcode::Get, Operation::Get, false);
         request.insert(
             op_get::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -48,7 +48,7 @@ impl OperationRequest {
         validate_value_length(value.len())?;
         let namespace_id = namespace_id_bytes(namespace_id)?;
         let fields = SetFields::from_options(options)?;
-        let mut request = Self::new(Opcode::Set, false);
+        let mut request = Self::new(Opcode::Set, Operation::Set, false);
         request.insert(op_set::NAMESPACE_ID, WireSegment::inline(&namespace_id));
         request.insert(op_set::ITEM_ID, WireSegment::inline(item_id.as_bytes()));
         request.insert(op_set::VALUE, WireSegment::owned(value));
@@ -71,7 +71,7 @@ impl OperationRequest {
     }
 
     pub(crate) fn delete(namespace_id: u64, item_id: ItemId) -> Result<Self> {
-        let mut request = Self::new(Opcode::Delete, false);
+        let mut request = Self::new(Opcode::Delete, Operation::Delete, false);
         request.insert(
             op_delete::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -81,7 +81,7 @@ impl OperationRequest {
     }
 
     pub(crate) fn stats(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::Stats, false);
+        let mut request = Self::new(Opcode::Stats, Operation::Stats, false);
         request.insert(
             op_stats::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -90,7 +90,7 @@ impl OperationRequest {
     }
 
     pub(crate) fn sync(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::Sync, false);
+        let mut request = Self::new(Opcode::Sync, Operation::Sync, false);
         request.insert(
             op_sync::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -110,7 +110,11 @@ impl OperationRequest {
             (false, Some(_)) => return Err(ProtocolError::UnexpectedNamespacePolicy),
             (false, None) => None,
         };
-        let mut request = Self::new(Opcode::NamespaceOpen, create_if_missing);
+        let mut request = Self::new(
+            Opcode::NamespaceOpen,
+            Operation::NamespaceOpen,
+            create_if_missing,
+        );
         request.insert(op_namespace_open::NAME, WireSegment::owned(name));
         request.insert(
             op_namespace_open::CREATE_IF_MISSING,
@@ -130,7 +134,11 @@ impl OperationRequest {
         let namespace_id = namespace_id_bytes(namespace_id)?;
         let expected_revision = revision_bytes(expected_revision)?;
         let policy = NamespacePolicyFields::new(policy)?;
-        let mut request = Self::new(Opcode::NamespaceUpdatePolicy, false);
+        let mut request = Self::new(
+            Opcode::NamespaceUpdatePolicy,
+            Operation::NamespaceUpdatePolicy,
+            false,
+        );
         request.insert(
             op_namespace_update_policy::NAMESPACE_ID,
             WireSegment::inline(&namespace_id),
@@ -144,7 +152,7 @@ impl OperationRequest {
     }
 
     pub(crate) fn namespace_delete(namespace_id: u64, expected_revision: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::NamespaceDelete, false);
+        let mut request = Self::new(Opcode::NamespaceDelete, Operation::NamespaceDelete, false);
         request.insert(
             op_namespace_delete::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -156,17 +164,20 @@ impl OperationRequest {
         Ok(request)
     }
 
-    fn new(opcode: Opcode, creates_resource: bool) -> Self {
+    fn new(opcode: Opcode, operation: Operation, creates_resource: bool) -> Self {
         Self {
-            opcode,
+            context: RequestContext {
+                opcode,
+                operation,
+                retry_policy: generated_retry_policy(opcode, creates_resource),
+            },
             fields: std::array::from_fn(|_| None),
-            retry_policy: generated_retry_policy(opcode, creates_resource),
         }
     }
 
     fn insert(&mut self, index: usize, field: WireSegment) {
         assert!(
-            index < wire_request_layout(self.opcode).field_count,
+            index < wire_request_layout(self.context.opcode).field_count,
             "generated request field index belongs to this operation"
         );
         let slot = self
@@ -211,12 +222,12 @@ impl OperationRequest {
 }
 
 impl RequestBuilder for OperationRequest {
-    fn retry_policy(&self) -> RequestRetryPolicy {
-        self.retry_policy
+    fn context(&self) -> RequestContext {
+        self.context
     }
 
     fn into_frame(self) -> crate::Result<OwnedRequestFrame> {
-        let layout = wire_request_layout(self.opcode);
+        let layout = wire_request_layout(self.context.opcode);
         if self
             .fields
             .get(layout.field_count..)
@@ -229,7 +240,7 @@ impl RequestBuilder for OperationRequest {
             ));
         }
         encode_request_frame(
-            self.opcode,
+            self.context.opcode,
             layout,
             self.fields.into_iter().take(layout.field_count),
         )
