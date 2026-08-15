@@ -740,16 +740,26 @@ fn install_capabilities(
     registry: &mut super::operation_capabilities::CapabilityRegistry,
     bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
 ) -> Result<(), &'static str> {
-    let resources = super::operation_api::downcast_capability(
+    let cache = super::operation_api::downcast_capability(
         bootstrap,
-        super::operation_runtime_capabilities::SERVER_RUNTIME_RESOURCES,
+        super::operation_runtime_ports::NETWORK_WORKER_CACHE,
     )
-    .ok_or("server runtime bootstrap capability is unavailable")?;
+    .ok_or("network worker cache port is unavailable")?;
+    let namespaces = super::operation_api::downcast_capability(
+        bootstrap,
+        super::operation_runtime_ports::NAMESPACE_REGISTRY,
+    )
+    .ok_or("namespace registry port is unavailable")?;
+    let observability = super::operation_api::downcast_capability(
+        bootstrap,
+        super::operation_runtime_ports::OBSERVABILITY_STATE,
+    )
+    .ok_or("observability state port is unavailable")?;
     install_compatibility_services(
         registry,
-        resources.cache.clone(),
-        resources.namespaces.clone(),
-        resources.observability.clone(),
+        cache.clone(),
+        namespaces.clone(),
+        observability.clone(),
     );
     Ok(())
 }
