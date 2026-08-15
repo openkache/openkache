@@ -4,12 +4,16 @@
 
 use std::error::Error;
 
-use openkache::ItemId;
-use openkache::{AppConfig, Command, KvError, ThreadedKvkache};
+use openkache::{AppConfig, Command, ItemId, KvError, StorageKey, ThreadedKvkache};
 use sha2::{Digest, Sha256};
 
 fn item_id(application_key: &[u8]) -> ItemId {
     ItemId::new(Sha256::digest(application_key).into())
+}
+
+fn storage_key(cache: &ThreadedKvkache, application_key: &[u8]) -> StorageKey {
+    let item_id = item_id(application_key);
+    cache.storage_key_for_identity(item_id.as_bytes())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -29,17 +33,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut cache = ThreadedKvkache::start(config)?;
     let operation: Result<(), Box<dyn Error>> = async {
         match command {
-            Command::Get(application_key) => match cache.get(item_id(&application_key)).await? {
+            Command::Get(application_key) => match cache
+                .get(storage_key(&cache, &application_key))
+                .await?
+            {
                 Some(value) => println!("{}", String::from_utf8_lossy(&value)),
                 None => println!("(nil)"),
             },
             Command::Set(application_key, value) => {
-                println!("{:?}", cache.set(item_id(&application_key), value).await?)
+                println!(
+                    "{:?}",
+                    cache
+                        .set(storage_key(&cache, &application_key), value)
+                        .await?
+                )
             }
             Command::Delete(application_key) => {
                 println!(
                     "{}",
-                    if cache.delete(item_id(&application_key)).await? {
+                    if cache
+                        .delete(storage_key(&cache, &application_key))
+                        .await?
+                    {
                         "Deleted"
                     } else {
                         "NotFound"

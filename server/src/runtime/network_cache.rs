@@ -1,14 +1,13 @@
 //! Network-worker view of the storage runtime.
 //!
 //! This adapter carries requester identity for telemetry and exposes both the
-//! compatibility cache calls and the neutral [`StoragePort`] through one
+//! neutral keyed cache calls and the [`StoragePort`] through one
 //! network-owned handle. Worker lifecycle and key derivation stay in sibling
 //! runtime modules.
 
 use std::sync::Arc;
 
 use crate::observability::{NetworkWorkerId, Operation};
-use crate::protocol::ItemId;
 use crate::types::StoredItemValue;
 use crate::{Result, SetOutcome, StorageKey};
 
@@ -80,20 +79,26 @@ impl NetworkWorkerCache {
             .await
     }
 
-    /// Routes an API-owned opaque storage key using the same hash as keyed
-    /// compatibility operations.
+    /// Routes an API-owned opaque storage key using the runtime routing hash.
     #[allow(dead_code)]
     pub(crate) fn worker_for(&self, storage_key: &StorageKey) -> usize {
         self.cache.owner(storage_key)
     }
 
-    pub(crate) fn namespace_item_storage_key(
+    pub(crate) fn storage_key_for_identity(
         &self,
-        namespace_id: u64,
-        item_id: ItemId,
+        identity: &[u8; crate::types::STORAGE_KEY_BYTES],
+    ) -> StorageKey {
+        self.cache.storage_key_for_identity(identity)
+    }
+
+    pub(crate) fn storage_key_for_domain_identity(
+        &self,
+        storage_domain_id: u64,
+        identity: &[u8; crate::types::STORAGE_KEY_BYTES],
     ) -> StorageKey {
         self.cache
-            .namespace_item_storage_key(namespace_id, item_id)
+            .storage_key_for_domain_identity(storage_domain_id, identity)
     }
 
     pub(crate) async fn get_storage_key(
@@ -131,40 +136,6 @@ impl NetworkWorkerCache {
     ) -> Result<bool> {
         self.cache
             .delete_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
-            .await
-    }
-
-    pub(crate) async fn get_stored(
-        &self,
-        item_id: ItemId,
-        operation: Operation,
-    ) -> Result<Option<StoredItemValue>> {
-        self.cache
-            .get_async_with_requester(item_id, operation, Some(self.network_worker))
-            .await
-    }
-
-    pub(crate) async fn set_with_options(
-        &self,
-        item_id: ItemId,
-        value: StoredItemValue,
-        options: StorageWriteOptions,
-        operation: Operation,
-    ) -> Result<SetOutcome> {
-        self.cache
-            .set_async_with_options_requester(
-                item_id,
-                value,
-                options,
-                operation,
-                Some(self.network_worker),
-            )
-            .await
-    }
-
-    pub(crate) async fn delete(&self, item_id: ItemId, operation: Operation) -> Result<bool> {
-        self.cache
-            .delete_async_with_requester(item_id, operation, Some(self.network_worker))
             .await
     }
 
