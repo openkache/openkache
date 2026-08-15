@@ -8,7 +8,7 @@ use crate::{MAX_VALUE_BYTES, OPCODE_BYTES, Opcode, ProtocolError, Result};
 
 pub(super) const MAX_REQUEST_FRAME_STATE_SLOTS: usize = 8;
 const EMPTY_BYTE_LENGTH: u16 = u16::MAX;
-const NO_REQUEST_FIELD: usize = usize::MAX;
+const NO_REQUEST_FIELD: u32 = u32::MAX;
 
 /// One canonical modeled field recovered while delimiting a request frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,9 +124,10 @@ pub struct RequestFrameLayout {
 /// Header metadata required to delimit one opaque request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestFrameHeader {
-    opcode: Opcode,
     encoded_len: usize,
-    value_len: usize,
+    body_len: usize,
+    opcode: Opcode,
+    body_field: u32,
 }
 
 impl RequestFrameHeader {
@@ -140,15 +141,27 @@ impl RequestFrameHeader {
         self.encoded_len
     }
 
-    /// Returns the body length carried by a value-bearing layout.
-    pub const fn value_len(self) -> usize {
-        self.value_len
+    /// Returns the opaque body length carried by the layout.
+    pub const fn body_len(self) -> usize {
+        self.body_len
+    }
+
+    /// Returns the numeric modeled field represented by the opaque body.
+    ///
+    /// Generic opaque and fixed bodies are not associated with a modeled
+    /// field and return `None`.
+    pub const fn body_field(self) -> Option<usize> {
+        if self.body_field == NO_REQUEST_FIELD {
+            None
+        } else {
+            Some(self.body_field as usize)
+        }
     }
 
     /// Returns the complete frame length.
     pub fn frame_len(self) -> Result<usize> {
         self.encoded_len
-            .checked_add(self.value_len)
+            .checked_add(self.body_len)
             .ok_or(ProtocolError::FrameLengthOverflow)
     }
 }
@@ -228,7 +241,48 @@ pub fn decode_request_frame_header(
     layout: RequestFrameLayout,
 ) -> Result<Option<RequestFrameHeader>> {
     decode_request_frame_metadata::<false>(prefix, layout, &mut [])
-        .map(|decoded| decoded.map(|decoded| decoded.header))
+}
+
+/// Projects modeled fields available after decoding only the request header.
+///
+/// Header-resident fixed, packed, and integer fields use the same canonical
+/// projections as complete-frame decoding. A terminal body remains
+/// [`RequestFieldProjection::Missing`]; callers can inspect its declared
+/// length and numeric field through [`RequestFrameHeader`].
+///
+/// The output is reset to [`RequestFieldProjection::Missing`] when the header
+/// is incomplete or malformed.
+pub fn project_request_frame_header(
+    prefix: &[u8],
+    layout: RequestFrameLayout,
+    fields: &mut [RequestFieldProjection],
+) -> Result<Option<RequestFrameHeader>> {
+    fields.fill(RequestFieldProjection::Missing);
+    let result = (|| {
+        if fields.len() < layout.field_count {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "request field projection output is too short",
+            ));
+        }
+        let header = decode_request_frame_metadata::<true>(
+            prefix,
+            layout,
+            &mut fields[..layout.field_count],
+        )?;
+        if header
+            .and_then(RequestFrameHeader::body_field)
+            .is_some_and(|field| field >= layout.field_count)
+        {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "request body field projection is out of range",
+            ));
+        }
+        Ok(header)
+    })();
+    if !matches!(result, Ok(Some(_))) {
+        fields.fill(RequestFieldProjection::Missing);
+    }
+    result
 }
 
 /// Projects modeled fields from one complete request frame.
@@ -243,38 +297,30 @@ pub fn project_request_frame(
 ) -> Result<RequestFrameHeader> {
     fields.fill(RequestFieldProjection::Missing);
     let result = (|| {
-        if fields.len() < layout.field_count {
-            return Err(ProtocolError::InvalidFieldSequence(
-                "request field projection output is too short",
-            ));
-        }
-        let decoded = decode_request_frame_metadata::<true>(
-            frame,
-            layout,
-            &mut fields[..layout.field_count],
-        )?
-        .ok_or(ProtocolError::FrameTooShort {
-            expected: OPCODE_BYTES,
-            actual: frame.len(),
-        })?;
-        let expected = decoded.header.frame_len()?;
+        let header = project_request_frame_header(frame, layout, fields)?.ok_or(
+            ProtocolError::FrameTooShort {
+                expected: OPCODE_BYTES,
+                actual: frame.len(),
+            },
+        )?;
+        let expected = header.frame_len()?;
         if frame.len() != expected {
             return Err(ProtocolError::FrameLength {
                 expected,
                 actual: frame.len(),
             });
         }
-        if decoded.value_field != NO_REQUEST_FIELD {
+        if let Some(body_field) = header.body_field() {
             set_request_field_projection(
                 &mut fields[..layout.field_count],
-                decoded.value_field,
+                body_field,
                 RequestFieldProjection::Borrowed {
-                    start: decoded.header.encoded_len,
+                    start: header.encoded_len,
                     end: expected,
                 },
             )?;
         }
-        Ok(decoded.header)
+        Ok(header)
     })();
     if result.is_err() {
         fields.fill(RequestFieldProjection::Missing);
@@ -282,16 +328,11 @@ pub fn project_request_frame(
     result
 }
 
-struct DecodedRequestFrame {
-    header: RequestFrameHeader,
-    value_field: usize,
-}
-
 fn decode_request_frame_metadata<const PROJECT_FIELDS: bool>(
     prefix: &[u8],
     layout: RequestFrameLayout,
     projections: &mut [RequestFieldProjection],
-) -> Result<Option<DecodedRequestFrame>> {
+) -> Result<Option<RequestFrameHeader>> {
     if prefix.len() < OPCODE_BYTES {
         return Ok(None);
     }
@@ -312,21 +353,19 @@ fn decode_request_frame_metadata<const PROJECT_FIELDS: bool>(
             "byte-length prefix has no matching body step",
         ));
     }
-    Ok(Some(DecodedRequestFrame {
-        header: RequestFrameHeader {
-            opcode,
-            encoded_len: state.cursor,
-            value_len: state.value_len,
-        },
-        value_field: state.value_field,
+    Ok(Some(RequestFrameHeader {
+        encoded_len: state.cursor,
+        body_len: state.body_len,
+        opcode,
+        body_field: state.body_field,
     }))
 }
 
 struct RequestFrameDecodeState {
     cursor: usize,
-    value_len: usize,
-    value_field: usize,
-    value_length_seen: bool,
+    body_len: usize,
+    body_field: u32,
+    body_length_seen: bool,
     terminal_body: bool,
     packed_values: [u8; MAX_REQUEST_FRAME_STATE_SLOTS],
     packed_present: u8,
@@ -337,9 +376,9 @@ impl RequestFrameDecodeState {
     const fn new() -> Self {
         Self {
             cursor: OPCODE_BYTES,
-            value_len: 0,
-            value_field: NO_REQUEST_FIELD,
-            value_length_seen: false,
+            body_len: 0,
+            body_field: NO_REQUEST_FIELD,
+            body_length_seen: false,
             terminal_body: false,
             packed_values: [0; MAX_REQUEST_FRAME_STATE_SLOTS],
             packed_present: 0,
@@ -347,16 +386,33 @@ impl RequestFrameDecodeState {
         }
     }
 
-    fn set_value_length(&mut self, value_len: usize, terminal: bool, field: usize) -> Result<()> {
-        if self.value_length_seen {
+    fn set_body_length(
+        &mut self,
+        body_len: usize,
+        terminal: bool,
+        field: Option<usize>,
+    ) -> Result<()> {
+        if self.body_length_seen {
             return Err(ProtocolError::InvalidFieldSequence(
-                "request layout declares more than one value body",
+                "request layout declares more than one body",
             ));
         }
-        validate_value_length(value_len)?;
-        self.value_len = value_len;
-        self.value_field = field;
-        self.value_length_seen = true;
+        validate_body_length(body_len)?;
+        self.body_len = body_len;
+        self.body_field = match field {
+            Some(field) => u32::try_from(field).map_err(|_| {
+                ProtocolError::InvalidFieldSequence(
+                    "request body field index exceeds header storage",
+                )
+            })?,
+            None => NO_REQUEST_FIELD,
+        };
+        if self.body_field == NO_REQUEST_FIELD && field.is_some() {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "request body field index exceeds header storage",
+            ));
+        }
+        self.body_length_seen = true;
         self.terminal_body = terminal;
         Ok(())
     }
@@ -401,26 +457,19 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                 state.cursor = end;
             }
             RequestFrameStep::FixedBody { bytes } => {
-                state.set_value_length(bytes, true, NO_REQUEST_FIELD)?;
-                let body_end = state
-                    .cursor
-                    .checked_add(bytes)
-                    .ok_or(ProtocolError::FrameLengthOverflow)?;
-                if prefix.len() < body_end {
-                    return Ok(None);
-                }
+                state.set_body_length(bytes, true, None)?;
             }
             RequestFrameStep::ValueLength => {
                 let Some((length, encoded_len)) = crate::decode_varuint(
                     prefix.get(state.cursor..).unwrap_or_default(),
-                    "request value length",
+                    "request body length",
                 )?
                 else {
                     return Ok(None);
                 };
-                let value_len =
+                let body_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-                state.set_value_length(value_len, true, NO_REQUEST_FIELD)?;
+                state.set_body_length(body_len, true, None)?;
                 state.cursor = state
                     .cursor
                     .checked_add(encoded_len)
@@ -429,14 +478,14 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
             RequestFrameStep::ValueLengthPrefix => {
                 let Some((length, encoded_len)) = crate::decode_varuint(
                     prefix.get(state.cursor..).unwrap_or_default(),
-                    "request value length",
+                    "request body length",
                 )?
                 else {
                     return Ok(None);
                 };
-                let value_len =
+                let body_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-                state.set_value_length(value_len, false, NO_REQUEST_FIELD)?;
+                state.set_body_length(body_len, false, None)?;
                 state.cursor = state
                     .cursor
                     .checked_add(encoded_len)
@@ -446,17 +495,17 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
             | RequestFrameStep::ValueLengthPrefixField { field } => {
                 let Some((length, encoded_len)) = crate::decode_varuint(
                     prefix.get(state.cursor..).unwrap_or_default(),
-                    "request value length",
+                    "request body length",
                 )?
                 else {
                     return Ok(None);
                 };
-                let value_len =
+                let body_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-                state.set_value_length(
-                    value_len,
+                state.set_body_length(
+                    body_len,
                     matches!(*step, RequestFrameStep::TrailingField { .. }),
-                    field,
+                    Some(field),
                 )?;
                 state.cursor = state
                     .cursor
@@ -702,10 +751,10 @@ fn set_request_field_projection(
     Ok(())
 }
 
-fn validate_value_length(value_len: usize) -> Result<()> {
-    if value_len > MAX_VALUE_BYTES {
+fn validate_body_length(body_len: usize) -> Result<()> {
+    if body_len > MAX_VALUE_BYTES {
         return Err(ProtocolError::ValueTooLarge {
-            size: value_len,
+            size: body_len,
             maximum: MAX_VALUE_BYTES,
         });
     }

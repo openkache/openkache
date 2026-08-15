@@ -92,7 +92,7 @@ pub use optional_values::{
 pub use request::{
     OpaqueRequestFrame, RequestFieldProjection, RequestFrameHeader, RequestFrameLayout,
     RequestFramePackedField, RequestFramePackedValue, RequestFrameStep,
-    decode_request_frame_header, project_request_frame,
+    decode_request_frame_header, project_request_frame, project_request_frame_header,
 };
 pub use request_encoder::encode_request_frame;
 pub use response::{

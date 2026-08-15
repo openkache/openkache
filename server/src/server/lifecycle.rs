@@ -97,7 +97,6 @@ impl KacheServer {
             return Err(ServerError::NetworkWorker(message.into()));
         }
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
-        let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
         let storage_directory = config.storage.directory.clone();
         let observability = ObservabilityService::new(
@@ -143,7 +142,6 @@ impl KacheServer {
             namespaces: Arc::new(Mutex::new(namespaces)),
             network,
             request_timeout,
-            max_item_bytes,
             observability,
             capabilities: Arc::new(EmptyCapabilityCatalog),
         })
@@ -219,7 +217,6 @@ impl KacheServer {
             namespaces,
             network,
             request_timeout,
-            max_item_bytes,
             observability: observability_service,
             capabilities,
             ..
@@ -248,7 +245,6 @@ impl KacheServer {
                 request_timeout,
                 max_stream_lanes: network.max_stream_lanes_per_connection,
                 request_budget: request_budget.clone(),
-                max_item_bytes,
                 namespaces: Arc::clone(&namespaces),
                 observability: Arc::clone(&observability),
                 capabilities: Arc::clone(&capabilities),

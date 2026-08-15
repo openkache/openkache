@@ -75,6 +75,10 @@ pub struct ThreadedKvkache {
 }
 
 impl ThreadedKvkache {
+    pub(crate) fn max_item_bytes(&self) -> usize {
+        self.config.storage.max_item_size_mib * 1024 * 1024
+    }
+
     pub fn start(config: crate::config::AppConfig) -> Result<Self> {
         config.validate()?;
         Self::start_validated(config)

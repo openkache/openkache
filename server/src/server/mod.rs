@@ -122,7 +122,6 @@ pub struct KacheServer {
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     network: NetworkConfig,
     request_timeout: Duration,
-    max_item_bytes: usize,
     observability: ObservabilityService,
     capabilities: Arc<dyn CapabilityCatalog>,
 }

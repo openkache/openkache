@@ -9,12 +9,71 @@
 //! becoming a second operation registry. Adding an API changes its generated
 //! contract and API-owned registration/binding, not the network loop.
 
-use openkache_protocol::Opcode;
+use openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
 use super::operation_api;
 use super::operation_handlers;
 use super::operation_transport;
+
+pub(super) struct HeaderAdmissionRejection {
+    opcode: Opcode,
+    response: operation_transport::OperationResponse,
+    elapsed: std::time::Duration,
+}
+
+impl HeaderAdmissionRejection {
+    pub(super) const fn opcode(&self) -> Opcode {
+        self.opcode
+    }
+
+    pub(super) const fn status(&self) -> openkache_protocol::Status {
+        self.response.status()
+    }
+
+    pub(super) const fn elapsed(&self) -> std::time::Duration {
+        self.elapsed
+    }
+
+    pub(super) fn into_response(self) -> operation_transport::OperationResponse {
+        self.response
+    }
+}
+
+/// Runs an API-owned request-header admission hook before the transport reads
+/// the declared body.
+///
+/// The dense registration lookup is the only operation selection here.
+/// Generated numeric body-field identity keeps the dispatcher independent of
+/// field roles, storage ceilings, and compatibility API names.
+pub(super) fn admit_request_header(
+    header: RequestFrameHeader,
+    prefix: &[u8],
+    capabilities: &dyn super::operation_capabilities::CapabilityCatalog,
+) -> Result<(), HeaderAdmissionRejection> {
+    let Some(registration) = operation_api::server_operation(header.opcode()) else {
+        return Ok(());
+    };
+    let Some(admit) = registration.admit_header else {
+        return Ok(());
+    };
+    let view = operation_api::OperationHeaderView::new(header, prefix);
+    let started = std::time::Instant::now();
+    admit(
+        &view,
+        operation_api::HeaderAdmissionContext { capabilities },
+    )
+    .map_err(|error| {
+        let response = operation_transport::contract_error_response_status(
+            header.opcode(), error.status, error.message,
+        );
+        HeaderAdmissionRejection {
+            opcode: header.opcode(),
+            response,
+            elapsed: started.elapsed(),
+        }
+    })
+}
 
 /// Returns whether a request may have crossed a mutation commit point.
 ///

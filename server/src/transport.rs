@@ -13,7 +13,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use crate::QuicBackend;
 use crate::network_runtime;
 use crate::protocol::RequestFrame as ProtocolRequestFrame;
-use openkache_protocol::ResponseParts;
+use openkache_protocol::{RequestFrameHeader, ResponseParts};
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use openkache_protocol::ResponseSegment;
 
@@ -161,13 +161,13 @@ pub(super) trait Connection {
 
 /// Receive half of one request stream.
 pub(super) trait ReceiveStream {
-    fn read_request(
+    fn read_request<T>(
         &mut self,
         maximum: usize,
-        maximum_value: usize,
         timeout: Duration,
         budget: &RequestBudget,
-    ) -> impl Future<Output = Result<RequestFrame, StreamReadError>>;
+        admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
+    ) -> impl Future<Output = Result<Result<RequestFrame, T>, StreamReadError>>;
 }
 
 /// Send half of one response stream.
@@ -377,14 +377,14 @@ trait RequestByteStream {
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-async fn read_buffered_request<S: RequestByteStream>(
+async fn read_buffered_request<S: RequestByteStream, T>(
     stream: &mut S,
     backend: &'static str,
     maximum: usize,
-    maximum_value: usize,
     timeout: Duration,
     budget: &RequestBudget,
-) -> Result<RequestFrame, StreamReadError> {
+    admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
+) -> Result<Result<RequestFrame, T>, StreamReadError> {
     let first = network_runtime::timeout(timeout, stream.append_chunk(Vec::new(), 1, backend))
         .await
         .map_err(|_| StreamReadError::Timeout)?
@@ -421,9 +421,6 @@ async fn read_buffered_request<S: RequestByteStream>(
     })
     .await
     .map_err(|_| StreamReadError::Timeout)??;
-    if header.value_len() > maximum_value {
-        return Err(StreamReadError::TooLarge);
-    }
     let (mut frame, frame_len) = network_runtime::timeout(timeout, async {
         let frame = frame;
         let frame_len = header.frame_len()?;
@@ -434,7 +431,10 @@ async fn read_buffered_request<S: RequestByteStream>(
     if frame_len > maximum {
         return Err(StreamReadError::TooLarge);
     }
-    let permit = budget.acquire(header.value_len(), timeout).await?;
+    if let Err(rejection) = admit(header, &frame[..header.encoded_len()]) {
+        return Ok(Err(rejection));
+    }
+    let permit = budget.acquire(header.body_len(), timeout).await?;
     let body = network_runtime::timeout(timeout, async {
         while frame.len() < frame_len {
             let previous_len = frame.len();
@@ -463,11 +463,11 @@ async fn read_buffered_request<S: RequestByteStream>(
             Err(_) => false,
             Ok(result) => result.map_err(StreamReadError::Transport)?,
         };
-    Ok(RequestFrame::with_trailing_bytes(
+    Ok(Ok(RequestFrame::with_trailing_bytes(
         body,
         permit,
         has_trailing_bytes,
-    ))
+    )))
 }
 
 /// Stable transport failure with backend and operation context.

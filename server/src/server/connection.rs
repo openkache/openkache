@@ -6,7 +6,6 @@ pub(super) struct NetworkWorkerLimits {
     pub(super) request_timeout: Duration,
     pub(super) max_stream_lanes: usize,
     pub(super) request_budget: RequestBudget,
-    pub(super) max_item_bytes: usize,
     pub(super) namespaces: Arc<Mutex<NamespaceRegistry>>,
     pub(super) observability: Arc<ObservabilityState>,
     pub(super) capabilities: Arc<dyn CapabilityCatalog>,
@@ -62,7 +61,6 @@ async fn run_network_worker<E: TransportEndpoint>(
         request_timeout,
         max_stream_lanes,
         request_budget,
-        max_item_bytes,
         namespaces: _,
         observability,
         capabilities,
@@ -79,7 +77,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, network_shard, access_policy, request_timeout,
-                        max_stream_lanes, request_budget.clone(), max_item_bytes,
+                        max_stream_lanes, request_budget.clone(),
                         Arc::clone(&capabilities),
                     ));
                 }
@@ -95,7 +93,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, network_shard, access_policy, request_timeout,
-                        max_stream_lanes, request_budget.clone(), max_item_bytes,
+                        max_stream_lanes, request_budget.clone(),
                         Arc::clone(&capabilities),
                     ));
                 }
@@ -117,7 +115,6 @@ async fn serve_incoming<I: TransportIncoming>(
     request_timeout: Duration,
     max_stream_lanes: usize,
     request_budget: RequestBudget,
-    max_item_bytes: usize,
     capabilities: Arc<dyn CapabilityCatalog>,
 ) {
     match incoming.connect().await {
@@ -137,7 +134,6 @@ async fn serve_incoming<I: TransportIncoming>(
                 request_timeout,
                 max_stream_lanes,
                 request_budget,
-                max_item_bytes,
                 capabilities,
             )
             .await;
@@ -155,7 +151,6 @@ async fn serve_connection<C: TransportConnection>(
     request_timeout: Duration,
     max_stream_lanes: usize,
     request_budget: RequestBudget,
-    max_item_bytes: usize,
     capabilities: Arc<dyn CapabilityCatalog>,
 ) {
     let mut streams = FuturesUnordered::new();
@@ -175,7 +170,6 @@ async fn serve_connection<C: TransportConnection>(
                         authorization.clone(),
                         request_timeout,
                         request_budget.clone(),
-                        max_item_bytes,
                         Arc::clone(&capabilities),
                     ));
                 }
@@ -196,7 +190,6 @@ async fn serve_connection<C: TransportConnection>(
                             authorization.clone(),
                             request_timeout,
                             request_budget.clone(),
-                            max_item_bytes,
                             Arc::clone(&capabilities),
                         ));
                     }
@@ -217,7 +210,6 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     authorization: operation_handlers::AuthorizationContext,
     request_timeout: Duration,
     request_budget: RequestBudget,
-    max_item_bytes: usize,
     capabilities: Arc<dyn CapabilityCatalog>,
 ) {
     let _stream_guard = ActiveStream { network_shard };
@@ -225,13 +217,30 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         let mut frame = match receive
             .read_request(
                 crate::protocol::max_request_frame_bytes(),
-                max_item_bytes,
                 request_timeout,
                 &request_budget,
+                |header, prefix| {
+                    operation_dispatch::admit_request_header(
+                        header,
+                        prefix,
+                        capabilities.as_ref(),
+                    )
+                },
             )
             .await
         {
-            Ok(frame) => frame,
+            Ok(Ok(frame)) => frame,
+            Ok(Err(rejection)) => {
+                network_shard.record_request(
+                    operation_contract::telemetry_operation(rejection.opcode()),
+                    rejection.status(),
+                    rejection.elapsed(),
+                );
+                if !write_response(&mut send, rejection.into_response(), request_timeout).await {
+                    network_shard.response_write_failure();
+                }
+                break;
+            }
             Err(StreamReadError::Timeout) => {
                 network_shard.request_read_timeout();
                 if !write_response(

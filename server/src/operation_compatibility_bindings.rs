@@ -8,12 +8,13 @@
 use openkache_protocol::{ItemId, Opcode, OwnedRange};
 
 use super::operation_api::{
-    ApiModule, PrepareContext, PrepareError, PreparePlan, RegistrationBuilder, ResourceLock,
+    ApiModule, HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
+    PrepareError, PreparePlan, RegistrationBuilder, ResourceLock,
 };
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
-    COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_SERVICES, CompatibilityResourceResolver,
-    CompatibilityServices,
+    COMPATIBILITY_BODY_LIMITS, COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_SERVICES,
+    CompatibilityBodyLimits, CompatibilityResourceResolver, CompatibilityServices,
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::{self, OperationContext, OperationInputView};
@@ -28,6 +29,35 @@ const INVALID_NAMESPACE_ID: &[u8] = b"namespace identity must be nonzero";
 const INVALID_EXPECTED_REVISION: &[u8] = b"expected revision must be nonzero";
 const INVALID_SET_TTL: &[u8] = b"SET explicit TTL must be positive";
 const INVALID_NAMESPACE_NAME: &[u8] = b"namespace-open name is not UTF-8";
+
+fn admit_set_header(
+    input: &OperationHeaderView<'_>,
+    context: HeaderAdmissionContext<'_>,
+) -> Result<(), HeaderAdmissionError> {
+    let limits: &CompatibilityBodyLimits =
+        super::operation_api::downcast_capability(context.capabilities, COMPATIBILITY_BODY_LIMITS)
+            .ok_or_else(|| {
+                HeaderAdmissionError::new(
+                    OperationStatus::InternalError,
+                    b"SET body limits are unavailable",
+                )
+            })?;
+    let value_len = input
+        .declared_body_len(request_fields::op_set::VALUE)
+        .ok_or_else(|| {
+            HeaderAdmissionError::new(
+                OperationStatus::InvalidRequest,
+                b"SET value declaration is unavailable",
+            )
+        })?;
+    if value_len > limits.max_item_bytes {
+        return Err(HeaderAdmissionError::new(
+            OperationStatus::TooLarge,
+            b"SET value exceeds the configured item limit",
+        ));
+    }
+    Ok(())
+}
 
 /// Installs the compatibility adapter's concrete service bundle at the API
 /// composition boundary. The network loop only calls the aggregate operation
@@ -731,6 +761,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
         .read_only()
         .build(),
     RegistrationBuilder::new(Opcode::Set, set_handler)
+        .admit_header(admit_set_header)
         .prepare(prepare_set)
         .authorize(operation_handlers::authorization_none)
         .mutation()

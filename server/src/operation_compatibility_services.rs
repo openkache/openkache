@@ -71,6 +71,14 @@ impl CompatibilityResourceResolver {
 pub(super) const COMPATIBILITY_RESOURCE_RESOLVER: CapabilityKey<CompatibilityResourceResolver> =
     CapabilityKey::new("openkache.compatibility.resource_resolver");
 
+/// Request-body limits owned by the current compatibility API adapter.
+pub(super) struct CompatibilityBodyLimits {
+    pub(super) max_item_bytes: usize,
+}
+
+pub(super) const COMPATIBILITY_BODY_LIMITS: CapabilityKey<CompatibilityBodyLimits> =
+    CapabilityKey::new("openkache.compatibility.body_limits");
+
 /// Adds the compatibility adapter's worker-scoped capabilities.
 ///
 /// Generic runtime capabilities are installed by the server composition root
@@ -82,6 +90,12 @@ pub(super) fn install_compatibility_services(
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     observability: Arc<ObservabilityState>,
 ) {
+    registry.insert(
+        COMPATIBILITY_BODY_LIMITS,
+        CompatibilityBodyLimits {
+            max_item_bytes: cache.max_item_bytes(),
+        },
+    );
     let services: Arc<dyn CompatibilityServices + Send + Sync> = Arc::new(ServerContext::new(
         Arc::clone(&cache),
         Arc::clone(&namespaces),

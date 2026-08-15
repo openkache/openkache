@@ -134,14 +134,14 @@ impl super::RequestByteStream for ReceiveStream {
 }
 
 impl super::ReceiveStream for ReceiveStream {
-    async fn read_request(
+    async fn read_request<T>(
         &mut self,
         maximum: usize,
-        maximum_value: usize,
         timeout: Duration,
         budget: &RequestBudget,
-    ) -> Result<RequestFrame, StreamReadError> {
-        read_buffered_request(self, NAME, maximum, maximum_value, timeout, budget).await
+        admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
+    ) -> Result<Result<RequestFrame, T>, StreamReadError> {
+        read_buffered_request(self, NAME, maximum, timeout, budget, admit).await
     }
 }
 
