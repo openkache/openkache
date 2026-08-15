@@ -17,63 +17,12 @@ use super::super::types::{
     StorageWriteOptions, StoredItemValue,
 };
 use super::super::{KvError, SetOutcome};
-use super::operation_api::{CapabilityKey, PrepareError, ResourceLock};
-use super::operation_contract::{OperationStatus, telemetry_operation};
+use super::operation_api::{CapabilityKey, ResourceLock};
+use super::operation_contract::telemetry_operation;
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
     NetworkWorkerCache, ObservabilityState, SetReservation,
 };
-
-/// Resource resolver for the compatibility namespace/storage adapter.
-///
-/// This adapter deliberately owns the only interpretation of the compatibility
-/// eight-byte namespace identity.
-pub(super) struct CompatibilityResourceResolver {
-    namespaces: NamespaceCapabilityHandle,
-}
-
-impl CompatibilityResourceResolver {
-    pub(super) fn new(namespaces: NamespaceCapabilityHandle) -> Self {
-        Self { namespaces }
-    }
-
-    pub(super) fn resolve_namespace(&self, identity: &[u8]) -> Result<ResourceLock, PrepareError> {
-        let identity: [u8; 8] = identity
-            .try_into()
-            .map_err(|_| PrepareError::invalid_request(b"resource identity is malformed"))?;
-        let identity = u64::from_be_bytes(identity);
-        self.namespaces.operation_lock(identity).ok_or_else(|| {
-            PrepareError::resource_unavailable(
-                OperationStatus::NamespaceNotFound,
-                b"namespace does not exist",
-            )
-        })
-    }
-
-    pub(super) fn resolve_global(&self) -> Result<ResourceLock, PrepareError> {
-        let shared = self.namespaces.lifecycle_lock().map_err(|_| {
-            PrepareError::resource_unavailable(
-                OperationStatus::InternalError,
-                b"namespace metadata is unavailable",
-            )
-        })?;
-        Ok(ResourceLock::unconditional(shared))
-    }
-}
-
-/// Request-body limits owned by the current compatibility API adapter.
-pub(super) struct CompatibilityBodyLimits {
-    pub(super) max_item_bytes: usize,
-}
-
-/// Builds the compatibility adapter's worker-scoped context.
-pub(super) fn build_compatibility_context(
-    storage: StorageCapabilityHandle,
-    namespaces: NamespaceCapabilityHandle,
-    observability: ObservabilityCapabilityHandle,
-) -> CompatibilityContext {
-    CompatibilityContext::new(storage, namespaces, observability)
-}
 
 pub(super) type CacheFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, KvError>> + 'a>>;
 
@@ -169,33 +118,44 @@ pub(super) const COMPATIBILITY_NAMESPACE_PORT: CapabilityKey<NamespaceCapability
 pub(super) const COMPATIBILITY_OBSERVABILITY_PORT: CapabilityKey<ObservabilityCapabilityHandle> =
     CapabilityKey::new("openkache.compatibility.observability_port");
 
-/// Opaque dependencies retained by the current API adapter.
-pub(super) struct CompatibilityContext {
+pub(super) struct GetState {
+    pub(super) storage: StorageCapabilityHandle,
+    pub(super) namespaces: NamespaceCapabilityHandle,
+}
+
+pub(super) struct SetState {
+    pub(super) storage: StorageCapabilityHandle,
+    pub(super) namespaces: NamespaceCapabilityHandle,
+    pub(super) max_item_bytes: usize,
+}
+
+pub(super) struct DeleteState {
+    pub(super) storage: StorageCapabilityHandle,
+    pub(super) namespaces: NamespaceCapabilityHandle,
+}
+
+pub(super) struct StatsState {
     pub(super) storage: StorageCapabilityHandle,
     pub(super) namespaces: NamespaceCapabilityHandle,
     pub(super) observability: ObservabilityCapabilityHandle,
-    pub(super) body_limits: CompatibilityBodyLimits,
-    pub(super) resource_resolver: CompatibilityResourceResolver,
 }
 
-impl CompatibilityContext {
-    pub(super) fn new(
-        storage: StorageCapabilityHandle,
-        namespaces: NamespaceCapabilityHandle,
-        observability: ObservabilityCapabilityHandle,
-    ) -> Self {
-        let body_limits = CompatibilityBodyLimits {
-            max_item_bytes: storage.max_item_bytes(),
-        };
-        let resource_resolver = CompatibilityResourceResolver::new(Arc::clone(&namespaces));
-        Self {
-            storage,
-            namespaces,
-            observability,
-            body_limits,
-            resource_resolver,
-        }
-    }
+pub(super) struct SyncState {
+    pub(super) storage: StorageCapabilityHandle,
+    pub(super) namespaces: NamespaceCapabilityHandle,
+}
+
+pub(super) struct NamespaceOpenState {
+    pub(super) namespaces: NamespaceCapabilityHandle,
+}
+
+pub(super) struct NamespaceUpdateState {
+    pub(super) namespaces: NamespaceCapabilityHandle,
+}
+
+pub(super) struct NamespaceDeleteState {
+    pub(super) storage: StorageCapabilityHandle,
+    pub(super) namespaces: NamespaceCapabilityHandle,
 }
 
 impl StorageCapability for NetworkWorkerCache {
@@ -208,11 +168,7 @@ impl StorageCapability for NetworkWorkerCache {
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
     ) -> StorageKey {
-        NetworkWorkerCache::storage_key_for_domain_identity(
-            self,
-            namespace_id,
-            item_id.as_bytes(),
-        )
+        NetworkWorkerCache::storage_key_for_domain_identity(self, namespace_id, item_id.as_bytes())
     }
 
     fn worker_for(&self, storage_key: &StorageKey) -> usize {
