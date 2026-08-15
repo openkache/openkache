@@ -166,8 +166,7 @@ pub(super) type HeaderAdmissionFn = for<'a> fn(
 /// Preparation is intentionally narrower than behavior execution. An API
 /// binding can resolve opaque resources and reservations without
 /// depending on the concrete server, cache implementation, or transport
-/// context. The composition root supplies the compatibility resolver and the
-/// opaque capability catalog.
+/// context. The composition root supplies an opaque capability catalog.
 pub(super) type PrepareFn = for<'a> fn(
     &OperationInputView,
     PrepareContext<'a>,
@@ -190,9 +189,8 @@ pub(super) fn prepare_none(
 pub(super) struct PrepareContext<'a> {
     /// API-owned dependencies used to build API-owned resource plans.
     ///
-    /// Every binding, including compatibility adapters, obtains its resolver
-    /// through this opaque catalog. The dispatcher does not carry a
-    /// domain-specific dependency field.
+    /// Every binding obtains its dependencies through this opaque catalog. The
+    /// dispatcher does not carry domain-specific dependency fields.
     pub(super) capabilities: &'a dyn CapabilityCatalog,
 }
 

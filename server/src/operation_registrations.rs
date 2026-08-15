@@ -11,10 +11,12 @@ use openkache_protocol::Opcode;
 use super::operation_api::{ServerComposition, ServerOperationRegistration};
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
-    operation_capabilities::{CapabilityCatalog, CapabilityRegistry},
+    operation_capabilities::{
+        CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry,
+    },
     operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
-    operation_runtime_capabilities::{
-        SERVER_RUNTIME_RESOURCES, ServerRuntimeResources,
+    operation_runtime_ports::{
+        NAMESPACE_REGISTRY, NETWORK_WORKER_CACHE, OBSERVABILITY_STATE,
     },
 };
 
@@ -35,9 +37,9 @@ pub(super) fn registered_operations() -> impl Iterator<Item = &'static ServerOpe
 /// Installs the capabilities owned by the currently registered API modules.
 ///
 /// This is deliberately the only server composition function that knows which
-/// concrete runtime handles are needed by the compatibility adapters. The network
-/// loop passes opaque capability state onward and remains independent of
-/// operation names, wire layouts, and client projections.
+/// concrete runtime handles are available to API installers. The network loop
+/// passes opaque capability state onward and remains independent of operation
+/// names, wire layouts, and client projections.
 pub(super) fn install_runtime_capabilities(
     base: Arc<dyn CapabilityCatalog>,
     cache: Arc<NetworkWorkerCache>,
@@ -47,14 +49,12 @@ pub(super) fn install_runtime_capabilities(
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
     let mut registry = CapabilityRegistry::overlay(base);
     super::storage_port::install(&mut registry, storage_port);
-    let bootstrap = CapabilityRegistry::new().with(
-        SERVER_RUNTIME_RESOURCES,
-        ServerRuntimeResources {
-            cache,
-            namespaces,
-            observability,
-        },
-    );
+    let bootstrap_entries = [
+        CapabilityEntry::new(NETWORK_WORKER_CACHE, &cache),
+        CapabilityEntry::new(NAMESPACE_REGISTRY, &namespaces),
+        CapabilityEntry::new(OBSERVABILITY_STATE, &observability),
+    ];
+    let bootstrap = CapabilityList::new(&bootstrap_entries);
     SERVER_COMPOSITION.install_capabilities(&mut registry, &bootstrap)?;
     Ok(Arc::new(registry))
 }
