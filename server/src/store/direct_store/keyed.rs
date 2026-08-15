@@ -1,0 +1,411 @@
+//! Keyed operation contracts and completion coordination.
+//!
+//! This module is the storage-facing mutation adapter. It consumes typed
+//! operation intent and returns storage outcomes; it does not encode protocol
+//! bytes or inspect client/wire concerns.
+
+use std::rc::Rc;
+use std::time::Instant;
+
+use crate::types::{StorageWriteCondition, StorageWriteOptions, StoredItemValue};
+use crate::{BUCKET_BYTES, KvError, Result, StorageKey};
+
+use super::policy::{item_state_is_live_at, set_condition_allows, unix_time_ms, validate_ttl};
+use super::read_plan::{
+    DirectReadPlan, KeyedObservation, LocatedKeyState, PreparedReadBacking, PreparedReadCandidate,
+    ReadPurpose,
+};
+use super::value_reads::read_mutable_value;
+use super::values::mutable_value_handle_for;
+use super::{
+    CAPACITY_CHECK_INTERVAL, ItemState, Kvkache, MutableValueHandle, ReadBacking, SetOutcome,
+    TableLocation, bucket_hash, find_item_in_bucket,
+};
+
+pub(crate) enum KeyedOperation {
+    Get,
+    Set {
+        value: StoredItemValue,
+        options: StorageWriteOptions,
+    },
+    Delete,
+}
+
+pub(crate) enum KeyedOutcome {
+    Value(Option<StoredItemValue>),
+    Set(SetOutcome),
+    Deleted(bool),
+}
+
+#[derive(Clone)]
+pub(crate) enum KeyedVisibleState {
+    Missing,
+    Present(StoredItemValue),
+}
+
+pub(crate) struct KeyedFinish {
+    pub(crate) outcome: Result<KeyedOutcome>,
+    pub(crate) visible_state: Option<KeyedVisibleState>,
+    pub(crate) flush_required: bool,
+    pub(crate) pending: bool,
+}
+
+pub(crate) struct PendingKeyedResult {
+    pub(crate) storage_key: StorageKey,
+    pub(crate) outcome: KeyedOutcome,
+    pub(crate) visible_state: Option<KeyedVisibleState>,
+}
+
+enum PreparedKeyedOperation {
+    Get,
+    Set {
+        value: StoredItemValue,
+        options: StorageWriteOptions,
+    },
+    Delete,
+}
+
+enum KeyedObservationPlan {
+    Read(DirectReadPlan, ReadPurpose),
+    Error(KvError),
+}
+
+pub(crate) struct KeyedJob {
+    storage_key: StorageKey,
+    operation: PreparedKeyedOperation,
+    observation: KeyedObservationPlan,
+}
+
+pub(crate) struct CompletedKeyedJob {
+    storage_key: StorageKey,
+    operation: PreparedKeyedOperation,
+    observation: Result<KeyedObservation>,
+}
+
+impl KeyedJob {
+    pub(crate) async fn run(self) -> CompletedKeyedJob {
+        let observation = match self.observation {
+            KeyedObservationPlan::Read(plan, purpose) => plan.read(purpose).await,
+            KeyedObservationPlan::Error(error) => Err(error),
+        };
+        CompletedKeyedJob {
+            storage_key: self.storage_key,
+            operation: self.operation,
+            observation,
+        }
+    }
+}
+
+pub(super) enum PendingKeyedMutation {
+    Set {
+        storage_key: StorageKey,
+        value: StoredItemValue,
+        ttl_ms: Option<u64>,
+        eviction_protected: bool,
+        previous: Option<TableLocation>,
+        previous_mutable_value: Option<MutableValueHandle>,
+        previous_state: Option<ItemState>,
+        condition: StorageWriteCondition,
+        include_visible_state: bool,
+    },
+}
+
+impl Kvkache {
+    pub(crate) fn prepare_keyed(
+        &mut self,
+        storage_key: StorageKey,
+        operation: KeyedOperation,
+    ) -> KeyedJob {
+        let (operation, observation) = match operation {
+            KeyedOperation::Get => (
+                PreparedKeyedOperation::Get,
+                self.keyed_read_plan(storage_key, ReadPurpose::Value),
+            ),
+            KeyedOperation::Set { value, options } => {
+                let observation = if options.ttl_ms() == Some(0) {
+                    KeyedObservationPlan::Error(KvError::InvalidRequest(
+                        "SET TTL must be greater than zero milliseconds".into(),
+                    ))
+                } else if let Err(error) = validate_ttl(options.ttl_ms()) {
+                    KeyedObservationPlan::Error(error)
+                } else if let Err(error) =
+                    self.validate_value(&value.bytes, options.ttl_ms().is_some())
+                {
+                    KeyedObservationPlan::Error(error)
+                } else {
+                    // Observe the current item state before admission. A
+                    // conditional SET that will return NotStored must not be
+                    // rejected by an unrelated capacity check.
+                    self.keyed_read_plan(storage_key, ReadPurpose::State)
+                };
+                (PreparedKeyedOperation::Set { value, options }, observation)
+            }
+            KeyedOperation::Delete => (
+                PreparedKeyedOperation::Delete,
+                self.keyed_read_plan(storage_key, ReadPurpose::State),
+            ),
+        };
+        KeyedJob {
+            storage_key,
+            operation,
+            observation,
+        }
+    }
+
+    fn keyed_read_plan(
+        &self,
+        storage_key: StorageKey,
+        purpose: ReadPurpose,
+    ) -> KeyedObservationPlan {
+        let mut candidates = Vec::new();
+        let mut job_pins = Vec::new();
+        for table_location in self.table.candidate_locations(&storage_key) {
+            let Some(backing) = self.directory.read_backing(table_location.sg_index) else {
+                continue;
+            };
+            let (sequence, backing) = match backing {
+                ReadBacking::Mutable { lane, _job_pin } => {
+                    job_pins.push(_job_pin);
+                    let Some(generation) = self.mutable[lane].as_ref() else {
+                        continue;
+                    };
+                    let bucket_index = bucket_hash(
+                        &storage_key,
+                        table_location.bucket_hash_index,
+                        self.config.bucket_count(),
+                    );
+                    let start = bucket_index * BUCKET_BYTES;
+                    let item = find_item_in_bucket(
+                        &generation.segment.bytes[start..start + BUCKET_BYTES],
+                        &storage_key,
+                    );
+                    let mutable_value = item.as_ref().and_then(|item| {
+                        mutable_value_handle_for(lane, generation.logical_sg_id, &item.value)
+                    });
+                    let value = match (purpose, item.as_ref()) {
+                        (ReadPurpose::Value, Some(item)) if !item.is_tombstone => Some(
+                            read_mutable_value(item.value.clone(), generation)
+                                .map(StoredItemValue::new),
+                        ),
+                        _ => None,
+                    };
+                    (
+                        generation.sequence,
+                        PreparedReadBacking::Mutable {
+                            item,
+                            value,
+                            mutable_value,
+                        },
+                    )
+                }
+                ReadBacking::Ram {
+                    backing,
+                    retirement_guard,
+                } => (
+                    backing.sequence,
+                    PreparedReadBacking::Ram {
+                        backing,
+                        _retirement_guard: retirement_guard,
+                    },
+                ),
+                ReadBacking::Ssd(backing) => (backing.sequence, PreparedReadBacking::Ssd(backing)),
+            };
+            candidates.push(PreparedReadCandidate {
+                table_location,
+                sequence,
+                backing,
+            });
+        }
+        KeyedObservationPlan::Read(
+            DirectReadPlan {
+                data: self.data.clone(),
+                large_values: self.large_values.clone(),
+                config: self.config.clone(),
+                storage_key,
+                candidates,
+                io: Rc::clone(&self.io),
+                _job_pins: job_pins,
+            },
+            purpose,
+        )
+    }
+
+    pub(crate) fn finish_keyed(
+        &mut self,
+        completed: CompletedKeyedJob,
+        include_visible_state: bool,
+    ) -> KeyedFinish {
+        let observation = match completed.observation {
+            Ok(observation) => observation,
+            Err(error) => {
+                return KeyedFinish {
+                    outcome: Err(error),
+                    visible_state: None,
+                    flush_required: false,
+                    pending: false,
+                };
+            }
+        };
+        let (outcome, visible_state, flush_required, pending) =
+            match (completed.operation, observation) {
+                (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
+                    let visible_state = include_visible_state.then(|| match &mut value {
+                        Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
+                        None => KeyedVisibleState::Missing,
+                    });
+                    (Ok(KeyedOutcome::Value(value)), visible_state, false, false)
+                }
+                (
+                    PreparedKeyedOperation::Set { value, options },
+                    KeyedObservation::State(previous),
+                ) => {
+                    let evaluated_at_ms = unix_time_ms();
+                    match self.finish_keyed_set(
+                        completed.storage_key,
+                        value,
+                        options,
+                        evaluated_at_ms,
+                        previous,
+                        include_visible_state,
+                    ) {
+                        Ok((outcome, visible_state, flush_required, pending)) => (
+                            Ok(KeyedOutcome::Set(outcome)),
+                            visible_state,
+                            flush_required,
+                            pending,
+                        ),
+                        Err(error) => (Err(error), None, false, false),
+                    }
+                }
+                (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
+                    match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous)
+                    {
+                        Ok((deleted, flush_required)) => (
+                            Ok(KeyedOutcome::Deleted(deleted)),
+                            Some(KeyedVisibleState::Missing),
+                            flush_required,
+                            false,
+                        ),
+                        Err(error) => (Err(error), None, false, false),
+                    }
+                }
+                _ => (
+                    Err(KvError::Worker(
+                        "keyed operation completed with an incompatible observation".into(),
+                    )),
+                    None,
+                    false,
+                    false,
+                ),
+            };
+        KeyedFinish {
+            outcome,
+            visible_state,
+            flush_required,
+            pending,
+        }
+    }
+
+    pub(crate) fn can_collapse_set(&self, value: &StoredItemValue) -> bool {
+        self.validate_value(&value.bytes, false).is_ok()
+    }
+
+    fn finish_keyed_set(
+        &mut self,
+        storage_key: StorageKey,
+        mut value: StoredItemValue,
+        options: StorageWriteOptions,
+        evaluated_at_ms: u64,
+        previous: Option<LocatedKeyState>,
+        include_visible_state: bool,
+    ) -> Result<(SetOutcome, Option<KeyedVisibleState>, bool, bool)> {
+        let previous_live = previous
+            .as_ref()
+            .is_some_and(|located| item_state_is_live_at(located.item_state, evaluated_at_ms));
+        if !set_condition_allows(options.condition, previous_live) {
+            return Ok((SetOutcome::NotStored, None, false, false));
+        }
+        self.admit_set()?;
+        // Admission can wait for a capacity refresh. Re-evaluate the
+        // condition at the mutation boundary so expiration is observed at
+        // the same point that determines the replacement outcome.
+        let previous_live = previous
+            .as_ref()
+            .is_some_and(|located| item_state_is_live_at(located.item_state, unix_time_ms()));
+        if !set_condition_allows(options.condition, previous_live) {
+            return Ok((SetOutcome::NotStored, None, false, false));
+        }
+        let previous_location = previous.as_ref().map(|located| located.table_location);
+        let previous_state = previous.as_ref().map(|located| located.item_state);
+        let previous_mutable_value = previous.and_then(|located| located.mutable_value);
+        if let Some(replacement) = self.try_append_value(
+            storage_key,
+            &value.bytes,
+            options.ttl_ms(),
+            options.eviction_protected(),
+            previous_location,
+            previous_mutable_value,
+        )? {
+            let previous_disappeared = self.publish_table_location(
+                storage_key,
+                previous_location,
+                previous_mutable_value,
+                replacement,
+            )?;
+            if !previous_live || previous_disappeared {
+                self.live_keys += 1;
+            }
+            let outcome = if previous_live {
+                SetOutcome::Replaced
+            } else {
+                SetOutcome::Created
+            };
+            let visible_state = (include_visible_state
+                && options == StorageWriteOptions::default())
+            .then(|| KeyedVisibleState::Present(value.clone_for_visible_state()));
+            return Ok((outcome, visible_state, false, false));
+        }
+        self.pending_keyed_mutations
+            .push_back(PendingKeyedMutation::Set {
+                storage_key,
+                value,
+                ttl_ms: options.ttl_ms(),
+                eviction_protected: options.eviction_protected(),
+                previous: previous_location,
+                previous_mutable_value,
+                previous_state,
+                condition: options.condition,
+                include_visible_state,
+            });
+        // The operation has not linearized yet. The worker must defer its
+        // response until capacity work appends the value and re-evaluates the
+        // condition against the current expiration/eviction state.
+        Ok((SetOutcome::NotStored, None, true, true))
+    }
+
+    pub(super) fn admit_set(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let refresh_memory = now >= self.next_memory_capacity_check;
+        if refresh_memory {
+            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
+        }
+        self.resource_guard.admit_set(refresh_memory)
+    }
+
+    fn finish_keyed_delete(
+        &mut self,
+        storage_key: StorageKey,
+        evaluated_at_ms: u64,
+        previous: Option<LocatedKeyState>,
+    ) -> Result<(bool, bool)> {
+        let Some(previous) = previous else {
+            return Ok((false, false));
+        };
+        if !item_state_is_live_at(previous.item_state, evaluated_at_ms) {
+            return Ok((false, false));
+        }
+        self.remove_table_location(storage_key, previous.table_location, previous.mutable_value)?;
+        self.live_keys = self.live_keys.saturating_sub(1);
+        Ok((true, false))
+    }
+}
