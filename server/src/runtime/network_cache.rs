@@ -36,6 +36,10 @@ impl NetworkWorkerCache {
         }
     }
 
+    pub(crate) fn max_item_bytes(&self) -> usize {
+        self.cache.max_item_bytes()
+    }
+
     /// Runs API-owned storage work on one worker without adding an
     /// operation-specific worker command or response variant.
     #[allow(dead_code)]

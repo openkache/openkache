@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::lock::Mutex as AsyncMutex;
-use openkache_protocol::Opcode;
+use openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
 use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
@@ -103,6 +103,63 @@ pub(super) struct PrepareError {
     pub(super) status: OperationStatus,
     pub(super) message: &'static [u8],
 }
+
+/// One header-level admission failure expressed in API-owned status vocabulary.
+///
+/// Admission runs after generic framing has validated the declared request
+/// shape but before the transport reserves or reads its opaque body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct HeaderAdmissionError {
+    pub(super) status: OperationStatus,
+    pub(super) message: &'static [u8],
+}
+
+impl HeaderAdmissionError {
+    pub(super) const fn new(status: OperationStatus, message: &'static [u8]) -> Self {
+        Self { status, message }
+    }
+}
+
+/// Header metadata exposed to an API-owned admission hook.
+///
+/// Numeric field indexes come from the generated API contract. The generic
+/// server does not attach semantic names or storage policy to them.
+pub(super) struct OperationHeaderView<'a> {
+    header: RequestFrameHeader,
+    prefix: &'a [u8],
+}
+
+impl<'a> OperationHeaderView<'a> {
+    pub(super) const fn new(header: RequestFrameHeader, prefix: &'a [u8]) -> Self {
+        Self { header, prefix }
+    }
+
+    /// Returns the complete declared opaque-body length.
+    pub(super) const fn body_len(&self) -> usize {
+        self.header.body_len()
+    }
+
+    /// Returns the declared body length when it represents this modeled field.
+    pub(super) fn declared_body_len(&self, field: usize) -> Option<usize> {
+        (self.header.body_field() == Some(field)).then_some(self.body_len())
+    }
+
+    /// Returns the exact bytes available before the opaque body.
+    #[allow(dead_code)]
+    pub(super) const fn prefix(&self) -> &'a [u8] {
+        self.prefix
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct HeaderAdmissionContext<'a> {
+    pub(super) capabilities: &'a dyn CapabilityCatalog,
+}
+
+pub(super) type HeaderAdmissionFn = for<'a> fn(
+    &OperationHeaderView<'a>,
+    HeaderAdmissionContext<'a>,
+) -> std::result::Result<(), HeaderAdmissionError>;
 
 /// Dependencies exposed to an API-owned preparation boundary.
 ///
@@ -271,6 +328,7 @@ impl PreparePlan {
 pub(super) struct ServerOperationRegistration {
     pub(super) opcode: Opcode,
     pub(super) handler: OperationHandler,
+    pub(super) admit_header: Option<HeaderAdmissionFn>,
     pub(super) prepare: PrepareFn,
     pub(super) authorization: AuthorizationFn,
     pub(super) policy: ServerOperationPolicy,
@@ -301,11 +359,18 @@ impl RegistrationBuilder {
             registration: ServerOperationRegistration {
                 opcode,
                 handler,
+                admit_header: None,
                 prepare: prepare_none,
                 authorization: super::operation_handlers::authorization_none,
                 policy: ServerOperationPolicy::READ_ONLY,
             },
         }
+    }
+
+    /// Adds an API-owned admission hook over generated request-header fields.
+    pub(super) const fn admit_header(mut self, admit: HeaderAdmissionFn) -> Self {
+        self.registration.admit_header = Some(admit);
+        self
     }
 
     /// Adds an API-owned resource preparation hook.

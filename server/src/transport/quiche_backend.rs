@@ -159,13 +159,13 @@ impl ReceiveStream {
 }
 
 impl super::ReceiveStream for ReceiveStream {
-    async fn read_request(
+    async fn read_request<T>(
         &mut self,
         maximum: usize,
-        maximum_value: usize,
         timeout: Duration,
         budget: &RequestBudget,
-    ) -> Result<RequestFrame, StreamReadError> {
+        admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
+    ) -> Result<Result<RequestFrame, T>, StreamReadError> {
         network_runtime::timeout(timeout, async {
             while self.buffered.is_empty() {
                 self.buffered = self.next_chunk("stream header read").await?;
@@ -189,9 +189,6 @@ impl super::ReceiveStream for ReceiveStream {
         })
         .await
         .map_err(|_| StreamReadError::Timeout)??;
-        if header.value_len() > maximum_value {
-            return Err(StreamReadError::TooLarge);
-        }
         let frame_len = network_runtime::timeout(timeout, async {
             let frame_len = header.frame_len()?;
             Ok::<_, StreamReadError>(frame_len)
@@ -201,7 +198,10 @@ impl super::ReceiveStream for ReceiveStream {
         if frame_len > maximum {
             return Err(StreamReadError::TooLarge);
         }
-        let permit = budget.acquire(header.value_len(), timeout).await?;
+        if let Err(rejection) = admit(header, &self.buffered[..header.encoded_len()]) {
+            return Ok(Err(rejection));
+        }
+        let permit = budget.acquire(header.body_len(), timeout).await?;
         network_runtime::timeout(timeout, async {
             while self.buffered.len() < frame_len {
                 let chunk = self.next_chunk("stream body read").await?;
@@ -218,11 +218,11 @@ impl super::ReceiveStream for ReceiveStream {
         } else {
             self.buffered.drain(..frame_len).collect()
         };
-        Ok(RequestFrame::with_trailing_bytes(
+        Ok(Ok(RequestFrame::with_trailing_bytes(
             frame,
             permit,
             has_trailing_bytes,
-        ))
+        )))
     }
 }
 
