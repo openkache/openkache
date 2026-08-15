@@ -399,15 +399,21 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     let (frame, header) = network_runtime::timeout(timeout, async {
         let mut frame = first;
         loop {
-            if let Some(header) = ProtocolRequestFrame::decode_header(&frame)? {
+            let additional = ProtocolRequestFrame::header_bytes_needed(&frame)?;
+            if additional == 0 {
+                let header = ProtocolRequestFrame::decode_header(&frame)?.ok_or(
+                    openkache_protocol::ProtocolError::InvalidFieldSequence(
+                        "header sizing completed before header decode",
+                    ),
+                )?;
                 break Ok::<_, StreamReadError>((frame, header));
             }
-            if frame.len() >= maximum {
+            if additional > maximum.saturating_sub(frame.len()) {
                 return Err(StreamReadError::TooLarge);
             }
             let previous_len = frame.len();
             frame = stream
-                .append_chunk(frame, 1, backend)
+                .append_chunk(frame, additional, backend)
                 .await
                 .map_err(StreamReadError::Transport)?;
             if frame.len() == previous_len {

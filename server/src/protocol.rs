@@ -49,6 +49,15 @@ impl<'a> RequestFrame<'a> {
         openkache_protocol::OpaqueRequestFrame::decode_header(prefix, layout)
     }
 
+    /// Returns the exact additional bytes needed to complete the next
+    /// unresolved request-header step.
+    pub fn header_bytes_needed(prefix: &[u8]) -> WireResult<usize> {
+        let Some(layout) = Self::layout(prefix)? else {
+            return Ok(REQUEST_FIXED_BYTES - prefix.len());
+        };
+        openkache_protocol::OpaqueRequestFrame::header_bytes_needed(prefix, layout)
+    }
+
     /// Reports the complete frame length once enough metadata is available.
     pub fn frame_len(prefix: &[u8]) -> WireResult<Option<usize>> {
         Self::decode_header(prefix)?
