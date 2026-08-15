@@ -580,6 +580,9 @@ operation Delete {
 @operationContract(
     scope: "namespace",
     compactRoute: "namespace",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     responseSemantics: "stats_json",
@@ -595,6 +598,9 @@ operation Stats {
 @operationContract(
     scope: "namespace",
     compactRoute: "namespace",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "empty",
@@ -610,6 +616,84 @@ operation Sync {
 @operationContract(
     scope: "namespace_management",
     compactRoute: "namespace_open",
+    requestWire: [
+        {
+            packed: {
+                fields: [
+                    {
+                        field: "createIfMissing",
+                        mask: 1,
+                        values: [
+                            { value: "false", bits: 0 },
+                            { value: "true", bits: 1 }
+                        ]
+                    }
+                ],
+                reservedMask: 254
+            }
+        },
+        { byteLengthField: { field: "name" } },
+        {
+            conditional: {
+                field: "createIfMissing",
+                equals: "true",
+                steps: [
+                    {
+                        packed: {
+                            fields: [
+                                {
+                                    field: "policy.defaultExpiration",
+                                    mask: 3,
+                                    values: [
+                                        { value: "no_expiry", bits: 0 },
+                                        { value: "fixed_ttl", bits: 1 }
+                                    ]
+                                },
+                                {
+                                    field: "policy.expirationOverride",
+                                    mask: 4,
+                                    values: [
+                                        { value: "disallowed", bits: 0 },
+                                        { value: "allowed", bits: 4 }
+                                    ]
+                                },
+                                {
+                                    field: "policy.defaultEviction",
+                                    mask: 8,
+                                    values: [
+                                        { value: "evictable", bits: 0 },
+                                        { value: "eviction_protected", bits: 8 }
+                                    ]
+                                },
+                                {
+                                    field: "policy.evictionOverride",
+                                    mask: 16,
+                                    values: [
+                                        { value: "disallowed", bits: 0 },
+                                        { value: "allowed", bits: 16 }
+                                    ]
+                                }
+                            ],
+                            reservedMask: 224
+                        }
+                    },
+                    {
+                        conditional: {
+                            field: "policy.defaultExpiration",
+                            equals: "fixed_ttl",
+                            steps: [
+                                {
+                                    varuintField: {
+                                        field: "policy.defaultTtlMilliseconds"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     opaqueAggregate: true,
@@ -626,6 +710,62 @@ operation NamespaceOpen {
 @operationContract(
     scope: "namespace_management",
     compactRoute: "namespace_update_policy",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { fixedField: { field: "expectedRevision", bytes: 8 } },
+        {
+            packed: {
+                fields: [
+                    {
+                        field: "policy.defaultExpiration",
+                        mask: 3,
+                        values: [
+                            { value: "no_expiry", bits: 0 },
+                            { value: "fixed_ttl", bits: 1 }
+                        ]
+                    },
+                    {
+                        field: "policy.expirationOverride",
+                        mask: 4,
+                        values: [
+                            { value: "disallowed", bits: 0 },
+                            { value: "allowed", bits: 4 }
+                        ]
+                    },
+                    {
+                        field: "policy.defaultEviction",
+                        mask: 8,
+                        values: [
+                            { value: "evictable", bits: 0 },
+                            { value: "eviction_protected", bits: 8 }
+                        ]
+                    },
+                    {
+                        field: "policy.evictionOverride",
+                        mask: 16,
+                        values: [
+                            { value: "disallowed", bits: 0 },
+                            { value: "allowed", bits: 16 }
+                        ]
+                    }
+                ],
+                reservedMask: 224
+            }
+        },
+        {
+            conditional: {
+                field: "policy.defaultExpiration",
+                equals: "fixed_ttl",
+                steps: [
+                    {
+                        varuintField: {
+                            field: "policy.defaultTtlMilliseconds"
+                        }
+                    }
+                ]
+            }
+        }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     opaqueAggregate: true,
@@ -642,6 +782,11 @@ operation NamespaceUpdatePolicy {
 @operationContract(
     scope: "namespace_management",
     compactRoute: "namespace_delete",
+    requestWire: [
+        { constant: { hex: "00" } },
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { fixedField: { field: "expectedRevision", bytes: 8 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "delete_outcome",

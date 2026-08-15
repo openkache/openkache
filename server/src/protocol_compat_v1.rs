@@ -18,7 +18,7 @@ use contract::{
 
 use super::{
     ItemId, NamespacePolicy, Opcode, ProtocolError, RequestDescriptor, RequestHeader, Result,
-    SetOptions, WireRequestLayout, WireRequestStep, WireResult, wire_request_layout,
+    SetOptions, WireRequestLayout, WireResult, wire_request_layout,
 };
 
 #[path = "protocol_compat_v1_policy.rs"]
@@ -313,68 +313,13 @@ pub(super) fn request_namespace_policy(
         .map(|(policy, _)| policy)
 }
 
-// These tables are the compatibility adapter's only knowledge of historical
-// namespace byte prefixes. Item operations use their API-owned generated
-// request-wire plans.
-const COMPACT_V1_NAMESPACE_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES,
-    }],
-};
-const COMPACT_V1_NAMESPACE_OPEN_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[
-        WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES + contract::OPEN_FLAGS_BYTES,
-        },
-        WireRequestStep::ByteLength,
-        WireRequestStep::ConditionalByteThenVarUInt {
-            selector_offset: openkache_protocol::OPCODE_BYTES,
-            mask: contract::OPEN_CREATE_IF_MISSING,
-            expected: contract::OPEN_CREATE_IF_MISSING,
-            prefix_bytes: contract::POLICY_FLAGS_BYTES,
-            value_mask: contract::POLICY_DEFAULT_EXPIRATION_MASK,
-            value_expected: contract::POLICY_FIXED_TTL,
-        },
-    ],
-};
-const COMPACT_V1_NAMESPACE_POLICY_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[
-        WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES
-                + openkache_protocol::NAMESPACE_ID_BYTES
-                + openkache_protocol::NAMESPACE_REVISION_BYTES,
-        },
-        WireRequestStep::ByteThenVarUInt {
-            prefix_bytes: contract::POLICY_FLAGS_BYTES,
-            mask: contract::POLICY_DEFAULT_EXPIRATION_MASK,
-            expected: contract::POLICY_FIXED_TTL,
-        },
-    ],
-};
-const COMPACT_V1_NAMESPACE_DELETE_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES
-            + contract::DELETE_FLAGS_BYTES
-            + openkache_protocol::NAMESPACE_ID_BYTES
-            + openkache_protocol::NAMESPACE_REVISION_BYTES,
-    }],
-};
-
 pub(super) fn request_frame_layout(opcode: Opcode) -> WireResult<WireRequestLayout> {
-    let route = compatibility_route(opcode).ok_or_else(|| {
+    compatibility_route(opcode).ok_or_else(|| {
         openkache_protocol::ProtocolError::InvalidFieldSequence(
             "compact operation has no protocol-v1 route",
         )
     })?;
-    match route {
-        CompactV1RequestRoute::Item | CompactV1RequestRoute::Set => {
-            Ok(wire_request_layout(opcode))
-        }
-        CompactV1RequestRoute::Namespace => Ok(COMPACT_V1_NAMESPACE_LAYOUT),
-        CompactV1RequestRoute::NamespaceOpen => Ok(COMPACT_V1_NAMESPACE_OPEN_LAYOUT),
-        CompactV1RequestRoute::NamespaceUpdatePolicy => Ok(COMPACT_V1_NAMESPACE_POLICY_LAYOUT),
-        CompactV1RequestRoute::NamespaceDelete => Ok(COMPACT_V1_NAMESPACE_DELETE_LAYOUT),
-    }
+    Ok(wire_request_layout(opcode))
 }
 
 pub(super) fn decode_request_metadata(
