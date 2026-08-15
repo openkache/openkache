@@ -48,12 +48,13 @@ pub mod operation {
 }
 
 pub use operation::{
-    MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS, OPERATION_CODEC_NAMES,
-    OperationFieldLayout, OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
-    OperationLayoutPlan, OperationRequestFraming, OperationResponseFraming, OperationWireSpec,
-    WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor,
-    WireCodecKind, WireCodecLengthEncoding, WireCodecWidth, operation_registry,
-    operation_wire_spec, request_fields, response_fields, wire_codec_kind,
+    MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS, MAX_REQUEST_FRAME_BYTES,
+    OPERATION_CODEC_NAMES, OperationFieldLayout, OperationFieldPlan, OperationFramePolicy,
+    OperationLayoutFraming, OperationLayoutPlan, OperationRequestFraming,
+    OperationResponseFraming, OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES,
+    WireCodecCardinality, WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding,
+    WireCodecWidth, operation_registry, operation_wire_spec, request_fields, response_fields,
+    wire_codec_kind, wire_request_layout,
 };
 
 /// Draft-v1 compatibility constants and field projections.
