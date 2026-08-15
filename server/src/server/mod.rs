@@ -17,10 +17,7 @@ use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
 };
 use crate::platform::StorageDeviceKind;
-use crate::protocol::{
-    ComposedRequestDescriptorProvider, ItemId, NamespaceDescriptor, NamespacePolicy, Request,
-    RequestDescriptorProvider, Response, ServerRequest,
-};
+use crate::protocol::{ItemId, NamespaceDescriptor, NamespacePolicy, Response};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
@@ -76,10 +73,10 @@ mod operation_registry;
 mod operation_runtime_capabilities;
 #[path = "../operation_transport.rs"]
 mod operation_transport;
+#[path = "../request_projection.rs"]
+mod request_projection;
 #[path = "../storage_port.rs"]
 mod storage_port;
-#[path = "../v1_adapter.rs"]
-mod v1_adapter;
 
 pub use operation_api::CapabilityKey;
 pub use operation_capabilities::{
@@ -135,5 +132,4 @@ pub struct KacheServer {
     max_item_bytes: usize,
     observability: ObservabilityService,
     capabilities: Arc<dyn CapabilityCatalog>,
-    request_descriptor_provider: Arc<dyn RequestDescriptorProvider>,
 }

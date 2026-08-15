@@ -30,10 +30,48 @@ use crate::protocol::{
 };
 use contract::request_fields;
 
+const INVALID_NAMESPACE_ID: &[u8] = b"namespace identity must be nonzero";
+const INVALID_EXPECTED_REVISION: &[u8] = b"expected revision must be nonzero";
+const INVALID_SET_TTL: &[u8] = b"SET explicit TTL must be positive";
+const INVALID_NAMESPACE_NAME: &[u8] = b"namespace-open name is not UTF-8";
+
 /// Installs the compatibility adapter's concrete service bundle at the API
 /// composition boundary. The network loop only calls the aggregate operation
 /// registration installer and never reaches into this compatibility surface.
 pub(super) use super::operation_compatibility_services::install_compatibility_services;
+
+impl OperationInputView {
+    fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
+        match self.field_at_index(index) {
+            Some(value) if value.len() == openkache_protocol::ITEM_ID_BYTES => Some(ItemId::new(
+                value.try_into().expect("validated item ID width"),
+            )),
+            _ => None,
+        }
+    }
+
+    fn unsigned_long_at_index(&self, index: usize) -> Option<u64> {
+        self.encoded_field_at_index(index)
+            .and_then(|field| field.decode_u64().ok())
+    }
+
+    fn unsigned_long_at_index_result(
+        &self,
+        index: Option<usize>,
+    ) -> Result<Option<u64>, &'static [u8]> {
+        index
+            .and_then(|index| self.encoded_field_at_index(index))
+            .map(|field| field.decode_u64())
+            .transpose()
+    }
+
+    fn boolean_at_index(&self, index: Option<usize>) -> Result<Option<bool>, &'static [u8]> {
+        index
+            .and_then(|index| self.encoded_field_at_index(index))
+            .map(|field| field.decode_bool())
+            .transpose()
+    }
+}
 
 /// Typed input for the namespace/item compatibility adapter.
 pub(super) struct GetInput {
@@ -75,13 +113,52 @@ pub(super) struct NamespaceDeleteInput {
     pub(super) expected_revision: u64,
 }
 
+struct SetFields {
+    namespace_id: u64,
+    item_id: ItemId,
+    options: SetOptions,
+}
+
+struct NamespaceOpenFields {
+    create_if_missing: bool,
+    policy: Option<NamespacePolicy>,
+}
+
 fn required_namespace_id(
     input: &OperationInputView,
     field_index: usize,
 ) -> Result<u64, &'static [u8]> {
-    input
-        .unsigned_long_at_index(field_index)
-        .ok_or(b"operation requires namespace identity")
+    required_positive_unsigned(
+        input,
+        field_index,
+        b"operation requires namespace identity",
+        INVALID_NAMESPACE_ID,
+    )
+}
+
+fn required_expected_revision(
+    input: &OperationInputView,
+    field_index: usize,
+) -> Result<u64, &'static [u8]> {
+    required_positive_unsigned(
+        input,
+        field_index,
+        b"operation requires an expected revision",
+        INVALID_EXPECTED_REVISION,
+    )
+}
+
+fn required_positive_unsigned(
+    input: &OperationInputView,
+    field_index: usize,
+    missing: &'static [u8],
+    zero: &'static [u8],
+) -> Result<u64, &'static [u8]> {
+    match input.unsigned_long_at_index(field_index) {
+        Some(0) => Err(zero),
+        Some(value) => Ok(value),
+        None => Err(missing),
+    }
 }
 
 fn required_item_id_at(
@@ -100,22 +177,32 @@ pub(super) fn decode_get(input: &OperationInputView) -> Result<GetInput, &'stati
     })
 }
 
-pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'static [u8]> {
+fn decode_set_fields(input: &OperationInputView) -> Result<SetFields, &'static [u8]> {
     let condition = decode_set_condition(input, request_fields::SET_CONDITION_0)?;
     let expiration_mode = decode_expiration_mode(input, request_fields::SET_EXPIRATION_MODE_0)?;
     let eviction_mode = decode_eviction_mode(input, request_fields::SET_EVICTION_MODE_0)?;
     let ttl_ms = input
         .unsigned_long_at_index_result(Some(request_fields::SET_TTL_MILLISECONDS_0))
         .map_err(|_| &b"SET TTL is malformed"[..])?;
-    if expiration_mode == ExpirationMode::ExplicitTtl {
-        if ttl_ms.is_none() {
-            return Err(b"SET explicit TTL is missing");
-        }
-    } else if ttl_ms.is_some() {
-        return Err(b"SET TTL is only valid with explicit expiration");
-    }
+    validate_set_ttl_value(expiration_mode == ExpirationMode::ExplicitTtl, ttl_ms)?;
     let namespace_id = required_namespace_id(input, request_fields::SET_NAMESPACE_ID_0)?;
     let item_id = required_item_id_at(input, request_fields::SET_ITEM_ID_0)?;
+    input
+        .bytes_at_index(request_fields::SET_VALUE_0)
+        .ok_or(&b"operation requires a value"[..])?;
+    Ok(SetFields {
+        namespace_id,
+        item_id,
+        options: SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode),
+    })
+}
+
+pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'static [u8]> {
+    let SetFields {
+        namespace_id,
+        item_id,
+        options,
+    } = decode_set_fields(input)?;
     let value = input
         .take_owned_bytes_range_at_index(request_fields::SET_VALUE_0)
         .ok_or(&b"operation requires a value"[..])?;
@@ -130,12 +217,15 @@ pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'s
         namespace_id,
         item_id,
         value,
-        options: SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode),
+        options,
     })
 }
 
 pub(super) fn decode_delete(input: &OperationInputView) -> Result<GetInput, &'static [u8]> {
-    decode_get(input)
+    Ok(GetInput {
+        namespace_id: required_namespace_id(input, request_fields::DELETE_NAMESPACE_ID_0)?,
+        item_id: required_item_id_at(input, request_fields::DELETE_ITEM_ID_0)?,
+    })
 }
 
 fn decode_namespace(
@@ -158,15 +248,32 @@ fn decode_sync(input: &OperationInputView) -> Result<NamespaceInput, &'static [u
 pub(super) fn decode_namespace_open(
     input: &mut OperationInputView,
 ) -> Result<NamespaceOpenInput, &'static [u8]> {
+    let NamespaceOpenFields {
+        create_if_missing,
+        policy,
+    } = decode_namespace_open_fields(input)?;
+    let name = input
+        .take_owned_bytes_range_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
+        .ok_or(&b"namespace-open requires a name"[..])?;
     Ok(NamespaceOpenInput {
-        name: input
-            .take_owned_bytes_range_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
-            .ok_or(&b"namespace-open requires a name"[..])?,
-        create_if_missing: input
-            .boolean_at_index(Some(request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0))
-            .map_err(|_| &b"namespace-open create flag is malformed"[..])?
-            .unwrap_or(false),
-        policy: decode_namespace_open_policy(input)?,
+        name,
+        create_if_missing,
+        policy,
+    })
+}
+
+fn decode_namespace_open_fields(
+    input: &OperationInputView,
+) -> Result<NamespaceOpenFields, &'static [u8]> {
+    validate_namespace_open_name(input)?;
+    let create_if_missing = input
+        .boolean_at_index(Some(request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0))
+        .map_err(|_| &b"namespace-open create flag is malformed"[..])?
+        .unwrap_or(false);
+    let policy = decode_namespace_open_policy(input)?;
+    Ok(NamespaceOpenFields {
+        create_if_missing,
+        policy,
     })
 }
 
@@ -178,9 +285,10 @@ pub(super) fn decode_namespace_revision(
             input,
             request_fields::NAMESPACE_UPDATE_POLICY_NAMESPACE_ID_0,
         )?,
-        expected_revision: input
-            .unsigned_long_at_index(request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0)
-            .ok_or(&b"operation requires an expected revision"[..])?,
+        expected_revision: required_expected_revision(
+            input,
+            request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0,
+        )?,
         policy: decode_namespace_update_policy(input)?
             .ok_or(&b"namespace policy is required"[..])?,
     })
@@ -194,20 +302,17 @@ pub(super) fn decode_namespace_delete(
             input,
             request_fields::NAMESPACE_DELETE_NAMESPACE_ID_0,
         )?,
-        expected_revision: input
-            .unsigned_long_at_index(request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0)
-            .ok_or(&b"operation requires an expected revision"[..])?,
+        expected_revision: required_expected_revision(
+            input,
+            request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0,
+        )?,
     })
 }
 
-fn required_resource(
-    input: &OperationInputView,
+fn namespace_resource(
+    namespace_id: u64,
     context: PrepareContext<'_>,
 ) -> std::result::Result<ResourceLock, PrepareError> {
-    let namespace_field_index = namespace_field_index(input.opcode)
-        .ok_or_else(|| PrepareError::invalid_request(b"operation has no namespace identity"))?;
-    let namespace_id = required_namespace_id(input, namespace_field_index)
-        .map_err(PrepareError::invalid_request)?;
     compatibility_resolver(context)?.resolve_namespace(&namespace_id.to_be_bytes())
 }
 
@@ -236,8 +341,25 @@ pub(super) fn prepare_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    let resource = required_resource(input, context)?;
+    let namespace_field_index = namespace_field_index(input.opcode)
+        .ok_or_else(|| PrepareError::invalid_request(b"operation has no namespace identity"))?;
+    let namespace_id = required_namespace_id(input, namespace_field_index)
+        .map_err(PrepareError::invalid_request)?;
+    let resource = namespace_resource(namespace_id, context)?;
     Ok(PreparePlan::resource(resource))
+}
+
+pub(super) fn prepare_set(
+    input: &OperationInputView,
+    context: PrepareContext<'_>,
+) -> std::result::Result<PreparePlan, PrepareError> {
+    let namespace_id = required_namespace_id(input, request_fields::SET_NAMESPACE_ID_0)
+        .map_err(PrepareError::invalid_request)?;
+    validate_set_ttl(input).map_err(PrepareError::invalid_request)?;
+    Ok(PreparePlan::resource(namespace_resource(
+        namespace_id,
+        context,
+    )?))
 }
 
 fn namespace_field_index(opcode: openkache_protocol::Opcode) -> Option<usize> {
@@ -258,18 +380,54 @@ pub(super) fn prepare_lifecycle(
     ))
 }
 
-pub(super) fn prepare_lifecycle_and_namespace(
+pub(super) fn prepare_namespace_open(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
-    let namespace_field_index = namespace_field_index(input.opcode)
-        .ok_or_else(|| PrepareError::invalid_request(b"operation has no namespace identity"))?;
-    let namespace_id = required_namespace_id(input, namespace_field_index)
+    validate_namespace_open_name(input).map_err(PrepareError::invalid_request)?;
+    validate_namespace_policy_ttl(input, NAMESPACE_OPEN_POLICY_FIELDS)
         .map_err(PrepareError::invalid_request)?;
-    let resource =
-        compatibility_resolver(context)?.resolve_namespace(&namespace_id.to_be_bytes())?;
+    prepare_lifecycle(input, context)
+}
+
+pub(super) fn prepare_namespace_update(
+    input: &OperationInputView,
+    context: PrepareContext<'_>,
+) -> std::result::Result<PreparePlan, PrepareError> {
+    let namespace_id = required_namespace_id(
+        input,
+        request_fields::NAMESPACE_UPDATE_POLICY_NAMESPACE_ID_0,
+    )
+    .map_err(PrepareError::invalid_request)?;
+    required_expected_revision(
+        input,
+        request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0,
+    )
+    .map_err(PrepareError::invalid_request)?;
+    validate_namespace_policy_ttl(input, NAMESPACE_UPDATE_POLICY_FIELDS)
+        .map_err(PrepareError::invalid_request)?;
+    Ok(PreparePlan::resource(namespace_resource(
+        namespace_id,
+        context,
+    )?))
+}
+
+pub(super) fn prepare_namespace_delete(
+    input: &OperationInputView,
+    context: PrepareContext<'_>,
+) -> std::result::Result<PreparePlan, PrepareError> {
+    let namespace_id =
+        required_namespace_id(input, request_fields::NAMESPACE_DELETE_NAMESPACE_ID_0)
+            .map_err(PrepareError::invalid_request)?;
+    required_expected_revision(
+        input,
+        request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0,
+    )
+    .map_err(PrepareError::invalid_request)?;
+    let resolver = compatibility_resolver(context)?;
+    let resource = resolver.resolve_namespace(&namespace_id.to_be_bytes())?;
     Ok(PreparePlan::from_resources([
-        compatibility_resolver(context)?.resolve_global()?,
+        resolver.resolve_global()?,
         resource,
     ]))
 }
@@ -355,6 +513,64 @@ fn decode_namespace_update_policy(
     decode_namespace_policy(input, NAMESPACE_UPDATE_POLICY_FIELDS)
 }
 
+fn validate_set_ttl(input: &OperationInputView) -> Result<(), &'static [u8]> {
+    let expiration_mode = required_token(
+        input,
+        request_fields::SET_EXPIRATION_MODE_0,
+        b"SET expiration mode is missing",
+    )?;
+    let ttl_ms = input
+        .unsigned_long_at_index_result(Some(request_fields::SET_TTL_MILLISECONDS_0))
+        .map_err(|_| &b"SET TTL is malformed"[..])?;
+    validate_set_ttl_value(expiration_mode == b"explicit_ttl", ttl_ms)
+}
+
+fn validate_namespace_open_name(input: &OperationInputView) -> Result<(), &'static [u8]> {
+    let name = input
+        .bytes_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
+        .ok_or(&b"namespace-open requires a name"[..])?;
+    std::str::from_utf8(name)
+        .map(|_| ())
+        .map_err(|_| INVALID_NAMESPACE_NAME)
+}
+
+fn validate_set_ttl_value(
+    explicit_ttl: bool,
+    ttl_ms: Option<u64>,
+) -> Result<(), &'static [u8]> {
+    match (explicit_ttl, ttl_ms) {
+        (true, Some(0)) => Err(INVALID_SET_TTL),
+        (true, None) => Err(b"SET explicit TTL is missing"),
+        (true, Some(_)) | (false, None) => Ok(()),
+        (false, Some(_)) => Err(b"SET TTL is only valid with explicit expiration"),
+    }
+}
+
+fn validate_namespace_policy_ttl(
+    input: &OperationInputView,
+    fields: NamespacePolicyFieldIndexes,
+) -> Result<(), &'static [u8]> {
+    let default_expiration = input.bytes_at_index(fields.default_expiration);
+    let ttl_ms = input
+        .unsigned_long_at_index_result(Some(fields.default_ttl_milliseconds))
+        .map_err(|_| &b"namespace TTL is malformed"[..])?;
+    validate_namespace_policy_ttl_value(default_expiration, ttl_ms)
+}
+
+fn validate_namespace_policy_ttl_value(
+    default_expiration: Option<&[u8]>,
+    ttl_ms: Option<u64>,
+) -> Result<(), &'static [u8]> {
+    match (default_expiration, ttl_ms) {
+        (Some(b"fixed_ttl"), Some(0)) => Err(b"fixed namespace TTL must be positive"),
+        (Some(b"fixed_ttl"), None) => Err(b"fixed namespace TTL is missing"),
+        (Some(b"fixed_ttl"), Some(_)) | (_, None) => Ok(()),
+        (Some(b"no_expiry"), Some(_)) => Err(b"namespace TTL is invalid for no-expiry policy"),
+        (None, Some(_)) => Err(b"namespace policy is incomplete"),
+        (Some(_), Some(_)) => Ok(()),
+    }
+}
+
 fn decode_namespace_policy(
     input: &OperationInputView,
     fields: NamespacePolicyFieldIndexes,
@@ -372,23 +588,13 @@ fn decode_namespace_policy(
         }
         return Ok(None);
     };
+    let default_ttl_milliseconds =
+        input.unsigned_long_at_index(fields.default_ttl_milliseconds);
+    validate_namespace_policy_ttl_value(Some(default_expiration), default_ttl_milliseconds)?;
     let default_expiration = match default_expiration {
-        b"no_expiry" => {
-            if input
-                .unsigned_long_at_index(fields.default_ttl_milliseconds)
-                .is_some()
-            {
-                return Err(b"namespace TTL is invalid for no-expiry policy");
-            }
-            ExpirationDefault::NoExpiry
-        }
+        b"no_expiry" => ExpirationDefault::NoExpiry,
         b"fixed_ttl" => {
-            let Some(ttl_ms) = input.unsigned_long_at_index(fields.default_ttl_milliseconds) else {
-                return Err(b"fixed namespace TTL is missing");
-            };
-            if ttl_ms == 0 {
-                return Err(b"fixed namespace TTL must be positive");
-            }
+            let ttl_ms = default_ttl_milliseconds.expect("validated fixed namespace TTL");
             ExpirationDefault::FixedTtl { ttl_ms }
         }
         _ => return Err(b"namespace expiration default is malformed"),
@@ -488,15 +694,6 @@ typed_handler!(
 typed_handler!(stats_handler, decode_stats, compatibility_behavior::stats);
 typed_handler!(sync_handler, decode_sync, compatibility_behavior::sync);
 
-/// Returns whether this API module owns the historical v1 projection for an
-/// opcode. The compatibility validator uses this module-local catalog rather
-/// than placing a compatibility marker in every generic server registration.
-pub(super) fn handles(opcode: Opcode) -> bool {
-    API.operations()
-        .iter()
-        .any(|registration| registration.opcode == opcode)
-}
-
 fn install_capabilities(
     registry: &mut super::operation_capabilities::CapabilityRegistry,
     bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
@@ -518,79 +715,46 @@ fn install_capabilities(
 pub(super) const API: ApiModule = ApiModule::new(
     crate::protocol::compatibility_request_descriptor(),
     &[
-        RegistrationBuilder::with_decoder(
-            Opcode::Get,
-            super::v1_adapter::adapt_request,
-            get_handler,
-        )
+        RegistrationBuilder::new(Opcode::Get, get_handler)
         .prepare(prepare_namespace)
         .authorize(operation_handlers::authorization_none)
         .read_only()
         .build(),
-        RegistrationBuilder::with_decoder(
-            Opcode::Set,
-            super::v1_adapter::adapt_request,
-            set_handler,
-        )
+        RegistrationBuilder::new(Opcode::Set, set_handler)
+        .prepare(prepare_set)
+        .authorize(operation_handlers::authorization_none)
+        .mutation()
+        .build(),
+        RegistrationBuilder::new(Opcode::Delete, delete_handler)
         .prepare(prepare_namespace)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-        RegistrationBuilder::with_decoder(
-            Opcode::Delete,
-            super::v1_adapter::adapt_request,
-            delete_handler,
-        )
-        .prepare(prepare_namespace)
-        .authorize(operation_handlers::authorization_none)
-        .mutation()
-        .build(),
-        RegistrationBuilder::with_decoder(
-            Opcode::Stats,
-            super::v1_adapter::adapt_request,
-            stats_handler,
-        )
+        RegistrationBuilder::new(Opcode::Stats, stats_handler)
         .prepare(prepare_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .read_only()
         .build(),
-        RegistrationBuilder::with_decoder(
-            Opcode::Sync,
-            super::v1_adapter::adapt_request,
-            sync_handler,
-        )
+        RegistrationBuilder::new(Opcode::Sync, sync_handler)
         .prepare(prepare_namespace)
         .authorize(operation_handlers::authorization_administrator)
         .mutation()
         .build(),
-        RegistrationBuilder::with_decoder(
-            Opcode::NamespaceOpen,
-            super::v1_adapter::adapt_request,
-            namespace_open_handler,
-        )
-        .prepare(prepare_lifecycle)
+        RegistrationBuilder::new(Opcode::NamespaceOpen, namespace_open_handler)
+        .prepare(prepare_namespace_open)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-        RegistrationBuilder::with_decoder(
-            Opcode::NamespaceUpdatePolicy,
-            super::v1_adapter::adapt_request,
-            namespace_update_policy_handler,
-        )
-        .prepare(prepare_namespace)
+        RegistrationBuilder::new(Opcode::NamespaceUpdatePolicy, namespace_update_policy_handler)
+        .prepare(prepare_namespace_update)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
-        RegistrationBuilder::with_decoder(
-            Opcode::NamespaceDelete,
-            super::v1_adapter::adapt_request,
-            namespace_delete_handler,
-        )
-        .prepare(prepare_lifecycle_and_namespace)
+        RegistrationBuilder::new(Opcode::NamespaceDelete, namespace_delete_handler)
+        .prepare(prepare_namespace_delete)
         .authorize(operation_handlers::authorization_none)
         .mutation()
         .build(),
     ],
 )
-.install_capabilities(install_capabilities)
-.validate_with(super::v1_adapter::validate_compatibility_routes);
+.install_capabilities(install_capabilities);

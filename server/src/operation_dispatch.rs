@@ -12,7 +12,6 @@
 use openkache_protocol::Opcode;
 use smallvec::SmallVec;
 
-use super::ServerRequest;
 use super::operation_api;
 use super::operation_handlers;
 use super::operation_transport;
@@ -62,11 +61,11 @@ pub(crate) fn response_budget_bytes(opcode: Opcode) -> Option<usize> {
 /// The caller only needs a response or an abandoned mutation. All protocol
 /// status selection and response framing stay in `operation_transport`.
 pub(super) async fn execute_request(
-    request: ServerRequest,
+    input: operation_handlers::OperationInputView,
     authorization: operation_handlers::AuthorizationContext,
     capabilities: &dyn super::operation_capabilities::CapabilityCatalog,
 ) -> Option<operation_transport::OperationResponse> {
-    let opcode = request.opcode();
+    let opcode = input.opcode();
     let Some(registration) = operation_api::server_operation(opcode) else {
         return Some(operation_transport::contract_error_response_status(
             opcode,
@@ -82,17 +81,6 @@ pub(super) async fn execute_request(
         ));
     }
 
-    // Every modeled request is decoded exactly once into the generated field
-    // view. Immediate operations use the same preparation and resource path
-    // as asynchronous ones.
-    let input = (registration.decode)(request);
-    if !input.is_valid() {
-        return Some(operation_transport::contract_error_response_status(
-            opcode,
-            super::operation_contract::OperationStatus::InvalidRequest,
-            b"operation field sequence is invalid",
-        ));
-    }
     if let Err(message) = input.validate_codecs() {
         return Some(operation_transport::contract_error_response_status(
             opcode,

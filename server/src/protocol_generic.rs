@@ -7,7 +7,7 @@
 
 use super::super::operation_contract as contract;
 use super::{
-    ProtocolError, Result, WireRequestLayout, WireResult, decode_varuint, validate_value_length,
+    ProtocolError, Result, decode_varuint, validate_value_length,
 };
 use openkache_protocol::{
     OPCODE_BYTES, Opcode, OperationLayoutPlan, decode_planned_fields, encode_planned_fields,
@@ -18,18 +18,12 @@ const INLINE_OPERATION_FIELDS: usize = 8;
 
 pub(super) static REQUEST_DESCRIPTOR: super::RequestDescriptor = super::RequestDescriptor::new(
     "generated",
-    request_frame_layout,
     decode_header,
     encode_request_prefix,
     validate_request,
     decode_request,
     decode_owned_request,
-    decode_server_request,
 );
-
-pub(super) fn request_frame_layout(opcode: Opcode) -> WireResult<WireRequestLayout> {
-    Ok(contract::wire_request_layout(opcode))
-}
 
 pub(super) fn decode_header(
     prefix: &[u8],
@@ -237,15 +231,6 @@ pub(super) fn decode_owned_request(
     frame.copy_within(header.encoded_len.., 0);
     frame.truncate(header.value_len);
     super::Request::from_generic_parts(header.opcode, frame)
-}
-
-/// Keeps a generic request frame owned until the generated operation view has
-/// decoded its fields. No semantic compatibility projection is materialized.
-pub(super) fn decode_server_request(
-    frame: Vec<u8>,
-    header: super::RequestHeader,
-) -> Result<super::ServerRequest> {
-    Ok(super::ServerRequest::Frame { frame, header })
 }
 
 /// Validates only generated shape metadata for a generic request.

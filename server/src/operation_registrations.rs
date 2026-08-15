@@ -1,8 +1,8 @@
 //! API module composition.
 //!
-//! API-owned modules contribute request projection and behavior together.
-//! This composition root builds their dense catalogs in one step, while the
-//! transport and executor consume only their respective projections.
+//! API-owned modules contribute behavior, semantic request descriptors, and
+//! capabilities. Runtime frame admission uses the generated wire layout
+//! directly and reaches this composition only after projection.
 
 use std::sync::{Arc, Mutex};
 
@@ -67,12 +67,8 @@ pub(super) fn install_runtime_capabilities(
 
 /// Validates the complete server composition in one place.
 ///
-/// The network server should only decide whether the operation catalog is
-/// usable; it should not know that one module happens to be a protocol-v1
-/// compatibility projection. Keeping the compatibility-route check beside the
-/// registration catalog makes adding another adapter a local composition
-/// change.
+/// The network server only decides whether every modeled operation has a
+/// usable behavior registration and codec binding.
 pub(super) fn validate() -> Result<(), &'static str> {
-    super::operation_handlers::validate_handler_registry()?;
-    SERVER_COMPOSITION.validate_modules()
+    super::operation_handlers::validate_handler_registry()
 }

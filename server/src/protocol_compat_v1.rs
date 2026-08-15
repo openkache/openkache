@@ -18,7 +18,7 @@ use contract::{
 
 use super::{
     ItemId, NamespacePolicy, Opcode, ProtocolError, RequestDescriptor, RequestHeader, Result,
-    SetOptions, WireRequestLayout, WireResult, wire_request_layout,
+    SetOptions,
 };
 
 #[path = "protocol_compat_v1_policy.rs"]
@@ -27,13 +27,11 @@ pub(crate) use policy::decode_namespace_policy;
 
 pub(super) static REQUEST_DESCRIPTOR: RequestDescriptor = RequestDescriptor::new(
     "draft-v1",
-    request_frame_layout,
     decode_header,
     encode_request_prefix,
     validate_request,
     decode_request,
     decode_owned_request,
-    decode_server_request,
 );
 
 /// Compact request layouts owned by the protocol-v1 compatibility adapter.
@@ -202,10 +200,8 @@ pub(super) fn decode_header(
                 required,
                 0,
                 Some(namespace_id),
-                Some(openkache_protocol::OPCODE_BYTES),
                 Some(openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES),
                 item_id_count,
-                None,
                 SetOptions::NONE,
                 false,
             )))
@@ -223,10 +219,8 @@ pub(super) fn decode_header(
                 required,
                 0,
                 Some(namespace_id),
-                Some(openkache_protocol::OPCODE_BYTES),
                 None,
                 0,
-                None,
                 SetOptions::NONE,
                 false,
             )))
@@ -268,58 +262,6 @@ pub(super) fn decode_owned_request(
         Vec::new()
     };
     super::Request::from_decoded_parts(metadata, value, header.opcode)
-}
-
-/// Converts the compatibility projection into the server's adapter-neutral
-/// request envelope. The dispatcher does not need to know this route family.
-pub(super) fn decode_server_request(
-    frame: Vec<u8>,
-    header: RequestHeader,
-) -> Result<super::ServerRequest> {
-    Ok(super::ServerRequest::Frame { frame, header })
-}
-
-pub(super) fn request_namespace_name_range(
-    frame: &[u8],
-    header: RequestHeader,
-) -> Option<std::ops::Range<usize>> {
-    if compatibility_route(header.opcode) != Some(CompactV1RequestRoute::NamespaceOpen) {
-        return None;
-    }
-    let length_offset = openkache_protocol::OPCODE_BYTES + OPEN_FLAGS_BYTES;
-    let start = length_offset + openkache_protocol::NAMESPACE_NAME_LENGTH_BYTES;
-    Some(start..start + usize::from(*frame.get(length_offset)?))
-}
-
-pub(super) fn request_create_if_missing(frame: &[u8], header: RequestHeader) -> Option<bool> {
-    (compatibility_route(header.opcode) == Some(CompactV1RequestRoute::NamespaceOpen))
-        .then(|| frame.get(openkache_protocol::OPCODE_BYTES))
-        .flatten()
-        .map(|flags| flags & OPEN_CREATE_IF_MISSING != 0)
-}
-
-pub(super) fn request_namespace_policy(
-    frame: &[u8],
-    header: RequestHeader,
-) -> Option<NamespacePolicy> {
-    let start = match compatibility_route(header.opcode)? {
-        CompactV1RequestRoute::NamespaceOpen => request_namespace_name_range(frame, header)?.end,
-        CompactV1RequestRoute::NamespaceUpdatePolicy => header.expected_revision_range()?.end,
-        _ => return None,
-    };
-    decode_namespace_policy(frame.get(start..)?)
-        .ok()
-        .flatten()
-        .map(|(policy, _)| policy)
-}
-
-pub(super) fn request_frame_layout(opcode: Opcode) -> WireResult<WireRequestLayout> {
-    compatibility_route(opcode).ok_or_else(|| {
-        openkache_protocol::ProtocolError::InvalidFieldSequence(
-            "compact operation has no protocol-v1 route",
-        )
-    })?;
-    Ok(wire_request_layout(opcode))
 }
 
 pub(super) fn decode_request_metadata(
@@ -474,10 +416,8 @@ pub(super) fn decode_set_header(
         cursor + value_len_bytes,
         value_len,
         Some(namespace_id),
-        Some(openkache_protocol::OPCODE_BYTES),
         Some(item_id_start),
         1,
-        None,
         set_options,
         has_ttl,
     )))
@@ -523,9 +463,7 @@ pub(super) fn decode_namespace_open_header(
         0,
         None,
         None,
-        None,
         0,
-        None,
         SetOptions::NONE,
         false,
     )))
@@ -557,10 +495,8 @@ pub(super) fn decode_namespace_update_header(
         fixed + policy_len,
         0,
         Some(namespace_id),
-        Some(openkache_protocol::OPCODE_BYTES),
         None,
         0,
-        Some(openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES),
         SetOptions::NONE,
         false,
     )))
@@ -599,14 +535,8 @@ pub(super) fn decode_namespace_delete_header(
         fixed,
         0,
         Some(namespace_id),
-        Some(openkache_protocol::OPCODE_BYTES + DELETE_FLAGS_BYTES),
         None,
         0,
-        Some(
-            openkache_protocol::OPCODE_BYTES
-                + DELETE_FLAGS_BYTES
-                + openkache_protocol::NAMESPACE_ID_BYTES,
-        ),
         SetOptions::NONE,
         false,
     )))

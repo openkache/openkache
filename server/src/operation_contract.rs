@@ -15,10 +15,11 @@ use crate::observability::Operation;
 // or compact bit constants merely because the generated artifact contains
 // them.
 pub(super) use crate::contract::{
-    MAX_OPERATION_REQUEST_FIELDS, OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
-    OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES,
-    WireCodecCardinality, WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding,
-    WireCodecWidth, operation_registry, operation_wire_spec, wire_codec_kind, wire_request_layout,
+    MAX_OPERATION_REQUEST_FIELDS, MAX_REQUEST_FRAME_BYTES, OperationFieldPlan,
+    OperationFramePolicy, OperationLayoutFraming, OperationStatus, OperationWireSpec,
+    WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor,
+    WireCodecKind, WireCodecLengthEncoding, WireCodecWidth, operation_registry,
+    operation_wire_spec, wire_codec_kind, wire_request_layout,
 };
 // Future generated generic bindings consume field indexes through this neutral
 // facade even when the currently registered generic API has no fields.
