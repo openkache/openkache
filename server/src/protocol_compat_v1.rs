@@ -276,19 +276,37 @@ pub(super) fn decode_server_request(
     frame: Vec<u8>,
     header: RequestHeader,
 ) -> Result<super::ServerRequest> {
+    Ok(super::ServerRequest::Frame { frame, header })
+}
+
+pub(super) fn request_namespace_name_range(
+    frame: &[u8],
+    header: RequestHeader,
+) -> Option<std::ops::Range<usize>> {
     if compatibility_route(header.opcode) != Some(CompactV1RequestRoute::NamespaceOpen) {
-        return Ok(super::ServerRequest::Frame { frame, header });
+        return None;
     }
-    Ok(super::ServerRequest::from_request(decode_owned_request(
-        frame, header,
-    )?))
+    let length_offset = openkache_protocol::OPCODE_BYTES + OPEN_FLAGS_BYTES;
+    let start = length_offset + openkache_protocol::NAMESPACE_NAME_LENGTH_BYTES;
+    Some(start..start + usize::from(*frame.get(length_offset)?))
+}
+
+pub(super) fn request_create_if_missing(frame: &[u8], header: RequestHeader) -> Option<bool> {
+    (compatibility_route(header.opcode) == Some(CompactV1RequestRoute::NamespaceOpen))
+        .then(|| frame.get(openkache_protocol::OPCODE_BYTES))
+        .flatten()
+        .map(|flags| flags & OPEN_CREATE_IF_MISSING != 0)
 }
 
 pub(super) fn request_namespace_policy(
     frame: &[u8],
     header: RequestHeader,
 ) -> Option<NamespacePolicy> {
-    let start = header.expected_revision_range()?.end;
+    let start = match compatibility_route(header.opcode)? {
+        CompactV1RequestRoute::NamespaceOpen => request_namespace_name_range(frame, header)?.end,
+        CompactV1RequestRoute::NamespaceUpdatePolicy => header.expected_revision_range()?.end,
+        _ => return None,
+    };
     decode_namespace_policy(frame.get(start..)?)
         .ok()
         .flatten()

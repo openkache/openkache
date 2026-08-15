@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use futures_util::lock::Mutex as AsyncMutex;
-use openkache_protocol::Opcode;
+use openkache_protocol::{Opcode, OwnedRange};
 
 use super::super::observability::Operation;
 use super::super::types::{
@@ -132,7 +132,7 @@ pub(super) trait NamespaceCapability {
     fn policy(&self, namespace_id: u64) -> Option<NamespacePolicy>;
     fn open(
         &self,
-        name: Vec<u8>,
+        name: OwnedRange,
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError>;
@@ -343,7 +343,7 @@ impl NamespaceCapability for Mutex<NamespaceRegistry> {
 
     fn open(
         &self,
-        name: Vec<u8>,
+        name: OwnedRange,
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError> {

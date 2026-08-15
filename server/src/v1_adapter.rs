@@ -207,6 +207,18 @@ fn populate_frame_fields(
                     start: range.start,
                     end: range.end,
                 }),
+            "name" => {
+                crate::protocol::compatibility_namespace_name_range(frame, header).map(|range| {
+                    OperationFieldStorage::OwnerRange {
+                        start: range.start,
+                        end: range.end,
+                    }
+                })
+            }
+            "create_if_missing" => crate::protocol::compatibility_create_if_missing(frame, header)
+                .map(|create| {
+                    OperationFieldStorage::StaticBytes(if create { b"\x01" } else { b"\x00" })
+                }),
             "policy" => None,
             "default_expiration" => namespace_policy.map(|policy| {
                 OperationFieldStorage::StaticBytes(default_expiration_token(
