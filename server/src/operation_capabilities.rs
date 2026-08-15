@@ -82,6 +82,7 @@ impl<'a> CapabilityEntry<'a> {
 pub struct CapabilityList<'a> {
     /// Immutable entries searched by their stable key.
     pub entries: &'a [CapabilityEntry<'a>],
+    base: Option<&'a dyn CapabilityCatalog>,
 }
 
 impl<'a> CapabilityList<'a> {
@@ -91,7 +92,34 @@ impl<'a> CapabilityList<'a> {
     ///
     /// * `entries` - Entries whose values outlive the catalog.
     pub const fn new(entries: &'a [CapabilityEntry<'a>]) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            base: None,
+        }
+    }
+
+    /// Creates an immutable overlay over one borrowed base catalog.
+    ///
+    /// The base and entries remain borrowed, so composition does not allocate
+    /// or clone shared ownership. An identity present in both catalogs is
+    /// ambiguous and cannot be resolved by overlay precedence.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - Existing catalog borrowed for the overlay lifetime.
+    /// * `entries` - Additional borrowed entries.
+    ///
+    /// # Returns
+    ///
+    /// An allocation-free catalog that searches both sources.
+    pub const fn overlay(
+        base: &'a dyn CapabilityCatalog,
+        entries: &'a [CapabilityEntry<'a>],
+    ) -> Self {
+        Self {
+            entries,
+            base: Some(base),
+        }
     }
 }
 
@@ -102,6 +130,7 @@ impl CapabilityCatalog for CapabilityList<'_> {
 
     fn contains_id(&self, id: u64) -> bool {
         self.entries.iter().any(|entry| entry.id == id)
+            || self.base.is_some_and(|base| base.contains_id(id))
     }
 
     fn get_by_id(&self, id: u64, name: &'static str) -> Option<&(dyn Any + Send + Sync)> {
@@ -112,7 +141,13 @@ impl CapabilityCatalog for CapabilityList<'_> {
             }
             found = Some(entry.value);
         }
-        found
+        let Some(base) = self.base else {
+            return found;
+        };
+        if found.is_some() && base.contains_id(id) {
+            return None;
+        }
+        found.or_else(|| base.get_by_id(id, name))
     }
 }
 
