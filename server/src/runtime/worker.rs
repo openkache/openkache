@@ -26,34 +26,6 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     }
 }
 
-/// Adapter-owned execution for work that requires a quiescent keyed lane.
-///
-/// The worker only preserves ordering and records whether work ran. The
-/// adapter owns command extraction, cancellation policy, execution, and
-/// completion projection.
-pub(super) trait ExclusiveWorkPort<C> {
-    type Work;
-
-    fn take_exclusive(command: C) -> Option<Self::Work>;
-    fn execute_exclusive(
-        &mut self,
-        work: Self::Work,
-    ) -> impl Future<Output = ExclusiveWorkResult> + '_;
-}
-
-pub(super) enum ExclusiveWorkResult {
-    Completed { operation: Operation },
-    Cancelled,
-}
-
-async fn execute_exclusive_work<L, C>(lifecycle: &mut L, command: C) -> Option<ExclusiveWorkResult>
-where
-    L: ExclusiveWorkPort<C>,
-{
-    let work = L::take_exclusive(command)?;
-    Some(lifecycle.execute_exclusive(work).await)
-}
-
 pub(super) trait ControlPort<C> {
     fn execute_control(
         &mut self,
@@ -244,7 +216,7 @@ pub(super) async fn worker_loop<C, X>(
 where
     C: KeyedWorkPort<Kvkache, StorageKey> + Send + Unpin + 'static,
     X: Send + Unpin + 'static,
-    Kvkache: ExclusiveWorkPort<C> + ControlPort<X>,
+    Kvkache: ControlPort<X>,
 {
     let storage_shard = observability
         .as_deref()
@@ -253,7 +225,8 @@ where
         .batch_size
         .saturating_mul(io_config.max_inflight_per_worker)
         .max(io_config.max_inflight_per_worker);
-    let mut scheduler = KeyScheduler::with_waiting_capacity(waiting_capacity);
+    let mut scheduler: KeyScheduler<StorageKey, C> =
+        KeyScheduler::with_waiting_capacity(waiting_capacity);
     let mut inflight = FuturesUnordered::new();
     let mut barrier = None;
     let mut disconnected = false;
@@ -391,33 +364,7 @@ where
             }
         }
 
-        // Exclusive adapter work may borrow worker-local state for its full
-        // future lifetime, so it cannot overlap an owned keyed job. It still
-        // lives in the keyed lane and preserves per-key ordering.
-        if inflight.is_empty()
-            && let Some((storage_key, command)) = scheduler.take_ready_exclusive()
-        {
-            let started_at = Instant::now();
-            let Some(result) = execute_exclusive_work(&mut cache, command).await else {
-                scheduler.finish_running_lane(storage_key);
-                continue;
-            };
-            match result {
-                ExclusiveWorkResult::Completed { operation } => {
-                    if let Some(storage_shard) = storage_shard {
-                        storage_shard.record_operation(operation, started_at.elapsed());
-                    }
-                }
-                ExclusiveWorkResult::Cancelled => {}
-            }
-            scheduler.finish_running_lane(storage_key);
-            continue;
-        }
-
         while inflight.len() < io_config.max_inflight_per_worker {
-            if scheduler.ready_is_exclusive() {
-                break;
-            }
             let Some((storage_key, command)) = scheduler.take_ready() else {
                 break;
             };

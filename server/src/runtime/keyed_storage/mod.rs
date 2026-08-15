@@ -16,12 +16,9 @@ use crate::types::{
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
 use super::scheduler::ScheduledTask;
-use super::storage_task::StorageTask;
-use super::worker::{ExclusiveWorkPort, ExclusiveWorkResult};
 use super::worker_contract::{
     CollapsedKeyedWork, KeyedWorkMetadata, KeyedWorkPort, PreparedKeyedWork,
 };
-use super::worker_control::execute_storage_task;
 use super::{WorkerResponse, WorkerResponseSender};
 
 pub(in crate::runtime) use crate::store::KeyedOutcome as Response;
@@ -60,10 +57,6 @@ impl WriteMetadata {
 
 /// One keyed storage command routed through a worker lane.
 pub(in crate::runtime) enum Command {
-    Task {
-        task: StorageTask,
-        response: WorkerResponseSender,
-    },
     Get {
         operation: Operation,
         response: WorkerResponseSender,
@@ -77,10 +70,6 @@ pub(in crate::runtime) enum Command {
         operation: Operation,
         response: WorkerResponseSender,
     },
-}
-
-pub(in crate::runtime) fn storage_task(task: StorageTask, response: WorkerResponseSender) -> Command {
-    Command::Task { task, response }
 }
 
 pub(in crate::runtime) fn get(operation: Operation, response: WorkerResponseSender) -> Command {
@@ -113,7 +102,6 @@ pub(in crate::runtime) fn delete(operation: Operation, response: WorkerResponseS
 impl Command {
     fn metadata(&self, cache: &Kvkache) -> KeyedWorkMetadata {
         let (operation, collapsible) = match self {
-            Self::Task { .. } => (Operation::unknown(), false),
             Self::Get { operation, .. } => (*operation, true),
             Self::Set {
                 value,
@@ -138,9 +126,6 @@ impl Command {
         storage_key: StorageKey,
     ) -> PreparedKeyedWork<WorkerResponse, PreparedJob> {
         let (operation, response) = match self {
-            Self::Task { .. } => {
-                unreachable!("exclusive storage tasks do not enter the keyed job path")
-            }
             Self::Get { response, .. } => (KeyedOperation::Get, response),
             Self::Set {
                 value,
@@ -202,57 +187,13 @@ pub(in crate::runtime) fn delete_response(
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum CollapseGroup {
     Storage,
-    Task,
 }
 
 impl ScheduledTask for Command {
     type CollapseGroup = CollapseGroup;
 
     fn collapse_group(&self) -> Self::CollapseGroup {
-        match self {
-            Self::Task { .. } => CollapseGroup::Task,
-            Self::Get { .. } | Self::Set { .. } | Self::Delete { .. } => CollapseGroup::Storage,
-        }
-    }
-
-    fn is_exclusive(&self) -> bool {
-        matches!(self, Self::Task { .. })
-    }
-}
-
-pub(in crate::runtime) struct ExclusiveStorageTask {
-    task: StorageTask,
-    response: WorkerResponseSender,
-}
-
-impl ExclusiveWorkPort<Command> for Kvkache {
-    type Work = ExclusiveStorageTask;
-
-    fn take_exclusive(command: Command) -> Option<Self::Work> {
-        match command {
-            Command::Task { task, response } => Some(ExclusiveStorageTask { task, response }),
-            Command::Get { .. } | Command::Set { .. } | Command::Delete { .. } => None,
-        }
-    }
-
-    fn execute_exclusive(
-        &mut self,
-        work: Self::Work,
-    ) -> impl std::future::Future<Output = ExclusiveWorkResult> + '_ {
-        async move {
-            let ExclusiveStorageTask { task, response } = work;
-            if task.metadata().cancellation()
-                == super::StorageTaskCancellation::CancelIfDisconnected
-                && response.is_disconnected()
-            {
-                return ExclusiveWorkResult::Cancelled;
-            }
-            let result = execute_storage_task(self, task).await;
-            let _ = response.send(Ok(result));
-            ExclusiveWorkResult::Completed {
-                operation: Operation::unknown(),
-            }
-        }
+        CollapseGroup::Storage
     }
 }
 

@@ -4,7 +4,6 @@ use std::future::Future;
 
 use super::completion::CompletionSender;
 use super::scheduler::ScheduledTask;
-use super::storage_port::{StorageError, StorageTaskOutput};
 use crate::Result;
 use crate::observability::Operation;
 
@@ -21,8 +20,6 @@ pub(super) enum Response<D> {
     Data(D),
     Stats(String),
     Synced,
-    StorageResult(StorageTaskOutput),
-    StorageFailure(StorageError),
 }
 
 impl<D> std::fmt::Debug for Response<D> {
@@ -31,11 +28,6 @@ impl<D> std::fmt::Debug for Response<D> {
             Self::Data(_) => formatter.write_str("Data(..)"),
             Self::Stats(stats) => formatter.debug_tuple("Stats").field(stats).finish(),
             Self::Synced => formatter.write_str("Synced"),
-            Self::StorageResult(_) => formatter.write_str("StorageResult(..)"),
-            Self::StorageFailure(error) => formatter
-                .debug_tuple("StorageFailure")
-                .field(error)
-                .finish(),
         }
     }
 }
