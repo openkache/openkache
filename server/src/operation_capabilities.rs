@@ -1,8 +1,7 @@
 //! Type-erased composition primitives for server and API capabilities.
 //!
-//! The generic executor only sees the long-lived request catalog. During
-//! startup, the same primitives can expose borrowed server ports to API module
-//! installers without adding those bootstrap entries to request execution.
+//! Startup composition exposes caller capabilities and borrowed server ports
+//! to API module initializers without retaining a request-path service locator.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -173,7 +172,6 @@ impl CapabilityCatalog for EmptyCapabilityCatalog {
 /// [`KacheServer::with_capabilities`](super::KacheServer::with_capabilities).
 pub struct CapabilityRegistry {
     entries: Vec<(u64, &'static str, Arc<dyn Any + Send + Sync>)>,
-    base: Option<Arc<dyn CapabilityCatalog>>,
 }
 
 impl CapabilityRegistry {
@@ -181,26 +179,13 @@ impl CapabilityRegistry {
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
-            base: None,
-        }
-    }
-
-    /// Starts one immutable worker registry over caller-supplied base entries.
-    ///
-    /// API contributions are inserted into this single registry before it is
-    /// shared. Lookups therefore perform at most one sorted search and one
-    /// fallback instead of walking an overlay chain.
-    pub(crate) fn overlay(base: Arc<dyn CapabilityCatalog>) -> Self {
-        Self {
-            entries: Vec::new(),
-            base: Some(base),
         }
     }
 
     /// Registers one API-owned capability.
     ///
     /// The typed key keeps the downcast type next to the registration site;
-    /// the generic dispatcher only stores and looks up the erased value.
+    /// API module initializers consume the erased value during worker startup.
     ///
     /// # Panics
     ///
@@ -214,14 +199,6 @@ impl CapabilityRegistry {
                 panic!("duplicate capability key");
             }
             panic!("capability key hash collision");
-        }
-        if let Some(base) = &self.base
-            && base.contains_id(key.id())
-        {
-            if base.get_by_id(key.id(), key.name()).is_some() {
-                panic!("duplicate capability key");
-            }
-            panic!("capability key conflict");
         }
         self.entries.push((key.id(), key.name(), Arc::new(value)));
         self.entries.sort_unstable_by_key(|(id, _, _)| *id);
@@ -250,22 +227,13 @@ impl CapabilityCatalog for CapabilityRegistry {
 
     fn contains_id(&self, id: u64) -> bool {
         self.entries.iter().any(|(entry_id, _, _)| *entry_id == id)
-            || self.base.as_ref().is_some_and(|base| base.contains_id(id))
     }
 
     fn get_by_id(&self, id: u64, name: &'static str) -> Option<&(dyn Any + Send + Sync)> {
-        let local = self
-            .entries
+        self.entries
             .binary_search_by_key(&id, |(entry_id, _, _)| *entry_id)
             .ok()
             .filter(|index| self.entries[*index].1 == name)
-            .map(|index| self.entries[index].2.as_ref());
-        let Some(base) = &self.base else {
-            return local;
-        };
-        if local.is_some() && base.contains_id(id) {
-            return None;
-        }
-        local.or_else(|| base.get_by_id(id, name))
+            .map(|index| self.entries[index].2.as_ref())
     }
 }

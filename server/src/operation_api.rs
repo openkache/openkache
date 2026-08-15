@@ -14,7 +14,7 @@ use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
-use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
+use super::operation_capabilities::CapabilityCatalog;
 use super::operation_contract as contract;
 use super::operation_contract::OperationStatus;
 use super::operation_execution_state::{
@@ -433,7 +433,7 @@ pub(super) struct ApiModule {
 }
 
 pub(super) type ModuleInitializer =
-    fn(&mut CapabilityRegistry, &dyn CapabilityCatalog) -> Result<ModuleState, &'static str>;
+    fn(&dyn CapabilityCatalog) -> Result<ModuleState, &'static str>;
 
 fn state_is<T: Any>(state: &ModuleState) -> bool {
     state.is::<T>()
@@ -467,13 +467,12 @@ impl ApiModule {
 
     fn initialize(
         self,
-        registry: &mut CapabilityRegistry,
         bootstrap: &dyn CapabilityCatalog,
     ) -> Result<Option<ModuleState>, &'static str> {
         let Some(initialize) = self.initializer else {
             return Ok(None);
         };
-        let state = initialize(registry, bootstrap)?;
+        let state = initialize(bootstrap)?;
         if !self
             .state_validator
             .is_some_and(|validate| validate(&state))
@@ -515,14 +514,13 @@ impl ServerComposition {
 
     pub(super) fn initialize_modules(
         &'static self,
-        registry: &mut CapabilityRegistry,
         bootstrap: &dyn CapabilityCatalog,
     ) -> Result<OperationRuntimeBuilder, &'static str> {
         let mut runtime = OperationRuntimeBuilder::new();
         let mut index = 0;
         while index < self.module_count {
             let module = self.modules[index].expect("registered API module is missing");
-            let state = module.initialize(registry, bootstrap)?;
+            let state = module.initialize(bootstrap)?;
             runtime.bind(module.operations(), state)?;
             index += 1;
         }

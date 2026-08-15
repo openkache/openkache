@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use super::operation_api::CapabilityKey;
-use super::operation_capabilities::CapabilityRegistry;
 
 #[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
@@ -28,8 +27,3 @@ pub(super) const STORAGE_PORT: CapabilityKey<StoragePortHandle> =
 
 /// Keeps the handle type-erased at the capability boundary.
 pub(crate) type StoragePortHandle = Arc<dyn StoragePort>;
-
-/// Installs the neutral storage capability shared by API modules.
-pub(super) fn install(registry: &mut CapabilityRegistry, storage: StoragePortHandle) {
-    registry.insert(STORAGE_PORT, storage);
-}

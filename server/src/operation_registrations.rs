@@ -12,9 +12,7 @@ use super::operation_api::{ServerComposition, ServerOperationRegistration};
 use super::operation_execution_state::OperationRuntime;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
-    operation_capabilities::{
-        CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry,
-    },
+    operation_capabilities::{CapabilityCatalog, CapabilityEntry, CapabilityList},
     operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
     operation_compatibility_services::{
         COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT,
@@ -40,11 +38,10 @@ pub(super) fn registered_operations() -> impl Iterator<Item = &'static ServerOpe
 /// Installs the capabilities owned by the currently registered API modules.
 ///
 /// This is deliberately the only server composition function that knows which
-/// concrete runtime handles are available to API installers. The network loop
-/// passes opaque capability state onward and remains independent of operation
-/// names, wire layouts, and client projections.
+/// concrete runtime handles are available to API installers. Request execution
+/// receives only the resulting dense operation runtime.
 pub(super) fn build_operation_runtime(
-    base: Arc<dyn CapabilityCatalog>,
+    base: &dyn CapabilityCatalog,
     cache: Arc<NetworkWorkerCache>,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     observability: Arc<ObservabilityState>,
@@ -53,9 +50,8 @@ pub(super) fn build_operation_runtime(
     let compatibility_storage: StorageCapabilityHandle = cache;
     let compatibility_namespaces: NamespaceCapabilityHandle = namespaces;
     let compatibility_observability: ObservabilityCapabilityHandle = observability;
-    let mut registry = CapabilityRegistry::overlay(base);
-    super::storage_port::install(&mut registry, storage_port);
     let bootstrap_entries = [
+        CapabilityEntry::new(super::storage_port::STORAGE_PORT, &storage_port),
         CapabilityEntry::new(COMPATIBILITY_STORAGE_PORT, &compatibility_storage),
         CapabilityEntry::new(
             COMPATIBILITY_NAMESPACE_PORT,
@@ -66,10 +62,9 @@ pub(super) fn build_operation_runtime(
             &compatibility_observability,
         ),
     ];
-    let bootstrap = CapabilityList::new(&bootstrap_entries);
-    let runtime = SERVER_COMPOSITION.initialize_modules(&mut registry, &bootstrap)?;
-    let capabilities: Arc<dyn CapabilityCatalog> = Arc::new(registry);
-    Ok(Arc::new(runtime.finish(capabilities)))
+    let bootstrap = CapabilityList::overlay(base, &bootstrap_entries);
+    let runtime = SERVER_COMPOSITION.initialize_modules(&bootstrap)?;
+    Ok(Arc::new(runtime.finish()))
 }
 
 /// Validates the complete server composition in one place.

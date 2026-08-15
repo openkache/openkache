@@ -4,9 +4,9 @@ use super::connection::{NetworkWorkerLimits, prepare_network_worker, run_selecte
 impl KacheServer {
     /// Installs API-owned capabilities before the server starts serving.
     ///
-    /// Each network worker retains the catalog inside its operation runtime.
-    /// Generic dispatch only exposes opaque catalog and module-state views;
-    /// API services remain supplied by the composition root.
+    /// Each network worker borrows the catalog while its operation modules
+    /// initialize, then retains only their validated module state. Request
+    /// dispatch does not expose the catalog.
     ///
     /// # Arguments
     ///
