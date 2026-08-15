@@ -11,11 +11,11 @@ use super::operation_api::{
     ApiModule, HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
     PrepareError, PreparePlan, RegistrationBuilder, ResourceLock,
 };
+use super::operation_execution_state::ModuleState;
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
-    COMPATIBILITY_BODY_LIMITS, COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT,
-    COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_SERVICES, COMPATIBILITY_STORAGE_PORT,
-    CompatibilityBodyLimits, CompatibilityResourceResolver, CompatibilityServices,
+    COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, COMPATIBILITY_STORAGE_PORT,
+    CompatibilityContext, CompatibilityResourceResolver, CompatibilityServices,
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::{self, OperationContext, OperationInputView};
@@ -35,14 +35,15 @@ fn admit_set_header(
     input: &OperationHeaderView<'_>,
     context: HeaderAdmissionContext<'_>,
 ) -> Result<(), HeaderAdmissionError> {
-    let limits: &CompatibilityBodyLimits =
-        super::operation_api::downcast_capability(context.capabilities, COMPATIBILITY_BODY_LIMITS)
-            .ok_or_else(|| {
-                HeaderAdmissionError::new(
-                    OperationStatus::InternalError,
-                    b"SET body limits are unavailable",
-                )
-            })?;
+    let limits = context
+        .state::<CompatibilityContext>()
+        .map(|state| &state.body_limits)
+        .ok_or_else(|| {
+            HeaderAdmissionError::new(
+                OperationStatus::InternalError,
+                b"compatibility module state is unavailable",
+            )
+        })?;
     let value_len = input
         .declared_body_len(request_fields::op_set::VALUE)
         .ok_or_else(|| {
@@ -63,7 +64,7 @@ fn admit_set_header(
 /// Installs the compatibility adapter's concrete service bundle at the API
 /// composition boundary. The network loop only calls the aggregate operation
 /// registration installer and never reaches into this compatibility surface.
-pub(super) use super::operation_compatibility_services::install_compatibility_services;
+pub(super) use super::operation_compatibility_services::build_compatibility_context;
 
 impl OperationInputView {
     fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
@@ -345,10 +346,11 @@ fn compatibility_resolver<'a>(
     context: PrepareContext<'a>,
 ) -> std::result::Result<&'a CompatibilityResourceResolver, PrepareError> {
     context
-        .capability::<CompatibilityResourceResolver>(COMPATIBILITY_RESOURCE_RESOLVER)
+        .state::<CompatibilityContext>()
+        .map(|state| &state.resource_resolver)
         .ok_or(PrepareError::resource_unavailable(
             OperationStatus::InternalError,
-            b"compatibility resource resolver is unavailable",
+            b"compatibility module state is unavailable",
         ))
 }
 
@@ -356,8 +358,8 @@ fn compatibility_services<'a>(
     context: &OperationContext<'a>,
 ) -> Option<&'a (dyn CompatibilityServices + Send + Sync)> {
     context
-        .capability(COMPATIBILITY_SERVICES)
-        .map(std::sync::Arc::as_ref)
+        .state::<CompatibilityContext>()
+        .map(|state| state as &(dyn CompatibilityServices + Send + Sync))
 }
 
 fn prepare_namespace_at(
@@ -676,6 +678,15 @@ fn invalid_input<'a>(message: &'static [u8]) -> OperationFuture<'a> {
     OperationFuture::ready(OperationOutcome::invalid_request(message))
 }
 
+fn missing_module_state<'a>() -> OperationFuture<'a> {
+    OperationFuture::ready(OperationOutcome::error(
+        super::operation_outcome::OperationError::status(
+            OperationStatus::InternalError,
+            b"compatibility module state is unavailable",
+        ),
+    ))
+}
+
 /// Builds a typed API binding from a generated field decoder and an
 /// API-owned behavior function.
 ///
@@ -687,7 +698,7 @@ macro_rules! typed_handler {
     ($name:ident, mut $decode:ident, $behavior:path) => {
         pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
             let Some(services) = compatibility_services(&context) else {
-                return invalid_input(b"compatibility services are unavailable");
+                return missing_module_state();
             };
             let OperationContext { mut input, .. } = context;
             let decoded = match $decode(&mut input) {
@@ -700,7 +711,7 @@ macro_rules! typed_handler {
     ($name:ident, $decode:path, $behavior:path) => {
         pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
             let Some(services) = compatibility_services(&context) else {
-                return invalid_input(b"compatibility services are unavailable");
+                return missing_module_state();
             };
             let OperationContext { input, .. } = context;
             let decoded = match $decode(&input) {
@@ -737,10 +748,10 @@ typed_handler!(
 typed_handler!(stats_handler, decode_stats, compatibility_behavior::stats);
 typed_handler!(sync_handler, decode_sync, compatibility_behavior::sync);
 
-fn install_capabilities(
-    registry: &mut super::operation_capabilities::CapabilityRegistry,
+fn initialize_module(
+    _registry: &mut super::operation_capabilities::CapabilityRegistry,
     bootstrap: &dyn super::operation_capabilities::CapabilityCatalog,
-) -> Result<(), &'static str> {
+) -> Result<ModuleState, &'static str> {
     let storage = super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)
         .ok_or("compatibility storage port is unavailable")?;
     let namespaces =
@@ -749,13 +760,12 @@ fn install_capabilities(
     let observability =
         super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
             .ok_or("compatibility observability port is unavailable")?;
-    install_compatibility_services(
-        registry,
+    let state = build_compatibility_context(
         storage.clone(),
         namespaces.clone(),
         observability.clone(),
     );
-    Ok(())
+    Ok(ModuleState::new(state))
 }
 
 pub(super) const API: ApiModule = ApiModule::new(&[
@@ -804,4 +814,4 @@ pub(super) const API: ApiModule = ApiModule::new(&[
         .mutation()
         .build(),
 ])
-.install_capabilities(install_capabilities);
+.initialize_state::<CompatibilityContext>(initialize_module);

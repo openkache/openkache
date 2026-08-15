@@ -17,6 +17,9 @@ use smallvec::SmallVec;
 use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
 use super::operation_contract as contract;
 use super::operation_contract::OperationStatus;
+use super::operation_execution_state::{
+    ModuleState, OperationRuntimeBuilder, OperationStateRef,
+};
 use super::operation_handlers::{AuthorizationFn, OperationInputView};
 use super::operation_registry::OperationHandler;
 /// Downcasts one API-owned capability without exposing the catalog's
@@ -153,7 +156,14 @@ impl<'a> OperationHeaderView<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct HeaderAdmissionContext<'a> {
-    pub(super) capabilities: &'a dyn CapabilityCatalog,
+    pub(super) state: OperationStateRef<'a>,
+}
+
+impl<'a> HeaderAdmissionContext<'a> {
+    /// Borrows the state initialized by this operation's API module.
+    pub(super) fn state<T: Any>(&self) -> Option<&'a T> {
+        self.state.get()
+    }
 }
 
 pub(super) type HeaderAdmissionFn = for<'a> fn(
@@ -166,7 +176,7 @@ pub(super) type HeaderAdmissionFn = for<'a> fn(
 /// Preparation is intentionally narrower than behavior execution. An API
 /// binding can resolve opaque resources and reservations without
 /// depending on the concrete server, cache implementation, or transport
-/// context. The composition root supplies an opaque capability catalog.
+/// context. The composition root supplies opaque module state.
 pub(super) type PrepareFn = for<'a> fn(
     &OperationInputView,
     PrepareContext<'a>,
@@ -187,17 +197,14 @@ pub(super) fn prepare_none(
 
 #[derive(Clone, Copy)]
 pub(super) struct PrepareContext<'a> {
-    /// API-owned dependencies used to build API-owned resource plans.
-    ///
-    /// Every binding obtains its dependencies through this opaque catalog. The
-    /// dispatcher does not carry domain-specific dependency fields.
-    pub(super) capabilities: &'a dyn CapabilityCatalog,
+    /// State initialized once for the operation's API module.
+    pub(super) state: OperationStateRef<'a>,
 }
 
 impl<'a> PrepareContext<'a> {
-    /// Looks up one API-owned dependency for custom resource preparation.
-    pub(super) fn capability<T: Any>(&self, key: CapabilityKey<T>) -> Option<&'a T> {
-        downcast_capability(self.capabilities, key)
+    /// Borrows the state initialized by this operation's API module.
+    pub(super) fn state<T: Any>(&self) -> Option<&'a T> {
+        self.state.get()
     }
 }
 
@@ -403,28 +410,42 @@ impl RegistrationBuilder {
 
 /// A self-contained API module contribution.
 ///
-/// The module owns behavior registrations and optional capability
-/// installation. Runtime frame projection is generated independently of API
+/// The module owns behavior registrations and optional worker state
+/// initialization. Runtime frame projection is generated independently of API
 /// modules.
 #[derive(Clone, Copy)]
 pub(super) struct ApiModule {
     operations: &'static [ServerOperationRegistration],
-    install_capabilities: Option<ModuleCapabilityInstaller>,
+    initializer: Option<ModuleInitializer>,
+    state_validator: Option<fn(&ModuleState) -> bool>,
 }
 
-pub(super) type ModuleCapabilityInstaller =
-    fn(&mut CapabilityRegistry, &dyn CapabilityCatalog) -> Result<(), &'static str>;
+pub(super) type ModuleInitializer =
+    fn(&mut CapabilityRegistry, &dyn CapabilityCatalog) -> Result<ModuleState, &'static str>;
+
+fn state_is<T: Any>(state: &ModuleState) -> bool {
+    state.is::<T>()
+}
 
 impl ApiModule {
     pub(super) const fn new(operations: &'static [ServerOperationRegistration]) -> Self {
         Self {
             operations,
-            install_capabilities: None,
+            initializer: None,
+            state_validator: None,
         }
     }
 
-    pub(super) const fn install_capabilities(mut self, install: ModuleCapabilityInstaller) -> Self {
-        self.install_capabilities = Some(install);
+    /// Initializes state shared by this module's operations.
+    ///
+    /// The declared type is checked once during worker startup so a wiring
+    /// mismatch cannot survive until request dispatch.
+    pub(super) const fn initialize_state<T: Any + Send + Sync>(
+        mut self,
+        initialize: ModuleInitializer,
+    ) -> Self {
+        self.initializer = Some(initialize);
+        self.state_validator = Some(state_is::<T>);
         self
     }
 
@@ -432,21 +453,28 @@ impl ApiModule {
         self.operations
     }
 
-    fn install(
+    fn initialize(
         self,
         registry: &mut CapabilityRegistry,
         bootstrap: &dyn CapabilityCatalog,
-    ) -> Result<(), &'static str> {
-        if let Some(install) = self.install_capabilities {
-            install(registry, bootstrap)?;
+    ) -> Result<Option<ModuleState>, &'static str> {
+        let Some(initialize) = self.initializer else {
+            return Ok(None);
+        };
+        let state = initialize(registry, bootstrap)?;
+        if !self
+            .state_validator
+            .is_some_and(|validate| validate(&state))
+        {
+            return Err("API module initialized an unexpected state type");
         }
-        Ok(())
+        Ok(Some(state))
     }
 }
 
 /// Server catalogs assembled together from API-owned module contributions.
 ///
-/// Registering one module installs its behavior and optional capabilities.
+/// Registering one module installs its behavior and optional worker state.
 /// Generated metadata remains the sole runtime frame-admission contract.
 pub(super) struct ServerComposition {
     operations: OperationCatalog,
@@ -473,19 +501,20 @@ impl ServerComposition {
         self
     }
 
-    pub(super) fn install_capabilities(
+    pub(super) fn initialize_modules(
         &'static self,
         registry: &mut CapabilityRegistry,
         bootstrap: &dyn CapabilityCatalog,
-    ) -> Result<(), &'static str> {
+    ) -> Result<OperationRuntimeBuilder, &'static str> {
+        let mut runtime = OperationRuntimeBuilder::new();
         let mut index = 0;
         while index < self.module_count {
-            self.modules[index]
-                .expect("registered API module is missing")
-                .install(registry, bootstrap)?;
+            let module = self.modules[index].expect("registered API module is missing");
+            let state = module.initialize(registry, bootstrap)?;
+            runtime.bind(module.operations(), state)?;
             index += 1;
         }
-        Ok(())
+        Ok(runtime)
     }
 
     pub(super) fn operation(

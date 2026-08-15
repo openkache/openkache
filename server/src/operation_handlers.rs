@@ -16,6 +16,7 @@ pub(super) use super::operation_authorization::{
     authorization_none,
 };
 use super::operation_capabilities::CapabilityCatalog;
+use super::operation_execution_state::OperationStateRef;
 pub(super) use super::operation_fields::OperationFieldEnvelope;
 use crate::operation_contract as contract;
 
@@ -300,10 +301,16 @@ impl OperationFieldStorage {
 
 pub(super) struct OperationContext<'a> {
     pub(super) capabilities: &'a dyn CapabilityCatalog,
+    pub(super) state: OperationStateRef<'a>,
     pub(super) input: OperationInputView,
 }
 
 impl<'a> OperationContext<'a> {
+    /// Borrows this operation's API module state.
+    pub(super) fn state<T: Any>(&self) -> Option<&'a T> {
+        self.state.get()
+    }
+
     /// Looks up an API-owned dependency without exposing type erasure to a
     /// behavior binding.
     #[allow(dead_code)]

@@ -8,13 +8,10 @@
 use openkache_protocol::{Opcode, ProtocolError, Response, ResponseParts, ResponseSegment, Status};
 use smallvec::SmallVec;
 
-use super::operation_capabilities::CapabilityCatalog;
 use super::operation_contract::OperationStatus;
-use super::operation_handlers::{OperationContext, OperationInputView};
 use super::operation_outcome::{
     OperationBody, OperationError, OperationOutcome, OperationSuccessStatus, OperationValue,
 };
-use super::operation_registry::OperationHandler;
 use crate::operation_contract as contract;
 
 /// One fully framed operation response ready for ownership-preserving writes.
@@ -50,25 +47,6 @@ impl From<Response> for OperationResponse {
 /// contract directly.
 pub(super) const fn response_budget(opcode: Opcode) -> usize {
     contract::response_budget(opcode)
-}
-
-/// Executes one API handler and projects its outcome to a response.
-///
-/// Every registration uses this same boundary, including compatibility
-/// adapters. The handler decides domain behavior; this module alone maps the
-/// transport-neutral outcome through the generated response contract.
-pub(super) async fn execute(
-    capabilities: &dyn CapabilityCatalog,
-    input: OperationInputView,
-    handler: OperationHandler,
-) -> Option<OperationResponse> {
-    let opcode = input.opcode();
-    let outcome = handler(OperationContext {
-        capabilities,
-        input,
-    })
-    .await;
-    encode_operation_outcome(opcode, outcome)
 }
 
 /// Selects an error status that the generated operation contract permits.

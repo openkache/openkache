@@ -13,6 +13,7 @@ use openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
 use super::operation_api;
+use super::operation_execution_state::OperationRuntime;
 use super::operation_handlers;
 use super::operation_transport;
 
@@ -49,9 +50,9 @@ impl HeaderAdmissionRejection {
 pub(super) fn admit_request_header(
     header: RequestFrameHeader,
     prefix: &[u8],
-    capabilities: &dyn super::operation_capabilities::CapabilityCatalog,
+    runtime: &OperationRuntime,
 ) -> Result<(), HeaderAdmissionRejection> {
-    let Some(registration) = operation_api::server_operation(header.opcode()) else {
+    let Some((registration, state)) = runtime.operation(header.opcode()) else {
         return Ok(());
     };
     let Some(admit) = registration.admit_header else {
@@ -61,7 +62,9 @@ pub(super) fn admit_request_header(
     let started = std::time::Instant::now();
     admit(
         &view,
-        operation_api::HeaderAdmissionContext { capabilities },
+        operation_api::HeaderAdmissionContext {
+            state,
+        },
     )
     .map_err(|error| {
         let response = operation_transport::contract_error_response_status(
@@ -80,8 +83,8 @@ pub(super) fn admit_request_header(
 /// The stream loop uses this only to decide whether a timeout may safely
 /// produce an error response. Mutation policy remains part of the API
 /// registration and never becomes a network-loop opcode match.
-pub(super) fn may_mutate(opcode: Opcode) -> bool {
-    operation_api::server_operation(opcode).is_some_and(|registration| {
+pub(super) fn may_mutate(runtime: &OperationRuntime, opcode: Opcode) -> bool {
+    runtime.registration(opcode).is_some_and(|registration| {
         matches!(
             registration.policy,
             operation_api::OperationCommitDisposition::MayBeCommitted
@@ -108,8 +111,8 @@ pub(super) fn timeout_response(
 /// The stream loop uses this opaque budget before dispatch. Wire payload
 /// bounds remain owned by the generated contract adapter rather than being
 /// re-derived by the network server.
-pub(crate) fn response_budget_bytes(opcode: Opcode) -> Option<usize> {
-    operation_api::server_operation(opcode).and_then(|_| {
+pub(super) fn response_budget_bytes(runtime: &OperationRuntime, opcode: Opcode) -> Option<usize> {
+    runtime.registration(opcode).and_then(|_| {
         let budget = operation_transport::response_budget(opcode);
         (budget > 0).then_some(budget)
     })
@@ -122,10 +125,10 @@ pub(crate) fn response_budget_bytes(opcode: Opcode) -> Option<usize> {
 pub(super) async fn execute_request(
     input: operation_handlers::OperationInputView,
     authorization: operation_handlers::AuthorizationContext,
-    capabilities: &dyn super::operation_capabilities::CapabilityCatalog,
+    runtime: &OperationRuntime,
 ) -> Option<operation_transport::OperationResponse> {
     let opcode = input.opcode();
-    let Some(registration) = operation_api::server_operation(opcode) else {
+    let Some((registration, state)) = runtime.operation(opcode) else {
         return Some(operation_transport::contract_error_response_status(
             opcode,
             super::operation_contract::OperationStatus::UnsupportedOpcode,
@@ -148,17 +151,21 @@ pub(super) async fn execute_request(
         ));
     }
 
-    let preparation =
-        match (registration.prepare)(&input, operation_api::PrepareContext { capabilities }) {
-            Ok(preparation) => preparation,
-            Err(error) => {
-                return Some(operation_transport::contract_error_response_status(
-                    opcode,
-                    error.status,
-                    error.message,
-                ));
-            }
-        };
+    let preparation = match (registration.prepare)(
+        &input,
+        operation_api::PrepareContext {
+            state,
+        },
+    ) {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            return Some(operation_transport::contract_error_response_status(
+                opcode,
+                error.status,
+                error.message,
+            ));
+        }
+    };
 
     // Preparation resolves opaque lock handles. The dispatcher acquires them
     // in the generated deterministic order and never interprets resource
@@ -177,5 +184,11 @@ pub(super) async fn execute_request(
         }
     }
 
-    operation_transport::execute(capabilities, input, registration.handler).await
+    let outcome = (registration.handler)(operation_handlers::OperationContext {
+        capabilities: runtime.capabilities(),
+        state,
+        input,
+    })
+    .await;
+    operation_transport::encode_operation_outcome(opcode, outcome)
 }
