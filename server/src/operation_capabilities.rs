@@ -1,14 +1,15 @@
-//! Public composition primitives for API-owned server dependencies.
+//! Type-erased composition primitives for server and API capabilities.
 //!
-//! The generic executor only sees this type-erased catalog. Concrete API
-//! modules own the keys and downcast values at their binding boundary.
+//! The generic executor only sees the long-lived request catalog. During
+//! startup, the same primitives can expose borrowed server ports to API module
+//! installers without adding those bootstrap entries to request execution.
 
 use std::any::Any;
 use std::sync::Arc;
 
 use super::operation_api::{CapabilityKey, capability_id};
 
-/// Type-erased API-owned dependencies supplied by the server composition root.
+/// Type-erased dependencies supplied by the server composition root.
 ///
 /// Catalog values must outlive the catalog that borrows or owns them. API
 /// bindings should pair stable keys with their concrete types through the
@@ -31,7 +32,7 @@ pub trait CapabilityCatalog: Send + Sync {
     }
 }
 
-/// One API-owned capability exposed through [`CapabilityList`].
+/// One borrowed capability exposed through [`CapabilityList`].
 #[derive(Clone, Copy)]
 pub struct CapabilityEntry<'a> {
     /// Stable key chosen by the API module.
@@ -42,20 +43,6 @@ pub struct CapabilityEntry<'a> {
 }
 
 impl<'a> CapabilityEntry<'a> {
-    /// Creates one key/value entry for a capability list.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Stable lookup key owned by the API module.
-    /// * `value` - Capability value that remains valid for the catalog lifetime.
-    pub const fn new(key: &'static str, value: &'a (dyn Any + Send + Sync)) -> Self {
-        Self {
-            key,
-            id: capability_id(key),
-            value,
-        }
-    }
-
     /// Creates an entry whose value type is checked against its capability key.
     ///
     /// # Arguments
@@ -66,12 +53,24 @@ impl<'a> CapabilityEntry<'a> {
     /// # Returns
     ///
     /// A borrowed, type-erased entry that retains the key's stable identity.
-    pub fn typed<T>(key: CapabilityKey<T>, value: &'a T) -> Self
+    pub fn new<T>(key: CapabilityKey<T>, value: &'a T) -> Self
     where
         T: Any + Send + Sync,
     {
-        Self::new(key.name(), value)
+        Self::erased(key.name(), value)
     }
+
+    pub(crate) const fn erased(
+        key: &'static str,
+        value: &'a (dyn Any + Send + Sync),
+    ) -> Self {
+        Self {
+            key,
+            id: capability_id(key),
+            value,
+        }
+    }
+
 }
 
 /// Allocation-free capability catalog for a composition root.

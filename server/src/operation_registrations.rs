@@ -55,12 +55,12 @@ pub(super) fn install_runtime_capabilities(
     let mut registry = CapabilityRegistry::overlay(base);
     super::storage_port::install(&mut registry, storage_port);
     let bootstrap_entries = [
-        CapabilityEntry::typed(COMPATIBILITY_STORAGE_PORT, &compatibility_storage),
-        CapabilityEntry::typed(
+        CapabilityEntry::new(COMPATIBILITY_STORAGE_PORT, &compatibility_storage),
+        CapabilityEntry::new(
             COMPATIBILITY_NAMESPACE_PORT,
             &compatibility_namespaces,
         ),
-        CapabilityEntry::typed(
+        CapabilityEntry::new(
             COMPATIBILITY_OBSERVABILITY_PORT,
             &compatibility_observability,
         ),
