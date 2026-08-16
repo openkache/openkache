@@ -1,4 +1,5 @@
 use super::operation_preparation;
+use super::namespace_journal::{JournalEvent, NamespaceJournal};
 use super::storage_port::StorageRoute;
 use super::{ItemId, NamespaceDescriptor, NamespacePolicy};
 use futures_util::lock::Mutex as AsyncMutex;
@@ -99,6 +100,7 @@ pub(crate) struct NamespaceRegistry {
     by_id: HashMap<u64, NamespaceEntry>,
     by_name: HashMap<NamespaceName, u64>,
     metadata_path: Option<std::path::PathBuf>,
+    journal: Option<NamespaceJournal>,
     persistent: bool,
     lifecycle_lock: Arc<AsyncMutex<()>>,
 }
@@ -117,6 +119,7 @@ impl NamespaceRegistry {
             by_id: HashMap::new(),
             by_name: HashMap::new(),
             metadata_path: Some(metadata_path),
+            journal: None,
             persistent: true,
             lifecycle_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -134,6 +137,12 @@ impl NamespaceRegistry {
                         "namespace metadata is missing for existing storage",
                     ));
                 }
+                let journal_path = registry
+                    .metadata_path
+                    .as_ref()
+                    .expect("durable namespace registry has metadata path")
+                    .with_extension("journal");
+                registry.journal = Some(NamespaceJournal::start(&journal_path)?);
                 return Ok(registry);
             }
             Err(error) => return Err(error),
@@ -141,6 +150,14 @@ impl NamespaceRegistry {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         registry.decode_metadata(&bytes)?;
+        let journal_path = registry
+            .metadata_path
+            .as_ref()
+            .expect("durable namespace registry has metadata path")
+            .with_extension("journal");
+        let journal_events = NamespaceJournal::load_events(&journal_path)?;
+        registry.replay_journal(journal_events)?;
+        registry.journal = Some(NamespaceJournal::start(&journal_path)?);
         Ok(registry)
     }
 
@@ -150,6 +167,7 @@ impl NamespaceRegistry {
             by_id: HashMap::new(),
             by_name: HashMap::new(),
             metadata_path: None,
+            journal: None,
             persistent: false,
             lifecycle_lock: Arc::new(AsyncMutex::new(())),
         }
@@ -327,7 +345,14 @@ impl NamespaceRegistry {
         if !reservation.inserted_item && !reservation.inserted_worker {
             return Ok(reservation);
         }
-        if self.persist().is_err() {
+        let event = JournalEvent::ReserveItem {
+            namespace_id,
+            item_id: *item_id.as_bytes(),
+            route: route.persisted(),
+            inserted_item: reservation.inserted_item,
+            inserted_worker: reservation.inserted_worker,
+        };
+        if self.append_event(event).is_err() {
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
                 if reservation.inserted_item {
                     entry.items.remove(&item_id);
@@ -369,7 +394,16 @@ impl NamespaceRegistry {
                 entry.dirty_workers.remove(&route);
             }
         }
-        if self.persist().is_err() {
+        if self
+            .append_event(JournalEvent::RollbackItem {
+                namespace_id,
+                item_id: *item_id.as_bytes(),
+                route: route.persisted(),
+                remove_item: reservation.inserted_item,
+                remove_worker: reservation.inserted_worker,
+            })
+            .is_err()
+        {
             if reservation.inserted_item {
                 if let Some(entry) = self.by_id.get_mut(&namespace_id) {
                     entry.items.insert(item_id);
@@ -403,7 +437,13 @@ impl NamespaceRegistry {
         if !inserted {
             return Ok(());
         }
-        if self.persist().is_err() {
+        if self
+            .append_event(JournalEvent::ReserveWorker {
+                namespace_id,
+                route: route.persisted(),
+            })
+            .is_err()
+        {
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
                 entry.dirty_workers.remove(&route);
             }
@@ -423,7 +463,14 @@ impl NamespaceRegistry {
                 .by_id
                 .get_mut(&namespace_id)
                 .is_some_and(|entry| entry.items.remove(&item_id));
-        if removed && self.persist().is_err() {
+        if removed
+            && self
+                .append_event(JournalEvent::MarkDelete {
+                    namespace_id,
+                    item_id: *item_id.as_bytes(),
+                })
+                .is_err()
+        {
             // Keeping the item in memory is conservative when persistence
             // fails; the caller closes the lane because the mutation outcome
             // can no longer be represented reliably.
@@ -465,7 +512,10 @@ impl NamespaceRegistry {
         if previous.is_empty() {
             return Ok(());
         }
-        if self.persist().is_err() {
+        if self
+            .append_event(JournalEvent::MarkWorkersClean { namespace_id })
+            .is_err()
+        {
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
                 entry.dirty_workers = previous;
             }
@@ -485,11 +535,100 @@ impl NamespaceRegistry {
         if !entry.items.remove(&item_id) {
             return Ok(());
         }
-        if self.persist().is_err() {
+        if self
+            .append_event(JournalEvent::PruneItem {
+                namespace_id,
+                item_id: *item_id.as_bytes(),
+            })
+            .is_err()
+        {
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
                 entry.items.insert(item_id);
             }
             return Err(NamespaceError::Internal);
+        }
+        Ok(())
+    }
+
+    fn append_event(&self, event: JournalEvent) -> std::io::Result<()> {
+        if !self.persistent {
+            return Ok(());
+        }
+        self.journal
+            .as_ref()
+            .expect("persistent namespace registry has journal")
+            .append(event)
+    }
+
+    fn replay_journal(&mut self, events: Vec<JournalEvent>) -> std::io::Result<()> {
+        for event in events {
+            match event {
+                JournalEvent::ReserveItem {
+                    namespace_id,
+                    item_id,
+                    route,
+                    inserted_item,
+                    inserted_worker,
+                } => {
+                    let Some(entry) = self.by_id.get_mut(&namespace_id) else {
+                        continue;
+                    };
+                    if inserted_item {
+                        entry.items.insert(ItemId::new(item_id));
+                    }
+                    if inserted_worker {
+                        entry
+                            .dirty_workers
+                            .insert(StorageRoute::from_persisted(route));
+                    }
+                }
+                JournalEvent::RollbackItem {
+                    namespace_id,
+                    item_id,
+                    route,
+                    remove_item,
+                    remove_worker,
+                } => {
+                    let Some(entry) = self.by_id.get_mut(&namespace_id) else {
+                        continue;
+                    };
+                    if remove_item {
+                        entry.items.remove(&ItemId::new(item_id));
+                    }
+                    if remove_worker {
+                        entry
+                            .dirty_workers
+                            .remove(&StorageRoute::from_persisted(route));
+                    }
+                }
+                JournalEvent::ReserveWorker {
+                    namespace_id,
+                    route,
+                } => {
+                    if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                        entry
+                            .dirty_workers
+                            .insert(StorageRoute::from_persisted(route));
+                    }
+                }
+                JournalEvent::MarkWorkersClean { namespace_id } => {
+                    if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                        entry.dirty_workers.clear();
+                    }
+                }
+                JournalEvent::MarkDelete {
+                    namespace_id,
+                    item_id,
+                }
+                | JournalEvent::PruneItem {
+                    namespace_id,
+                    item_id,
+                } => {
+                    if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                        entry.items.remove(&ItemId::new(item_id));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -535,6 +674,10 @@ impl NamespaceRegistry {
                     &route.persisted().to_be_bytes(),
                 );
             }
+        }
+
+        if let Some(journal) = &self.journal {
+            return journal.compact(bytes);
         }
 
         let metadata_path = self
