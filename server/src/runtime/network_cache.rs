@@ -15,11 +15,27 @@ use crate::{KvError, Result, SetOutcome, StorageKey};
 
 use super::ThreadedKvkache;
 use super::storage_port::{
-    StorageAddress, StorageError, StorageMutation, StorageReadValue, StorageResult, StorageValue,
-    StorageWriteOptions, StorageWriteOutcome,
+    PreparedStorageAddress, StorageError, StorageMutation, StorageReadValue, StorageResult,
+    StorageRoute, StorageScope, StorageValue, StorageWriteOptions, StorageWriteOutcome,
 };
 
 const GENERIC_STORAGE_ADDRESS_DOMAIN: &[u8] = b"openkache/generic-storage-address/v1\0";
+
+fn opaque_storage_key_for_scope(scope: &StorageScope, identity: &[u8]) -> StorageKey {
+    let mut hasher = Sha256::new();
+    hasher.update(GENERIC_STORAGE_ADDRESS_DOMAIN);
+    // Keep the generic tuple unambiguous without allocating or changing the
+    // fixed-width compact storage key.  Length prefixes prevent `(ab, c)` from
+    // colliding with `(a, bc)` while the digest remains exactly 32 bytes.
+    hasher.update((scope.as_bytes().len() as u64).to_be_bytes());
+    hasher.update(scope.as_bytes());
+    hasher.update((identity.len() as u64).to_be_bytes());
+    hasher.update(identity);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; crate::types::STORAGE_KEY_BYTES];
+    bytes.copy_from_slice(&digest[..crate::types::STORAGE_KEY_BYTES]);
+    StorageKey::new(bytes)
+}
 
 pub(crate) fn into_storage_read_value(value: StoredItemValue) -> StorageReadValue {
     match value.bytes {
@@ -68,16 +84,6 @@ impl From<KvError> for StorageError {
             }
         }
     }
-}
-
-fn opaque_storage_key_for_address(address: &StorageAddress) -> StorageKey {
-    let mut hasher = Sha256::new();
-    hasher.update(GENERIC_STORAGE_ADDRESS_DOMAIN);
-    hasher.update(address.as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; crate::types::STORAGE_KEY_BYTES];
-    bytes.copy_from_slice(&digest[..crate::types::STORAGE_KEY_BYTES]);
-    StorageKey::new(bytes)
 }
 
 /// A network-worker-owned view of the storage runtime and its request shard.
@@ -176,13 +182,25 @@ impl NetworkWorkerCache {
             .await
     }
 
+    pub(crate) async fn sync_routes(
+        &self,
+        routes: &[StorageRoute],
+        operation: Operation,
+    ) -> Result<()> {
+        let workers = routes
+            .iter()
+            .map(|route| route.worker())
+            .collect::<Vec<_>>();
+        self.sync_workers(&workers, operation).await
+    }
+
     /// Retrieves a value through the neutral storage adapter.
     pub(crate) async fn storage_get(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        prepared: PreparedStorageAddress,
     ) -> StorageResult<Option<StorageReadValue>> {
-        let storage_key = self.storage_key_for_address(&storage_address);
+        let storage_key = StorageKey::new(*prepared.as_bytes());
         self.cache
             .get_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
             .await
@@ -194,11 +212,11 @@ impl NetworkWorkerCache {
     pub(crate) async fn storage_set(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        prepared: PreparedStorageAddress,
         value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageResult<StorageWriteOutcome> {
-        let storage_key = self.storage_key_for_address(&storage_address);
+        let storage_key = StorageKey::new(*prepared.as_bytes());
         let value = StoredItemValue::from_owned_range(value.into_owned_range());
         self.cache
             .set_storage_key_with_requester(
@@ -221,9 +239,9 @@ impl NetworkWorkerCache {
     pub(crate) async fn storage_delete(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        prepared: PreparedStorageAddress,
     ) -> StorageResult<StorageMutation> {
-        let storage_key = self.storage_key_for_address(&storage_address);
+        let storage_key = StorageKey::new(*prepared.as_bytes());
         self.cache
             .delete_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
             .await
@@ -237,26 +255,27 @@ impl NetworkWorkerCache {
             .map_err(StorageError::from)
     }
 
-    pub(crate) fn storage_address_for_domain_identity(
+    pub(crate) fn prepare_address(
+        &self,
+        scope: StorageScope,
+        identity: &[u8],
+    ) -> PreparedStorageAddress {
+        let key = opaque_storage_key_for_scope(&scope, identity);
+        let route = StorageRoute::from_worker(self.worker_for(&key));
+        PreparedStorageAddress::new(key.into_bytes(), route)
+    }
+
+    pub(crate) fn prepare_compatibility_address(
         &self,
         storage_domain_id: u64,
         identity: &[u8; crate::types::STORAGE_KEY_BYTES],
-    ) -> StorageAddress {
-        StorageAddress::from_derived(
-            self.storage_key_for_domain_identity(storage_domain_id, identity)
-                .into_bytes(),
-        )
+    ) -> PreparedStorageAddress {
+        let key = self.storage_key_for_domain_identity(storage_domain_id, identity);
+        let route = StorageRoute::from_worker(self.worker_for(&key));
+        PreparedStorageAddress::new(key.into_bytes(), route)
     }
 
-    pub(crate) fn storage_worker_for(&self, storage_address: &StorageAddress) -> usize {
-        self.worker_for(&self.storage_key_for_address(storage_address))
-    }
-
-    fn storage_key_for_address(&self, storage_address: &StorageAddress) -> StorageKey {
-        storage_address
-            .derived_bytes()
-            .copied()
-            .map(StorageKey::new)
-            .unwrap_or_else(|| opaque_storage_key_for_address(storage_address))
+    pub(crate) fn storage_route_for(&self, prepared: &PreparedStorageAddress) -> StorageRoute {
+        prepared.route()
     }
 }

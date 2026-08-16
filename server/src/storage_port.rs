@@ -13,8 +13,9 @@ use super::operation_capabilities::CapabilityKey;
 use super::super::observability::Operation;
 #[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
-    StorageAddress, StorageError, StorageMutation, StorageReadBytes, StorageReadOwner,
-    StorageReadValue, StorageResult, StorageValue, StorageWriteOptions, StorageWriteOutcome,
+    PreparedStorageAddress, StorageReadBytes, StorageReadOwner, StorageReadValue, StorageResult,
+    StorageRoute, StorageScope, StorageValue, StorageWriteOptions, StorageWriteOutcome,
+    StorageError, StorageMutation,
 };
 #[allow(unused_imports)]
 pub(crate) use super::super::types::{
@@ -41,7 +42,7 @@ impl StoragePort {
     pub(crate) async fn get(
         &self,
         operation: Operation,
-        address: StorageAddress,
+        address: PreparedStorageAddress,
     ) -> StorageResult<Option<StorageReadValue>> {
         self.backend.storage_get(operation, address).await
     }
@@ -51,7 +52,7 @@ impl StoragePort {
     pub(crate) async fn set(
         &self,
         operation: Operation,
-        address: StorageAddress,
+        address: PreparedStorageAddress,
         value: StorageValue,
         options: StorageWriteOptions,
     ) -> StorageResult<StorageWriteOutcome> {
@@ -65,7 +66,7 @@ impl StoragePort {
     pub(crate) async fn delete(
         &self,
         operation: Operation,
-        address: StorageAddress,
+        address: PreparedStorageAddress,
     ) -> StorageResult<StorageMutation> {
         self.backend.storage_delete(operation, address).await
     }
@@ -79,24 +80,24 @@ impl StoragePort {
 pub(crate) trait StorageDataPort: Send + Sync {
     fn max_item_bytes(&self) -> usize;
 
-    fn address_for_domain_identity(
+    fn prepare_address(
         &self,
-        storage_domain_id: u64,
-        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
-    ) -> StorageAddress;
+        scope: StorageScope,
+        identity: &[u8],
+    ) -> PreparedStorageAddress;
 
-    fn partition_for(&self, storage_address: &StorageAddress) -> usize;
+    fn route_for(&self, address: &PreparedStorageAddress) -> StorageRoute;
 
     fn get(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        storage_address: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<Option<StorageReadValue>>> + '_;
 
     fn set(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        storage_address: PreparedStorageAddress,
         value: StorageValue,
         options: StorageWriteOptions,
     ) -> impl Future<Output = StorageResult<StorageWriteOutcome>> + '_;
@@ -104,8 +105,26 @@ pub(crate) trait StorageDataPort: Send + Sync {
     fn delete(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        storage_address: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_;
+}
+
+/// Compatibility-only address preparation preserving the published v2 key.
+///
+/// Generic APIs use [`StorageDataPort::prepare_address`]. This adapter keeps
+/// the legacy namespace key derivation outside the common port contract.
+#[allow(dead_code)]
+pub(crate) trait CompatibilityStorageAddressPort: StorageDataPort {
+    fn prepare_compatibility_address(
+        &self,
+        storage_domain_id: u64,
+        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
+    ) -> PreparedStorageAddress {
+        self.prepare_address(
+            StorageScope::from_owned(storage_domain_id.to_be_bytes().to_vec()),
+            identity,
+        )
+    }
 }
 
 /// Statically dispatched storage administration plane.
@@ -113,9 +132,9 @@ pub(crate) trait StorageDataPort: Send + Sync {
 pub(crate) trait StorageAdministrationPort: Send + Sync {
     fn stats(&self, operation: Operation) -> impl Future<Output = StorageResult<Vec<String>>> + '_;
 
-    fn sync_partitions<'a>(
+    fn sync_routes<'a>(
         &'a self,
-        partitions: &'a [usize],
+        routes: &'a [StorageRoute],
         operation: Operation,
     ) -> impl Future<Output = StorageResult<()>> + 'a;
 }
@@ -125,23 +144,22 @@ impl StorageDataPort for StoragePort {
         self.backend.max_item_bytes()
     }
 
-    fn address_for_domain_identity(
+    fn prepare_address(
         &self,
-        storage_domain_id: u64,
-        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
-    ) -> StorageAddress {
-        self.backend
-            .storage_address_for_domain_identity(storage_domain_id, identity)
+        scope: StorageScope,
+        identity: &[u8],
+    ) -> PreparedStorageAddress {
+        self.backend.prepare_address(scope, identity)
     }
 
-    fn partition_for(&self, storage_address: &StorageAddress) -> usize {
-        self.backend.storage_worker_for(storage_address)
+    fn route_for(&self, address: &PreparedStorageAddress) -> StorageRoute {
+        self.backend.storage_route_for(address)
     }
 
     fn get(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        storage_address: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<Option<StorageReadValue>>> + '_ {
         StoragePort::get(self, operation, storage_address)
     }
@@ -149,7 +167,7 @@ impl StorageDataPort for StoragePort {
     fn set(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        storage_address: PreparedStorageAddress,
         value: StorageValue,
         options: StorageWriteOptions,
     ) -> impl Future<Output = StorageResult<StorageWriteOutcome>> + '_ {
@@ -159,9 +177,20 @@ impl StorageDataPort for StoragePort {
     fn delete(
         &self,
         operation: Operation,
-        storage_address: StorageAddress,
+        storage_address: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
         StoragePort::delete(self, operation, storage_address)
+    }
+}
+
+impl CompatibilityStorageAddressPort for StoragePort {
+    fn prepare_compatibility_address(
+        &self,
+        storage_domain_id: u64,
+        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
+    ) -> PreparedStorageAddress {
+        self.backend
+            .prepare_compatibility_address(storage_domain_id, identity)
     }
 }
 
@@ -175,14 +204,14 @@ impl StorageAdministrationPort for StoragePort {
         }
     }
 
-    fn sync_partitions<'a>(
+    fn sync_routes<'a>(
         &'a self,
-        partitions: &'a [usize],
+        routes: &'a [StorageRoute],
         operation: Operation,
     ) -> impl Future<Output = StorageResult<()>> + 'a {
         async move {
             self.backend
-                .sync_workers(partitions, operation)
+                .sync_routes(routes, operation)
                 .await
                 .map_err(StorageError::from)
         }
