@@ -7,11 +7,10 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::observability::Operation;
-
 use super::NetworkWorkerCache;
 use super::operation_capabilities::CapabilityKey;
 
+use super::super::observability::Operation;
 #[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
     StorageAddress, StorageError, StorageMutation, StorageReadOwner, StorageReadValue,
@@ -83,7 +82,7 @@ pub(crate) trait StorageDataPort: Send + Sync {
     fn address_for_domain_identity(
         &self,
         storage_domain_id: u64,
-        identity: &[u8; crate::types::STORAGE_KEY_BYTES],
+        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
     ) -> StorageAddress;
 
     fn partition_for(&self, storage_address: &StorageAddress) -> usize;
@@ -129,7 +128,7 @@ impl StorageDataPort for StoragePort {
     fn address_for_domain_identity(
         &self,
         storage_domain_id: u64,
-        identity: &[u8; crate::types::STORAGE_KEY_BYTES],
+        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
     ) -> StorageAddress {
         self.backend
             .storage_address_for_domain_identity(storage_domain_id, identity)
