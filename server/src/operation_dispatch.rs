@@ -12,7 +12,7 @@
 use openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
-use super::operation_authorization;
+use super::operation_authorization::AuthorizationContext;
 use super::operation_execution_state::OperationRuntime;
 use super::operation_handlers;
 use super::operation_preparation;
@@ -130,7 +130,7 @@ pub(super) fn response_budget_bytes(runtime: &OperationRuntime, opcode: Opcode) 
 /// status selection and response framing stay in `operation_transport`.
 pub(super) async fn execute_request(
     input: operation_handlers::OperationInputView,
-    authorization: &operation_handlers::AuthorizationContext,
+    authorization: &AuthorizationContext,
     runtime: &OperationRuntime,
 ) -> Option<operation_transport::OperationResponse> {
     let opcode = input.opcode();
@@ -141,10 +141,7 @@ pub(super) async fn execute_request(
             b"modeled operation has no server registration",
         ));
     };
-    if !operation_authorization::authorization_allowed(
-        registration.authorization,
-        authorization,
-    ) {
+    if !(registration.authorization)(authorization) {
         return Some(operation_transport::contract_error_response_status(
             opcode,
             super::operation_contract::OperationStatus::Forbidden,
