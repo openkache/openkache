@@ -240,8 +240,25 @@ where
     pub(super) fn drain_collapsible(
         &mut self,
         storage_key: K,
+        can_collapse: impl FnMut(&T) -> bool,
+    ) -> CollapsibleDrain<'_, K, T> {
+        self.drain_collapsible_up_to(storage_key, usize::MAX, can_collapse)
+    }
+
+    /// Moves at most `limit` commands from the compatible reducer prefix.
+    pub(super) fn drain_collapsible_up_to(
+        &mut self,
+        storage_key: K,
+        limit: usize,
         mut can_collapse: impl FnMut(&T) -> bool,
     ) -> CollapsibleDrain<'_, K, T> {
+        if limit == 0 {
+            return CollapsibleDrain {
+                scheduler: self,
+                storage_key,
+                remaining: 0,
+            };
+        }
         let Some((collapse_group, mut head)) =
             self.lanes
                 .get(&storage_key)
@@ -266,6 +283,9 @@ where
                 break;
             }
             remaining += 1;
+            if remaining == limit {
+                break;
+            }
             let Some(next) = self.waiting.next(head) else {
                 break;
             };
