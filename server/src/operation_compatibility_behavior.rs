@@ -18,13 +18,12 @@ use super::operation_compatibility_decode::{
     GetInput, NamespaceDeleteInput, NamespaceInput, NamespaceOpenInput, NamespaceRevisionInput,
     SetInput,
 };
-use super::operation_compatibility_services::{
-    NamespaceCapability, ObservabilityCapability, storage_write_options,
-};
+use super::operation_compatibility_services::storage_write_options;
 use super::operation_contract::{OperationStatus, telemetry_operation};
 use super::operation_outcome::{
     OperationBody, OperationError, OperationOutcome, OperationSuccessStatus,
 };
+use super::operation_ports::{NamespaceCapability, ObservabilityCapability};
 use super::storage_port::{
     CompatibilityStorageAddressPort, StorageAdministrationPort, StorageError, StorageMutation,
     StorageValue, StorageWriteOutcome,
