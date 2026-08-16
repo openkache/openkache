@@ -8,6 +8,21 @@ function formatted_decimal(value: number): string {
 
 /** Renders generic operation metadata for the server-owned adapter. */
 export function render_rust_server_contract(contract: Wire_Contract): string {
+  const operation_id_variants = contract.opcodes
+    .map((opcode) => `    ${opcode.name},`)
+    .join("\n")
+  const operation_id_from_opcode_arms = contract.opcodes
+    .map(
+      (opcode) =>
+        `        Opcode::${opcode.name} => OperationId::${opcode.name},`,
+    )
+    .join("\n")
+  const opcode_from_operation_id_arms = contract.opcodes
+    .map(
+      (opcode) =>
+        `        OperationId::${opcode.name} => Opcode::${opcode.name},`,
+    )
+    .join("\n")
   const operation_status_variants = contract.statuses
     .map((status) => `    ${status.name},`)
     .join("\n")
@@ -16,7 +31,7 @@ export function render_rust_server_contract(contract: Wire_Contract): string {
     .join("\n")
   return `// Generated from the OpenKache Smithy operation contract. Do not edit.
 
-use openkache_protocol::Status;
+use openkache_protocol::{Opcode, Status};
 // The server consumes only the canonical wire projection. Client-result/retry
 // and execution-scope metadata belongs to the respective
 // adapters; it is intentionally absent from this server contract surface.
@@ -33,6 +48,40 @@ pub use openkache_protocol::{
     MAX_REQUEST_FRAME_BYTES, RequestFrameLayout as WireRequestLayout,
     RequestFrameStep as WireRequestStep, wire_request_layout,
 };
+
+/// Runtime operation identity generated from the modeled operation table.
+///
+/// This ordinal is deliberately independent of the wire discriminant. API
+/// modules and runtime catalogs use it as their dense key; only the generated
+/// adapter below translates to/from the wire Opcode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum OperationId {
+${operation_id_variants}
+}
+
+impl OperationId {
+    pub const COUNT: usize = ${contract.opcodes.length};
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[inline]
+pub const fn operation_id_for_opcode(opcode: Opcode) -> OperationId {
+    match opcode {
+${operation_id_from_opcode_arms}
+    }
+}
+
+#[inline]
+pub const fn opcode_for_operation_id(operation: OperationId) -> Opcode {
+    match operation {
+${opcode_from_operation_id_arms}
+    }
+}
 
 /// Transport-neutral semantic status generated from the modeled vocabulary.
 ///

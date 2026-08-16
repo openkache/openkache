@@ -4,10 +4,8 @@
 //! Request and response shapes come from the generated operation contract;
 //! only application semantics live here.
 
-use openkache_protocol::Opcode;
-
 use super::operation_composition::ApiModule;
-use super::operation_contract::OperationStatus;
+use super::operation_contract::{OperationId, OperationStatus};
 use super::operation_handlers::OperationContext;
 use super::operation_outcome::{OperationOutcome, OperationValue};
 use super::operation_registration::RegistrationBuilder;
@@ -25,7 +23,7 @@ fn ping_handler<'a>(
 
 pub(super) const API: ApiModule =
     ApiModule::new(&[
-        RegistrationBuilder::new(Opcode::Ping, ping_handler)
+        RegistrationBuilder::new(OperationId::Ping, ping_handler)
             .read_only()
             .build(),
     ]);
