@@ -1,4 +1,4 @@
-use super::operation_api;
+use super::operation_preparation;
 use super::{ItemId, NamespaceDescriptor, NamespacePolicy};
 use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::OwnedRange;
@@ -221,12 +221,12 @@ impl NamespaceRegistry {
     pub(crate) fn operation_lock(
         &self,
         namespace_id: u64,
-    ) -> Option<operation_api::ResourceLock> {
+    ) -> Option<operation_preparation::ResourceLock> {
         self.by_id.get(&namespace_id).map(|entry| {
-            operation_api::ResourceLock::new(
+            operation_preparation::ResourceLock::new(
                 Arc::clone(&entry.operation_lock),
                 Arc::clone(&entry.active),
-                operation_api::PrepareError::resource_unavailable(
+                operation_preparation::PrepareError::resource_unavailable(
                     super::operation_contract::OperationStatus::NamespaceNotFound,
                     b"namespace does not exist",
                 ),

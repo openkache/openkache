@@ -30,18 +30,14 @@ use crate::KvError;
 pub(crate) use crate::{contract, protocol};
 // Operation modules are nested below this composition root, while the
 // generated operation contract lives at the crate root. Re-exporting the
-// facade here keeps the nested modules independent of the crate layout and
-// lets the private source-copy test harness use the same path.
+// contract here keeps the nested modules independent of the crate layout.
 pub(crate) use crate::operation_contract;
-// Keep the compatibility contract available through the same composition
-// facade for white-box tests and compatibility bindings. It remains
-// `pub(crate)`, so this does not add a public server API or make generic
-// dispatch depend on v1 vocabulary.
+// Keep the compatibility contract available to compatibility bindings. It
+// remains `pub(crate)`, so this does not add a public server API or make
+// generic dispatch depend on v1 vocabulary.
 #[allow(unused_imports)]
 pub(crate) use super::operation_compatibility_contract;
 
-#[path = "../operation_api.rs"]
-mod operation_api;
 #[path = "../operation_authorization.rs"]
 mod operation_authorization;
 #[path = "../operation_capabilities.rs"]
@@ -60,6 +56,8 @@ mod operation_compatibility_module;
 mod operation_compatibility_prepare;
 #[path = "../operation_compatibility_services.rs"]
 mod operation_compatibility_services;
+#[path = "../operation_composition.rs"]
+mod operation_composition;
 #[path = "../operation_dispatch.rs"]
 pub(crate) mod operation_dispatch;
 #[path = "../operation_execution_state.rs"]
@@ -72,6 +70,10 @@ mod operation_generic_bindings;
 mod operation_handlers;
 #[path = "../operation_outcome.rs"]
 mod operation_outcome;
+#[path = "../operation_preparation.rs"]
+mod operation_preparation;
+#[path = "../operation_registration.rs"]
+mod operation_registration;
 #[path = "../operation_registrations.rs"]
 mod operation_registrations;
 #[path = "../operation_registry.rs"]
@@ -83,9 +85,9 @@ mod request_projection;
 #[path = "../storage_port.rs"]
 mod storage_port;
 
-pub use operation_api::CapabilityKey;
 pub use operation_capabilities::{
-    CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry, EmptyCapabilityCatalog,
+    CapabilityCatalog, CapabilityEntry, CapabilityKey, CapabilityList, CapabilityRegistry,
+    EmptyCapabilityCatalog,
 };
 
 #[path = "network_roles.rs"]

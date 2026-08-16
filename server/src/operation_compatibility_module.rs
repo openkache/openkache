@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use openkache_protocol::Opcode;
 
-use super::operation_api::{ApiModule, RegistrationBuilder, ServerOperationRegistration};
-use super::operation_capabilities::CapabilityCatalog;
+use super::operation_authorization::{authorization_administrator, authorization_none};
+use super::operation_capabilities::{CapabilityCatalog, downcast_capability};
 use super::operation_compatibility_handlers as handlers;
 use super::operation_compatibility_prepare as prepare;
 use super::operation_compatibility_services::{
@@ -17,20 +17,21 @@ use super::operation_compatibility_services::{
     DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
     SetState, StatsState, SyncState,
 };
+use super::operation_composition::ApiModule;
 use super::operation_execution_state::OperationStateBindings;
-use super::operation_handlers;
+use super::operation_registration::{RegistrationBuilder, ServerOperationRegistration};
 
 fn initialize_module(
     states: &mut OperationStateBindings<'_>,
     bootstrap: &dyn CapabilityCatalog,
 ) -> Result<(), &'static str> {
-    let storage = super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)
+    let storage = downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)
         .ok_or("compatibility storage port is unavailable")?;
     let namespaces =
-        super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_NAMESPACE_PORT)
+        downcast_capability(bootstrap, COMPATIBILITY_NAMESPACE_PORT)
             .ok_or("compatibility namespace port is unavailable")?;
     let observability =
-        super::operation_api::downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
+        downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
             .ok_or("compatibility observability port is unavailable")?;
     let max_item_bytes = storage.max_item_bytes();
 
@@ -97,38 +98,38 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
     RegistrationBuilder::new(Opcode::Get, handlers::get_handler)
         .state::<GetState>()
         .prepare(prepare::prepare_get_namespace)
-        .authorize(operation_handlers::authorization_none)
+        .authorize(authorization_none)
         .read_only()
         .build(),
     RegistrationBuilder::new(Opcode::Set, handlers::set_handler)
         .state::<SetState>()
         .admit_header(prepare::admit_set_header)
         .prepare(prepare::prepare_set)
-        .authorize(operation_handlers::authorization_none)
+        .authorize(authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::Delete, handlers::delete_handler)
         .state::<DeleteState>()
         .prepare(prepare::prepare_delete_namespace)
-        .authorize(operation_handlers::authorization_none)
+        .authorize(authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::Stats, handlers::stats_handler)
         .state::<StatsState>()
         .prepare(prepare::prepare_stats_namespace)
-        .authorize(operation_handlers::authorization_administrator)
+        .authorize(authorization_administrator)
         .read_only()
         .build(),
     RegistrationBuilder::new(Opcode::Sync, handlers::sync_handler)
         .state::<SyncState>()
         .prepare(prepare::prepare_sync_namespace)
-        .authorize(operation_handlers::authorization_administrator)
+        .authorize(authorization_administrator)
         .mutation()
         .build(),
     RegistrationBuilder::new(Opcode::NamespaceOpen, handlers::namespace_open_handler)
         .state::<NamespaceOpenState>()
         .prepare(prepare::prepare_namespace_open)
-        .authorize(operation_handlers::authorization_none)
+        .authorize(authorization_none)
         .mutation()
         .build(),
     RegistrationBuilder::new(
@@ -137,7 +138,7 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
     )
     .state::<NamespaceUpdateState>()
     .prepare(prepare::prepare_namespace_update)
-    .authorize(operation_handlers::authorization_none)
+    .authorize(authorization_none)
     .mutation()
     .build(),
     RegistrationBuilder::new(
@@ -146,7 +147,7 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
     )
     .state::<NamespaceDeleteState>()
     .prepare(prepare::prepare_namespace_delete)
-    .authorize(operation_handlers::authorization_none)
+    .authorize(authorization_none)
     .mutation()
     .build(),
 ];

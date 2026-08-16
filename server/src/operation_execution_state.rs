@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use openkache_protocol::Opcode;
 
-use super::operation_api::ServerOperationRegistration;
+use super::operation_registration::ServerOperationRegistration;
 
 pub(super) type ErasedOperationState = dyn Any + Send + Sync;
 pub(super) type StateValidator = fn(Option<&ErasedOperationState>) -> bool;

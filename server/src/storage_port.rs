@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use super::operation_api::CapabilityKey;
+use super::operation_capabilities::CapabilityKey;
 
 #[allow(unused_imports)]
 pub(crate) use super::super::types::{

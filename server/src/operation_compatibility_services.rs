@@ -17,8 +17,9 @@ use super::super::types::{
     StorageWriteOptions, StoredItemValue,
 };
 use super::super::{KvError, SetOutcome};
-use super::operation_api::{CapabilityKey, ResourceLock};
+use super::operation_capabilities::CapabilityKey;
 use super::operation_contract::telemetry_operation;
+use super::operation_preparation::ResourceLock;
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
     NetworkWorkerCache, ObservabilityState, SetReservation,
