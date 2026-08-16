@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use openkache_protocol::Opcode;
 
 use super::operation_composition::ServerComposition;
-use super::operation_contract as contract;
+use super::operation_contract::{self as contract, OperationId, operation_id_for_opcode};
 use super::operation_execution_state::OperationRuntime;
 use super::operation_registration::ServerOperationRegistration;
 use super::{
@@ -28,7 +28,7 @@ pub(super) const SERVER_COMPOSITION: ServerComposition = ServerComposition::new(
     .register_module(compatibility::API);
 
 pub(super) fn server_operation(opcode: Opcode) -> Option<&'static ServerOperationRegistration> {
-    SERVER_COMPOSITION.operation(opcode)
+    SERVER_COMPOSITION.operation(operation_id_for_opcode(opcode))
 }
 
 pub(super) fn registered_operations() -> impl Iterator<Item = &'static ServerOperationRegistration>
@@ -65,11 +65,11 @@ pub(super) fn build_operation_runtime(
 /// The network server only decides whether every modeled operation has a
 /// usable behavior registration and codec binding.
 pub(super) fn validate() -> Result<(), &'static str> {
-    let mut seen = [false; Opcode::COUNT];
+    let mut seen = [false; OperationId::COUNT];
     for registration in registered_operations() {
-        let index = registration.opcode.index();
+        let index = registration.operation_id.index();
         if seen[index] {
-            return Err("server operation policy registry contains a duplicate opcode");
+            return Err("server operation policy registry contains a duplicate operation ID");
         }
         seen[index] = true;
     }

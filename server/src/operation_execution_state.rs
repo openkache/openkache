@@ -8,9 +8,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use openkache_protocol::Opcode;
-
 use super::operation_registration::ServerOperationRegistration;
+use super::operation_contract::{OperationId, operation_id_for_opcode};
 
 pub(super) type ErasedOperationState = dyn Any + Send + Sync;
 pub(super) type StateValidator = fn(Option<&ErasedOperationState>) -> bool;
@@ -50,13 +49,13 @@ impl BoundOperation {
 }
 
 pub(super) struct OperationStateInstaller {
-    states: [Option<Arc<ErasedOperationState>>; Opcode::COUNT],
+    states: [Option<Arc<ErasedOperationState>>; OperationId::COUNT],
 }
 
 impl OperationStateInstaller {
     pub(super) const fn new() -> Self {
         Self {
-            states: [const { None }; Opcode::COUNT],
+            states: [const { None }; OperationId::COUNT],
         }
     }
 
@@ -76,9 +75,9 @@ impl OperationStateInstaller {
         mut self,
         registrations: impl IntoIterator<Item = &'static ServerOperationRegistration>,
     ) -> Result<OperationRuntime, &'static str> {
-        let mut operations = [const { None }; Opcode::COUNT];
+        let mut operations = [const { None }; OperationId::COUNT];
         for registration in registrations {
-            let index = registration.opcode.index();
+            let index = registration.operation_id.index();
             if operations[index].is_some() {
                 return Err("operation runtime contains a duplicate registration");
             }
@@ -105,7 +104,7 @@ impl OperationStateInstaller {
 }
 
 pub(super) struct OperationStateBindings<'a> {
-    states: &'a mut [Option<Arc<ErasedOperationState>>; Opcode::COUNT],
+    states: &'a mut [Option<Arc<ErasedOperationState>>; OperationId::COUNT],
     registrations: &'static [ServerOperationRegistration],
 }
 
@@ -113,7 +112,7 @@ impl OperationStateBindings<'_> {
     /// Installs one state owner without allocating or cloning it.
     pub(super) fn bind<T>(
         &mut self,
-        opcode: Opcode,
+        operation_id: OperationId,
         state: Arc<T>,
     ) -> Result<(), &'static str>
     where
@@ -122,11 +121,11 @@ impl OperationStateBindings<'_> {
         if !self
             .registrations
             .iter()
-            .any(|registration| registration.opcode == opcode)
+            .any(|registration| registration.operation_id == operation_id)
         {
             return Err("API module bound state outside its operations");
         }
-        let slot = &mut self.states[opcode.index()];
+        let slot = &mut self.states[operation_id.index()];
         if slot.is_some() {
             return Err("operation state was bound more than once");
         }
@@ -136,26 +135,40 @@ impl OperationStateBindings<'_> {
 }
 
 pub(super) struct OperationRuntime {
-    operations: [Option<BoundOperation>; Opcode::COUNT],
+    operations: [Option<BoundOperation>; OperationId::COUNT],
 }
 
 impl OperationRuntime {
     pub(super) fn registration(
         &self,
-        opcode: Opcode,
+        operation_id: OperationId,
     ) -> Option<&'static ServerOperationRegistration> {
-        self.operations[opcode.index()]
+        self.operations[operation_id.index()]
             .as_ref()
             .map(|operation| operation.registration)
     }
 
+    pub(super) fn registration_for_opcode(
+        &self,
+        opcode: openkache_protocol::Opcode,
+    ) -> Option<&'static ServerOperationRegistration> {
+        self.registration(operation_id_for_opcode(opcode))
+    }
+
     pub(super) fn operation(
         &self,
-        opcode: Opcode,
+        operation_id: OperationId,
     ) -> Option<(&'static ServerOperationRegistration, OperationStateRef<'_>)> {
-        self.operations[opcode.index()]
+        self.operations[operation_id.index()]
             .as_ref()
             .map(|operation| (operation.registration, operation.state()))
+    }
+
+    pub(super) fn operation_for_opcode(
+        &self,
+        opcode: openkache_protocol::Opcode,
+    ) -> Option<(&'static ServerOperationRegistration, OperationStateRef<'_>)> {
+        self.operation(operation_id_for_opcode(opcode))
     }
 
 }

@@ -55,7 +55,7 @@ pub(super) fn admit_request_header(
     prefix: &[u8],
     runtime: &OperationRuntime,
 ) -> Result<(), HeaderAdmissionRejection> {
-    let Some((registration, state)) = runtime.operation(header.opcode()) else {
+    let Some((registration, state)) = runtime.operation_for_opcode(header.opcode()) else {
         return Ok(());
     };
     let Some(admit) = registration.admit_header else {
@@ -91,12 +91,14 @@ pub(super) fn admit_request_header(
 /// produce an error response. Mutation policy remains part of the API
 /// registration and never becomes a network-loop opcode match.
 pub(super) fn may_mutate(runtime: &OperationRuntime, opcode: Opcode) -> bool {
-    runtime.registration(opcode).is_some_and(|registration| {
+    runtime
+        .registration_for_opcode(opcode)
+        .is_some_and(|registration| {
         matches!(
             registration.policy,
             OperationCommitDisposition::MayBeCommitted
         )
-    })
+        })
 }
 
 /// Builds the timeout response through the operation's generated status
@@ -119,7 +121,7 @@ pub(super) fn timeout_response(
 /// bounds remain owned by the generated contract adapter rather than being
 /// re-derived by the network server.
 pub(super) fn response_budget_bytes(runtime: &OperationRuntime, opcode: Opcode) -> Option<usize> {
-    runtime.registration(opcode).and_then(|_| {
+    runtime.registration_for_opcode(opcode).and_then(|_| {
         let budget = operation_transport::response_budget(opcode);
         (budget > 0).then_some(budget)
     })
@@ -136,7 +138,7 @@ pub(super) async fn execute_request(
     task_storage: &mut OperationTaskStorage,
 ) -> Option<operation_transport::OperationResponse> {
     let opcode = input.opcode();
-    let Some((registration, state)) = runtime.operation(opcode) else {
+    let Some((registration, state)) = runtime.operation_for_opcode(opcode) else {
         return Some(operation_transport::contract_error_response_status(
             opcode,
             super::operation_contract::OperationStatus::UnsupportedOpcode,

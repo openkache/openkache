@@ -2,12 +2,11 @@
 
 use std::any::Any;
 
-use openkache_protocol::Opcode;
-
 use super::operation_authorization::{AuthorizationFn, authorization_none};
 use super::operation_execution_state::{StateValidator, no_operation_state, typed_operation_state};
 use super::operation_preparation::{HeaderAdmissionFn, PrepareFn, prepare_none};
 use super::operation_registry::OperationHandler;
+use super::operation_contract::OperationId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OperationCommitDisposition {
@@ -34,7 +33,7 @@ impl OperationCommitDisposition {
 /// forgotten in another.
 #[derive(Clone, Copy)]
 pub(super) struct ServerOperationRegistration {
-    pub(super) opcode: Opcode,
+    pub(super) operation_id: OperationId,
     pub(super) handler: OperationHandler,
     pub(super) admit_header: Option<HeaderAdmissionFn>,
     pub(super) prepare: PrepareFn,
@@ -63,10 +62,10 @@ pub(super) struct RegistrationBuilder {
 
 impl RegistrationBuilder {
     /// Starts one operation registration with safe read-only defaults.
-    pub(super) const fn new(opcode: Opcode, handler: OperationHandler) -> Self {
+    pub(super) const fn new(operation_id: OperationId, handler: OperationHandler) -> Self {
         Self {
             registration: ServerOperationRegistration {
-                opcode,
+                operation_id,
                 handler,
                 admit_header: None,
                 prepare: prepare_none,

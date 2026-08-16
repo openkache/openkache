@@ -1,8 +1,7 @@
 //! Dense operation composition assembled from API-owned modules.
 
-use openkache_protocol::Opcode;
-
 use super::operation_capabilities::CapabilityCatalog;
+use super::operation_contract::OperationId;
 use super::operation_execution_state::{
     OperationRuntime, OperationStateBindings, OperationStateInstaller,
 };
@@ -58,7 +57,7 @@ impl ApiModule {
 /// Generated metadata remains the sole runtime frame-admission contract.
 pub(super) struct ServerComposition {
     operations: OperationCatalog,
-    modules: [Option<ApiModule>; Opcode::COUNT],
+    modules: [Option<ApiModule>; OperationId::COUNT],
     module_count: usize,
 }
 
@@ -66,7 +65,7 @@ impl ServerComposition {
     pub(super) const fn new() -> Self {
         Self {
             operations: OperationCatalog::new(),
-            modules: [None; Opcode::COUNT],
+            modules: [None; OperationId::COUNT],
             module_count: 0,
         }
     }
@@ -98,9 +97,9 @@ impl ServerComposition {
 
     pub(super) fn operation(
         &'static self,
-        opcode: Opcode,
+        operation_id: OperationId,
     ) -> Option<&'static ServerOperationRegistration> {
-        self.operations.get(opcode)
+        self.operations.get(operation_id)
     }
 
     pub(super) fn operations(
@@ -116,13 +115,13 @@ impl ServerComposition {
 /// the one-time dense opcode placement used by the request hot path. The
 /// executor never knows which module supplied an entry.
 pub(super) struct OperationCatalog {
-    entries: [Option<ServerOperationRegistration>; Opcode::COUNT],
+    entries: [Option<ServerOperationRegistration>; OperationId::COUNT],
 }
 
 impl OperationCatalog {
     const fn new() -> Self {
         Self {
-            entries: [None; Opcode::COUNT],
+            entries: [None; OperationId::COUNT],
         }
     }
 
@@ -130,7 +129,7 @@ impl OperationCatalog {
         let mut index = 0;
         while index < registrations.len() {
             let registration = registrations[index];
-            let slot = registration.opcode.index();
+            let slot = registration.operation_id.index();
             if self.entries[slot].is_some() {
                 panic!("duplicate operation registration");
             }
@@ -144,8 +143,8 @@ impl OperationCatalog {
         self.register(module.operations())
     }
 
-    fn get(&'static self, opcode: Opcode) -> Option<&'static ServerOperationRegistration> {
-        self.entries[opcode.index()].as_ref()
+    fn get(&'static self, operation_id: OperationId) -> Option<&'static ServerOperationRegistration> {
+        self.entries[operation_id.index()].as_ref()
     }
 
     fn iter(&'static self) -> impl Iterator<Item = &'static ServerOperationRegistration> {
