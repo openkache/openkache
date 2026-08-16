@@ -367,7 +367,18 @@ pub(super) fn stats<'a>(
                     write!(payload, "{worker:?}").expect("writing to a String cannot fail");
                 }
                 payload.push_str(r#"],"observability":{"#);
-                payload.push_str(&observability.stats_json_fields());
+                let stats = observability.stats_snapshot();
+                write!(
+                    payload,
+                    r#""schema_version":1,"uptime_seconds":{:.3},"ready":{},"degraded":{},"active_connections":{},"active_streams":{},"requests_total":{}"#,
+                    stats.uptime_seconds,
+                    stats.ready,
+                    stats.degraded,
+                    stats.active_connections,
+                    stats.active_streams,
+                    stats.requests_total,
+                )
+                .expect("writing statistics to a String cannot fail");
                 payload.push_str("}}");
                 domain_success(
                     OperationStatus::Ok,

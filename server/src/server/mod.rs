@@ -14,7 +14,8 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::channel::{self, AsyncReceiver};
 use crate::network_runtime;
 use crate::observability::{
-    NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
+    NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, ObservabilityStats,
+    Operation,
 };
 use crate::platform::StorageDeviceKind;
 use crate::protocol::{ItemId, NamespaceDescriptor, NamespacePolicy, Response};
