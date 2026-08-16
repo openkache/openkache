@@ -1,9 +1,9 @@
 //! Network-worker view of the storage runtime.
 //!
 //! This adapter carries requester identity for telemetry and exposes both the
-//! neutral keyed cache calls and the [`StoragePort`] through one
-//! network-owned handle. Worker lifecycle stays in sibling runtime modules;
-//! generic address hashing lives here at the adapter boundary.
+//! neutral keyed cache calls through one network-owned handle. Worker
+//! lifecycle stays in sibling runtime modules; generic address hashing lives
+//! here at the adapter boundary.
 
 use std::sync::Arc;
 
@@ -15,9 +15,8 @@ use crate::{KvError, Result, SetOutcome, StorageKey};
 
 use super::ThreadedKvkache;
 use super::storage_port::{
-    StorageAddress, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
-    StorageReadFuture, StorageReadOwner, StorageReadValue, StorageValue, StorageWriteFuture,
-    StorageWriteOptions, StorageWriteOutcome,
+    StorageAddress, StorageError, StorageMutation, StorageReadOwner, StorageReadValue,
+    StorageResult, StorageValue, StorageWriteOptions, StorageWriteOutcome,
 };
 
 const GENERIC_STORAGE_ADDRESS_DOMAIN: &[u8] = b"openkache/generic-storage-address/v1\0";
@@ -146,72 +145,67 @@ impl NetworkWorkerCache {
             .sync_workers_async_with_requester(workers, operation, Some(self.network_worker))
             .await
     }
-}
 
-impl StoragePort for NetworkWorkerCache {
-    fn get<'a>(&'a self, storage_address: StorageAddress) -> StorageReadFuture<'a> {
+    /// Retrieves a value through the neutral storage adapter.
+    pub(crate) async fn storage_get(
+        &self,
+        operation: Operation,
+        storage_address: StorageAddress,
+    ) -> StorageResult<Option<StorageReadValue>> {
         let storage_key = storage_key_for_address(&storage_address);
-        Box::pin(async move {
-            self.cache
-                .get_storage_key_with_requester(
-                    storage_key,
-                    Operation::unknown(),
-                    Some(self.network_worker),
-                )
-                .await
-                .map(|value| value.map(StorageReadValue::from_owner))
-                .map_err(StorageError::from)
-        })
+        self.cache
+            .get_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
+            .await
+            .map(|value| value.map(StorageReadValue::from_owner))
+            .map_err(StorageError::from)
     }
 
-    fn set<'a>(
-        &'a self,
+    /// Stores a value through the neutral storage adapter.
+    pub(crate) async fn storage_set(
+        &self,
+        operation: Operation,
         storage_address: StorageAddress,
         value: StorageValue,
         options: StorageWriteOptions,
-    ) -> StorageWriteFuture<'a> {
+    ) -> StorageResult<StorageWriteOutcome> {
         let storage_key = storage_key_for_address(&storage_address);
         let value = StoredItemValue::from_owned_range(value.into_owned_range());
-        Box::pin(async move {
-            self.cache
-                .set_storage_key_with_requester(
-                    storage_key,
-                    value,
-                    options,
-                    Operation::unknown(),
-                    Some(self.network_worker),
-                )
-                .await
-                .map(|outcome| match outcome {
-                    SetOutcome::Created => StorageWriteOutcome::Created,
-                    SetOutcome::Replaced => StorageWriteOutcome::Replaced,
-                    SetOutcome::NotStored => StorageWriteOutcome::Unchanged,
-                })
-                .map_err(StorageError::from)
-        })
+        self.cache
+            .set_storage_key_with_requester(
+                storage_key,
+                value,
+                options,
+                operation,
+                Some(self.network_worker),
+            )
+            .await
+            .map(|outcome| match outcome {
+                SetOutcome::Created => StorageWriteOutcome::Created,
+                SetOutcome::Replaced => StorageWriteOutcome::Replaced,
+                SetOutcome::NotStored => StorageWriteOutcome::Unchanged,
+            })
+            .map_err(StorageError::from)
     }
 
-    fn delete<'a>(&'a self, storage_address: StorageAddress) -> StorageMutationFuture<'a> {
+    /// Deletes a value through the neutral storage adapter.
+    pub(crate) async fn storage_delete(
+        &self,
+        operation: Operation,
+        storage_address: StorageAddress,
+    ) -> StorageResult<StorageMutation> {
         let storage_key = storage_key_for_address(&storage_address);
-        Box::pin(async move {
-            self.cache
-                .delete_storage_key_with_requester(
-                    storage_key,
-                    Operation::unknown(),
-                    Some(self.network_worker),
-                )
-                .await
-                .map(|deleted| {
-                    if deleted {
-                        StorageMutation::Applied
-                    } else {
-                        StorageMutation::Unchanged
-                    }
-                })
-                .map_err(StorageError::from)
-        })
+        self.cache
+            .delete_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
+            .await
+            .map(|deleted| {
+                if deleted {
+                    StorageMutation::Applied
+                } else {
+                    StorageMutation::Unchanged
+                }
+            })
+            .map_err(StorageError::from)
     }
-
 }
 
 impl StorageReadOwner for StoredItemValue {

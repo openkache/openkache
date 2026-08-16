@@ -1,13 +1,14 @@
-//! API-facing storage capability bridge.
+//! API-facing storage capability.
 //!
 //! Operation registration and capability lookup depend on this narrow module,
-//! not on the runtime implementation module. The runtime-backed handle is
-//! re-exported here only at the composition boundary; replacing the worker
-//! implementation therefore does not change the generic operation catalog.
+//! not on the runtime implementation module. The concrete facade keeps worker
+//! details private while inherent async methods avoid per-call erased futures.
 
 use std::sync::Arc;
 
 use super::operation_capabilities::CapabilityKey;
+use super::NetworkWorkerCache;
+use super::super::observability::Operation;
 
 #[allow(unused_imports)]
 pub(crate) use super::super::types::{
@@ -15,14 +16,56 @@ pub(crate) use super::super::types::{
 };
 #[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
-    StorageAddress, StorageError, StorageMutation, StorageMutationFuture, StoragePort,
-    StorageReadFuture, StorageReadOwner, StorageReadValue, StorageResult, StorageValue,
-    StorageWriteFuture, StorageWriteOptions, StorageWriteOutcome,
+    StorageAddress, StorageError, StorageMutation, StorageReadOwner, StorageReadValue,
+    StorageResult, StorageValue, StorageWriteOptions, StorageWriteOutcome,
 };
 
 /// The generic capability identity used by API modules that need storage.
-pub(super) const STORAGE_PORT: CapabilityKey<StoragePortHandle> =
+pub(super) const STORAGE_PORT: CapabilityKey<StoragePort> =
     CapabilityKey::new("openkache.storage.port");
 
-/// Keeps the handle type-erased at the capability boundary.
-pub(crate) type StoragePortHandle = Arc<dyn StoragePort>;
+/// Concrete API-facing facade over one network worker's storage requester.
+#[derive(Clone)]
+pub(crate) struct StoragePort {
+    backend: Arc<NetworkWorkerCache>,
+}
+
+impl StoragePort {
+    pub(super) fn new(backend: Arc<NetworkWorkerCache>) -> Self {
+        Self { backend }
+    }
+
+    /// Retrieves a value using the caller's operation attribution.
+    #[allow(dead_code)]
+    pub(crate) async fn get(
+        &self,
+        operation: Operation,
+        address: StorageAddress,
+    ) -> StorageResult<Option<StorageReadValue>> {
+        self.backend.storage_get(operation, address).await
+    }
+
+    /// Stores a value using the caller's operation attribution.
+    #[allow(dead_code)]
+    pub(crate) async fn set(
+        &self,
+        operation: Operation,
+        address: StorageAddress,
+        value: StorageValue,
+        options: StorageWriteOptions,
+    ) -> StorageResult<StorageWriteOutcome> {
+        self.backend
+            .storage_set(operation, address, value, options)
+            .await
+    }
+
+    /// Deletes a value using the caller's operation attribution.
+    #[allow(dead_code)]
+    pub(crate) async fn delete(
+        &self,
+        operation: Operation,
+        address: StorageAddress,
+    ) -> StorageResult<StorageMutation> {
+        self.backend.storage_delete(operation, address).await
+    }
+}

@@ -48,7 +48,7 @@ pub(super) fn build_operation_runtime(
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     observability: Arc<ObservabilityState>,
 ) -> Result<Arc<OperationRuntime>, &'static str> {
-    let storage_port: super::storage_port::StoragePortHandle = cache.clone();
+    let storage_port = super::storage_port::StoragePort::new(Arc::clone(&cache));
     let compatibility_storage: StorageCapabilityHandle = cache;
     let compatibility_namespaces: NamespaceCapabilityHandle = namespaces;
     let compatibility_observability: ObservabilityCapabilityHandle = observability;

@@ -3,9 +3,7 @@
 //! The network/runtime implementation owns routing and worker lifecycle;
 //! API modules depend only on opaque address and storage operation contracts.
 
-use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::pin::Pin;
 
 use openkache_protocol::{OwnedRange, StableBytes};
 
@@ -264,20 +262,6 @@ impl StorageError {
 
 pub(crate) type StorageResult<T> = std::result::Result<T, StorageError>;
 
-/// Future returned by a neutral storage read.
-pub(crate) type StorageReadFuture<'a> =
-    Pin<Box<dyn Future<Output = StorageResult<Option<StorageReadValue>>> + 'a>>;
-
-/// Future returned by a neutral storage mutation.
-#[allow(dead_code)]
-pub(crate) type StorageMutationFuture<'a> =
-    Pin<Box<dyn Future<Output = StorageResult<StorageMutation>> + 'a>>;
-
-/// Future returned by a neutral storage write.
-#[allow(dead_code)]
-pub(crate) type StorageWriteFuture<'a> =
-    Pin<Box<dyn Future<Output = StorageResult<StorageWriteOutcome>> + 'a>>;
-
 /// The result of a storage mutation.
 ///
 /// The distinction is intentionally smaller than the concrete store outcome:
@@ -299,27 +283,4 @@ pub(crate) enum StorageWriteOutcome {
     Created,
     Replaced,
     Unchanged,
-}
-
-/// Runtime implementation contract for the API-facing storage capability.
-///
-/// The bridge re-exports this under the neutral [`StoragePort`] name. Keeping
-/// the implementation here avoids making the runtime depend on the server
-/// composition module while still hiding worker details from API bindings.
-pub(crate) trait StoragePort: Send + Sync {
-    /// Retrieves the value stored at one opaque address.
-    fn get<'a>(&'a self, storage_address: StorageAddress) -> StorageReadFuture<'a>;
-
-    /// Stores one opaque value at one opaque address.
-    #[allow(dead_code)]
-    fn set<'a>(
-        &'a self,
-        storage_address: StorageAddress,
-        value: StorageValue,
-        options: StorageWriteOptions,
-    ) -> StorageWriteFuture<'a>;
-
-    /// Deletes the value at one opaque address.
-    #[allow(dead_code)]
-    fn delete<'a>(&'a self, storage_address: StorageAddress) -> StorageMutationFuture<'a>;
 }
