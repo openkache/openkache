@@ -2,11 +2,12 @@
 
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
-    DeleteState, GetState, NamespaceCapability, NamespaceDeleteState, NamespaceOpenState,
-    NamespaceUpdateState, SetState, StatsState, SyncState,
+    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
+    SetState, StatsState, SyncState,
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::OperationInputView;
+use super::operation_ports::NamespaceCapability;
 use super::operation_preparation::{
     HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
     PrepareError, PreparePlan, ResourceLock,

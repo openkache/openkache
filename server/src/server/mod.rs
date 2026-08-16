@@ -70,6 +70,8 @@ mod operation_generic_bindings;
 mod operation_handlers;
 #[path = "../operation_outcome.rs"]
 mod operation_outcome;
+#[path = "../operation_ports.rs"]
+mod operation_ports;
 #[path = "../operation_preparation.rs"]
 mod operation_preparation;
 #[path = "../operation_registration.rs"]

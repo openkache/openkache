@@ -13,12 +13,12 @@ use super::operation_capabilities::{CapabilityCatalog, downcast_capability};
 use super::operation_compatibility_handlers as handlers;
 use super::operation_compatibility_prepare as prepare;
 use super::operation_compatibility_services::{
-    COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, DeleteState, GetState,
-    NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState, SetState, StatsState,
-    SyncState,
+    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
+    SetState, StatsState, SyncState,
 };
 use super::operation_composition::ApiModule;
 use super::operation_execution_state::OperationStateBindings;
+use super::operation_ports::{NAMESPACE_PORT, OBSERVABILITY_PORT};
 use super::operation_registration::{RegistrationBuilder, ServerOperationRegistration};
 use super::storage_port::{STORAGE_PORT, StorageDataPort};
 
@@ -28,10 +28,10 @@ fn initialize_module(
 ) -> Result<(), &'static str> {
     let storage = downcast_capability(bootstrap, STORAGE_PORT)
         .ok_or("compatibility storage port is unavailable")?;
-    let namespaces = downcast_capability(bootstrap, COMPATIBILITY_NAMESPACE_PORT)
-        .ok_or("compatibility namespace port is unavailable")?;
-    let observability = downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
-        .ok_or("compatibility observability port is unavailable")?;
+    let namespaces =
+        downcast_capability(bootstrap, NAMESPACE_PORT).ok_or("namespace port is unavailable")?;
+    let observability = downcast_capability(bootstrap, OBSERVABILITY_PORT)
+        .ok_or("observability port is unavailable")?;
     let max_item_bytes = storage.max_item_bytes();
 
     states.bind(
