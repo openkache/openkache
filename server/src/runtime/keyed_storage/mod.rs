@@ -240,8 +240,9 @@ impl KeyedWorkPort<Kvkache, StorageKey> for Command {
 
     fn progress_capacity(
         lifecycle: &mut Kvkache,
-    ) -> crate::Result<(bool, Vec<Self::CapacityCompletion>)> {
-        lifecycle.progress_capacity()
+        emit: impl FnMut(Self::CapacityCompletion),
+    ) -> crate::Result<bool> {
+        lifecycle.progress_capacity(emit)
     }
 
     fn capacity_completion(

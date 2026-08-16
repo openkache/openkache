@@ -12,17 +12,19 @@ enum PendingKeyedProgress {
 }
 
 impl Kvkache {
-    pub(crate) fn progress_capacity(&mut self) -> Result<(bool, Vec<PendingKeyedResult>)> {
+    pub(crate) fn progress_capacity(
+        &mut self,
+        mut emit: impl FnMut(PendingKeyedResult),
+    ) -> Result<bool> {
         self.advance_closings()?;
         self.advance_flushes()?;
-        let mut completed = Vec::new();
         while let Some(mutation) = self.pending_keyed_mutations.pop_front() {
             match self.try_apply_pending_keyed_mutation(mutation)? {
-                PendingKeyedProgress::Complete(result) => completed.push(result),
+                PendingKeyedProgress::Complete(result) => emit(result),
                 PendingKeyedProgress::Pending(mutation) => {
                     self.pending_keyed_mutations.push_front(mutation);
                     if self.active_flush_count() >= self.config.max_flushes_in_flight {
-                        return Ok((false, completed));
+                        return Ok(false);
                     }
                     let lane = self.fullest_mutable_lane()?;
                     self.close_lane(lane, SegmentFlushReason::Capacity)?;
@@ -31,7 +33,7 @@ impl Kvkache {
                 }
             }
         }
-        Ok((true, completed))
+        Ok(true)
     }
 
     pub(crate) fn cancel_pending_keyed_mutation(&mut self, storage_key: StorageKey) {
