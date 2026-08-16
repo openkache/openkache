@@ -5,7 +5,7 @@
 
 use super::worker::{ControlFlow, ControlPort};
 use super::worker_contract::ResponseSender;
-use super::{Kvkache, WorkerResponse};
+use super::{Kvkache, WorkerControlResponse, WorkerResponse};
 use crate::Result;
 
 pub(super) enum ControlRequest<R> {
@@ -32,11 +32,16 @@ impl ControlPort<ControlRequest<WorkerResponse>> for Kvkache {
                         crate::platform::cpu_diagnostic(affinity_id),
                         self.stats()
                     );
-                    let _ = response.send(Ok(WorkerResponse::Stats(stats)));
+                    let _ = response.send(Ok(WorkerResponse::Control(
+                        WorkerControlResponse::Stats(stats),
+                    )));
                     Ok(ControlFlow::Continue)
                 }
                 ControlRequest::Sync { response } => {
-                    let result = self.sync().await.map(|()| WorkerResponse::Synced);
+                    let result = self
+                        .sync()
+                        .await
+                        .map(|()| WorkerResponse::Control(WorkerControlResponse::Synced));
                     let _ = response.send(result);
                     Ok(ControlFlow::Continue)
                 }

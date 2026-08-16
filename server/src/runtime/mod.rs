@@ -39,7 +39,14 @@ pub(crate) use crate::storage_backend::{
     RUNNING_MARKER_FILE, SERVER_KEY_FILE, STORAGE_FORMAT_FILE,
 };
 
-pub(in crate::runtime) type WorkerResponse = worker_contract::Response<keyed_storage::Response>;
+#[derive(Debug)]
+pub(in crate::runtime) enum WorkerControlResponse {
+    Stats(String),
+    Synced,
+}
+
+pub(in crate::runtime) type WorkerResponse =
+    worker_contract::Response<keyed_storage::Response, WorkerControlResponse>;
 pub(in crate::runtime) type WorkerResponseSender = worker_contract::ResponseSender<WorkerResponse>;
 pub(in crate::runtime) type WorkerRequest =
     worker_contract::Request<StorageKey, keyed_storage::Command, WorkerControlRequest>;
@@ -616,7 +623,7 @@ impl ThreadedKvkache {
                 )
                 .await?
             {
-                WorkerResponse::Stats(worker_stats) => {
+                WorkerResponse::Control(WorkerControlResponse::Stats(worker_stats)) => {
                     stats.push(format!("thread={thread_id} {worker_stats}"));
                 }
                 response => {
@@ -649,7 +656,7 @@ impl ThreadedKvkache {
                 )
                 .await?
             {
-                WorkerResponse::Synced => {}
+                WorkerResponse::Control(WorkerControlResponse::Synced) => {}
                 response => {
                     return Err(KvError::Worker(format!(
                         "unexpected sync response: {response:?}"
@@ -688,7 +695,7 @@ impl ThreadedKvkache {
                 )
                 .await?
             {
-                WorkerResponse::Synced => {}
+                WorkerResponse::Control(WorkerControlResponse::Synced) => {}
                 response => {
                     return Err(KvError::Worker(format!(
                         "unexpected sync response: {response:?}"
