@@ -13,7 +13,6 @@ import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
-  extract_wire_contract as extract_generic_wire_contract,
   render_rust_operation_contract,
   render_rust_wire,
   render_rust_server_contract,
