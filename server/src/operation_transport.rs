@@ -49,6 +49,12 @@ pub(super) const fn response_budget(opcode: Opcode) -> usize {
     contract::response_budget(opcode)
 }
 
+/// Resolves a generated response budget at the explicit wire-adapter
+/// boundary. Runtime dispatch remains keyed by the neutral operation ID.
+pub(super) const fn response_budget_for_operation(operation_id: contract::OperationId) -> usize {
+    response_budget(contract::opcode_for_operation_id(operation_id))
+}
+
 /// Selects an error status that the generated operation contract permits.
 ///
 /// A generic adapter may discover a malformed domain result or a denied
@@ -94,6 +100,21 @@ pub(super) fn contract_error_response(
         .into()
 }
 
+/// Builds a wire error response for a neutral operation selected by runtime
+/// dispatch. This is the only conversion needed by callers that already have
+/// a protocol status rather than a generated semantic status.
+pub(super) fn contract_error_response_for_operation(
+    operation_id: contract::OperationId,
+    preferred: Status,
+    message: &[u8],
+) -> OperationResponse {
+    contract_error_response(
+        contract::opcode_for_operation_id(operation_id),
+        preferred,
+        message,
+    )
+}
+
 /// Builds a contract-valid error response from an API-owned semantic status.
 pub(super) fn contract_error_response_status(
     opcode: Opcode,
@@ -101,6 +122,20 @@ pub(super) fn contract_error_response_status(
     message: &[u8],
 ) -> OperationResponse {
     contract_error_response(opcode, preferred.wire_status(), message)
+}
+
+/// Builds a semantic error response after the neutral runtime has selected an
+/// operation. Wire status and framing remain private to this adapter.
+pub(super) fn contract_error_response_status_for_operation(
+    operation_id: contract::OperationId,
+    preferred: OperationStatus,
+    message: &[u8],
+) -> OperationResponse {
+    contract_error_response_status(
+        contract::opcode_for_operation_id(operation_id),
+        preferred,
+        message,
+    )
 }
 
 /// Encodes a generated ordered-field response without consulting a semantic
@@ -262,6 +297,14 @@ pub(super) fn encode_operation_outcome(
         OperationOutcome::Error(error) => operation_error_response(opcode, error),
         OperationOutcome::Abandoned => None,
     }
+}
+
+/// Projects a neutral operation outcome at the one wire response boundary.
+pub(super) fn encode_operation_outcome_for_operation(
+    operation_id: contract::OperationId,
+    outcome: OperationOutcome,
+) -> Option<OperationResponse> {
+    encode_operation_outcome(contract::opcode_for_operation_id(operation_id), outcome)
 }
 
 fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &[u8]) -> bool {

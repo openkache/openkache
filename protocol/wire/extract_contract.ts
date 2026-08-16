@@ -430,6 +430,45 @@ function wire_operations(
   return operations
 }
 
+function model_operation_entries(
+  shapes: Json_Object,
+  service: Json_Object,
+  opcodes: readonly Wire_Entry[],
+  strict: boolean,
+): readonly Wire_Entry[] {
+  const declared_operations = service.operations
+  if (!Array.isArray(declared_operations) || declared_operations.length === 0) {
+    return opcodes
+  }
+  const model_entries: Wire_Entry[] = []
+  for (const [index, operation] of declared_operations.entries()) {
+    const reference = object_value(
+      operation,
+      `${SERVICE_SHAPE_ID}.operations[${index}]`,
+    )
+    const target = string_member(
+      reference,
+      "target",
+      `${SERVICE_SHAPE_ID}.operations[${index}]`,
+    )
+    const name = pascal_case(shape_name(target))
+    const entry = opcodes.find((opcode) => opcode.name === name)
+    if (entry === undefined) {
+      if (strict) {
+        throw new Error(
+          `modeled operation ${name} has no matching wire opcode entry`,
+        )
+      }
+      return opcodes
+    }
+    // Resolve the operation shape here so malformed service declarations fail
+    // before a runtime identity can be generated from them.
+    object_member(shapes, target, "Smithy AST.shapes")
+    model_entries.push(entry)
+  }
+  return model_entries
+}
+
 /** Extracts the server-visible wire contract from a Smithy AST. */
 export function extract_wire_contract(
   ast: unknown,
@@ -486,6 +525,12 @@ export function extract_wire_contract(
         )
   unique_wire_values(opcodes, "opcode")
   if (opcodes.length === 0) throw new Error("opcode contract must define at least one entry")
+  const model_opcodes = model_operation_entries(
+    shapes,
+    service,
+    opcodes,
+    strict_operations,
+  )
   const statuses = wire_enum_entries(
     shapes,
     STATUS_SHAPE_ID,
@@ -495,6 +540,7 @@ export function extract_wire_contract(
   const contract = {
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
+    model_opcodes,
     opcodes,
     statuses,
     v1: adapter.extract_profile(

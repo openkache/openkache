@@ -8,8 +8,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use super::operation_contract::OperationId;
 use super::operation_registration::ServerOperationRegistration;
-use super::operation_contract::{OperationId, operation_id_for_opcode};
 
 pub(super) type ErasedOperationState = dyn Any + Send + Sync;
 pub(super) type StateValidator = fn(Option<&ErasedOperationState>) -> bool;
@@ -148,13 +148,6 @@ impl OperationRuntime {
             .map(|operation| operation.registration)
     }
 
-    pub(super) fn registration_for_opcode(
-        &self,
-        opcode: openkache_protocol::Opcode,
-    ) -> Option<&'static ServerOperationRegistration> {
-        self.registration(operation_id_for_opcode(opcode))
-    }
-
     pub(super) fn operation(
         &self,
         operation_id: OperationId,
@@ -163,12 +156,4 @@ impl OperationRuntime {
             .as_ref()
             .map(|operation| (operation.registration, operation.state()))
     }
-
-    pub(super) fn operation_for_opcode(
-        &self,
-        opcode: openkache_protocol::Opcode,
-    ) -> Option<(&'static ServerOperationRegistration, OperationStateRef<'_>)> {
-        self.operation(operation_id_for_opcode(opcode))
-    }
-
 }

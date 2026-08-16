@@ -6,10 +6,28 @@ function formatted_decimal(value: number): string {
   return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "_")
 }
 
+function rust_string_literal(value: string): string {
+  return JSON.stringify(value)
+}
+
+function wire_name(identifier: string): string {
+  return identifier
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase()
+}
+
 /** Renders generic operation metadata for the server-owned adapter. */
 export function render_rust_server_contract(contract: Wire_Contract): string {
-  const operation_id_variants = contract.opcodes
+  const model_opcodes = contract.model_opcodes ?? contract.opcodes
+  const operation_id_variants = model_opcodes
     .map((opcode) => `    ${opcode.name},`)
+    .join("\n")
+  const operation_id_names = model_opcodes
+    .map(
+      (opcode) =>
+        `        ${rust_string_literal(opcode.text ?? wire_name(opcode.name))},`,
+    )
     .join("\n")
   const operation_id_from_opcode_arms = contract.opcodes
     .map(
@@ -61,7 +79,12 @@ ${operation_id_variants}
 }
 
 impl OperationId {
-    pub const COUNT: usize = ${contract.opcodes.length};
+    pub const COUNT: usize = ${model_opcodes.length};
+
+    /// Stable modeled names in runtime operation-ID order.
+    pub const NAMES: [&'static str; Self::COUNT] = [
+${operation_id_names}
+    ];
 
     #[inline]
     pub const fn index(self) -> usize {
@@ -81,6 +104,19 @@ pub const fn opcode_for_operation_id(operation: OperationId) -> Opcode {
     match operation {
 ${opcode_from_operation_id_arms}
     }
+}
+
+/// Resolves generated wire metadata after runtime code has selected an
+/// operation by its neutral dense identity.
+#[inline]
+pub const fn operation_wire_spec_for_id(operation: OperationId) -> OperationWireSpec {
+    operation_wire_spec(opcode_for_operation_id(operation))
+}
+
+/// Resolves the compact request layout at the wire-adapter boundary.
+#[inline]
+pub const fn wire_request_layout_for_id(operation: OperationId) -> WireRequestLayout {
+    wire_request_layout(opcode_for_operation_id(operation))
 }
 
 /// Transport-neutral semantic status generated from the modeled vocabulary.

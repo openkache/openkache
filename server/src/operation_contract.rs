@@ -15,11 +15,12 @@ use crate::observability::Operation;
 // or compact bit constants merely because the generated artifact contains
 // them.
 pub(super) use crate::contract::{
-    MAX_OPERATION_REQUEST_FIELDS, MAX_REQUEST_FRAME_BYTES, OperationFieldPlan,
+    MAX_OPERATION_REQUEST_FIELDS, MAX_REQUEST_FRAME_BYTES, OperationFieldPlan, OperationId,
     OperationLayoutFraming, OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS,
     WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor, WireCodecKind,
-    WireCodecLengthEncoding, WireCodecWidth, OperationId, operation_id_for_opcode,
-    operation_registry, operation_wire_spec, wire_codec_kind, wire_request_layout,
+    WireCodecLengthEncoding, WireCodecWidth, opcode_for_operation_id, operation_id_for_opcode,
+    operation_registry, operation_wire_spec_for_id, wire_codec_kind,
+    wire_request_layout_for_id,
 };
 // Future generated generic bindings consume field indexes through this neutral
 // facade even when the currently registered generic API has no fields.
@@ -30,22 +31,27 @@ pub(super) const MAX_FIELDS: usize = crate::contract::MAX_OPERATION_FIELDS;
 
 const _: () = assert!(Opcode::COUNT <= u8::MAX as usize);
 
-const fn operation_names() -> [&'static str; Opcode::COUNT + 1] {
-    let mut names = ["unknown"; Opcode::COUNT + 1];
+const fn operation_names() -> [&'static str; OperationId::COUNT + 1] {
+    let mut names = ["unknown"; OperationId::COUNT + 1];
     let mut index = 0;
-    while index < Opcode::COUNT {
-        names[index] = Opcode::NAMES[index];
+    while index < OperationId::COUNT {
+        names[index] = OperationId::NAMES[index];
         index += 1;
     }
     names
 }
 
-pub(super) const OPERATION_NAMES: [&str; Opcode::COUNT + 1] = operation_names();
+pub(super) const OPERATION_NAMES: [&str; OperationId::COUNT + 1] = operation_names();
 
 /// Projects one generated operation into the neutral telemetry catalog.
 #[inline]
 pub(super) const fn telemetry_operation(opcode: Opcode) -> Operation {
-    Operation::from_generated_index(opcode.index() as u8)
+    telemetry_operation_id(operation_id_for_opcode(opcode))
+}
+
+#[inline]
+pub(super) const fn telemetry_operation_id(operation_id: OperationId) -> Operation {
+    Operation::from_generated_index(operation_id.index() as u8)
 }
 
 #[inline]

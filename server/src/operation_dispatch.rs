@@ -13,6 +13,7 @@ use openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
 use super::operation_authorization::AuthorizationContext;
+use super::operation_contract::{self, OperationId};
 use super::operation_execution_state::OperationRuntime;
 use super::operation_handlers;
 use super::operation_preparation;
@@ -55,7 +56,8 @@ pub(super) fn admit_request_header(
     prefix: &[u8],
     runtime: &OperationRuntime,
 ) -> Result<(), HeaderAdmissionRejection> {
-    let Some((registration, state)) = runtime.operation_for_opcode(header.opcode()) else {
+    let operation_id = operation_contract::operation_id_for_opcode(header.opcode());
+    let Some((registration, state)) = runtime.operation(operation_id) else {
         return Ok(());
     };
     let Some(admit) = registration.admit_header else {
@@ -69,13 +71,13 @@ pub(super) fn admit_request_header(
     let started = std::time::Instant::now();
     admit(
         &view,
-        operation_preparation::HeaderAdmissionContext {
-            state,
-        },
+        operation_preparation::HeaderAdmissionContext { state },
     )
     .map_err(|error| {
         let response = operation_transport::contract_error_response_status(
-            header.opcode(), error.status, error.message,
+            header.opcode(),
+            error.status,
+            error.message,
         );
         HeaderAdmissionRejection {
             opcode: header.opcode(),
@@ -90,14 +92,14 @@ pub(super) fn admit_request_header(
 /// The stream loop uses this only to decide whether a timeout may safely
 /// produce an error response. Mutation policy remains part of the API
 /// registration and never becomes a network-loop opcode match.
-pub(super) fn may_mutate(runtime: &OperationRuntime, opcode: Opcode) -> bool {
+pub(super) fn may_mutate(runtime: &OperationRuntime, operation_id: OperationId) -> bool {
     runtime
-        .registration_for_opcode(opcode)
+        .registration(operation_id)
         .is_some_and(|registration| {
-        matches!(
-            registration.policy,
-            OperationCommitDisposition::MayBeCommitted
-        )
+            matches!(
+                registration.policy,
+                OperationCommitDisposition::MayBeCommitted
+            )
         })
 }
 
@@ -105,11 +107,11 @@ pub(super) fn may_mutate(runtime: &OperationRuntime, opcode: Opcode) -> bool {
 /// contract. The network loop does not assume every future API uses the
 /// historical `timeout` token.
 pub(super) fn timeout_response(
-    opcode: Opcode,
+    operation_id: OperationId,
     message: &'static [u8],
 ) -> operation_transport::OperationResponse {
-    operation_transport::contract_error_response_status(
-        opcode,
+    operation_transport::contract_error_response_status_for_operation(
+        operation_id,
         super::operation_contract::OperationStatus::Timeout,
         message,
     )
@@ -120,9 +122,12 @@ pub(super) fn timeout_response(
 /// The stream loop uses this opaque budget before dispatch. Wire payload
 /// bounds remain owned by the generated contract adapter rather than being
 /// re-derived by the network server.
-pub(super) fn response_budget_bytes(runtime: &OperationRuntime, opcode: Opcode) -> Option<usize> {
-    runtime.registration_for_opcode(opcode).and_then(|_| {
-        let budget = operation_transport::response_budget(opcode);
+pub(super) fn response_budget_bytes(
+    runtime: &OperationRuntime,
+    operation_id: OperationId,
+) -> Option<usize> {
+    runtime.registration(operation_id).and_then(|_| {
+        let budget = operation_transport::response_budget_for_operation(operation_id);
         (budget > 0).then_some(budget)
     })
 }
@@ -137,45 +142,49 @@ pub(super) async fn execute_request(
     runtime: &OperationRuntime,
     task_storage: &mut OperationTaskStorage,
 ) -> Option<operation_transport::OperationResponse> {
-    let opcode = input.opcode();
-    let Some((registration, state)) = runtime.operation_for_opcode(opcode) else {
-        return Some(operation_transport::contract_error_response_status(
-            opcode,
-            super::operation_contract::OperationStatus::UnsupportedOpcode,
-            b"modeled operation has no server registration",
-        ));
+    let operation_id = input.operation_id();
+    let Some((registration, state)) = runtime.operation(operation_id) else {
+        return Some(
+            operation_transport::contract_error_response_status_for_operation(
+                operation_id,
+                super::operation_contract::OperationStatus::UnsupportedOpcode,
+                b"modeled operation has no server registration",
+            ),
+        );
     };
     if !(registration.authorization)(authorization) {
-        return Some(operation_transport::contract_error_response_status(
-            opcode,
-            super::operation_contract::OperationStatus::Forbidden,
-            b"operation authorization capability is not satisfied",
-        ));
+        return Some(
+            operation_transport::contract_error_response_status_for_operation(
+                operation_id,
+                super::operation_contract::OperationStatus::Forbidden,
+                b"operation authorization capability is not satisfied",
+            ),
+        );
     }
 
     if let Err(message) = input.validate_codecs() {
-        return Some(operation_transport::contract_error_response_status(
-            opcode,
-            super::operation_contract::OperationStatus::InvalidRequest,
-            message,
-        ));
+        return Some(
+            operation_transport::contract_error_response_status_for_operation(
+                operation_id,
+                super::operation_contract::OperationStatus::InvalidRequest,
+                message,
+            ),
+        );
     }
 
-    let preparation = match (registration.prepare)(
-        &input,
-        operation_preparation::PrepareContext {
-            state,
-        },
-    ) {
-        Ok(preparation) => preparation,
-        Err(error) => {
-            return Some(operation_transport::contract_error_response_status(
-                opcode,
-                error.status,
-                error.message,
-            ));
-        }
-    };
+    let preparation =
+        match (registration.prepare)(&input, operation_preparation::PrepareContext { state }) {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                return Some(
+                    operation_transport::contract_error_response_status_for_operation(
+                        operation_id,
+                        error.status,
+                        error.message,
+                    ),
+                );
+            }
+        };
 
     // Preparation resolves opaque lock handles. The dispatcher acquires them
     // in the generated deterministic order and never interprets resource
@@ -186,21 +195,20 @@ pub(super) async fn execute_request(
     }
     for resource in preparation.resources() {
         if let Some(error) = resource.inactive_error() {
-            return Some(operation_transport::contract_error_response_status(
-                opcode,
-                error.status,
-                error.message,
-            ));
+            return Some(
+                operation_transport::contract_error_response_status_for_operation(
+                    operation_id,
+                    error.status,
+                    error.message,
+                ),
+            );
         }
     }
 
     let outcome = (registration.handler)(
-        operation_handlers::OperationContext {
-            state,
-            input,
-        },
+        operation_handlers::OperationContext { state, input },
         task_storage,
     )
     .await;
-    operation_transport::encode_operation_outcome(opcode, outcome)
+    operation_transport::encode_operation_outcome_for_operation(operation_id, outcome)
 }
