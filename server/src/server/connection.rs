@@ -125,9 +125,9 @@ async fn serve_incoming<I: TransportIncoming>(
             network_shard.handshake_succeeded();
             let peer_certificate = connection.take_peer_certificate();
             let authorization = if access_policy.permits_administration(peer_certificate.as_ref()) {
-                operation_handlers::AuthorizationContext::administrator()
+                operation_authorization::AuthorizationContext::administrator()
             } else {
-                operation_handlers::AuthorizationContext::public()
+                operation_authorization::AuthorizationContext::public()
             };
             serve_connection(
                 connection,
@@ -149,7 +149,7 @@ async fn serve_incoming<I: TransportIncoming>(
 async fn serve_connection<C: TransportConnection>(
     connection: C,
     network_shard: NetworkShard<'_>,
-    authorization: operation_handlers::AuthorizationContext,
+    authorization: operation_authorization::AuthorizationContext,
     request_timeout: Duration,
     max_stream_lanes: usize,
     request_budget: RequestBudget,
@@ -209,7 +209,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
     network_shard: NetworkShard<'_>,
-    authorization: operation_handlers::AuthorizationContext,
+    authorization: operation_authorization::AuthorizationContext,
     request_timeout: Duration,
     request_budget: RequestBudget,
     runtime: Arc<operation_execution_state::OperationRuntime>,

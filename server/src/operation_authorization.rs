@@ -111,17 +111,3 @@ pub(super) fn authorization_none(_authorization: &AuthorizationContext) -> bool 
 pub(super) fn authorization_administrator(authorization: &AuthorizationContext) -> bool {
     authorization.permits("administrator")
 }
-
-/// Applies the generated authorization capability at the generic server
-/// boundary. Domain handlers only receive requests that have passed this
-/// capability check, so permissions do not become opcode-specific branches.
-///
-/// Unknown capabilities fail closed. They remain usable by a future
-/// authentication adapter as soon as it supplies the matching token; no
-/// generated helper or operation-name branch is required.
-pub(super) fn authorization_allowed(
-    predicate: AuthorizationFn,
-    authorization: &AuthorizationContext,
-) -> bool {
-    predicate(authorization)
-}

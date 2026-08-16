@@ -11,7 +11,6 @@ use std::any::Any;
 use openkache_protocol::{Opcode, OwnedRange};
 use smallvec::SmallVec;
 
-pub(super) use super::operation_authorization::AuthorizationContext;
 use super::operation_execution_state::OperationStateRef;
 pub(super) use super::operation_fields::OperationFieldEnvelope;
 use crate::operation_contract as contract;
