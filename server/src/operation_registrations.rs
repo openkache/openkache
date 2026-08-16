@@ -15,12 +15,12 @@ use super::operation_registration::ServerOperationRegistration;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{CapabilityCatalog, CapabilityEntry, CapabilityList},
-    operation_compatibility_module as compatibility, operation_generic_bindings as generic,
+    operation_compatibility_module as compatibility,
     operation_compatibility_services::{
-        COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT,
-        COMPATIBILITY_STORAGE_PORT, NamespaceCapabilityHandle, ObservabilityCapabilityHandle,
-        StorageCapabilityHandle,
+        COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, NamespaceCapabilityHandle,
+        ObservabilityCapabilityHandle,
     },
+    operation_generic_bindings as generic,
 };
 
 /// Composition-root catalogs assembled from API-owned modules.
@@ -49,16 +49,11 @@ pub(super) fn build_operation_runtime(
     observability: Arc<ObservabilityState>,
 ) -> Result<Arc<OperationRuntime>, &'static str> {
     let storage_port = super::storage_port::StoragePort::new(Arc::clone(&cache));
-    let compatibility_storage: StorageCapabilityHandle = cache;
     let compatibility_namespaces: NamespaceCapabilityHandle = namespaces;
     let compatibility_observability: ObservabilityCapabilityHandle = observability;
     let bootstrap_entries = [
         CapabilityEntry::new(super::storage_port::STORAGE_PORT, &storage_port),
-        CapabilityEntry::new(COMPATIBILITY_STORAGE_PORT, &compatibility_storage),
-        CapabilityEntry::new(
-            COMPATIBILITY_NAMESPACE_PORT,
-            &compatibility_namespaces,
-        ),
+        CapabilityEntry::new(COMPATIBILITY_NAMESPACE_PORT, &compatibility_namespaces),
         CapabilityEntry::new(
             COMPATIBILITY_OBSERVABILITY_PORT,
             &compatibility_observability,
