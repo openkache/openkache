@@ -11,9 +11,12 @@ use super::operation_contract::OperationStatus;
 use super::operation_handlers::OperationContext;
 use super::operation_outcome::{OperationOutcome, OperationValue};
 use super::operation_registration::RegistrationBuilder;
-use super::operation_registry::OperationFuture;
+use super::operation_registry::{OperationFuture, OperationTaskStorage};
 
-fn ping_handler<'a>(_context: OperationContext<'a>) -> OperationFuture<'a> {
+fn ping_handler<'a>(
+    _context: OperationContext<'a>,
+    _task_storage: &'a mut OperationTaskStorage,
+) -> OperationFuture<'a> {
     OperationFuture::ready(OperationOutcome::opaque(
         OperationStatus::Ok,
         OperationValue::inline(b"PONG"),
