@@ -15,7 +15,7 @@ use super::operation_preparation::ResourceLock;
 use super::storage_port::StorageRoute;
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
-    ObservabilityState, SetReservation,
+    ObservabilityState, ObservabilityStats, SetReservation,
 };
 
 /// Namespace metadata capability exposed to API behavior.
@@ -69,7 +69,7 @@ pub(super) trait NamespaceCapability: Send + Sync {
 
 /// Observability capability needed by APIs that expose server statistics.
 pub(super) trait ObservabilityCapability: Send + Sync {
-    fn stats_json_fields(&self) -> String;
+    fn stats_snapshot(&self) -> ObservabilityStats;
 }
 
 pub(super) type NamespaceCapabilityHandle = Arc<dyn NamespaceCapability>;
@@ -200,7 +200,7 @@ impl NamespaceCapability for Mutex<NamespaceRegistry> {
 }
 
 impl ObservabilityCapability for ObservabilityState {
-    fn stats_json_fields(&self) -> String {
-        ObservabilityState::stats_json_fields(self)
+    fn stats_snapshot(&self) -> ObservabilityStats {
+        ObservabilityState::stats_summary(self)
     }
 }

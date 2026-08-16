@@ -154,6 +154,17 @@ pub(super) struct TelemetrySnapshot {
     pub(super) storage: Vec<StorageWorkerSnapshot>,
 }
 
+/// Bounded, transport-neutral server statistics for capability consumers.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ObservabilityStats {
+    pub(crate) uptime_seconds: f64,
+    pub(crate) ready: bool,
+    pub(crate) degraded: bool,
+    pub(crate) active_connections: u64,
+    pub(crate) active_streams: u64,
+    pub(crate) requests_total: u64,
+}
+
 impl RequestMetrics {
     fn new() -> Self {
         Self {
@@ -685,33 +696,29 @@ impl ObservabilityState {
         super::prometheus::render(&self.snapshot(), scrapes)
     }
 
-    /// Adds machine-readable fields to the authenticated `STATS` JSON response.
-    pub(crate) fn stats_json_fields(&self) -> String {
+    /// Returns the bounded summary used by capability consumers.
+    pub(crate) fn stats_summary(&self) -> ObservabilityStats {
         let snapshot = self.snapshot();
-        let active_connections = snapshot
-            .network
-            .iter()
-            .map(|metrics| metrics.active_connections)
-            .sum::<u64>();
-        let active_streams = snapshot
-            .network
-            .iter()
-            .map(|metrics| metrics.active_streams)
-            .sum::<u64>();
-        let requests_total = snapshot
-            .network
-            .iter()
-            .flat_map(|metrics| metrics.request_totals.iter())
-            .flat_map(|statuses| statuses.iter())
-            .sum::<u64>();
-        format!(
-            r#""schema_version":1,"uptime_seconds":{:.3},"ready":{},"degraded":{},"active_connections":{},"active_streams":{},"requests_total":{}"#,
-            snapshot.uptime_seconds,
-            snapshot.lifecycle == Lifecycle::Ready,
-            matches!(snapshot.lifecycle, Lifecycle::Degraded),
-            active_connections,
-            active_streams,
-            requests_total,
-        )
+        ObservabilityStats {
+            uptime_seconds: snapshot.uptime_seconds,
+            ready: snapshot.lifecycle == Lifecycle::Ready,
+            degraded: matches!(snapshot.lifecycle, Lifecycle::Degraded),
+            active_connections: snapshot
+                .network
+                .iter()
+                .map(|metrics| metrics.active_connections)
+                .sum(),
+            active_streams: snapshot
+                .network
+                .iter()
+                .map(|metrics| metrics.active_streams)
+                .sum(),
+            requests_total: snapshot
+                .network
+                .iter()
+                .flat_map(|metrics| metrics.request_totals.iter())
+                .flat_map(|statuses| statuses.iter())
+                .sum(),
+        }
     }
 }

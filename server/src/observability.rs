@@ -11,5 +11,5 @@ mod shard;
 
 #[allow(unused_imports)]
 pub(crate) use http::MetricsEndpoint;
-pub(crate) use service::{ObservabilityService, ObservabilityState, Operation};
+pub(crate) use service::{ObservabilityService, ObservabilityState, ObservabilityStats, Operation};
 pub(crate) use shard::{NetworkShard, NetworkWorkerId, StorageWorkerId};
