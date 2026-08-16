@@ -1,4 +1,5 @@
 use super::operation_preparation;
+use super::storage_port::StorageRoute;
 use super::{ItemId, NamespaceDescriptor, NamespacePolicy};
 use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::OwnedRange;
@@ -62,7 +63,7 @@ struct NamespaceEntry {
     descriptor: NamespaceDescriptor,
     name: NamespaceName,
     items: HashSet<ItemId>,
-    dirty_workers: HashSet<usize>,
+    dirty_workers: HashSet<StorageRoute>,
     operation_lock: Arc<AsyncMutex<()>>,
     active: Arc<AtomicBool>,
 }
@@ -313,7 +314,7 @@ impl NamespaceRegistry {
         &mut self,
         namespace_id: u64,
         item_id: ItemId,
-        worker: usize,
+        route: StorageRoute,
     ) -> std::result::Result<SetReservation, NamespaceError> {
         let reservation = self
             .by_id
@@ -321,7 +322,7 @@ impl NamespaceRegistry {
             .ok_or(NamespaceError::NotFound)
             .map(|entry| SetReservation {
                 inserted_item: entry.items.insert(item_id),
-                inserted_worker: entry.dirty_workers.insert(worker),
+                inserted_worker: entry.dirty_workers.insert(route),
             })?;
         if !reservation.inserted_item && !reservation.inserted_worker {
             return Ok(reservation);
@@ -332,7 +333,7 @@ impl NamespaceRegistry {
                     entry.items.remove(&item_id);
                 }
                 if reservation.inserted_worker {
-                    entry.dirty_workers.remove(&worker);
+                    entry.dirty_workers.remove(&route);
                 }
             }
             return Err(NamespaceError::Internal);
@@ -351,7 +352,7 @@ impl NamespaceRegistry {
         &mut self,
         namespace_id: u64,
         item_id: ItemId,
-        worker: usize,
+        route: StorageRoute,
         reservation: SetReservation,
     ) -> std::result::Result<(), NamespaceError> {
         if !reservation.inserted_item && !reservation.inserted_worker {
@@ -365,7 +366,7 @@ impl NamespaceRegistry {
                 entry.items.remove(&item_id);
             }
             if reservation.inserted_worker {
-                entry.dirty_workers.remove(&worker);
+                entry.dirty_workers.remove(&route);
             }
         }
         if self.persist().is_err() {
@@ -376,7 +377,7 @@ impl NamespaceRegistry {
             }
             if reservation.inserted_worker {
                 if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                    entry.dirty_workers.insert(worker);
+                    entry.dirty_workers.insert(route);
                 }
             }
             return Err(NamespaceError::Internal);
@@ -391,20 +392,20 @@ impl NamespaceRegistry {
     pub(crate) fn reserve_worker(
         &mut self,
         namespace_id: u64,
-        worker: usize,
+        route: StorageRoute,
     ) -> std::result::Result<(), NamespaceError> {
         let inserted = self
             .by_id
             .get_mut(&namespace_id)
             .ok_or(NamespaceError::NotFound)?
             .dirty_workers
-            .insert(worker);
+            .insert(route);
         if !inserted {
             return Ok(());
         }
         if self.persist().is_err() {
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                entry.dirty_workers.remove(&worker);
+                entry.dirty_workers.remove(&route);
             }
             return Err(NamespaceError::Internal);
         }
@@ -440,7 +441,7 @@ impl NamespaceRegistry {
             .map(|entry| entry.items.iter().copied().collect())
     }
 
-    pub(crate) fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<usize>> {
+    pub(crate) fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<StorageRoute>> {
         self.by_id.get(&namespace_id).map(|entry| {
             let mut workers = entry.dirty_workers.iter().copied().collect::<Vec<_>>();
             workers.sort_unstable();
@@ -529,16 +530,9 @@ impl NamespaceRegistry {
             bytes.extend_from_slice(&(entry.dirty_workers.len() as u64).to_be_bytes());
             let mut dirty_workers = entry.dirty_workers.iter().copied().collect::<Vec<_>>();
             dirty_workers.sort_unstable();
-            for worker in dirty_workers {
+            for route in dirty_workers {
                 bytes.extend_from_slice(
-                    &u64::try_from(worker)
-                        .map_err(|_| {
-                            std::io::Error::new(
-                                ErrorKind::InvalidData,
-                                "storage worker ID does not fit metadata",
-                            )
-                        })?
-                        .to_be_bytes(),
+                    &route.persisted().to_be_bytes(),
                 );
             }
         }
@@ -631,10 +625,8 @@ impl NamespaceRegistry {
                     );
                 }
                 for _ in 0..dirty_worker_count {
-                    let worker = usize::try_from(cursor.u64()?).map_err(|_| {
-                        cursor.invalid("namespace metadata worker ID is invalid")
-                    })?;
-                    if !dirty_workers.insert(worker) {
+                    let route = StorageRoute::from_persisted(cursor.u64()?);
+                    if !dirty_workers.insert(route) {
                         return Err(cursor
                             .invalid("namespace metadata contains duplicate dirty workers"));
                     }

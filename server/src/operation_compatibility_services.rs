@@ -15,7 +15,7 @@ use super::super::types::{
 };
 use super::operation_capabilities::CapabilityKey;
 use super::operation_preparation::ResourceLock;
-use super::storage_port::StoragePort;
+use super::storage_port::{StoragePort, StorageRoute};
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
     ObservabilityState, SetReservation,
@@ -41,7 +41,7 @@ pub(super) trait NamespaceCapability: Send + Sync {
     ) -> Result<NamespaceDescriptor, NamespaceError>;
     fn delete(&self, namespace_id: u64, expected_revision: u64) -> Result<(), NamespaceError>;
     fn tracked_items(&self, namespace_id: u64) -> Option<Vec<openkache_protocol::ItemId>>;
-    fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<usize>>;
+    fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<StorageRoute>>;
     fn mark_workers_clean(&self, namespace_id: u64) -> Result<(), NamespaceError>;
     fn prune_item(
         &self,
@@ -52,16 +52,16 @@ pub(super) trait NamespaceCapability: Send + Sync {
         &self,
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
-        worker: usize,
+        route: StorageRoute,
     ) -> Result<SetReservation, NamespaceError>;
     fn rollback_set_reservation(
         &self,
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
-        worker: usize,
+        route: StorageRoute,
         reservation: SetReservation,
     ) -> Result<(), NamespaceError>;
-    fn reserve_worker(&self, namespace_id: u64, worker: usize) -> Result<(), NamespaceError>;
+    fn reserve_worker(&self, namespace_id: u64, route: StorageRoute) -> Result<(), NamespaceError>;
     fn mark_delete(
         &self,
         namespace_id: u64,
@@ -204,7 +204,7 @@ impl NamespaceCapability for Mutex<NamespaceRegistry> {
         self.lock().ok()?.tracked_items(namespace_id)
     }
 
-    fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<usize>> {
+    fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<StorageRoute>> {
         self.lock().ok()?.dirty_workers(namespace_id)
     }
 
@@ -228,29 +228,29 @@ impl NamespaceCapability for Mutex<NamespaceRegistry> {
         &self,
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
-        worker: usize,
+        route: StorageRoute,
     ) -> Result<SetReservation, NamespaceError> {
         self.lock()
             .map_err(|_| NamespaceError::Internal)?
-            .reserve_item(namespace_id, item_id, worker)
+            .reserve_item(namespace_id, item_id, route)
     }
 
     fn rollback_set_reservation(
         &self,
         namespace_id: u64,
         item_id: openkache_protocol::ItemId,
-        worker: usize,
+        route: StorageRoute,
         reservation: SetReservation,
     ) -> Result<(), NamespaceError> {
         self.lock()
             .map_err(|_| NamespaceError::Internal)?
-            .rollback_set_reservation(namespace_id, item_id, worker, reservation)
+            .rollback_set_reservation(namespace_id, item_id, route, reservation)
     }
 
-    fn reserve_worker(&self, namespace_id: u64, worker: usize) -> Result<(), NamespaceError> {
+    fn reserve_worker(&self, namespace_id: u64, route: StorageRoute) -> Result<(), NamespaceError> {
         self.lock()
             .map_err(|_| NamespaceError::Internal)?
-            .reserve_worker(namespace_id, worker)
+            .reserve_worker(namespace_id, route)
     }
 
     fn mark_delete(

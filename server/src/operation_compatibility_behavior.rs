@@ -26,8 +26,8 @@ use super::operation_outcome::{
     OperationBody, OperationError, OperationOutcome, OperationSuccessStatus,
 };
 use super::storage_port::{
-    StorageAdministrationPort, StorageDataPort, StorageError, StorageMutation, StorageValue,
-    StorageWriteOutcome,
+    CompatibilityStorageAddressPort, StorageAdministrationPort, StorageError, StorageMutation,
+    StorageValue, StorageWriteOutcome,
 };
 use super::{NamespaceError, NamespaceOpenResult};
 
@@ -137,7 +137,7 @@ pub(super) fn mutation_domain_error(is_set: bool, error: StorageError) -> Operat
 }
 
 pub(super) fn get<'a>(
-    cache: &'a impl StorageDataPort,
+    cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: GetInput,
 ) -> BehaviorFuture<'a> {
@@ -187,7 +187,7 @@ pub(super) fn namespace_update_policy<'a>(
 }
 
 pub(super) fn namespace_delete<'a>(
-    cache: &'a impl StorageDataPort,
+    cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceDeleteInput,
 ) -> BehaviorFuture<'a> {
@@ -204,7 +204,8 @@ pub(super) fn namespace_delete<'a>(
             }
         };
         for item_id in tracked_items {
-            let address = cache.address_for_domain_identity(namespace_id, item_id.as_bytes());
+            let address =
+                cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
             match cache.get(telemetry_operation(Opcode::Get), address).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
@@ -228,7 +229,7 @@ pub(super) fn namespace_delete<'a>(
 }
 
 pub(super) fn set<'a>(
-    cache: &'a impl StorageDataPort,
+    cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: SetInput,
 ) -> BehaviorFuture<'a> {
@@ -254,9 +255,10 @@ pub(super) fn set<'a>(
         };
         let item_id = decoded.item_id;
         let value = decoded.value;
-        let address = cache.address_for_domain_identity(namespace_id, item_id.as_bytes());
-        let worker = cache.partition_for(&address);
-        let reservation = match namespaces.reserve_item(namespace_id, item_id, worker) {
+        let address =
+            cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        let route = cache.route_for(&address);
+        let reservation = match namespaces.reserve_item(namespace_id, item_id, route) {
             Ok(reservation) => reservation,
             Err(error) => {
                 return namespace_error(error, b"namespace metadata is unavailable");
@@ -279,7 +281,7 @@ pub(super) fn set<'a>(
             }
             Ok(StorageWriteOutcome::Unchanged) => {
                 let rollback =
-                    namespaces.rollback_set_reservation(namespace_id, item_id, worker, reservation);
+                    namespaces.rollback_set_reservation(namespace_id, item_id, route, reservation);
                 match rollback {
                     Ok(()) => domain_success(OperationStatus::NotStored, OperationBody::Empty),
                     Err(_) => OperationOutcome::abandoned(),
@@ -288,7 +290,7 @@ pub(super) fn set<'a>(
             Err(error) => {
                 let response = mutation_domain_error(true, error);
                 let rollback =
-                    namespaces.rollback_set_reservation(namespace_id, item_id, worker, reservation);
+                    namespaces.rollback_set_reservation(namespace_id, item_id, route, reservation);
                 if rollback.is_ok() {
                     response
                 } else {
@@ -300,7 +302,7 @@ pub(super) fn set<'a>(
 }
 
 pub(super) fn delete<'a>(
-    cache: &'a impl StorageDataPort,
+    cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: GetInput,
 ) -> BehaviorFuture<'a> {
@@ -313,9 +315,10 @@ pub(super) fn delete<'a>(
             );
         }
         let item_id = decoded.item_id;
-        let address = cache.address_for_domain_identity(namespace_id, item_id.as_bytes());
-        let worker = cache.partition_for(&address);
-        if let Err(status) = namespaces.reserve_worker(namespace_id, worker) {
+        let address =
+            cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        let route = cache.route_for(&address);
+        if let Err(status) = namespaces.reserve_worker(namespace_id, route) {
             return namespace_error(status, b"namespace metadata is unavailable");
         }
         let mutation = cache
@@ -405,7 +408,7 @@ pub(super) fn sync<'a>(
             }
         };
         match cache
-            .sync_partitions(&dirty_workers, telemetry_operation(Opcode::Sync))
+            .sync_routes(&dirty_workers, telemetry_operation(Opcode::Sync))
             .await
         {
             Ok(()) => {
@@ -421,7 +424,7 @@ pub(super) fn sync<'a>(
 }
 
 async fn execute_get(
-    cache: &impl StorageDataPort,
+    cache: &impl CompatibilityStorageAddressPort,
     namespace_id: u64,
     item_id: ItemId,
     namespaces: &dyn NamespaceCapability,
@@ -432,7 +435,7 @@ async fn execute_get(
             b"namespace does not exist",
         );
     }
-    let address = cache.address_for_domain_identity(namespace_id, item_id.as_bytes());
+    let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
     match cache.get(telemetry_operation(Opcode::Get), address).await {
         Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value),
         Ok(None) => {
