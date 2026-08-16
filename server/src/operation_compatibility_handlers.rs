@@ -1,5 +1,7 @@
 //! Typed compatibility handlers connecting decoded input to API behavior.
 
+use std::sync::Arc;
+
 use super::operation_compatibility_behavior as behavior;
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
@@ -10,6 +12,29 @@ use super::operation_contract::OperationStatus;
 use super::operation_handlers::OperationContext;
 use super::operation_outcome::{OperationError, OperationOutcome};
 use super::operation_registry::OperationFuture;
+use super::storage_port::StoragePort;
+
+trait HandlerPortRef {
+    type Target: ?Sized;
+
+    fn handler_port_ref(&self) -> &Self::Target;
+}
+
+impl<T: ?Sized> HandlerPortRef for Arc<T> {
+    type Target = T;
+
+    fn handler_port_ref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl HandlerPortRef for StoragePort {
+    type Target = StoragePort;
+
+    fn handler_port_ref(&self) -> &Self::Target {
+        self
+    }
+}
 
 fn invalid_input<'a>(message: &'static [u8]) -> OperationFuture<'a> {
     OperationFuture::ready(OperationOutcome::invalid_request(message))
@@ -35,7 +60,7 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending($behavior($(state.$port.as_ref(),)+ decoded))
+            OperationFuture::pending($behavior($(state.$port.handler_port_ref(),)+ decoded))
         }
     };
     ($name:ident, $state:ty, $decode:ident, $behavior:path; $($port:ident),+) => {
@@ -48,7 +73,7 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending($behavior($(state.$port.as_ref(),)+ decoded))
+            OperationFuture::pending($behavior($(state.$port.handler_port_ref(),)+ decoded))
         }
     };
 }

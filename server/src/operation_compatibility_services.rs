@@ -5,55 +5,21 @@
 //! the capabilities used by the currently modeled operations while allowing
 //! future operations to provide a different service bundle.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use futures_util::lock::Mutex as AsyncMutex;
-use openkache_protocol::{Opcode, OwnedRange};
+use openkache_protocol::OwnedRange;
 
 use super::super::types::{
-    StorageKey, StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration,
-    StorageWriteOptions, StoredItemValue,
+    StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
 };
-use super::super::{KvError, SetOutcome};
 use super::operation_capabilities::CapabilityKey;
-use super::operation_contract::telemetry_operation;
 use super::operation_preparation::ResourceLock;
+use super::storage_port::StoragePort;
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
-    NetworkWorkerCache, ObservabilityState, SetReservation,
+    ObservabilityState, SetReservation,
 };
-
-pub(super) type CacheFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, KvError>> + 'a>>;
-
-/// Storage capability exposed to the compatibility API behavior.
-///
-/// This is an adapter contract over the current key/value worker. Generic API
-/// modules should register their own capability types when they need richer
-/// commands; the dispatcher and wire layers do not grow a cache-command enum.
-pub(super) trait StorageCapability: Send + Sync {
-    fn max_item_bytes(&self) -> usize;
-    fn namespace_item_storage_key(
-        &self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
-    ) -> StorageKey;
-    fn worker_for(&self, storage_key: &StorageKey) -> usize;
-    fn get_storage_key<'a>(
-        &'a self,
-        storage_key: StorageKey,
-    ) -> CacheFuture<'a, Option<StoredItemValue>>;
-    fn set_storage_key<'a>(
-        &'a self,
-        storage_key: StorageKey,
-        value: StoredItemValue,
-        options: StorageWriteOptions,
-    ) -> CacheFuture<'a, SetOutcome>;
-    fn delete_storage_key<'a>(&'a self, storage_key: StorageKey) -> CacheFuture<'a, bool>;
-    fn stats<'a>(&'a self) -> CacheFuture<'a, Vec<String>>;
-    fn sync_workers<'a>(&'a self, workers: &'a [usize]) -> CacheFuture<'a, ()>;
-}
 
 /// Namespace metadata capability exposed to the current storage behavior.
 pub(super) trait NamespaceCapability: Send + Sync {
@@ -108,41 +74,38 @@ pub(super) trait ObservabilityCapability: Send + Sync {
     fn stats_json_fields(&self) -> String;
 }
 
-pub(super) type StorageCapabilityHandle = Arc<dyn StorageCapability>;
 pub(super) type NamespaceCapabilityHandle = Arc<dyn NamespaceCapability>;
 pub(super) type ObservabilityCapabilityHandle = Arc<dyn ObservabilityCapability>;
 
-pub(super) const COMPATIBILITY_STORAGE_PORT: CapabilityKey<StorageCapabilityHandle> =
-    CapabilityKey::new("openkache.compatibility.storage_port");
 pub(super) const COMPATIBILITY_NAMESPACE_PORT: CapabilityKey<NamespaceCapabilityHandle> =
     CapabilityKey::new("openkache.compatibility.namespace_port");
 pub(super) const COMPATIBILITY_OBSERVABILITY_PORT: CapabilityKey<ObservabilityCapabilityHandle> =
     CapabilityKey::new("openkache.compatibility.observability_port");
 
 pub(super) struct GetState {
-    pub(super) storage: StorageCapabilityHandle,
+    pub(super) storage: StoragePort,
     pub(super) namespaces: NamespaceCapabilityHandle,
 }
 
 pub(super) struct SetState {
-    pub(super) storage: StorageCapabilityHandle,
+    pub(super) storage: StoragePort,
     pub(super) namespaces: NamespaceCapabilityHandle,
     pub(super) max_item_bytes: usize,
 }
 
 pub(super) struct DeleteState {
-    pub(super) storage: StorageCapabilityHandle,
+    pub(super) storage: StoragePort,
     pub(super) namespaces: NamespaceCapabilityHandle,
 }
 
 pub(super) struct StatsState {
-    pub(super) storage: StorageCapabilityHandle,
+    pub(super) storage: StoragePort,
     pub(super) namespaces: NamespaceCapabilityHandle,
     pub(super) observability: ObservabilityCapabilityHandle,
 }
 
 pub(super) struct SyncState {
-    pub(super) storage: StorageCapabilityHandle,
+    pub(super) storage: StoragePort,
     pub(super) namespaces: NamespaceCapabilityHandle,
 }
 
@@ -155,75 +118,8 @@ pub(super) struct NamespaceUpdateState {
 }
 
 pub(super) struct NamespaceDeleteState {
-    pub(super) storage: StorageCapabilityHandle,
+    pub(super) storage: StoragePort,
     pub(super) namespaces: NamespaceCapabilityHandle,
-}
-
-impl StorageCapability for NetworkWorkerCache {
-    fn max_item_bytes(&self) -> usize {
-        NetworkWorkerCache::max_item_bytes(self)
-    }
-
-    fn namespace_item_storage_key(
-        &self,
-        namespace_id: u64,
-        item_id: openkache_protocol::ItemId,
-    ) -> StorageKey {
-        NetworkWorkerCache::storage_key_for_domain_identity(self, namespace_id, item_id.as_bytes())
-    }
-
-    fn worker_for(&self, storage_key: &StorageKey) -> usize {
-        NetworkWorkerCache::worker_for(self, storage_key)
-    }
-
-    fn get_storage_key<'a>(
-        &'a self,
-        storage_key: StorageKey,
-    ) -> CacheFuture<'a, Option<StoredItemValue>> {
-        Box::pin(NetworkWorkerCache::get_storage_key(
-            self,
-            storage_key,
-            telemetry_operation(Opcode::Get),
-        ))
-    }
-
-    fn set_storage_key<'a>(
-        &'a self,
-        storage_key: StorageKey,
-        value: StoredItemValue,
-        options: StorageWriteOptions,
-    ) -> CacheFuture<'a, SetOutcome> {
-        Box::pin(NetworkWorkerCache::set_storage_key(
-            self,
-            storage_key,
-            value,
-            options,
-            telemetry_operation(Opcode::Set),
-        ))
-    }
-
-    fn delete_storage_key<'a>(&'a self, storage_key: StorageKey) -> CacheFuture<'a, bool> {
-        Box::pin(NetworkWorkerCache::delete_storage_key(
-            self,
-            storage_key,
-            telemetry_operation(Opcode::Delete),
-        ))
-    }
-
-    fn stats<'a>(&'a self) -> CacheFuture<'a, Vec<String>> {
-        Box::pin(NetworkWorkerCache::stats(
-            self,
-            telemetry_operation(Opcode::Stats),
-        ))
-    }
-
-    fn sync_workers<'a>(&'a self, workers: &'a [usize]) -> CacheFuture<'a, ()> {
-        Box::pin(NetworkWorkerCache::sync_workers(
-            self,
-            workers,
-            telemetry_operation(Opcode::Sync),
-        ))
-    }
 }
 
 pub(crate) const fn storage_write_options(

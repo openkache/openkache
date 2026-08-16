@@ -13,39 +13,38 @@ use super::operation_capabilities::{CapabilityCatalog, downcast_capability};
 use super::operation_compatibility_handlers as handlers;
 use super::operation_compatibility_prepare as prepare;
 use super::operation_compatibility_services::{
-    COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, COMPATIBILITY_STORAGE_PORT,
-    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
-    SetState, StatsState, SyncState,
+    COMPATIBILITY_NAMESPACE_PORT, COMPATIBILITY_OBSERVABILITY_PORT, DeleteState, GetState,
+    NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState, SetState, StatsState,
+    SyncState,
 };
 use super::operation_composition::ApiModule;
 use super::operation_execution_state::OperationStateBindings;
 use super::operation_registration::{RegistrationBuilder, ServerOperationRegistration};
+use super::storage_port::{STORAGE_PORT, StorageDataPort};
 
 fn initialize_module(
     states: &mut OperationStateBindings<'_>,
     bootstrap: &dyn CapabilityCatalog,
 ) -> Result<(), &'static str> {
-    let storage = downcast_capability(bootstrap, COMPATIBILITY_STORAGE_PORT)
+    let storage = downcast_capability(bootstrap, STORAGE_PORT)
         .ok_or("compatibility storage port is unavailable")?;
-    let namespaces =
-        downcast_capability(bootstrap, COMPATIBILITY_NAMESPACE_PORT)
-            .ok_or("compatibility namespace port is unavailable")?;
-    let observability =
-        downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
-            .ok_or("compatibility observability port is unavailable")?;
+    let namespaces = downcast_capability(bootstrap, COMPATIBILITY_NAMESPACE_PORT)
+        .ok_or("compatibility namespace port is unavailable")?;
+    let observability = downcast_capability(bootstrap, COMPATIBILITY_OBSERVABILITY_PORT)
+        .ok_or("compatibility observability port is unavailable")?;
     let max_item_bytes = storage.max_item_bytes();
 
     states.bind(
         Opcode::Get,
         Arc::new(GetState {
-            storage: Arc::clone(storage),
+            storage: storage.clone(),
             namespaces: Arc::clone(namespaces),
         }),
     )?;
     states.bind(
         Opcode::Set,
         Arc::new(SetState {
-            storage: Arc::clone(storage),
+            storage: storage.clone(),
             namespaces: Arc::clone(namespaces),
             max_item_bytes,
         }),
@@ -53,14 +52,14 @@ fn initialize_module(
     states.bind(
         Opcode::Delete,
         Arc::new(DeleteState {
-            storage: Arc::clone(storage),
+            storage: storage.clone(),
             namespaces: Arc::clone(namespaces),
         }),
     )?;
     states.bind(
         Opcode::Stats,
         Arc::new(StatsState {
-            storage: Arc::clone(storage),
+            storage: storage.clone(),
             namespaces: Arc::clone(namespaces),
             observability: Arc::clone(observability),
         }),
@@ -68,7 +67,7 @@ fn initialize_module(
     states.bind(
         Opcode::Sync,
         Arc::new(SyncState {
-            storage: Arc::clone(storage),
+            storage: storage.clone(),
             namespaces: Arc::clone(namespaces),
         }),
     )?;
@@ -87,7 +86,7 @@ fn initialize_module(
     states.bind(
         Opcode::NamespaceDelete,
         Arc::new(NamespaceDeleteState {
-            storage: Arc::clone(storage),
+            storage: storage.clone(),
             namespaces: Arc::clone(namespaces),
         }),
     )?;
@@ -141,15 +140,12 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
     .authorize(authorization_none)
     .mutation()
     .build(),
-    RegistrationBuilder::new(
-        Opcode::NamespaceDelete,
-        handlers::namespace_delete_handler,
-    )
-    .state::<NamespaceDeleteState>()
-    .prepare(prepare::prepare_namespace_delete)
-    .authorize(authorization_none)
-    .mutation()
-    .build(),
+    RegistrationBuilder::new(Opcode::NamespaceDelete, handlers::namespace_delete_handler)
+        .state::<NamespaceDeleteState>()
+        .prepare(prepare::prepare_namespace_delete)
+        .authorize(authorization_none)
+        .mutation()
+        .build(),
 ];
 
 pub(super) const API: ApiModule =
