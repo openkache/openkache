@@ -14,11 +14,13 @@ import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
-  extract_wire_contract as extract_protocol_wire_contract,
   render_rust_wire as render_protocol_rust_wire,
   type Wire_Contract,
   type Wire_Entry,
 } from "../protocol/wire"
+import {
+  extract_compatibility_wire_contract as extract_protocol_wire_contract,
+} from "../protocol/compatibility_v1"
 import {
   derive_operation_client_projection,
 } from "./operation_client_projection"

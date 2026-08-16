@@ -156,7 +156,14 @@ function pascal_case(identifier: string): string {
     .join("")
 }
 
-function wire_v1_contract(value: unknown): Wire_V1_Contract {
+/**
+ * Extracts the unpublished draft-v1 transport profile.
+ *
+ * Generic extraction invokes this only through an explicit contract adapter.
+ * Keeping the profile extractor separately exported lets adapters select the
+ * existing compact contract without making it the generic extractor's default.
+ */
+export function extract_draft_v1_contract(value: unknown): Wire_V1_Contract {
   const contract = object_value(value, `${WIRE_CONTRACT_TRAIT_ID}.v1`)
   const optional_value_length_bytes = optional_integer_member(
     contract,
@@ -1275,6 +1282,11 @@ export function extract_wire_contract(
     WIRE_CONTRACT_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
+  if (adapter === undefined) {
+    throw new Error(
+      "generic wire extraction requires an explicit transport-profile adapter",
+    )
+  }
   const opcode_shape = shapes[OPCODE_SHAPE_ID]
   const opcodes =
     opcode_shape === undefined
@@ -1323,7 +1335,10 @@ export function extract_wire_contract(
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,
-    v1: wire_v1_contract(contract_trait.v1),
+    v1: adapter.extract_profile(
+      contract_trait.v1,
+      `${WIRE_CONTRACT_TRAIT_ID}.v1`,
+    ),
   }
   const operations = wire_operations(
     shapes,
