@@ -99,7 +99,7 @@ pub(super) trait KeyedWorkPort<L, K>: ScheduledTask + Sized {
         lifecycle: &mut L,
         storage_key: K,
         base: Self::VisibleState,
-        commands: Vec<Self>,
+        commands: impl ExactSizeIterator<Item = Self>,
     ) -> CollapsedKeyedWork<Self::Response, Self::PreparedJob, Self::VisibleState>;
     fn finish(
         lifecycle: &mut L,
