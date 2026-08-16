@@ -17,6 +17,7 @@ use super::operation_execution_state::OperationRuntime;
 use super::operation_handlers;
 use super::operation_preparation;
 use super::operation_registration::OperationCommitDisposition;
+use super::operation_registry::OperationTaskStorage;
 use super::operation_transport;
 
 pub(super) struct HeaderAdmissionRejection {
@@ -132,6 +133,7 @@ pub(super) async fn execute_request(
     input: operation_handlers::OperationInputView,
     authorization: &AuthorizationContext,
     runtime: &OperationRuntime,
+    task_storage: &mut OperationTaskStorage,
 ) -> Option<operation_transport::OperationResponse> {
     let opcode = input.opcode();
     let Some((registration, state)) = runtime.operation(opcode) else {
@@ -190,10 +192,13 @@ pub(super) async fn execute_request(
         }
     }
 
-    let outcome = (registration.handler)(operation_handlers::OperationContext {
-        state,
-        input,
-    })
+    let outcome = (registration.handler)(
+        operation_handlers::OperationContext {
+            state,
+            input,
+        },
+        task_storage,
+    )
     .await;
     operation_transport::encode_operation_outcome(opcode, outcome)
 }

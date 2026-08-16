@@ -215,6 +215,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     runtime: Arc<operation_execution_state::OperationRuntime>,
 ) {
     let _stream_guard = ActiveStream { network_shard };
+    let mut task_storage = operation_registry::OperationTaskStorage::new();
     loop {
         let mut frame = match receive
             .read_request(
@@ -343,6 +344,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         input,
                         &authorization,
                         runtime.as_ref(),
+                        &mut task_storage,
                     ),
                 )
                 .await

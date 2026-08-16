@@ -11,7 +11,7 @@ use super::operation_compatibility_services::{
 use super::operation_contract::OperationStatus;
 use super::operation_handlers::OperationContext;
 use super::operation_outcome::{OperationError, OperationOutcome};
-use super::operation_registry::OperationFuture;
+use super::operation_registry::{OperationFuture, OperationTaskStorage};
 use super::storage_port::StoragePort;
 
 trait HandlerPortRef {
@@ -51,7 +51,10 @@ fn missing_module_state<'a>() -> OperationFuture<'a> {
 /// behavior function.
 macro_rules! typed_handler {
     ($name:ident, $state:ty, mut $decode:ident, $behavior:path; $($port:ident),+) => {
-        pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
+        pub(super) fn $name<'a>(
+            context: OperationContext<'a>,
+            task_storage: &'a mut OperationTaskStorage,
+        ) -> OperationFuture<'a> {
             let Some(state) = context.state::<$state>() else {
                 return missing_module_state();
             };
@@ -60,11 +63,17 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending($behavior($(state.$port.handler_port_ref(),)+ decoded))
+            OperationFuture::pending(
+                task_storage,
+                $behavior($(state.$port.handler_port_ref(),)+ decoded),
+            )
         }
     };
     ($name:ident, $state:ty, $decode:ident, $behavior:path; $($port:ident),+) => {
-        pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
+        pub(super) fn $name<'a>(
+            context: OperationContext<'a>,
+            task_storage: &'a mut OperationTaskStorage,
+        ) -> OperationFuture<'a> {
             let Some(state) = context.state::<$state>() else {
                 return missing_module_state();
             };
@@ -73,7 +82,10 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending($behavior($(state.$port.handler_port_ref(),)+ decoded))
+            OperationFuture::pending(
+                task_storage,
+                $behavior($(state.$port.handler_port_ref(),)+ decoded),
+            )
         }
     };
 }

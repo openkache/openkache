@@ -6,7 +6,6 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
-use std::pin::Pin;
 
 use openkache_protocol::{ItemId, Opcode, ResponseSegment};
 
@@ -29,8 +28,6 @@ use super::storage_port::{
     StorageValue, StorageWriteOutcome,
 };
 use super::{NamespaceError, NamespaceOpenResult};
-
-type BehaviorFuture<'a> = Pin<Box<dyn Future<Output = OperationOutcome> + 'a>>;
 
 fn descriptor_payload(descriptor: NamespaceDescriptor) -> ResponseSegment {
     descriptor
@@ -139,17 +136,15 @@ pub(super) fn get<'a>(
     cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: GetInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(
-        async move { execute_get(cache, decoded.namespace_id, decoded.item_id, namespaces).await },
-    )
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move { execute_get(cache, decoded.namespace_id, decoded.item_id, namespaces).await }
 }
 
 pub(super) fn namespace_open<'a>(
     namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceOpenInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(async move {
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
         let result = namespaces.open(decoded.name, decoded.create_if_missing, decoded.policy);
         match result {
             Ok((NamespaceOpenResult::Existing, descriptor)) => domain_success(
@@ -162,14 +157,14 @@ pub(super) fn namespace_open<'a>(
             ),
             Err(error) => namespace_error(error, b"namespace operation rejected"),
         }
-    })
+    }
 }
 
 pub(super) fn namespace_update_policy<'a>(
     namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceRevisionInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(async move {
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
         let result = namespaces.update(
             decoded.namespace_id,
             decoded.expected_revision,
@@ -182,15 +177,15 @@ pub(super) fn namespace_update_policy<'a>(
             ),
             Err(error) => namespace_error(error, b"namespace policy update rejected"),
         }
-    })
+    }
 }
 
 pub(super) fn namespace_delete<'a>(
     cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceDeleteInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(async move {
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
         let namespace_id = decoded.namespace_id;
         let expected_revision = decoded.expected_revision;
         let tracked_items = match namespaces.tracked_items(namespace_id) {
@@ -224,15 +219,15 @@ pub(super) fn namespace_delete<'a>(
             Ok(()) => domain_success(OperationStatus::Deleted, OperationBody::Empty),
             Err(error) => namespace_error(error, b"namespace deletion rejected"),
         }
-    })
+    }
 }
 
 pub(super) fn set<'a>(
     cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: SetInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(async move {
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
         let namespace_id = decoded.namespace_id;
         let set_options = decoded.options;
         let policy = match namespaces.policy(namespace_id) {
@@ -297,15 +292,15 @@ pub(super) fn set<'a>(
                 }
             }
         }
-    })
+    }
 }
 
 pub(super) fn delete<'a>(
     cache: &'a impl CompatibilityStorageAddressPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: GetInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(async move {
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
@@ -343,7 +338,7 @@ pub(super) fn delete<'a>(
             }
             Err(error) => mutation_domain_error(false, error),
         }
-    })
+    }
 }
 
 pub(super) fn stats<'a>(
@@ -351,8 +346,8 @@ pub(super) fn stats<'a>(
     namespaces: &'a dyn NamespaceCapability,
     observability: &'a dyn ObservabilityCapability,
     decoded: NamespaceInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(async move {
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
@@ -381,15 +376,15 @@ pub(super) fn stats<'a>(
             }
             Err(error) => domain_storage(error),
         }
-    })
+    }
 }
 
 pub(super) fn sync<'a>(
     cache: &'a impl StorageAdministrationPort,
     namespaces: &'a dyn NamespaceCapability,
     decoded: NamespaceInput,
-) -> BehaviorFuture<'a> {
-    Box::pin(async move {
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
@@ -419,7 +414,7 @@ pub(super) fn sync<'a>(
             }
             Err(_) => OperationOutcome::abandoned(),
         }
-    })
+    }
 }
 
 async fn execute_get(
