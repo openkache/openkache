@@ -588,6 +588,8 @@ impl Default for IoUringConfig {
 }
 
 impl IoUringConfig {
+    const MAX_RETAINED_RESPONSES_PER_WORKER: usize = 1 << 18;
+
     pub(crate) fn waiting_capacity(&self) -> Result<usize> {
         let capacity = self
             .batch_size
@@ -602,6 +604,22 @@ impl IoUringConfig {
                 "io_uring worker waiting capacity exceeds the supported slot index range".into(),
             )
         })?;
+        Ok(capacity)
+    }
+
+    pub(crate) fn retained_response_capacity(&self) -> Result<usize> {
+        let capacity = self
+            .waiting_capacity()?
+            .checked_add(self.max_inflight_per_worker)
+            .ok_or_else(|| {
+                KvError::InvalidConfig("io_uring retained-response capacity exceeds usize".into())
+            })?;
+        if capacity > Self::MAX_RETAINED_RESPONSES_PER_WORKER {
+            return Err(KvError::InvalidConfig(format!(
+                "io_uring retained-response capacity exceeds {} slots per worker",
+                Self::MAX_RETAINED_RESPONSES_PER_WORKER
+            )));
+        }
         Ok(capacity)
     }
 }
@@ -864,7 +882,7 @@ impl AppConfig {
                 "io_uring.batch_size must be non-zero".into(),
             ));
         }
-        self.io_uring.waiting_capacity()?;
+        self.io_uring.retained_response_capacity()?;
         if self.timeouts.input_max_time_us == 0
             || self.timeouts.output_max_time_us == 0
             || self.timeouts.read_max_time_us == 0

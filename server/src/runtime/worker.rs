@@ -11,11 +11,14 @@ use crate::*;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use super::CoreTask;
+use super::retained_response::{ResponseBatch, ResponseReservation, RetainedResponseArena};
 use super::scheduler::{KeyScheduler, ScheduledTask};
 use super::worker_contract::{
     CollapsedKeyedWork, DeferredResponse, FinishedKeyedWork, KeyedWorkPort, PreparedKeyedWork,
     Request, ResponseSender,
 };
+
+const MAX_RETAINED_RESPONSE_METADATA_BYTES_PER_WORKER: usize = 64 * 1024 * 1024;
 
 pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     while let Ok(task) = receiver.recv_async_storage().await {
@@ -59,9 +62,12 @@ struct RunningKeyedCommand<J, R, S> {
 }
 
 enum RunningCompletion<R, S> {
-    Direct(ResponseSender<R>),
+    Direct {
+        response: ResponseSender<R>,
+        reservation: ResponseReservation,
+    },
     Collapsed {
-        responses: Vec<DeferredResponse<R>>,
+        responses: ResponseBatch,
         mutation_response_index: usize,
         success_state: S,
         failure_state: S,
@@ -107,42 +113,51 @@ enum WorkerEvent<T, Q> {
 enum DeferredLaneCompletion<R, S> {
     Batch {
         storage_key: StorageKey,
-        responses: Vec<DeferredResponse<R>>,
+        responses: ResponseBatch,
         success_state: Option<S>,
         failure_state: Option<S>,
     },
     Pending {
         storage_key: StorageKey,
         response: ResponseSender<R>,
+        reservation: ResponseReservation,
     },
     CollapsedPending {
         storage_key: StorageKey,
-        responses: Vec<DeferredResponse<R>>,
+        responses: ResponseBatch,
         mutation_response_index: usize,
         failure_state: S,
     },
 }
 
-fn send_success<R>(responses: Vec<DeferredResponse<R>>) {
-    for response in responses {
+fn send_success<R>(
+    arena: &mut RetainedResponseArena<DeferredResponse<R>>,
+    responses: ResponseBatch,
+) {
+    for response in arena.drain(responses) {
         let _ = response.sender.send(Ok(response.value));
     }
 }
 
 fn send_pending_success<R>(
-    mut responses: Vec<DeferredResponse<R>>,
+    arena: &mut RetainedResponseArena<DeferredResponse<R>>,
+    responses: ResponseBatch,
     mutation_response_index: usize,
     outcome: R,
 ) {
-    let response = responses
-        .get_mut(mutation_response_index)
+    let response = arena
+        .get_mut(&responses, mutation_response_index)
         .expect("collapsed mutation response index is in bounds");
     response.value = outcome;
-    send_success(responses);
+    send_success(arena, responses);
 }
 
-fn send_failure<R>(responses: Vec<DeferredResponse<R>>, message: &str) {
-    for response in responses {
+fn send_failure<R>(
+    arena: &mut RetainedResponseArena<DeferredResponse<R>>,
+    responses: ResponseBatch,
+    message: &str,
+) {
+    for response in arena.drain(responses) {
         let _ = response
             .sender
             .send(Err(KvError::Worker(message.to_string())));
@@ -152,6 +167,7 @@ fn send_failure<R>(responses: Vec<DeferredResponse<R>>, message: &str) {
 fn finish_scheduler_lane<C>(
     cache: &mut Kvkache,
     scheduler: &mut KeyScheduler<StorageKey, C>,
+    arena: &mut RetainedResponseArena<DeferredResponse<C::Response>>,
     storage_key: StorageKey,
     visible_state: Option<C::VisibleState>,
 ) -> Option<RunningKeyedCommand<C::PreparedJob, C::Response, C::VisibleState>>
@@ -162,36 +178,47 @@ where
         scheduler.finish_running_lane(storage_key);
         return None;
     };
-    let commands =
-        scheduler.drain_collapsible(storage_key, |command| command.metadata(cache).collapsible);
+    let commands = scheduler.drain_collapsible_up_to(storage_key, arena.available(), |command| {
+        command.metadata(cache).collapsible
+    });
     if commands.len() == 0 {
         drop(commands);
         scheduler.finish_running_lane(storage_key);
         return None;
     }
-    let (operation, job, responses, mutation_response_index, success_state, failure_state) =
-        match C::collapse(cache, storage_key, base, commands) {
-            CollapsedKeyedWork::Complete(responses) => {
-                send_success(responses);
-                scheduler.finish_running_lane(storage_key);
-                return None;
-            }
-            CollapsedKeyedWork::Prepared {
-                operation,
-                job,
-                responses,
-                mutation_response_index,
-                success_state,
-                failure_state,
-            } => (
-                operation,
-                job,
-                responses,
-                mutation_response_index,
-                success_state,
-                failure_state,
-            ),
-        };
+    let command_count = commands.len();
+    let mut responses = arena.batch();
+    let work = C::collapse(cache, storage_key, base, commands, |response| {
+        responses
+            .push(response)
+            .unwrap_or_else(|_| unreachable!("bounded collapse exceeded response capacity"))
+    });
+    assert_eq!(
+        responses.len(),
+        command_count,
+        "collapse must defer one response per command"
+    );
+    let responses = responses.commit();
+    let (operation, job, mutation_response_index, success_state, failure_state) = match work {
+        CollapsedKeyedWork::Complete => {
+            send_success(arena, responses);
+            scheduler.finish_running_lane(storage_key);
+            return None;
+        }
+        CollapsedKeyedWork::Prepared {
+            operation,
+            job,
+            mutation_response_index,
+            success_state,
+            failure_state,
+        } => (
+            operation,
+            job,
+            mutation_response_index,
+            success_state,
+            failure_state,
+        ),
+    };
     Some(RunningKeyedCommand {
         storage_key,
         completion: RunningCompletion::Collapsed {
@@ -223,13 +250,37 @@ where
         .as_deref()
         .map(|state| state.storage_shard(StorageWorkerId(worker_id)));
     let waiting_capacity = io_config.waiting_capacity()?;
+    let retained_response_capacity = io_config.retained_response_capacity()?;
+    let retained_response_bytes =
+        RetainedResponseArena::<DeferredResponse<C::Response>>::allocation_bytes(
+            retained_response_capacity,
+        )
+        .ok_or_else(|| {
+            KvError::InvalidConfig("io_uring retained-response arena size exceeds usize".into())
+        })?;
+    let retained_metadata_bytes = io_config
+        .max_inflight_per_worker
+        .checked_mul(std::mem::size_of::<
+            DeferredLaneCompletion<C::Response, C::VisibleState>,
+        >())
+        .and_then(|bytes| bytes.checked_add(retained_response_bytes))
+        .ok_or_else(|| {
+            KvError::InvalidConfig("io_uring retained-response metadata exceeds usize".into())
+        })?;
+    if retained_metadata_bytes > MAX_RETAINED_RESPONSE_METADATA_BYTES_PER_WORKER {
+        return Err(KvError::InvalidConfig(format!(
+            "io_uring retained-response metadata requires {retained_metadata_bytes} bytes per worker"
+        )));
+    }
     let mut scheduler: KeyScheduler<StorageKey, C> =
         KeyScheduler::with_waiting_capacity(waiting_capacity);
+    let mut retained_responses = RetainedResponseArena::new(retained_response_capacity);
+    debug_assert_eq!(retained_responses.capacity(), retained_response_capacity);
     let mut inflight = FuturesUnordered::new();
     let mut barrier = None;
     let mut disconnected = false;
     let mut deferred_completions: Vec<DeferredLaneCompletion<C::Response, C::VisibleState>> =
-        Vec::new();
+        Vec::with_capacity(io_config.max_inflight_per_worker);
 
     loop {
         if !deferred_completions.is_empty() {
@@ -252,11 +303,14 @@ where
                             DeferredLaneCompletion::Pending {
                                 storage_key,
                                 response,
+                                reservation,
                             } => {
+                                retained_responses.release(reservation);
                                 let _ = response.send(Ok(result.outcome));
                                 if let Some(running) = finish_scheduler_lane(
                                     &mut cache,
                                     &mut scheduler,
+                                    &mut retained_responses,
                                     storage_key,
                                     result.visible_state,
                                 ) {
@@ -270,6 +324,7 @@ where
                                 ..
                             } => {
                                 send_pending_success(
+                                    &mut retained_responses,
                                     responses,
                                     mutation_response_index,
                                     result.outcome,
@@ -277,6 +332,7 @@ where
                                 if let Some(running) = finish_scheduler_lane(
                                     &mut cache,
                                     &mut scheduler,
+                                    &mut retained_responses,
                                     storage_key,
                                     result.visible_state,
                                 ) {
@@ -297,10 +353,11 @@ where
                                     success_state,
                                     ..
                                 } => {
-                                    send_success(responses);
+                                    send_success(&mut retained_responses, responses);
                                     if let Some(running) = finish_scheduler_lane(
                                         &mut cache,
                                         &mut scheduler,
+                                        &mut retained_responses,
                                         storage_key,
                                         success_state,
                                     ) {
@@ -327,14 +384,16 @@ where
                                 failure_state,
                                 ..
                             } => {
-                                send_failure(responses, &message);
+                                send_failure(&mut retained_responses, responses, &message);
                                 (storage_key, failure_state)
                             }
                             DeferredLaneCompletion::Pending {
                                 storage_key,
                                 response,
+                                reservation,
                             } => {
                                 C::cancel_pending(&mut cache, storage_key);
+                                retained_responses.release(reservation);
                                 let _ = response.send(Err(KvError::Worker(message.clone())));
                                 (storage_key, None)
                             }
@@ -345,13 +404,14 @@ where
                                 ..
                             } => {
                                 C::cancel_pending(&mut cache, storage_key);
-                                send_failure(responses, &message);
+                                send_failure(&mut retained_responses, responses, &message);
                                 (storage_key, Some(failure_state))
                             }
                         };
                         if let Some(running) = finish_scheduler_lane(
                             &mut cache,
                             &mut scheduler,
+                            &mut retained_responses,
                             storage_key,
                             failure_state,
                         ) {
@@ -362,15 +422,22 @@ where
             }
         }
 
-        while inflight.len() < io_config.max_inflight_per_worker {
+        while inflight.len() + deferred_completions.len() < io_config.max_inflight_per_worker {
+            let Some(reservation) = retained_responses.reserve() else {
+                break;
+            };
             let Some((storage_key, command)) = scheduler.take_ready() else {
+                retained_responses.release(reservation);
                 break;
             };
             let metadata = command.metadata(&cache);
             let PreparedKeyedWork { response, job } = command.prepare(&mut cache, storage_key);
             let running = RunningKeyedCommand {
                 storage_key,
-                completion: RunningCompletion::Direct(response),
+                completion: RunningCompletion::Direct {
+                    response,
+                    reservation,
+                },
                 operation: metadata.operation,
                 started_at: Instant::now(),
                 job,
@@ -446,6 +513,7 @@ where
                                 ..
                             } => {
                                 send_failure(
+                                    &mut retained_responses,
                                     responses,
                                     "write cannot be admitted without evicting protected items",
                                 );
@@ -454,8 +522,10 @@ where
                             DeferredLaneCompletion::Pending {
                                 storage_key,
                                 response,
+                                reservation,
                             } => {
                                 C::cancel_pending(&mut cache, storage_key);
+                                retained_responses.release(reservation);
                                 let _ = response.send(Err(KvError::NoCapacity));
                                 (storage_key, None)
                             }
@@ -467,6 +537,7 @@ where
                             } => {
                                 C::cancel_pending(&mut cache, storage_key);
                                 send_failure(
+                                    &mut retained_responses,
                                     responses,
                                     "write cannot be admitted without evicting protected items",
                                 );
@@ -476,6 +547,7 @@ where
                         if let Some(running) = finish_scheduler_lane(
                             &mut cache,
                             &mut scheduler,
+                            &mut retained_responses,
                             storage_key,
                             failure_state,
                         ) {
@@ -498,12 +570,17 @@ where
                     pending,
                 } = C::finish(&mut cache, completed.job, include_visible_state);
                 let completion = match completed.completion {
-                    RunningCompletion::Direct(response) => match outcome {
+                    RunningCompletion::Direct {
+                        response,
+                        reservation,
+                    } => match outcome {
                         Ok(outcome) if !flush_required => {
+                            retained_responses.release(reservation);
                             let _ = response.send(Ok(outcome));
                             if let Some(running) = finish_scheduler_lane(
                                 &mut cache,
                                 &mut scheduler,
+                                &mut retained_responses,
                                 completed.storage_key,
                                 visible_state,
                             ) {
@@ -514,21 +591,27 @@ where
                         Ok(_) if pending => DeferredLaneCompletion::Pending {
                             storage_key: completed.storage_key,
                             response,
+                            reservation,
                         },
                         Ok(outcome) => DeferredLaneCompletion::Batch {
                             storage_key: completed.storage_key,
-                            responses: vec![DeferredResponse {
-                                sender: response,
-                                value: outcome,
-                            }],
+                            responses: retained_responses.complete(
+                                reservation,
+                                DeferredResponse {
+                                    sender: response,
+                                    value: outcome,
+                                },
+                            ),
                             success_state: visible_state,
                             failure_state: None,
                         },
                         Err(error) => {
+                            retained_responses.release(reservation);
                             let _ = response.send(Err(error));
                             if let Some(running) = finish_scheduler_lane(
                                 &mut cache,
                                 &mut scheduler,
+                                &mut retained_responses,
                                 completed.storage_key,
                                 None,
                             ) {
@@ -561,10 +644,11 @@ where
                             failure_state: Some(failure_state),
                         },
                         Err(error) => {
-                            send_failure(responses, &error.to_string());
+                            send_failure(&mut retained_responses, responses, &error.to_string());
                             if let Some(running) = finish_scheduler_lane(
                                 &mut cache,
                                 &mut scheduler,
+                                &mut retained_responses,
                                 completed.storage_key,
                                 Some(failure_state),
                             ) {
@@ -586,10 +670,11 @@ where
                     else {
                         unreachable!("a pending completion must require capacity work");
                     };
-                    send_success(responses);
+                    send_success(&mut retained_responses, responses);
                     if let Some(running) = finish_scheduler_lane(
                         &mut cache,
                         &mut scheduler,
+                        &mut retained_responses,
                         storage_key,
                         success_state,
                     ) {

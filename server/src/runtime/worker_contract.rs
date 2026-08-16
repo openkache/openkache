@@ -50,12 +50,11 @@ pub(super) struct PreparedKeyedWork<R, J> {
     pub(super) job: J,
 }
 
-pub(super) enum CollapsedKeyedWork<R, J, S> {
-    Complete(Vec<DeferredResponse<R>>),
+pub(super) enum CollapsedKeyedWork<J, S> {
+    Complete,
     Prepared {
         operation: Operation,
         job: J,
-        responses: Vec<DeferredResponse<R>>,
         mutation_response_index: usize,
         success_state: S,
         failure_state: S,
@@ -95,12 +94,14 @@ pub(super) trait KeyedWorkPort<L, K>: ScheduledTask + Sized {
         storage_key: K,
     ) -> PreparedKeyedWork<Self::Response, Self::PreparedJob>;
     fn run(job: Self::PreparedJob) -> impl Future<Output = Self::CompletedJob>;
+    /// Reduces commands in order, deferring exactly one response for each command.
     fn collapse(
         lifecycle: &mut L,
         storage_key: K,
         base: Self::VisibleState,
         commands: impl ExactSizeIterator<Item = Self>,
-    ) -> CollapsedKeyedWork<Self::Response, Self::PreparedJob, Self::VisibleState>;
+        defer: impl FnMut(DeferredResponse<Self::Response>) -> usize,
+    ) -> CollapsedKeyedWork<Self::PreparedJob, Self::VisibleState>;
     fn finish(
         lifecycle: &mut L,
         job: Self::CompletedJob,

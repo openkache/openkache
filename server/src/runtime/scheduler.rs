@@ -236,15 +236,6 @@ where
         Ok(())
     }
 
-    /// Moves the contiguous prefix compatible with the running reducer.
-    pub(super) fn drain_collapsible(
-        &mut self,
-        storage_key: K,
-        can_collapse: impl FnMut(&T) -> bool,
-    ) -> CollapsibleDrain<'_, K, T> {
-        self.drain_collapsible_up_to(storage_key, usize::MAX, can_collapse)
-    }
-
     /// Moves at most `limit` commands from the compatible reducer prefix.
     pub(super) fn drain_collapsible_up_to(
         &mut self,
