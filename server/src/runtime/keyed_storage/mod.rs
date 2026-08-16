@@ -224,7 +224,7 @@ impl KeyedWorkPort<Kvkache, StorageKey> for Command {
         lifecycle: &mut Kvkache,
         storage_key: StorageKey,
         base: Self::VisibleState,
-        commands: Vec<Self>,
+        commands: impl ExactSizeIterator<Item = Self>,
     ) -> CollapsedKeyedWork<Self::Response, Self::PreparedJob, Self::VisibleState> {
         CollapsedBatch::reduce(base, commands).into_work(lifecycle, storage_key)
     }

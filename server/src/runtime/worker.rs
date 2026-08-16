@@ -163,8 +163,9 @@ where
         return None;
     };
     let commands =
-        scheduler.take_collapsible(storage_key, |command| command.metadata(cache).collapsible);
-    if commands.is_empty() {
+        scheduler.drain_collapsible(storage_key, |command| command.metadata(cache).collapsible);
+    if commands.len() == 0 {
+        drop(commands);
         scheduler.finish_running_lane(storage_key);
         return None;
     }

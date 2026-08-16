@@ -24,7 +24,10 @@ pub(in crate::runtime) struct CollapsedMutation {
 }
 
 impl CollapsedBatch {
-    pub(in crate::runtime) fn reduce(base: KeyedVisibleState, commands: Vec<Command>) -> Self {
+    pub(in crate::runtime) fn reduce(
+        base: KeyedVisibleState,
+        commands: impl ExactSizeIterator<Item = Command>,
+    ) -> Self {
         let base_present = matches!(base, KeyedVisibleState::Present(_));
         let mut current = base.clone();
         let mut responses = Vec::with_capacity(commands.len());

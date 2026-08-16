@@ -29,6 +29,7 @@ pub(super) struct SlotId {
 struct WaitingSlot<T> {
     generation: u32,
     value: Option<T>,
+    /// Next FIFO command while occupied, or next free slot while vacant.
     next: Option<SlotId>,
 }
 
@@ -36,7 +37,7 @@ struct WaitingSlot<T> {
 /// out of the slab; no per-request linked-list allocation is required.
 pub(super) struct WaitingSlab<T> {
     slots: Vec<WaitingSlot<T>>,
-    free: Vec<u32>,
+    free: Option<SlotId>,
     capacity: usize,
 }
 
@@ -44,18 +45,19 @@ impl<T> WaitingSlab<T> {
     pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
             slots: Vec::with_capacity(capacity),
-            free: Vec::new(),
+            free: None,
             capacity,
         }
     }
 
     pub(super) fn has_capacity(&self) -> bool {
-        self.slots.len() < self.capacity || !self.free.is_empty()
+        self.slots.len() < self.capacity || self.free.is_some()
     }
 
     pub(super) fn insert(&mut self, value: T) -> Option<SlotId> {
-        let index = if let Some(index) = self.free.pop() {
-            index
+        let id = if let Some(id) = self.free {
+            self.free = self.slot_mut(id).next.take();
+            id
         } else {
             if self.slots.len() == self.capacity {
                 return None;
@@ -66,16 +68,16 @@ impl<T> WaitingSlab<T> {
                 value: None,
                 next: None,
             });
-            index
+            SlotId {
+                index,
+                generation: 0,
+            }
         };
-        let slot = &mut self.slots[index as usize];
+        let slot = self.slot_mut(id);
         debug_assert!(slot.value.is_none());
         slot.value = Some(value);
         slot.next = None;
-        Some(SlotId {
-            index,
-            generation: slot.generation,
-        })
+        Some(id)
     }
 
     pub(super) fn link(&mut self, tail: SlotId, next: SlotId) {
@@ -85,11 +87,16 @@ impl<T> WaitingSlab<T> {
     }
 
     pub(super) fn take(&mut self, id: SlotId) -> (T, Option<SlotId>) {
+        let free = self.free;
         let slot = self.slot_mut(id);
         let value = slot.value.take().expect("waiting slot contains a command");
         let next = slot.next.take();
         slot.generation = slot.generation.wrapping_add(1);
-        self.free.push(id.index);
+        slot.next = free;
+        self.free = Some(SlotId {
+            index: id.index,
+            generation: slot.generation,
+        });
         (value, next)
     }
 
@@ -105,6 +112,18 @@ impl<T> WaitingSlab<T> {
         slot.value
             .as_ref()
             .expect("waiting slot contains a command")
+    }
+
+    fn next(&self, id: SlotId) -> Option<SlotId> {
+        let slot = self
+            .slots
+            .get(id.index as usize)
+            .expect("waiting SlotId index is valid");
+        assert_eq!(
+            slot.generation, id.generation,
+            "waiting SlotId generation is current"
+        );
+        slot.next
     }
 
     fn slot_mut(&mut self, id: SlotId) -> &mut WaitingSlot<T> {
@@ -217,12 +236,12 @@ where
         Ok(())
     }
 
-    /// Takes the contiguous prefix compatible with the running reducer.
-    pub(super) fn take_collapsible(
+    /// Moves the contiguous prefix compatible with the running reducer.
+    pub(super) fn drain_collapsible(
         &mut self,
         storage_key: K,
         mut can_collapse: impl FnMut(&T) -> bool,
-    ) -> Vec<T> {
+    ) -> CollapsibleDrain<'_, K, T> {
         let Some((collapse_group, mut head)) =
             self.lanes
                 .get(&storage_key)
@@ -233,31 +252,58 @@ where
                     _ => None,
                 })
         else {
-            return Vec::new();
+            return CollapsibleDrain {
+                scheduler: self,
+                storage_key,
+                remaining: 0,
+            };
         };
 
-        let mut commands = Vec::new();
+        let mut remaining = 0;
         loop {
             let command = self.waiting.get(head);
             if command.collapse_group() != collapse_group || !can_collapse(command) {
                 break;
             }
-            let (command, next) = self.waiting.take(head);
-            let lane = self
-                .lanes
-                .get_mut(&storage_key)
-                .expect("completed key has a lane");
-            lane.waiting_head = next;
-            if next.is_none() {
-                lane.waiting_tail = None;
-            }
-            commands.push(command);
-            let Some(next_head) = next else {
+            remaining += 1;
+            let Some(next) = self.waiting.next(head) else {
                 break;
             };
-            head = next_head;
+            head = next;
         }
-        commands
+
+        CollapsibleDrain {
+            scheduler: self,
+            storage_key,
+            remaining,
+        }
+    }
+
+    fn take_collapsible_head(&mut self, storage_key: &K) -> T {
+        let (collapse_group, head) =
+            self.lanes
+                .get(storage_key)
+                .and_then(|lane| match (lane.state, lane.waiting_head) {
+                    (LaneState::Running { collapse_group }, Some(head)) => {
+                        Some((collapse_group, head))
+                    }
+                    _ => None,
+                })
+                .expect("collapsible drain retains a running command");
+        debug_assert!(
+            self.waiting.get(head).collapse_group() == collapse_group,
+            "collapsible drain remains in its reducer family"
+        );
+        let (command, next) = self.waiting.take(head);
+        let lane = self
+            .lanes
+            .get_mut(storage_key)
+            .expect("completed key has a lane");
+        lane.waiting_head = next;
+        if next.is_none() {
+            lane.waiting_tail = None;
+        }
+        command
     }
 
     pub(super) fn finish_running_lane(&mut self, storage_key: K) {
@@ -280,4 +326,53 @@ where
             self.lanes.remove(&storage_key);
         }
     }
+}
+
+/// Exact-size move iterator over one compatible scheduler prefix.
+///
+/// Each command remains scheduler-owned until it is consumed, avoiding an
+/// intermediate batch. Dropping the iterator leaves its unconsumed suffix
+/// queued.
+pub(super) struct CollapsibleDrain<'a, K, T>
+where
+    K: Eq + Hash + Clone,
+    T: ScheduledTask,
+{
+    scheduler: &'a mut KeyScheduler<K, T>,
+    storage_key: K,
+    remaining: usize,
+}
+
+impl<K, T> Iterator for CollapsibleDrain<'_, K, T>
+where
+    K: Eq + Hash + Clone,
+    T: ScheduledTask,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        Some(self.scheduler.take_collapsible_head(&self.storage_key))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<K, T> ExactSizeIterator for CollapsibleDrain<'_, K, T>
+where
+    K: Eq + Hash + Clone,
+    T: ScheduledTask,
+{
+}
+
+impl<K, T> std::iter::FusedIterator for CollapsibleDrain<'_, K, T>
+where
+    K: Eq + Hash + Clone,
+    T: ScheduledTask,
+{
 }
