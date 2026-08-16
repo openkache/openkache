@@ -3,9 +3,7 @@
 //! The network/runtime implementation owns routing and worker lifecycle;
 //! API modules depend only on opaque address and storage operation contracts.
 
-use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::pin::Pin;
 
 use openkache_protocol::{OwnedRange, StableBytes};
 
@@ -21,7 +19,13 @@ pub(crate) use crate::types::StorageWriteOptions;
 /// engine's internal key width or namespace.
 #[derive(Debug)]
 pub(crate) struct StorageAddress {
-    owner: OwnedRange,
+    kind: StorageAddressKind,
+}
+
+#[derive(Debug)]
+enum StorageAddressKind {
+    Opaque(OwnedRange),
+    Derived([u8; crate::types::STORAGE_KEY_BYTES]),
 }
 
 impl StorageAddress {
@@ -35,7 +39,7 @@ impl StorageAddress {
     /// buffer is moved into the address instead of borrowing transport memory.
     pub(crate) fn from_owned(bytes: Vec<u8>) -> Self {
         Self {
-            owner: OwnedRange::whole(bytes),
+            kind: StorageAddressKind::Opaque(OwnedRange::whole(bytes)),
         }
     }
 
@@ -45,8 +49,20 @@ impl StorageAddress {
     /// frame allocation alive without memmoving a payload out of its wire
     /// prefix. The returned address still compares and hashes by the visible
     /// range rather than by the hidden frame bytes.
+    #[allow(dead_code)]
     pub(crate) fn from_owned_range(bytes: OwnedRange) -> Self {
-        Self { owner: bytes }
+        Self {
+            kind: StorageAddressKind::Opaque(bytes),
+        }
+    }
+
+    /// Retains one already-derived server storage identity inline.
+    pub(in crate::runtime) const fn from_derived(
+        bytes: [u8; crate::types::STORAGE_KEY_BYTES],
+    ) -> Self {
+        Self {
+            kind: StorageAddressKind::Derived(bytes),
+        }
     }
 
     /// Creates an address from a borrowed key without exposing ownership
@@ -80,13 +96,32 @@ impl StorageAddress {
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
-        self.owner.as_slice()
+        match &self.kind {
+            StorageAddressKind::Opaque(owner) => owner.as_slice(),
+            StorageAddressKind::Derived(bytes) => bytes,
+        }
+    }
+
+    pub(in crate::runtime) const fn derived_bytes(
+        &self,
+    ) -> Option<&[u8; crate::types::STORAGE_KEY_BYTES]> {
+        match &self.kind {
+            StorageAddressKind::Opaque(_) => None,
+            StorageAddressKind::Derived(bytes) => Some(bytes),
+        }
     }
 }
 
 impl PartialEq for StorageAddress {
     fn eq(&self, other: &Self) -> bool {
-        self.as_ref() == other.as_ref()
+        match (&self.kind, &other.kind) {
+            (StorageAddressKind::Opaque(left), StorageAddressKind::Opaque(right)) => left == right,
+            (StorageAddressKind::Derived(left), StorageAddressKind::Derived(right)) => {
+                left == right
+            }
+            (StorageAddressKind::Opaque(_), StorageAddressKind::Derived(_))
+            | (StorageAddressKind::Derived(_), StorageAddressKind::Opaque(_)) => false,
+        }
     }
 }
 
@@ -94,13 +129,27 @@ impl Eq for StorageAddress {}
 
 impl Hash for StorageAddress {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(&self.kind).hash(state);
         self.as_ref().hash(state);
     }
 }
 
 impl Ord for StorageAddress {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.as_ref().cmp(other.as_ref())
+        match (&self.kind, &other.kind) {
+            (StorageAddressKind::Opaque(left), StorageAddressKind::Opaque(right)) => {
+                left.as_slice().cmp(right.as_slice())
+            }
+            (StorageAddressKind::Derived(left), StorageAddressKind::Derived(right)) => {
+                left.cmp(right)
+            }
+            (StorageAddressKind::Opaque(_), StorageAddressKind::Derived(_)) => {
+                std::cmp::Ordering::Less
+            }
+            (StorageAddressKind::Derived(_), StorageAddressKind::Opaque(_)) => {
+                std::cmp::Ordering::Greater
+            }
+        }
     }
 }
 
@@ -245,17 +294,22 @@ impl Eq for StorageReadValue {}
 pub(crate) enum StorageError {
     InvalidRequest(String),
     Worker(String),
-    Unavailable(String),
+    NoCapacity(String),
+    Overloaded(String),
+    TooLarge(String),
     Timeout(String),
     Backend(String),
 }
 
 impl StorageError {
-    pub(crate) fn message(&self) -> &str {
+    #[allow(dead_code)]
+    pub(crate) fn into_message(self) -> String {
         match self {
             Self::InvalidRequest(message)
             | Self::Worker(message)
-            | Self::Unavailable(message)
+            | Self::NoCapacity(message)
+            | Self::Overloaded(message)
+            | Self::TooLarge(message)
             | Self::Timeout(message)
             | Self::Backend(message) => message,
         }
@@ -263,20 +317,6 @@ impl StorageError {
 }
 
 pub(crate) type StorageResult<T> = std::result::Result<T, StorageError>;
-
-/// Future returned by a neutral storage read.
-pub(crate) type StorageReadFuture<'a> =
-    Pin<Box<dyn Future<Output = StorageResult<Option<StorageReadValue>>> + 'a>>;
-
-/// Future returned by a neutral storage mutation.
-#[allow(dead_code)]
-pub(crate) type StorageMutationFuture<'a> =
-    Pin<Box<dyn Future<Output = StorageResult<StorageMutation>> + 'a>>;
-
-/// Future returned by a neutral storage write.
-#[allow(dead_code)]
-pub(crate) type StorageWriteFuture<'a> =
-    Pin<Box<dyn Future<Output = StorageResult<StorageWriteOutcome>> + 'a>>;
 
 /// The result of a storage mutation.
 ///
@@ -299,27 +339,4 @@ pub(crate) enum StorageWriteOutcome {
     Created,
     Replaced,
     Unchanged,
-}
-
-/// Runtime implementation contract for the API-facing storage capability.
-///
-/// The bridge re-exports this under the neutral [`StoragePort`] name. Keeping
-/// the implementation here avoids making the runtime depend on the server
-/// composition module while still hiding worker details from API bindings.
-pub(crate) trait StoragePort: Send + Sync {
-    /// Retrieves the value stored at one opaque address.
-    fn get<'a>(&'a self, storage_address: StorageAddress) -> StorageReadFuture<'a>;
-
-    /// Stores one opaque value at one opaque address.
-    #[allow(dead_code)]
-    fn set<'a>(
-        &'a self,
-        storage_address: StorageAddress,
-        value: StorageValue,
-        options: StorageWriteOptions,
-    ) -> StorageWriteFuture<'a>;
-
-    /// Deletes the value at one opaque address.
-    #[allow(dead_code)]
-    fn delete<'a>(&'a self, storage_address: StorageAddress) -> StorageMutationFuture<'a>;
 }
