@@ -440,7 +440,8 @@ function model_operation_entries(
   if (!Array.isArray(declared_operations) || declared_operations.length === 0) {
     return opcodes
   }
-  return declared_operations.map((operation, index) => {
+  const model_entries: Wire_Entry[] = []
+  for (const [index, operation] of declared_operations.entries()) {
     const reference = object_value(
       operation,
       `${SERVICE_SHAPE_ID}.operations[${index}]`,
@@ -463,8 +464,9 @@ function model_operation_entries(
     // Resolve the operation shape here so malformed service declarations fail
     // before a runtime identity can be generated from them.
     object_member(shapes, target, "Smithy AST.shapes")
-    return entry
-  })
+    model_entries.push(entry)
+  }
+  return model_entries
 }
 
 /** Extracts the server-visible wire contract from a Smithy AST. */
