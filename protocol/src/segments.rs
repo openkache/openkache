@@ -1,6 +1,7 @@
 //! Operation-neutral ownership for ordered wire byte segments.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use smallvec::{Array, SmallVec};
 
@@ -242,8 +243,18 @@ pub use StableByteOwner as WireByteOwner;
 /// This operation-neutral container can cross application, storage, and
 /// transport boundaries without copying its payload or repeating type erasure.
 pub struct StableBytes {
-    owner: Box<dyn StableByteOwner>,
-    len: usize,
+    owner: StableBytesOwner,
+}
+
+enum StableBytesOwner {
+    Shared {
+        owner: Arc<dyn StableByteOwner>,
+        range: Range<usize>,
+    },
+    External {
+        owner: Box<dyn StableByteOwner>,
+        len: usize,
+    },
 }
 
 impl StableBytes {
@@ -251,20 +262,56 @@ impl StableBytes {
     pub fn new(owner: impl StableByteOwner) -> Self {
         let len = owner.as_bytes().len();
         Self {
-            owner: Box::new(owner),
-            len,
+            owner: StableBytesOwner::External {
+                owner: Box::new(owner),
+                len,
+            },
         }
+    }
+
+    /// Retains a shared owner and its complete visible bytes.
+    pub fn from_shared<T>(owner: Arc<T>) -> Self
+    where
+        T: StableByteOwner,
+    {
+        let len = owner.as_bytes().len();
+        Self::from_shared_range(owner, 0..len)
+            .expect("a shared owner's complete byte range is valid")
+    }
+
+    /// Retains a shared owner and one validated visible byte range.
+    pub fn from_shared_range<T>(owner: Arc<T>, range: Range<usize>) -> Option<Self>
+    where
+        T: StableByteOwner,
+    {
+        (range.start <= range.end && range.end <= owner.as_bytes().len()).then(|| Self {
+            owner: StableBytesOwner::Shared { owner, range },
+        })
     }
 
     /// Returns the stable visible bytes.
     pub fn as_slice(&self) -> &[u8] {
-        let bytes = self.owner.as_bytes();
-        assert_eq!(
-            bytes.len(),
-            self.len,
-            "stable byte owner changed its visible length"
-        );
-        bytes
+        match &self.owner {
+            StableBytesOwner::Shared { owner, range } => owner
+                .as_bytes()
+                .get(range.clone())
+                .expect("stable byte owner changed its visible length"),
+            StableBytesOwner::External { owner, len } => {
+                let bytes = owner.as_bytes();
+                assert_eq!(
+                    bytes.len(),
+                    *len,
+                    "stable byte owner changed its visible length"
+                );
+                bytes
+            }
+        }
+    }
+}
+
+impl StableByteOwner for Vec<u8> {
+    fn as_bytes(&self) -> &[u8] {
+        self
     }
 }
 

@@ -8,7 +8,7 @@
 use smallvec::SmallVec;
 
 use super::operation_contract::OperationStatus;
-use super::storage_port::StorageReadValue;
+use super::storage_port::{StorageReadBytes, StorageReadValue};
 use openkache_protocol::{OwnedRange, ResponseSegment};
 
 /// An owned wire value returned by a modeled server operation.
@@ -64,7 +64,10 @@ impl From<ResponseSegment> for OperationValue {
 
 impl From<StorageReadValue> for OperationValue {
     fn from(value: StorageReadValue) -> Self {
-        Self(value.into_stable_bytes().into())
+        match value.into_bytes() {
+            StorageReadBytes::Owned(value) => Self(ResponseSegment::Owned(value)),
+            StorageReadBytes::Stable(value) => Self(value.into()),
+        }
     }
 }
 
