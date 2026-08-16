@@ -110,6 +110,10 @@ pub use errors::{Result, ServerError};
 
 #[path = "namespace_registry.rs"]
 mod namespace_registry;
+#[path = "namespace_journal.rs"]
+mod namespace_journal;
+#[allow(unused_imports)]
+pub(crate) use namespace_journal::{JournalEvent, NamespaceJournal};
 pub(crate) use namespace_registry::{
     NamespaceError, NamespaceOpenResult, NamespaceRegistry, SetReservation,
 };
