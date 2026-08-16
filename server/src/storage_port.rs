@@ -7,15 +7,15 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use super::NetworkWorkerCache;
 use super::operation_capabilities::CapabilityKey;
+use super::NetworkWorkerCache;
 
 use super::super::observability::Operation;
 #[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
-    PreparedStorageAddress, StorageReadBytes, StorageReadOwner, StorageReadValue, StorageResult,
-    StorageRoute, StorageScope, StorageValue, StorageWriteOptions, StorageWriteOutcome,
-    StorageError, StorageMutation,
+    PreparedStorageAddress, StorageError, StorageMutation, StorageReadBytes, StorageReadOwner,
+    StorageReadValue, StorageResult, StorageRoute, StorageScope, StorageValue, StorageWriteOptions,
+    StorageWriteOutcome,
 };
 #[allow(unused_imports)]
 pub(crate) use super::super::types::{
@@ -80,11 +80,7 @@ impl StoragePort {
 pub(crate) trait StorageDataPort: Send + Sync {
     fn max_item_bytes(&self) -> usize;
 
-    fn prepare_address(
-        &self,
-        scope: StorageScope,
-        identity: &[u8],
-    ) -> PreparedStorageAddress;
+    fn prepare_address(&self, scope: StorageScope<'_>, identity: &[u8]) -> PreparedStorageAddress;
 
     fn route_for(&self, address: &PreparedStorageAddress) -> StorageRoute;
 
@@ -119,12 +115,7 @@ pub(crate) trait CompatibilityStorageAddressPort: StorageDataPort {
         &self,
         storage_domain_id: u64,
         identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
-    ) -> PreparedStorageAddress {
-        self.prepare_address(
-            StorageScope::from_owned(storage_domain_id.to_be_bytes().to_vec()),
-            identity,
-        )
-    }
+    ) -> PreparedStorageAddress;
 }
 
 /// Statically dispatched storage administration plane.
@@ -144,11 +135,7 @@ impl StorageDataPort for StoragePort {
         self.backend.max_item_bytes()
     }
 
-    fn prepare_address(
-        &self,
-        scope: StorageScope,
-        identity: &[u8],
-    ) -> PreparedStorageAddress {
+    fn prepare_address(&self, scope: StorageScope<'_>, identity: &[u8]) -> PreparedStorageAddress {
         self.backend.prepare_address(scope, identity)
     }
 

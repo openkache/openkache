@@ -13,15 +13,15 @@ use crate::observability::{NetworkWorkerId, Operation};
 use crate::types::{StoredItemBytes, StoredItemValue};
 use crate::{KvError, Result, SetOutcome, StorageKey};
 
-use super::ThreadedKvkache;
 use super::storage_port::{
     PreparedStorageAddress, StorageError, StorageMutation, StorageReadValue, StorageResult,
     StorageRoute, StorageScope, StorageValue, StorageWriteOptions, StorageWriteOutcome,
 };
+use super::ThreadedKvkache;
 
 const GENERIC_STORAGE_ADDRESS_DOMAIN: &[u8] = b"openkache/generic-storage-address/v1\0";
 
-fn opaque_storage_key_for_scope(scope: &StorageScope, identity: &[u8]) -> StorageKey {
+fn opaque_storage_key_for_scope(scope: &StorageScope<'_>, identity: &[u8]) -> StorageKey {
     let mut hasher = Sha256::new();
     hasher.update(GENERIC_STORAGE_ADDRESS_DOMAIN);
     // Keep the generic tuple unambiguous without allocating or changing the
@@ -257,7 +257,7 @@ impl NetworkWorkerCache {
 
     pub(crate) fn prepare_address(
         &self,
-        scope: StorageScope,
+        scope: StorageScope<'_>,
         identity: &[u8],
     ) -> PreparedStorageAddress {
         let key = opaque_storage_key_for_scope(&scope, identity);
