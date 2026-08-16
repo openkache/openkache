@@ -360,6 +360,17 @@ export interface Wire_Operation_Contract {
  */
 export interface Wire_Contract_Adapter {
   /**
+   * Extracts the transport profile selected by this adapter.
+   *
+   * The generic extractor treats the service-level profile as opaque. This
+   * prevents draft protocol constants and validation rules from becoming
+   * requirements of every future API contract.
+   */
+  readonly extract_profile: (
+    value: unknown,
+    location: string,
+  ) => Wire_V1_Contract
+  /**
    * Adds or validates adapter-owned operation-contract extensions.
    *
    * Generic extraction already preserves every non-wire member under a

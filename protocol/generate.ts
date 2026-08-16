@@ -45,7 +45,18 @@ export {
   render_rust_compatibility_contract,
   render_rust_semantic_constants,
 } from "./compatibility_v1_renderer"
-export { extract_generic_wire_contract }
+/**
+ * Extracts the neutral operation contract with the explicit draft-v1 profile.
+ *
+ * This compatibility export preserves existing generator callers while the
+ * generic extractor itself requires a caller-selected transport adapter.
+ */
+export function extract_generic_wire_contract(
+  ast: unknown,
+  strict_operations = false,
+): Wire_Contract {
+  return extract_compatibility_wire_contract(ast, strict_operations)
+}
 export {
   render_protocol_spec_contract_snapshot,
   render_protocol_spec_operation_table,

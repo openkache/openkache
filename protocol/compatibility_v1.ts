@@ -6,6 +6,7 @@ import type {
   Wire_Operation_Field_Plan,
 } from "./wire_types"
 import { extract_wire_contract as extract_generic_wire_contract } from "./wire"
+import { extract_draft_v1_contract } from "./wire/extract_contract"
 import {
   PROTOCOL_V1_RESPONSE_SEMANTICS_EXTENSION,
   PROTOCOL_V1_RETRY_MODE_EXTENSION,
@@ -37,6 +38,9 @@ const POLICY_ROLES = [
  * classifies request routes nor validates operation-specific request roles.
  */
 export const PROTOCOL_V1_WIRE_ADAPTER: Wire_Contract_Adapter = {
+  extract_profile(value: unknown): ReturnType<typeof extract_draft_v1_contract> {
+    return extract_draft_v1_contract(value)
+  },
   extract_extensions(
     contract: Readonly<Record<string, unknown>>,
     operation_location: string,
