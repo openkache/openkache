@@ -6,7 +6,7 @@ import type {
   Wire_Operation_Field_Plan,
 } from "./wire_types"
 import { extract_wire_contract as extract_generic_wire_contract } from "./wire"
-import { extract_draft_v1_contract } from "./wire/extract_contract"
+import { extract_draft_v1_contract } from "./compatibility_v1_profile"
 import {
   PROTOCOL_V1_RESPONSE_SEMANTICS_EXTENSION,
   PROTOCOL_V1_RETRY_MODE_EXTENSION,
