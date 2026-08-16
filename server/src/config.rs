@@ -587,6 +587,25 @@ impl Default for IoUringConfig {
     }
 }
 
+impl IoUringConfig {
+    pub(crate) fn waiting_capacity(&self) -> Result<usize> {
+        let capacity = self
+            .batch_size
+            .checked_mul(self.max_inflight_per_worker)
+            .ok_or_else(|| {
+                KvError::InvalidConfig(
+                    "io_uring.batch_size * max_inflight_per_worker exceeds usize".into(),
+                )
+            })?;
+        u32::try_from(capacity).map_err(|_| {
+            KvError::InvalidConfig(
+                "io_uring worker waiting capacity exceeds the supported slot index range".into(),
+            )
+        })?;
+        Ok(capacity)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TimeoutConfig {
@@ -845,6 +864,7 @@ impl AppConfig {
                 "io_uring.batch_size must be non-zero".into(),
             ));
         }
+        self.io_uring.waiting_capacity()?;
         if self.timeouts.input_max_time_us == 0
             || self.timeouts.output_max_time_us == 0
             || self.timeouts.read_max_time_us == 0
