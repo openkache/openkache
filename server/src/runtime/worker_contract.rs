@@ -15,19 +15,17 @@ pub(super) enum Request<K, C, X> {
     Control(X),
 }
 
-/// Worker result envelope with an API-owned data-plane projection.
-pub(super) enum Response<D> {
+/// Worker result envelope with API-owned data and control projections.
+pub(super) enum Response<D, C> {
     Data(D),
-    Stats(String),
-    Synced,
+    Control(C),
 }
 
-impl<D> std::fmt::Debug for Response<D> {
+impl<D, C: std::fmt::Debug> std::fmt::Debug for Response<D, C> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Data(_) => formatter.write_str("Data(..)"),
-            Self::Stats(stats) => formatter.debug_tuple("Stats").field(stats).finish(),
-            Self::Synced => formatter.write_str("Synced"),
+            Self::Control(control) => formatter.debug_tuple("Control").field(control).finish(),
         }
     }
 }
