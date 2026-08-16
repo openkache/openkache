@@ -13,8 +13,8 @@ use super::operation_capabilities::CapabilityKey;
 use super::super::observability::Operation;
 #[allow(unused_imports)]
 pub(crate) use super::super::runtime::{
-    StorageAddress, StorageError, StorageMutation, StorageReadOwner, StorageReadValue,
-    StorageResult, StorageValue, StorageWriteOptions, StorageWriteOutcome,
+    StorageAddress, StorageError, StorageMutation, StorageReadBytes, StorageReadOwner,
+    StorageReadValue, StorageResult, StorageValue, StorageWriteOptions, StorageWriteOutcome,
 };
 #[allow(unused_imports)]
 pub(crate) use super::super::types::{

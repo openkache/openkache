@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
-use openkache_protocol::{OwnedRange, WireByteOwner, WireSegment};
+use openkache_protocol::{OwnedRange, StableByteOwner};
 
 use crate::store::{DirectIoBuffer, DirectIoBufferLease};
 
@@ -154,9 +154,21 @@ impl StoredItemBytes {
     }
 }
 
-impl WireByteOwner for StoredItemBytes {
+impl StableByteOwner for StoredItemBytes {
     fn as_bytes(&self) -> &[u8] {
         self.as_slice()
+    }
+}
+
+impl StableByteOwner for DirectIoBuffer {
+    fn as_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl StableByteOwner for DirectIoBufferLease {
+    fn as_bytes(&self) -> &[u8] {
+        self
     }
 }
 
@@ -267,25 +279,6 @@ impl StoredItemValue {
             };
         }
         self.clone()
-    }
-
-    pub(crate) fn into_wire_segment(self) -> WireSegment {
-        match self.bytes {
-            StoredItemBytes::Owned(buffer) => match Arc::try_unwrap(buffer) {
-                Ok(buffer) => WireSegment::owned(buffer),
-                Err(buffer) => WireSegment::external(StoredItemBytes::Owned(buffer)),
-            },
-            StoredItemBytes::RangedOwned { buffer, range } => match Arc::try_unwrap(buffer) {
-                Ok(buffer) => WireSegment::Owned(
-                    OwnedRange::new(buffer, range)
-                        .expect("stored item range remains within its buffer"),
-                ),
-                Err(buffer) => {
-                    WireSegment::external(StoredItemBytes::RangedOwned { buffer, range })
-                }
-            },
-            bytes => WireSegment::external(bytes),
-        }
     }
 
     pub(crate) fn into_bytes(self) -> Vec<u8> {

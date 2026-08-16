@@ -10,16 +10,46 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 use crate::observability::{NetworkWorkerId, Operation};
-use crate::types::StoredItemValue;
+use crate::types::{StoredItemBytes, StoredItemValue};
 use crate::{KvError, Result, SetOutcome, StorageKey};
 
 use super::ThreadedKvkache;
 use super::storage_port::{
-    StorageAddress, StorageError, StorageMutation, StorageReadOwner, StorageReadValue,
-    StorageResult, StorageValue, StorageWriteOptions, StorageWriteOutcome,
+    StorageAddress, StorageError, StorageMutation, StorageReadValue, StorageResult, StorageValue,
+    StorageWriteOptions, StorageWriteOutcome,
 };
 
 const GENERIC_STORAGE_ADDRESS_DOMAIN: &[u8] = b"openkache/generic-storage-address/v1\0";
+
+pub(crate) fn into_storage_read_value(value: StoredItemValue) -> StorageReadValue {
+    match value.bytes {
+        StoredItemBytes::Owned(buffer) => match Arc::try_unwrap(buffer) {
+            Ok(buffer) => StorageReadValue::from_owned(buffer),
+            Err(buffer) => {
+                let len = buffer.len();
+                StorageReadValue::from_shared_owner(buffer, 0..len)
+                    .expect("a stored item range remains within its buffer")
+            }
+        },
+        StoredItemBytes::RangedOwned { buffer, range } => match Arc::try_unwrap(buffer) {
+            Ok(buffer) => StorageReadValue::from_owned_range(buffer, range)
+                .expect("a stored item range remains within its buffer"),
+            Err(buffer) => StorageReadValue::from_shared_owner(buffer, range)
+                .expect("a stored item range remains within its buffer"),
+        },
+        StoredItemBytes::Segment { segment, range } => {
+            StorageReadValue::from_shared_owner(segment, range)
+                .expect("a stored item range remains within its segment")
+        }
+        StoredItemBytes::DirectRead { buffer, range } => {
+            StorageReadValue::from_owner(StoredItemBytes::DirectRead { buffer, range })
+        }
+        StoredItemBytes::SharedDirectRead { buffer, range } => {
+            StorageReadValue::from_shared_owner(buffer, range)
+                .expect("a stored item range remains within its direct-read buffer")
+        }
+    }
+}
 
 impl From<KvError> for StorageError {
     fn from(error: KvError) -> Self {
@@ -156,7 +186,7 @@ impl NetworkWorkerCache {
         self.cache
             .get_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
             .await
-            .map(|value| value.map(StorageReadValue::from_owner))
+            .map(|value| value.map(into_storage_read_value))
             .map_err(StorageError::from)
     }
 
@@ -228,11 +258,5 @@ impl NetworkWorkerCache {
             .copied()
             .map(StorageKey::new)
             .unwrap_or_else(|| opaque_storage_key_for_address(storage_address))
-    }
-}
-
-impl StorageReadOwner for StoredItemValue {
-    fn as_bytes(&self) -> &[u8] {
-        self.as_ref()
     }
 }

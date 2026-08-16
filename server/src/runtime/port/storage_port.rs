@@ -243,21 +243,56 @@ pub(crate) use openkache_protocol::StableByteOwner as StorageReadOwner;
 /// API bindings can inspect or transfer this value without learning which
 /// storage representation keeps its bytes alive.
 pub(crate) struct StorageReadValue {
-    owner: StableBytes,
+    owner: StorageReadBytes,
+}
+
+pub(crate) enum StorageReadBytes {
+    Owned(OwnedRange),
+    Stable(StableBytes),
 }
 
 impl StorageReadValue {
-    pub(crate) fn from_owner(owner: impl StorageReadOwner) -> Self {
+    pub(crate) fn from_owned(owner: Vec<u8>) -> Self {
         Self {
-            owner: StableBytes::new(owner),
+            owner: StorageReadBytes::Owned(OwnedRange::whole(owner)),
         }
     }
 
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        self.owner.as_slice()
+    pub(crate) fn from_owned_range(
+        owner: Vec<u8>,
+        range: std::ops::Range<usize>,
+    ) -> Option<Self> {
+        OwnedRange::new(owner, range).map(|owner| Self {
+            owner: StorageReadBytes::Owned(owner),
+        })
     }
 
-    pub(crate) fn into_stable_bytes(self) -> StableBytes {
+    pub(crate) fn from_owner(owner: impl StorageReadOwner) -> Self {
+        Self {
+            owner: StorageReadBytes::Stable(StableBytes::new(owner)),
+        }
+    }
+
+    pub(crate) fn from_shared_owner<T>(
+        owner: std::sync::Arc<T>,
+        range: std::ops::Range<usize>,
+    ) -> Option<Self>
+    where
+        T: StorageReadOwner,
+    {
+        StableBytes::from_shared_range(owner, range).map(|owner| Self {
+            owner: StorageReadBytes::Stable(owner),
+        })
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        match &self.owner {
+            StorageReadBytes::Owned(owner) => owner.as_slice(),
+            StorageReadBytes::Stable(owner) => owner.as_slice(),
+        }
+    }
+
+    pub(crate) fn into_bytes(self) -> StorageReadBytes {
         self.owner
     }
 }
