@@ -9,16 +9,30 @@ pub(crate) use crate::types::StorageWriteOptions;
 
 /// Opaque API-owned storage scope. Its bytes are never interpreted by the
 /// storage port.
+///
+/// Borrowed scopes are the default for request-local domain identifiers. The
+/// owned variant remains available when a scope must outlive its source
+/// buffer.
 #[derive(Debug)]
-pub(crate) struct StorageScope(OwnedRange);
+pub(crate) enum StorageScope<'a> {
+    Borrowed(&'a [u8]),
+    Owned(OwnedRange),
+}
 
-impl StorageScope {
+impl<'a> StorageScope<'a> {
     pub(crate) fn from_owned(bytes: Vec<u8>) -> Self {
-        Self(OwnedRange::whole(bytes))
+        Self::Owned(OwnedRange::whole(bytes))
+    }
+
+    pub(crate) const fn from_borrowed(bytes: &'a [u8]) -> Self {
+        Self::Borrowed(bytes)
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
-        self.0.as_slice()
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes.as_slice(),
+        }
     }
 }
 
@@ -62,9 +76,7 @@ impl PreparedStorageAddress {
         Self { key, route }
     }
 
-    pub(in crate::runtime) const fn as_bytes(
-        &self,
-    ) -> &[u8; crate::types::STORAGE_KEY_BYTES] {
+    pub(in crate::runtime) const fn as_bytes(&self) -> &[u8; crate::types::STORAGE_KEY_BYTES] {
         &self.key
     }
 
@@ -154,10 +166,7 @@ impl StorageReadValue {
         }
     }
 
-    pub(crate) fn from_owned_range(
-        owner: Vec<u8>,
-        range: std::ops::Range<usize>,
-    ) -> Option<Self> {
+    pub(crate) fn from_owned_range(owner: Vec<u8>, range: std::ops::Range<usize>) -> Option<Self> {
         OwnedRange::new(owner, range).map(|owner| Self {
             owner: StorageReadBytes::Owned(owner),
         })
