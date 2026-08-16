@@ -107,7 +107,10 @@ pub(super) trait KeyedWorkPort<L, K>: ScheduledTask + Sized {
         job: Self::CompletedJob,
         include_visible_state: bool,
     ) -> FinishedKeyedWork<Self::Response, Self::VisibleState>;
-    fn progress_capacity(lifecycle: &mut L) -> Result<(bool, Vec<Self::CapacityCompletion>)>;
+    fn progress_capacity(
+        lifecycle: &mut L,
+        emit: impl FnMut(Self::CapacityCompletion),
+    ) -> Result<bool>;
     fn capacity_completion(
         completion: Self::CapacityCompletion,
     ) -> CapacityCompletion<K, Self::Response, Self::VisibleState>;

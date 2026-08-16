@@ -112,12 +112,15 @@ where
     let mut disconnected = false;
     let mut deferred_completions: Vec<DeferredLaneCompletion<C::Response, C::VisibleState>> =
         Vec::with_capacity(io_config.max_inflight_per_worker);
+    let mut capacity_completions: Vec<C::CapacityCompletion> =
+        Vec::with_capacity(io_config.max_inflight_per_worker);
 
     loop {
         if !deferred_completions.is_empty() {
-            match C::progress_capacity(&mut cache) {
-                Ok((capacity_ready, completed)) => {
-                    for result in completed {
+            capacity_completions.clear();
+            match C::progress_capacity(&mut cache, |result| capacity_completions.push(result)) {
+                Ok(capacity_ready) => {
+                    for result in capacity_completions.drain(..) {
                         let result = C::capacity_completion(result);
                         let index = deferred_completions
                             .iter()
