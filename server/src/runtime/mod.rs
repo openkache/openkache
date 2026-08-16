@@ -195,11 +195,7 @@ impl ThreadedKvkache {
         let (started_tx, started_rx) = channel::bounded::<
             std::result::Result<crate::platform::StorageDeviceKind, String>,
         >(config.runtime.thread_count);
-        let queue_capacity = config
-            .io_uring
-            .batch_size
-            .saturating_mul(config.io_uring.max_inflight_per_worker)
-            .max(64);
+        let queue_capacity = config.io_uring.waiting_capacity()?.max(64);
         let mut workers = Vec::with_capacity(config.runtime.thread_count);
         let resource_guard = Arc::new(ResourceGuard::for_app_config(&config)?);
 

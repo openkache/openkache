@@ -222,10 +222,7 @@ where
     let storage_shard = observability
         .as_deref()
         .map(|state| state.storage_shard(StorageWorkerId(worker_id)));
-    let waiting_capacity = io_config
-        .batch_size
-        .saturating_mul(io_config.max_inflight_per_worker)
-        .max(io_config.max_inflight_per_worker);
+    let waiting_capacity = io_config.waiting_capacity()?;
     let mut scheduler: KeyScheduler<StorageKey, C> =
         KeyScheduler::with_waiting_capacity(waiting_capacity);
     let mut inflight = FuturesUnordered::new();
