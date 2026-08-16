@@ -223,11 +223,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 request_timeout,
                 &request_budget,
                 |header, prefix| {
-                    operation_dispatch::admit_request_header(
-                        header,
-                        prefix,
-                        runtime.as_ref(),
-                    )
+                    operation_dispatch::admit_request_header(header, prefix, runtime.as_ref())
                 },
             )
             .await
@@ -289,12 +285,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         let mut terminal_after_response = frame.has_trailing_bytes;
         let response_result = match request_projection::project_owned_request(request_bytes) {
             Ok(input) => {
-                let request_opcode = input.opcode();
-                let operation: Operation = operation_contract::telemetry_operation(request_opcode);
+                let operation_id = input.operation_id();
+                let operation: Operation = operation_contract::telemetry_operation_id(operation_id);
                 let request_started = std::time::Instant::now();
-                let may_mutate = operation_dispatch::may_mutate(runtime.as_ref(), request_opcode);
+                let may_mutate = operation_dispatch::may_mutate(runtime.as_ref(), operation_id);
                 let response_permit = if let Some(response_budget_bytes) =
-                    operation_dispatch::response_budget_bytes(runtime.as_ref(), request_opcode)
+                    operation_dispatch::response_budget_bytes(runtime.as_ref(), operation_id)
                 {
                     match request_budget
                         .acquire(response_budget_bytes, request_timeout)
@@ -303,7 +299,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         Ok(permit) => Some(permit),
                         Err(StreamReadError::Timeout) => {
                             let response = operation_dispatch::timeout_response(
-                                request_opcode,
+                                operation_id,
                                 b"response memory budget timed out",
                             );
                             network_shard.record_request(
@@ -318,11 +314,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             continue;
                         }
                         Err(_) => {
-                            let response = operation_transport::contract_error_response(
-                                request_opcode,
-                                Status::Overloaded,
-                                b"response exceeds the server memory budget",
-                            );
+                            let response =
+                                operation_transport::contract_error_response_for_operation(
+                                    operation_id,
+                                    Status::Overloaded,
+                                    b"response exceeds the server memory budget",
+                                );
                             network_shard.record_request(
                                 operation,
                                 Status::Overloaded,
@@ -380,7 +377,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         );
                         (
                             operation_dispatch::timeout_response(
-                                request_opcode,
+                                operation_id,
                                 b"request execution timed out",
                             ),
                             response_permit,

@@ -508,6 +508,12 @@ export interface Wire_Contract {
    * protocol generation runs in strict mode and always emits it.
    */
   readonly operations?: readonly Wire_Operation[]
+  /**
+   * Smithy service declaration order, retained separately from the numeric
+   * wire order in `opcodes`. Runtime operation IDs use this model order so
+   * sparse or reordered wire values cannot change dense server indexes.
+   */
+  readonly model_opcodes?: readonly Wire_Entry[]
   readonly opcodes: readonly Wire_Entry[]
   readonly statuses: readonly Wire_Entry[]
   readonly v1: Wire_V1_Contract

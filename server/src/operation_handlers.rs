@@ -8,7 +8,7 @@
 
 use std::any::Any;
 
-use openkache_protocol::{Opcode, OwnedRange};
+use openkache_protocol::OwnedRange;
 use smallvec::SmallVec;
 
 use super::operation_execution_state::OperationStateRef;
@@ -57,7 +57,7 @@ impl OwnedFieldProjection {
 /// The context deliberately contains storage primitives and decoded request
 /// fields, rather than exposing transport or frame details to API handlers.
 pub(super) struct OperationInputView {
-    pub(super) opcode: Opcode,
+    pub(super) operation_id: contract::OperationId,
     plan: &'static [contract::OperationFieldPlan],
     fields: SmallVec<[Option<OperationFieldRecord>; INLINE_OPERATION_FIELDS]>,
     projection: Option<OwnedFieldProjection>,
@@ -89,23 +89,28 @@ pub(super) type OperationFieldValue<'a> = &'a [u8];
 
 impl OperationInputView {
     /// Returns the generated operation identity carried by this view.
-    pub(super) const fn opcode(&self) -> Opcode {
-        self.opcode
+    pub(super) const fn operation_id(&self) -> contract::OperationId {
+        self.operation_id
     }
 
     /// Builds a view from generated numeric field records.
-    pub(super) fn from_populated_parts<I>(opcode: Opcode, fields: I) -> OperationInputView
+    pub(super) fn from_populated_parts<I>(
+        operation_id: contract::OperationId,
+        fields: I,
+    ) -> OperationInputView
     where
         I: IntoIterator<Item = Option<OperationFieldRecord>>,
     {
         let mut fields: SmallVec<[Option<OperationFieldRecord>; INLINE_OPERATION_FIELDS]> =
             fields.into_iter().collect();
-        let plan = contract::spec(opcode).request.fields;
+        let plan = contract::operation_wire_spec_for_id(operation_id)
+            .request
+            .fields;
         if fields.len() < plan.len() {
             fields.resize_with(plan.len(), || None);
         }
         OperationInputView {
-            opcode,
+            operation_id,
             plan,
             fields,
             projection: None,
@@ -116,14 +121,14 @@ impl OperationInputView {
     ///
     /// Field ranges are relative to the owner's visible bytes.
     pub(super) fn from_populated_projection<I>(
-        opcode: Opcode,
+        operation_id: contract::OperationId,
         owner: OwnedRange,
         fields: I,
     ) -> OperationInputView
     where
         I: IntoIterator<Item = Option<OperationFieldRecord>>,
     {
-        let mut input = Self::from_populated_parts(opcode, fields);
+        let mut input = Self::from_populated_parts(operation_id, fields);
         input.projection = Some(OwnedFieldProjection::new(owner));
         input
     }
@@ -214,7 +219,10 @@ impl OperationInputView {
         if index >= self.plan.len() {
             return None;
         }
-        let frame = self.projection.as_ref().and_then(OwnedFieldProjection::as_slice);
+        let frame = self
+            .projection
+            .as_ref()
+            .and_then(OwnedFieldProjection::as_slice);
         self.fields
             .get(index)?
             .as_ref()?
@@ -248,10 +256,7 @@ impl OperationInputView {
     /// Generic opaque requests can return the complete request frame together
     /// with a payload range. Callers that can retain a borrowed range until
     /// completion should use this method to avoid a prefix-removing memmove.
-    pub(super) fn take_owned_bytes_range_at_index(
-        &mut self,
-        index: usize,
-    ) -> Option<OwnedRange> {
+    pub(super) fn take_owned_bytes_range_at_index(&mut self, index: usize) -> Option<OwnedRange> {
         let value = self.fields.get_mut(index)?.as_mut()?.value.take()?;
         match value {
             OperationFieldStorage::OwnerRange { start, end } => {
