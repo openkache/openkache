@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use super::operation_api::capability_id;
+use super::operation_capabilities::capability_id;
 
 /// API-owned authorization predicate stored in an operation definition.
 ///
@@ -120,8 +120,8 @@ pub(super) fn authorization_administrator(authorization: &AuthorizationContext) 
 /// authentication adapter as soon as it supplies the matching token; no
 /// generated helper or operation-name branch is required.
 pub(super) fn authorization_allowed(
-    registration: &super::operation_api::ServerOperationRegistration,
+    predicate: AuthorizationFn,
     authorization: &AuthorizationContext,
 ) -> bool {
-    (registration.authorization)(authorization)
+    predicate(authorization)
 }

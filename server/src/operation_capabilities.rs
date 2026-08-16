@@ -4,9 +4,62 @@
 //! to API module initializers without retaining a request-path service locator.
 
 use std::any::Any;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-use super::operation_api::{CapabilityKey, capability_id};
+const CAPABILITY_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const CAPABILITY_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Computes the stable numeric identity used by the capability catalog.
+///
+/// Names remain available for diagnostics and collision checks, while the
+/// numeric identity keeps request lookups independent of string allocation.
+pub const fn capability_id(name: &str) -> u64 {
+    let bytes = name.as_bytes();
+    let mut hash = CAPABILITY_HASH_OFFSET;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(CAPABILITY_HASH_PRIME);
+        index += 1;
+    }
+    hash
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapabilityKey<T: Any> {
+    name: &'static str,
+    id: u64,
+    _type: PhantomData<fn() -> T>,
+}
+
+impl<T: Any> CapabilityKey<T> {
+    /// Creates a stable key owned by one API module.
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            id: capability_id(name),
+            _type: PhantomData,
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+/// Downcasts one API-owned capability without exposing the catalog's
+/// type-erasure details to a binding.
+pub(super) fn downcast_capability<T: Any>(
+    catalog: &dyn CapabilityCatalog,
+    key: CapabilityKey<T>,
+) -> Option<&T> {
+    catalog.get_by_id(key.id(), key.name())?.downcast_ref::<T>()
+}
 
 /// Type-erased dependencies supplied by the server composition root.
 ///

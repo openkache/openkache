@@ -1,9 +1,5 @@
 //! API-owned admission and resource preparation for compatibility operations.
 
-use super::operation_api::{
-    HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
-    PrepareError, PreparePlan, ResourceLock,
-};
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
     DeleteState, GetState, NamespaceCapability, NamespaceDeleteState, NamespaceOpenState,
@@ -11,6 +7,10 @@ use super::operation_compatibility_services::{
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::OperationInputView;
+use super::operation_preparation::{
+    HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
+    PrepareError, PreparePlan, ResourceLock,
+};
 
 pub(super) fn admit_set_header(
     input: &OperationHeaderView<'_>,

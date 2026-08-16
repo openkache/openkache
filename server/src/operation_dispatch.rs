@@ -12,9 +12,11 @@
 use openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
-use super::operation_api;
+use super::operation_authorization;
 use super::operation_execution_state::OperationRuntime;
 use super::operation_handlers;
+use super::operation_preparation;
+use super::operation_registration::OperationCommitDisposition;
 use super::operation_transport;
 
 pub(super) struct HeaderAdmissionRejection {
@@ -58,11 +60,15 @@ pub(super) fn admit_request_header(
     let Some(admit) = registration.admit_header else {
         return Ok(());
     };
-    let view = operation_api::OperationHeaderView::new(header, prefix);
+    let view = operation_preparation::OperationHeaderView::new(
+        header.body_len(),
+        header.body_field(),
+        prefix,
+    );
     let started = std::time::Instant::now();
     admit(
         &view,
-        operation_api::HeaderAdmissionContext {
+        operation_preparation::HeaderAdmissionContext {
             state,
         },
     )
@@ -87,7 +93,7 @@ pub(super) fn may_mutate(runtime: &OperationRuntime, opcode: Opcode) -> bool {
     runtime.registration(opcode).is_some_and(|registration| {
         matches!(
             registration.policy,
-            operation_api::OperationCommitDisposition::MayBeCommitted
+            OperationCommitDisposition::MayBeCommitted
         )
     })
 }
@@ -135,7 +141,10 @@ pub(super) async fn execute_request(
             b"modeled operation has no server registration",
         ));
     };
-    if !operation_handlers::authorization_allowed(registration, authorization) {
+    if !operation_authorization::authorization_allowed(
+        registration.authorization,
+        authorization,
+    ) {
         return Some(operation_transport::contract_error_response_status(
             opcode,
             super::operation_contract::OperationStatus::Forbidden,
@@ -153,7 +162,7 @@ pub(super) async fn execute_request(
 
     let preparation = match (registration.prepare)(
         &input,
-        operation_api::PrepareContext {
+        operation_preparation::PrepareContext {
             state,
         },
     ) {

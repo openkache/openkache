@@ -11,10 +11,7 @@ use std::any::Any;
 use openkache_protocol::{Opcode, OwnedRange};
 use smallvec::SmallVec;
 
-pub(super) use super::operation_authorization::{
-    AuthorizationContext, AuthorizationFn, authorization_administrator, authorization_allowed,
-    authorization_none,
-};
+pub(super) use super::operation_authorization::AuthorizationContext;
 use super::operation_execution_state::OperationStateRef;
 pub(super) use super::operation_fields::OperationFieldEnvelope;
 use crate::operation_contract as contract;
@@ -308,21 +305,4 @@ impl<'a> OperationContext<'a> {
     pub(super) fn state<T: Any>(&self) -> Option<&'a T> {
         self.state.get()
     }
-}
-
-/// Verifies that every modeled opcode has a server-owned execution path.
-///
-/// This runs during server bind rather than allowing an omitted behavior to
-/// reach a panic or an accidental fallback response.
-pub(super) fn validate_handler_registry() -> Result<(), &'static str> {
-    super::operation_api::validate_registry()?;
-    super::operation_codecs::validate_contract_codecs()?;
-    for entry in contract::operation_registry() {
-        let opcode = entry.opcode;
-        if super::operation_api::server_operation(opcode).is_some() {
-            continue;
-        }
-        return Err("modeled operation has no registered server handler");
-    }
-    Ok(())
 }

@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use openkache_protocol::Opcode;
 
-use super::operation_api::{ServerComposition, ServerOperationRegistration};
+use super::operation_composition::ServerComposition;
+use super::operation_contract as contract;
 use super::operation_execution_state::OperationRuntime;
+use super::operation_registration::ServerOperationRegistration;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{CapabilityCatalog, CapabilityEntry, CapabilityList},
@@ -72,5 +74,37 @@ pub(super) fn build_operation_runtime(
 /// The network server only decides whether every modeled operation has a
 /// usable behavior registration and codec binding.
 pub(super) fn validate() -> Result<(), &'static str> {
-    super::operation_handlers::validate_handler_registry()
+    let mut seen = [false; Opcode::COUNT];
+    for registration in registered_operations() {
+        let index = registration.opcode.index();
+        if seen[index] {
+            return Err("server operation policy registry contains a duplicate opcode");
+        }
+        seen[index] = true;
+    }
+    for entry in contract::operation_registry() {
+        let Some(_registration) = server_operation(entry.opcode) else {
+            return Err("modeled operation has no server registration");
+        };
+        let wire = entry.wire;
+        if wire.request.fields.len() > contract::MAX_OPERATION_REQUEST_FIELDS {
+            return Err("modeled operation request plan exceeds generated bounds");
+        }
+        if matches!(
+            wire.response.framing,
+            contract::OperationLayoutFraming::OptionalValues
+                | contract::OperationLayoutFraming::FieldSequence
+        ) && wire.response.fields.is_empty()
+        {
+            return Err("ordered response operation has no generated fields");
+        }
+    }
+
+    super::operation_codecs::validate_contract_codecs()?;
+    for entry in contract::operation_registry() {
+        if server_operation(entry.opcode).is_none() {
+            return Err("modeled operation has no registered server handler");
+        }
+    }
+    Ok(())
 }

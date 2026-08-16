@@ -6,10 +6,11 @@
 
 use openkache_protocol::Opcode;
 
-use super::operation_api::{self, ApiModule};
+use super::operation_composition::ApiModule;
 use super::operation_contract::OperationStatus;
 use super::operation_handlers::OperationContext;
 use super::operation_outcome::{OperationOutcome, OperationValue};
+use super::operation_registration::RegistrationBuilder;
 use super::operation_registry::OperationFuture;
 
 fn ping_handler<'a>(_context: OperationContext<'a>) -> OperationFuture<'a> {
@@ -21,7 +22,7 @@ fn ping_handler<'a>(_context: OperationContext<'a>) -> OperationFuture<'a> {
 
 pub(super) const API: ApiModule =
     ApiModule::new(&[
-        operation_api::RegistrationBuilder::new(Opcode::Ping, ping_handler)
+        RegistrationBuilder::new(Opcode::Ping, ping_handler)
             .read_only()
             .build(),
     ]);
