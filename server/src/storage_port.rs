@@ -104,19 +104,6 @@ pub(crate) trait StorageDataPort: Send + Sync {
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_;
 }
 
-/// Compatibility-only address preparation preserving the published v2 key.
-///
-/// Generic APIs use [`StorageDataPort::prepare_address`]. This adapter keeps
-/// the legacy namespace key derivation outside the common port contract.
-#[allow(dead_code)]
-pub(crate) trait CompatibilityStorageAddressPort: StorageDataPort {
-    fn prepare_compatibility_address(
-        &self,
-        storage_domain_id: u64,
-        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
-    ) -> PreparedStorageAddress;
-}
-
 /// Statically dispatched storage administration plane.
 #[allow(dead_code)]
 pub(crate) trait StorageAdministrationPort: Send + Sync {
@@ -166,17 +153,6 @@ impl StorageDataPort for StoragePort {
         storage_address: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
         StoragePort::delete(self, operation, storage_address)
-    }
-}
-
-impl CompatibilityStorageAddressPort for StoragePort {
-    fn prepare_compatibility_address(
-        &self,
-        storage_domain_id: u64,
-        identity: &[u8; super::super::types::STORAGE_KEY_BYTES],
-    ) -> PreparedStorageAddress {
-        self.backend
-            .prepare_compatibility_address(storage_domain_id, identity)
     }
 }
 
