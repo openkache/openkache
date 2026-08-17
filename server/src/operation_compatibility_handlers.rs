@@ -1,7 +1,5 @@
 //! Typed compatibility handlers connecting decoded input to API behavior.
 
-use std::sync::Arc;
-
 use super::operation_compatibility_behavior as behavior;
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
@@ -12,29 +10,6 @@ use super::operation_contract::OperationStatus;
 use super::operation_handlers::OperationContext;
 use super::operation_outcome::{OperationError, OperationOutcome};
 use super::operation_registry::{OperationFuture, OperationTaskStorage};
-use super::storage_port::StoragePort;
-
-trait HandlerPortRef {
-    type Target: ?Sized;
-
-    fn handler_port_ref(&self) -> &Self::Target;
-}
-
-impl<T: ?Sized> HandlerPortRef for Arc<T> {
-    type Target = T;
-
-    fn handler_port_ref(&self) -> &Self::Target {
-        self.as_ref()
-    }
-}
-
-impl HandlerPortRef for StoragePort {
-    type Target = StoragePort;
-
-    fn handler_port_ref(&self) -> &Self::Target {
-        self
-    }
-}
 
 fn invalid_input<'a>(message: &'static [u8]) -> OperationFuture<'a> {
     OperationFuture::ready(OperationOutcome::invalid_request(message))
@@ -50,7 +25,7 @@ fn missing_module_state<'a>() -> OperationFuture<'a> {
 /// Builds a typed API handler from a generated field decoder and an API-owned
 /// behavior function.
 macro_rules! typed_handler {
-    ($name:ident, $state:ty, mut $decode:ident, $behavior:path; $($port:ident),+) => {
+    ($name:ident, $state:ty, mut $decode:ident, $behavior:path) => {
         pub(super) fn $name<'a>(
             context: OperationContext<'a>,
             task_storage: &'a mut OperationTaskStorage,
@@ -63,13 +38,10 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending(
-                task_storage,
-                $behavior($(state.$port.handler_port_ref(),)+ decoded),
-            )
+            OperationFuture::pending(task_storage, $behavior(state, decoded))
         }
     };
-    ($name:ident, $state:ty, $decode:ident, $behavior:path; $($port:ident),+) => {
+    ($name:ident, $state:ty, $decode:ident, $behavior:path) => {
         pub(super) fn $name<'a>(
             context: OperationContext<'a>,
             task_storage: &'a mut OperationTaskStorage,
@@ -82,74 +54,31 @@ macro_rules! typed_handler {
                 Ok(input) => input,
                 Err(message) => return invalid_input(message),
             };
-            OperationFuture::pending(
-                task_storage,
-                $behavior($(state.$port.handler_port_ref(),)+ decoded),
-            )
+            OperationFuture::pending(task_storage, $behavior(state, decoded))
         }
     };
 }
 
-typed_handler!(
-    get_handler,
-    GetState,
-    decode_get,
-    behavior::get;
-    storage,
-    namespaces
-);
+typed_handler!(get_handler, GetState, decode_get, behavior::get);
 typed_handler!(
     namespace_open_handler,
     NamespaceOpenState,
     mut decode_namespace_open,
-    behavior::namespace_open;
-    namespaces
+    behavior::namespace_open
 );
 typed_handler!(
     namespace_update_policy_handler,
     NamespaceUpdateState,
     decode_namespace_revision,
-    behavior::namespace_update_policy;
-    namespaces
+    behavior::namespace_update_policy
 );
 typed_handler!(
     namespace_delete_handler,
     NamespaceDeleteState,
     decode_namespace_delete,
-    behavior::namespace_delete;
-    storage,
-    namespaces
+    behavior::namespace_delete
 );
-typed_handler!(
-    set_handler,
-    SetState,
-    mut decode_set,
-    behavior::set;
-    storage,
-    namespaces
-);
-typed_handler!(
-    delete_handler,
-    DeleteState,
-    decode_delete,
-    behavior::delete;
-    storage,
-    namespaces
-);
-typed_handler!(
-    stats_handler,
-    StatsState,
-    decode_stats,
-    behavior::stats;
-    storage,
-    namespaces,
-    observability
-);
-typed_handler!(
-    sync_handler,
-    SyncState,
-    decode_sync,
-    behavior::sync;
-    storage,
-    namespaces
-);
+typed_handler!(set_handler, SetState, mut decode_set, behavior::set);
+typed_handler!(delete_handler, DeleteState, decode_delete, behavior::delete);
+typed_handler!(stats_handler, StatsState, decode_stats, behavior::stats);
+typed_handler!(sync_handler, SyncState, decode_sync, behavior::sync);

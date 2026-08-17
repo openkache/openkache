@@ -17,8 +17,9 @@ use super::{
     operation_capabilities::{CapabilityCatalog, CapabilityEntry, CapabilityList},
     operation_compatibility_module as compatibility, operation_generic_bindings as generic,
     operation_ports::{
-        NAMESPACE_PORT, NamespaceCapabilityHandle, OBSERVABILITY_PORT,
-        ObservabilityCapabilityHandle,
+        NAMESPACE_CATALOG_PORT, NAMESPACE_COORDINATION_PORT, NAMESPACE_MEMBERSHIP_PORT,
+        NamespaceCatalogCapabilityHandle, NamespaceCoordinationCapabilityHandle,
+        NamespaceMembershipCapabilityHandle, OBSERVABILITY_PORT, ObservabilityCapabilityHandle,
     },
 };
 
@@ -48,11 +49,17 @@ pub(super) fn build_operation_runtime(
     observability: Arc<ObservabilityState>,
 ) -> Result<Arc<OperationRuntime>, &'static str> {
     let storage_port = super::storage_port::StoragePort::new(Arc::clone(&cache));
-    let namespace_port: NamespaceCapabilityHandle = namespaces;
+    let coordination_registry = Arc::clone(&namespaces);
+    let catalog_registry = Arc::clone(&namespaces);
+    let namespace_coordination_port: NamespaceCoordinationCapabilityHandle = coordination_registry;
+    let namespace_catalog_port: NamespaceCatalogCapabilityHandle = catalog_registry;
+    let namespace_membership_port: NamespaceMembershipCapabilityHandle = namespaces;
     let observability_port: ObservabilityCapabilityHandle = observability;
     let bootstrap_entries = [
         CapabilityEntry::new(super::storage_port::STORAGE_PORT, &storage_port),
-        CapabilityEntry::new(NAMESPACE_PORT, &namespace_port),
+        CapabilityEntry::new(NAMESPACE_COORDINATION_PORT, &namespace_coordination_port),
+        CapabilityEntry::new(NAMESPACE_CATALOG_PORT, &namespace_catalog_port),
+        CapabilityEntry::new(NAMESPACE_MEMBERSHIP_PORT, &namespace_membership_port),
         CapabilityEntry::new(OBSERVABILITY_PORT, &observability_port),
     ];
     let bootstrap = CapabilityList::overlay(base, &bootstrap_entries);

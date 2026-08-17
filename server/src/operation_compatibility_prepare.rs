@@ -7,7 +7,7 @@ use super::operation_compatibility_services::{
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::OperationInputView;
-use super::operation_ports::NamespaceCapability;
+use super::operation_ports::NamespaceCoordinationCapability;
 use super::operation_preparation::{
     HeaderAdmissionContext, HeaderAdmissionError, OperationHeaderView, PrepareContext,
     PrepareError, PreparePlan, ResourceLock,
@@ -42,9 +42,9 @@ pub(super) fn admit_set_header(
 
 fn namespace_resource(
     namespace_id: u64,
-    namespaces: &dyn NamespaceCapability,
+    coordination: &dyn NamespaceCoordinationCapability,
 ) -> Result<ResourceLock, PrepareError> {
-    namespaces.operation_lock(namespace_id).ok_or_else(|| {
+    coordination.operation_lock(namespace_id).ok_or_else(|| {
         PrepareError::resource_unavailable(
             OperationStatus::NamespaceNotFound,
             b"namespace does not exist",
@@ -61,8 +61,10 @@ fn operation_state<'a, T: 'static>(context: PrepareContext<'a>) -> Result<&'a T,
         ))
 }
 
-fn global_resource(namespaces: &dyn NamespaceCapability) -> Result<ResourceLock, PrepareError> {
-    let shared = namespaces.lifecycle_lock().map_err(|_| {
+fn global_resource(
+    coordination: &dyn NamespaceCoordinationCapability,
+) -> Result<ResourceLock, PrepareError> {
+    let shared = coordination.lifecycle_lock().map_err(|_| {
         PrepareError::resource_unavailable(
             OperationStatus::InternalError,
             b"namespace metadata is unavailable",
@@ -73,12 +75,12 @@ fn global_resource(namespaces: &dyn NamespaceCapability) -> Result<ResourceLock,
 
 fn prepare_namespace_at(
     input: &OperationInputView,
-    namespaces: &dyn NamespaceCapability,
+    coordination: &dyn NamespaceCoordinationCapability,
     field_index: usize,
 ) -> Result<PreparePlan, PrepareError> {
     let namespace_id =
         decode::required_namespace_id(input, field_index).map_err(PrepareError::invalid_request)?;
-    let resource = namespace_resource(namespace_id, namespaces)?;
+    let resource = namespace_resource(namespace_id, coordination)?;
     Ok(PreparePlan::resource(resource))
 }
 
@@ -90,7 +92,7 @@ pub(super) fn prepare_get_namespace(
     let state = operation_state::<GetState>(context)?;
     prepare_namespace_at(
         input,
-        state.namespaces.as_ref(),
+        state.coordination.as_ref(),
         request_fields::op_get::NAMESPACE_ID,
     )
 }
@@ -102,7 +104,7 @@ pub(super) fn prepare_delete_namespace(
     let state = operation_state::<DeleteState>(context)?;
     prepare_namespace_at(
         input,
-        state.namespaces.as_ref(),
+        state.coordination.as_ref(),
         request_fields::op_delete::NAMESPACE_ID,
     )
 }
@@ -114,7 +116,7 @@ pub(super) fn prepare_stats_namespace(
     let state = operation_state::<StatsState>(context)?;
     prepare_namespace_at(
         input,
-        state.namespaces.as_ref(),
+        state.coordination.as_ref(),
         request_fields::op_stats::NAMESPACE_ID,
     )
 }
@@ -126,7 +128,7 @@ pub(super) fn prepare_sync_namespace(
     let state = operation_state::<SyncState>(context)?;
     prepare_namespace_at(
         input,
-        state.namespaces.as_ref(),
+        state.coordination.as_ref(),
         request_fields::op_sync::NAMESPACE_ID,
     )
 }
@@ -141,12 +143,14 @@ pub(super) fn prepare_set(
     let state = operation_state::<SetState>(context)?;
     Ok(PreparePlan::resource(namespace_resource(
         namespace_id,
-        state.namespaces.as_ref(),
+        state.coordination.as_ref(),
     )?))
 }
 
-fn prepare_lifecycle(namespaces: &dyn NamespaceCapability) -> Result<PreparePlan, PrepareError> {
-    Ok(PreparePlan::resource(global_resource(namespaces)?))
+fn prepare_lifecycle(
+    coordination: &dyn NamespaceCoordinationCapability,
+) -> Result<PreparePlan, PrepareError> {
+    Ok(PreparePlan::resource(global_resource(coordination)?))
 }
 
 pub(super) fn prepare_namespace_open(
@@ -156,7 +160,7 @@ pub(super) fn prepare_namespace_open(
     decode::validate_namespace_open_name(input).map_err(PrepareError::invalid_request)?;
     decode::validate_namespace_open_policy_ttl(input).map_err(PrepareError::invalid_request)?;
     let state = operation_state::<NamespaceOpenState>(context)?;
-    prepare_lifecycle(state.namespaces.as_ref())
+    prepare_lifecycle(state.coordination.as_ref())
 }
 
 pub(super) fn prepare_namespace_update(
@@ -177,7 +181,7 @@ pub(super) fn prepare_namespace_update(
     let state = operation_state::<NamespaceUpdateState>(context)?;
     Ok(PreparePlan::resource(namespace_resource(
         namespace_id,
-        state.namespaces.as_ref(),
+        state.coordination.as_ref(),
     )?))
 }
 
@@ -194,10 +198,10 @@ pub(super) fn prepare_namespace_delete(
     )
     .map_err(PrepareError::invalid_request)?;
     let state = operation_state::<NamespaceDeleteState>(context)?;
-    let namespaces = state.namespaces.as_ref();
-    let resource = namespace_resource(namespace_id, namespaces)?;
+    let coordination = state.coordination.as_ref();
+    let resource = namespace_resource(namespace_id, coordination)?;
     Ok(PreparePlan::from_resources([
-        global_resource(namespaces)?,
+        global_resource(coordination)?,
         resource,
     ]))
 }
