@@ -86,11 +86,18 @@ set(
   _openkache_client_generated_contract
   "${_openkache_client_generated_include_dir}/openkache/smithy_contract.h"
 )
+file(
+  GLOB
+  _openkache_client_generator_sources
+  CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/../generator/*.ts"
+)
 set_property(
   DIRECTORY
   APPEND
   PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/../generate.ts"
+    ${_openkache_client_generator_sources}
     "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/wire.ts"
     "${CMAKE_CURRENT_SOURCE_DIR}/../model"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/model"
