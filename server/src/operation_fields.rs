@@ -140,16 +140,6 @@ impl OperationFieldEnvelope<'_> {
         openkache_protocol::codec::transform_packed_f64_be(self.bytes, transform)
     }
 
-    /// Decodes container values as borrowed slices. The shared codec has
-    /// already validated bounds before an API binding asks for this view.
-    pub(super) fn decode_list(&self) -> Result<Vec<&[u8]>, &'static [u8]> {
-        openkache_protocol::codec::decode_list(
-            self.bytes,
-            openkache_protocol::codec::DEFAULT_MAX_CONTAINER_ENTRIES,
-        )
-        .map_err(|error| error.message())
-    }
-
     /// Returns a borrowed list cursor for APIs that do not need a collected
     /// element vector.
     pub(super) fn list_cursor(
@@ -158,14 +148,6 @@ impl OperationFieldEnvelope<'_> {
     ) -> Result<openkache_protocol::codec::ListCursor<'_>, &'static [u8]> {
         openkache_protocol::codec::ListCursor::new(self.bytes, max_entries)
             .map_err(|error| error.message())
-    }
-
-    pub(super) fn decode_map(&self) -> Result<Vec<(&[u8], &[u8])>, &'static [u8]> {
-        openkache_protocol::codec::decode_map(
-            self.bytes,
-            openkache_protocol::codec::DEFAULT_MAX_CONTAINER_ENTRIES,
-        )
-        .map_err(|error| error.message())
     }
 
     /// Returns a borrowed map cursor for APIs that do not need a collected
