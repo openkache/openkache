@@ -1,5 +1,5 @@
-use super::operation_preparation;
 use super::namespace_journal::{JournalEvent, NamespaceJournal};
+use super::namespace_metadata;
 use super::storage_port::StorageRoute;
 use super::{ItemId, NamespaceDescriptor, NamespacePolicy};
 use futures_util::lock::Mutex as AsyncMutex;
@@ -14,13 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const NAMESPACE_METADATA_MAGIC: &[u8; 8] = b"OKNSPACE";
-const NAMESPACE_METADATA_VERSION: u32 = 2;
-const NAMESPACE_METADATA_V1_VERSION: u32 = 1;
 const NAMESPACE_METADATA_MAX_ENTRIES: u64 = 1_000_000;
 const NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY: u64 = 1_000_000_000;
 const NAMESPACE_METADATA_MAX_DIRTY_WORKERS: u64 = 1_000_000;
-const NAMESPACE_NAME_MAX_BYTES: usize = openkache_protocol::compat_v1::NAMESPACE_NAME_MAX_BYTES;
 static NEXT_NAMESPACE_METADATA_TEMP: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -67,6 +63,18 @@ struct NamespaceEntry {
     dirty_workers: HashSet<StorageRoute>,
     operation_lock: Arc<AsyncMutex<()>>,
     active: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct NamespaceOperationLock {
+    lock: Arc<AsyncMutex<()>>,
+    active: Arc<AtomicBool>,
+}
+
+impl NamespaceOperationLock {
+    pub(crate) fn into_parts(self) -> (Arc<AsyncMutex<()>>, Arc<AtomicBool>) {
+        (self.lock, self.active)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -185,6 +193,9 @@ impl NamespaceRegistry {
     ) -> std::result::Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError>
     {
         let name = name.into();
+        if name.len() > namespace_metadata::NAME_MAX_BYTES {
+            return Err(NamespaceError::InvalidRequest);
+        }
         if let Some(namespace_id) = self.by_name.get(name.as_slice()).copied() {
             let Some(entry) = self.by_id.get(&namespace_id) else {
                 return Err(NamespaceError::Internal);
@@ -240,16 +251,10 @@ impl NamespaceRegistry {
     pub(crate) fn operation_lock(
         &self,
         namespace_id: u64,
-    ) -> Option<operation_preparation::ResourceLock> {
-        self.by_id.get(&namespace_id).map(|entry| {
-            operation_preparation::ResourceLock::new(
-                Arc::clone(&entry.operation_lock),
-                Arc::clone(&entry.active),
-                operation_preparation::PrepareError::resource_unavailable(
-                    super::operation_contract::OperationStatus::NamespaceNotFound,
-                    b"namespace does not exist",
-                ),
-            )
+    ) -> Option<NamespaceOperationLock> {
+        self.by_id.get(&namespace_id).map(|entry| NamespaceOperationLock {
+            lock: Arc::clone(&entry.operation_lock),
+            active: Arc::clone(&entry.active),
         })
     }
 
@@ -640,8 +645,8 @@ impl NamespaceRegistry {
         let mut entries = self.by_id.values().collect::<Vec<_>>();
         entries.sort_unstable_by_key(|entry| entry.descriptor.namespace_id);
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(NAMESPACE_METADATA_MAGIC);
-        bytes.extend_from_slice(&NAMESPACE_METADATA_VERSION.to_be_bytes());
+        bytes.extend_from_slice(namespace_metadata::MAGIC);
+        bytes.extend_from_slice(&namespace_metadata::VERSION.to_be_bytes());
         bytes.extend_from_slice(&self.next_id.unwrap_or(0).to_be_bytes());
         bytes.extend_from_slice(&(entries.len() as u64).to_be_bytes());
         for entry in entries {
@@ -652,9 +657,7 @@ impl NamespaceRegistry {
             bytes.extend_from_slice(&entry.descriptor.revision.to_be_bytes());
             bytes.extend_from_slice(&name_len.to_be_bytes());
             bytes.extend_from_slice(entry.name.as_ref());
-            let policy = entry.descriptor.policy.encode().map_err(|error| {
-                std::io::Error::new(ErrorKind::InvalidData, error.to_string())
-            })?;
+            let policy = namespace_metadata::encode_policy(entry.descriptor.policy)?;
             let policy_len = u8::try_from(policy.len()).map_err(|_| {
                 std::io::Error::new(ErrorKind::InvalidData, "policy is too long")
             })?;
@@ -710,12 +713,13 @@ impl NamespaceRegistry {
 
     fn decode_metadata(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut cursor = MetadataCursor::new(bytes);
-        if cursor.take(NAMESPACE_METADATA_MAGIC.len())? != NAMESPACE_METADATA_MAGIC {
+        if cursor.take(namespace_metadata::MAGIC.len())? != namespace_metadata::MAGIC {
             return Err(cursor.invalid("namespace metadata magic is invalid"));
         }
         let metadata_version = cursor.u32()?;
-        if metadata_version != NAMESPACE_METADATA_VERSION
-            && metadata_version != NAMESPACE_METADATA_V1_VERSION
+        if metadata_version != namespace_metadata::VERSION
+            && metadata_version != namespace_metadata::LEGACY_V2_VERSION
+            && metadata_version != namespace_metadata::LEGACY_V1_VERSION
         {
             return Err(cursor.invalid("namespace metadata version is unsupported"));
         }
@@ -732,7 +736,7 @@ impl NamespaceRegistry {
                 return Err(cursor.invalid("namespace metadata contains zero identity"));
             }
             let name_len = usize::from(cursor.u16()?);
-            if name_len > NAMESPACE_NAME_MAX_BYTES {
+            if name_len > namespace_metadata::NAME_MAX_BYTES {
                 return Err(cursor.invalid("namespace metadata name is too long"));
             }
             let name = cursor.take(name_len)?.to_vec();
@@ -740,7 +744,7 @@ impl NamespaceRegistry {
                 .map_err(|_| cursor.invalid("namespace metadata name is not UTF-8"))?;
             let policy_len = usize::from(cursor.u8()?);
             let policy_bytes = cursor.take(policy_len)?;
-            let (policy, used) = NamespacePolicy::decode(policy_bytes)
+            let (policy, used) = namespace_metadata::decode_policy(metadata_version, policy_bytes)
                 .map_err(|error| cursor.invalid(error.to_string()))?
                 .ok_or_else(|| cursor.invalid("namespace metadata policy is truncated"))?;
             if used != policy_len {
@@ -760,7 +764,7 @@ impl NamespaceRegistry {
                 items.insert(item_id);
             }
             let mut dirty_workers = HashSet::new();
-            if metadata_version >= NAMESPACE_METADATA_VERSION {
+            if metadata_version >= namespace_metadata::LEGACY_V2_VERSION {
                 let dirty_worker_count = cursor.u64()?;
                 if dirty_worker_count > NAMESPACE_METADATA_MAX_DIRTY_WORKERS {
                     return Err(

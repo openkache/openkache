@@ -44,12 +44,21 @@ fn namespace_resource(
     namespace_id: u64,
     coordination: &dyn NamespaceCoordinationCapability,
 ) -> Result<ResourceLock, PrepareError> {
-    coordination.operation_lock(namespace_id).ok_or_else(|| {
+    let resource = coordination.operation_lock(namespace_id).ok_or_else(|| {
         PrepareError::resource_unavailable(
             OperationStatus::NamespaceNotFound,
             b"namespace does not exist",
         )
-    })
+    })?;
+    let (lock, active) = resource.into_parts();
+    Ok(ResourceLock::new(
+        lock,
+        active,
+        PrepareError::resource_unavailable(
+            OperationStatus::NamespaceNotFound,
+            b"namespace does not exist",
+        ),
+    ))
 }
 
 fn operation_state<'a, T: 'static>(context: PrepareContext<'a>) -> Result<&'a T, PrepareError> {

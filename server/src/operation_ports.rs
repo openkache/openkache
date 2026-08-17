@@ -11,16 +11,15 @@ use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::OwnedRange;
 
 use super::operation_capabilities::CapabilityKey;
-use super::operation_preparation::ResourceLock;
 use super::storage_port::StorageRoute;
 use super::{
-    NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
-    ObservabilityState, ObservabilityStats, SetReservation,
+    NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespaceOperationLock,
+    NamespacePolicy, NamespaceRegistry, ObservabilityState, ObservabilityStats, SetReservation,
 };
 
 /// Namespace locking capability used during operation preparation.
 pub(super) trait NamespaceCoordinationCapability: Send + Sync {
-    fn operation_lock(&self, namespace_id: u64) -> Option<ResourceLock>;
+    fn operation_lock(&self, namespace_id: u64) -> Option<NamespaceOperationLock>;
     fn lifecycle_lock(&self) -> Result<Arc<AsyncMutex<()>>, NamespaceError>;
 }
 
@@ -97,7 +96,7 @@ pub(super) const OBSERVABILITY_PORT: CapabilityKey<ObservabilityCapabilityHandle
     CapabilityKey::new("openkache.observability.port");
 
 impl NamespaceCoordinationCapability for Mutex<NamespaceRegistry> {
-    fn operation_lock(&self, namespace_id: u64) -> Option<ResourceLock> {
+    fn operation_lock(&self, namespace_id: u64) -> Option<NamespaceOperationLock> {
         self.lock().ok()?.operation_lock(namespace_id)
     }
 
