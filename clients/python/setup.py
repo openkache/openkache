@@ -30,10 +30,18 @@ if not CORE_ROOT.is_dir():
     CORE_ROOT = PACKAGE_ROOT / "core"
 CLIENTS_ROOT = PUBLIC_ROOT / "clients"
 CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
+CLIENT_GENERATOR_ROOT = CLIENTS_ROOT / "generator"
 CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
+CLIENT_GENERATOR_INPUTS = (
+    "operation_client_projection.ts",
+    "operation_models.ts",
+    "operation_plans.ts",
+    "operation_results.ts",
+)
 if not CLIENT_GENERATOR.is_file():
     CLIENTS_ROOT = PACKAGE_ROOT / "clients"
     CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
+    CLIENT_GENERATOR_ROOT = CLIENTS_ROOT / "generator"
     CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
 
 
@@ -48,10 +56,10 @@ def native_library_name() -> str:
 def generate_smithy_contract() -> None:
     """Generate Python contracts from the scoped wire and client Smithy models."""
 
-    if not CLIENT_GENERATOR.is_file():
+    if not CLIENT_GENERATOR.is_file() or not CLIENT_GENERATOR_ROOT.is_dir():
         raise RuntimeError(
             "Python package builds require the bundled clients/generate.ts, "
-            "clients/model, and protocol/model Smithy sources."
+            "clients/generator, clients/model, and protocol/model Smithy sources."
         )
     environment = os.environ.copy()
     environment["OPENKACHE_GENERATION_TARGET"] = "python"
@@ -172,6 +180,16 @@ class sdist(_sdist):
         shutil.copytree(PROTOCOL_ROOT, release_root / "protocol", ignore=source_ignore)
         (release_root / "clients").mkdir(parents=True, exist_ok=True)
         shutil.copy2(CLIENT_GENERATOR, release_root / "clients" / "generate.ts")
+        shutil.copytree(
+            CLIENT_GENERATOR_ROOT,
+            release_root / "clients" / "generator",
+            ignore=source_ignore,
+        )
+        for generator_input in CLIENT_GENERATOR_INPUTS:
+            shutil.copy2(
+                CLIENTS_ROOT / generator_input,
+                release_root / "clients" / generator_input,
+            )
         shutil.copytree(
             CLIENT_MODEL_ROOT,
             release_root / "clients" / "model",

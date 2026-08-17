@@ -105,10 +105,12 @@ aligned without hand-maintained constants. The wire model in
 [`../protocol/model/openkache.smithy`](../protocol/model/openkache.smithy)
 contains only values the server must understand; the client model in
 [`model/openkache.smithy`](model/openkache.smithy) owns adapter defaults, API
-shapes, native ABI identifiers, and value-format metadata. The client entry
-point [`generate.ts`](generate.ts) owns client extraction/rendering and
-combines them for SDK outputs; its only protocol dependency is the wire
-contract module [`../protocol/wire.ts`](../protocol/wire.ts).
+shapes, native ABI identifiers, and value-format metadata. The stable
+[`generate.ts`](generate.ts) entry point selects outputs and performs atomic
+writes. Modules under [`generator/`](generator/) separately own Smithy
+extraction, shared contract types, literal rendering, and language-specific
+renderers. This keeps adding or changing one SDK renderer independent of the
+other language backends while preserving one generated contract.
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
 See each implemented package README for accepted configuration fields, platform

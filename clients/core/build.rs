@@ -99,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let generator = client_directory.join("generate.ts");
+    let generator_sources = client_directory.join("generator");
+    let operation_projection = client_directory.join("operation_client_projection.ts");
     let protocol_wire_generator = client_directory.join("../protocol/wire.ts");
     let client_model = client_directory.join("model");
     let protocol_model = client_directory.join("../protocol/model");
@@ -108,6 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .join("client_contract.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
+    println!("cargo:rerun-if-changed={}", generator_sources.display());
+    println!("cargo:rerun-if-changed={}", operation_projection.display());
     println!(
         "cargo:rerun-if-changed={}",
         protocol_wire_generator.display()

@@ -6,6 +6,9 @@ filegroup(
     name = "client_generator",
     srcs = [
         "generate.ts",
+    ] + glob([
+        "generator/*.ts",
+    ]) + [
         "operation_client_projection.ts",
         "operation_models.ts",
         "operation_plans.ts",
