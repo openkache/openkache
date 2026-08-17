@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::future::Future;
 
-use openkache_protocol::{Opcode, ResponseSegment};
+use openkache_protocol::ResponseSegment;
 
 use super::super::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
@@ -21,13 +21,13 @@ use super::operation_compatibility_services::{
     DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
     SetState, StatsState, SyncState, storage_write_options,
 };
-use super::operation_contract::{OperationStatus, telemetry_operation};
+use super::operation_contract::{OperationId, OperationStatus, telemetry_operation_id};
 use super::operation_outcome::{
     OperationBody, OperationError, OperationOutcome, OperationSuccessStatus,
 };
 use super::storage_port::{
-    CompatibilityStorageAddressPort, StorageAdministrationPort, StorageError, StorageMutation,
-    StorageValue, StorageWriteOutcome,
+    PreparedStorageAddress, StorageAdministrationPort, StorageDataPort, StorageError,
+    StorageMutation, StorageScope, StorageValue, StorageWriteOutcome,
 };
 use super::{NamespaceError, NamespaceOpenResult};
 
@@ -87,6 +87,15 @@ fn domain_storage(error: StorageError) -> OperationOutcome {
     OperationOutcome::error(storage_error(error))
 }
 
+fn item_address<S: StorageDataPort>(
+    storage: &S,
+    namespace_id: u64,
+    item_id: &[u8],
+) -> PreparedStorageAddress {
+    let namespace_scope = namespace_id.to_be_bytes();
+    storage.prepare_address(StorageScope::from_borrowed(&namespace_scope), item_id)
+}
+
 /// Converts the storage backend's error vocabulary at the API-owned boundary.
 ///
 /// The generic operation outcome carries only a generated semantic status and bytes;
@@ -134,7 +143,7 @@ pub(super) fn mutation_domain_error(is_set: bool, error: StorageError) -> Operat
     }
 }
 
-pub(super) fn get<'a, S: CompatibilityStorageAddressPort>(
+pub(super) fn get<'a, S: StorageDataPort>(
     state: &'a GetState<S>,
     decoded: GetInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
@@ -147,12 +156,10 @@ pub(super) fn get<'a, S: CompatibilityStorageAddressPort>(
             );
         }
         let item_id = decoded.item_id;
-        let address = state
-            .storage
-            .prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        let address = item_address(&state.storage, namespace_id, item_id.as_bytes());
         match state
             .storage
-            .get(telemetry_operation(Opcode::Get), address)
+            .get(telemetry_operation_id(OperationId::Get), address)
             .await
         {
             Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value),
@@ -212,7 +219,7 @@ pub(super) fn namespace_update_policy<'a>(
     }
 }
 
-pub(super) fn namespace_delete<'a, S: CompatibilityStorageAddressPort>(
+pub(super) fn namespace_delete<'a, S: StorageDataPort>(
     state: &'a NamespaceDeleteState<S>,
     decoded: NamespaceDeleteInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
@@ -230,8 +237,11 @@ pub(super) fn namespace_delete<'a, S: CompatibilityStorageAddressPort>(
             }
         };
         for item_id in tracked_items {
-            let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
-            match cache.get(telemetry_operation(Opcode::Get), address).await {
+            let address = item_address(cache, namespace_id, item_id.as_bytes());
+            match cache
+                .get(telemetry_operation_id(OperationId::Get), address)
+                .await
+            {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     let pruned = state
@@ -256,7 +266,7 @@ pub(super) fn namespace_delete<'a, S: CompatibilityStorageAddressPort>(
     }
 }
 
-pub(super) fn set<'a, S: CompatibilityStorageAddressPort>(
+pub(super) fn set<'a, S: StorageDataPort>(
     state: &'a SetState<S>,
     decoded: SetInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
@@ -284,7 +294,7 @@ pub(super) fn set<'a, S: CompatibilityStorageAddressPort>(
         };
         let item_id = decoded.item_id;
         let value = decoded.value;
-        let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        let address = item_address(cache, namespace_id, item_id.as_bytes());
         let route = cache.route_for(&address);
         let reservation = match state.membership.reserve_item(namespace_id, item_id, route) {
             Ok(reservation) => reservation,
@@ -294,7 +304,7 @@ pub(super) fn set<'a, S: CompatibilityStorageAddressPort>(
         };
         let outcome = cache
             .set(
-                telemetry_operation(Opcode::Set),
+                telemetry_operation_id(OperationId::Set),
                 address,
                 StorageValue::from_owned_range(value),
                 storage_options,
@@ -337,7 +347,7 @@ pub(super) fn set<'a, S: CompatibilityStorageAddressPort>(
     }
 }
 
-pub(super) fn delete<'a, S: CompatibilityStorageAddressPort>(
+pub(super) fn delete<'a, S: StorageDataPort>(
     state: &'a DeleteState<S>,
     decoded: GetInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
@@ -352,13 +362,13 @@ pub(super) fn delete<'a, S: CompatibilityStorageAddressPort>(
             );
         }
         let item_id = decoded.item_id;
-        let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        let address = item_address(cache, namespace_id, item_id.as_bytes());
         let route = cache.route_for(&address);
         if let Err(status) = state.membership.reserve_worker(namespace_id, route) {
             return namespace_error(status, b"namespace metadata is unavailable");
         }
         let mutation = cache
-            .delete(telemetry_operation(Opcode::Delete), address)
+            .delete(telemetry_operation_id(OperationId::Delete), address)
             .await;
         match mutation {
             Ok(mutation) => {
@@ -398,7 +408,10 @@ pub(super) fn stats<'a, S: StorageAdministrationPort>(
                 b"namespace does not exist",
             );
         }
-        match cache.stats(telemetry_operation(Opcode::Stats)).await {
+        match cache
+            .stats(telemetry_operation_id(OperationId::Stats))
+            .await
+        {
             Ok(workers) => {
                 let worker_bytes = workers.iter().map(String::len).sum::<usize>();
                 let mut payload = String::with_capacity(32 + worker_bytes);
@@ -457,7 +470,10 @@ pub(super) fn sync<'a, S: StorageAdministrationPort>(
             }
         };
         match cache
-            .sync_routes(&dirty_workers, telemetry_operation(Opcode::Sync))
+            .sync_routes(
+                &dirty_workers,
+                telemetry_operation_id(OperationId::Sync),
+            )
             .await
         {
             Ok(()) => {

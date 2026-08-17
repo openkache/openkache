@@ -8,6 +8,7 @@ use crate::StorageKey;
 
 pub(crate) const DOMAIN_V2_CONTEXT: &str = "OpenKache StorageKey DomainV2 root";
 pub(crate) const INTERNAL_STORAGE_DOMAIN_ID: u64 = 0;
+pub(crate) const SCOPED_STORAGE_ADDRESS_TAG: &[u8] = b"\xffSK\x01";
 const STORAGE_KEY_DIGEST_START: usize = 8;
 
 pub(crate) fn derive_domain_key(server_secret: &[u8; 32]) -> [u8; 32] {
@@ -18,19 +19,7 @@ pub(crate) fn derive_storage_key(
     domain_key: &[u8; 32],
     identity: &[u8; crate::types::STORAGE_KEY_BYTES],
 ) -> StorageKey {
-    derive_storage_key_for_domain(domain_key, INTERNAL_STORAGE_DOMAIN_ID, identity)
-}
-
-/// Derives a storage key for one opaque identity within a storage domain.
-///
-/// The domain prefix remains recoverable while the keyed digest binds the
-/// complete identity without allocating a concatenated preimage.
-pub(crate) fn derive_storage_key_for_domain(
-    domain_key: &[u8; 32],
-    storage_domain_id: u64,
-    identity: &[u8; crate::types::STORAGE_KEY_BYTES],
-) -> StorageKey {
-    let domain_bytes = storage_domain_id.to_be_bytes();
+    let domain_bytes = INTERNAL_STORAGE_DOMAIN_ID.to_be_bytes();
     let mut hasher = blake3::Hasher::new_keyed(domain_key);
     hasher.update(&domain_bytes);
     hasher.update(identity);
@@ -41,4 +30,23 @@ pub(crate) fn derive_storage_key_for_domain(
     bytes[STORAGE_KEY_DIGEST_START..]
         .copy_from_slice(&digest.as_bytes()[..crate::types::STORAGE_KEY_BYTES - 8]);
     StorageKey::new(bytes)
+}
+
+/// Derives one fixed-width key from an unambiguous opaque scope/identity tuple.
+///
+/// The inputs are streamed directly into the keyed hash so callers do not
+/// need to allocate a joined identity. Length prefixes keep arbitrary byte
+/// pairs distinct without exposing an API-specific identifier shape.
+pub(crate) fn derive_scoped_storage_key(
+    domain_key: &[u8; 32],
+    scope: &[u8],
+    identity: &[u8],
+) -> StorageKey {
+    let mut hasher = blake3::Hasher::new_keyed(domain_key);
+    hasher.update(SCOPED_STORAGE_ADDRESS_TAG);
+    hasher.update(&(scope.len() as u64).to_be_bytes());
+    hasher.update(scope);
+    hasher.update(&(identity.len() as u64).to_be_bytes());
+    hasher.update(identity);
+    StorageKey::new(*hasher.finalize().as_bytes())
 }

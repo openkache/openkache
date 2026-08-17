@@ -8,37 +8,18 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
-
 use crate::observability::{NetworkWorkerId, Operation};
 use crate::types::{StoredItemBytes, StoredItemValue};
 use crate::{KvError, Result, SetOutcome, StorageKey};
 
 use super::RequestAdmissionError;
 use super::keyed_storage;
+use super::storage_keys;
 use super::storage_port::{
     PreparedStorageAddress, StorageError, StorageMutation, StorageReadValue, StorageResult,
     StorageRoute, StorageScope, StorageValue, StorageWriteOptions, StorageWriteOutcome,
 };
 use super::{ThreadedKvkache, WorkerControlRequest, WorkerRequest, WorkerResponse};
-
-const GENERIC_STORAGE_ADDRESS_DOMAIN: &[u8] = b"openkache/generic-storage-address/v1\0";
-
-fn opaque_storage_key_for_scope(scope: &StorageScope<'_>, identity: &[u8]) -> StorageKey {
-    let mut hasher = Sha256::new();
-    hasher.update(GENERIC_STORAGE_ADDRESS_DOMAIN);
-    // Keep the generic tuple unambiguous without allocating or changing the
-    // fixed-width compact storage key.  Length prefixes prevent `(ab, c)` from
-    // colliding with `(a, bc)` while the digest remains exactly 32 bytes.
-    hasher.update((scope.as_bytes().len() as u64).to_be_bytes());
-    hasher.update(scope.as_bytes());
-    hasher.update((identity.len() as u64).to_be_bytes());
-    hasher.update(identity);
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; crate::types::STORAGE_KEY_BYTES];
-    bytes.copy_from_slice(&digest[..crate::types::STORAGE_KEY_BYTES]);
-    StorageKey::new(bytes)
-}
 
 pub(crate) fn into_storage_read_value(value: StoredItemValue) -> StorageReadValue {
     match value.bytes {
@@ -129,15 +110,6 @@ impl NetworkWorkerCache {
         identity: &[u8; crate::types::STORAGE_KEY_BYTES],
     ) -> StorageKey {
         self.cache.storage_key_for_identity(identity)
-    }
-
-    pub(crate) fn storage_key_for_domain_identity(
-        &self,
-        storage_domain_id: u64,
-        identity: &[u8; crate::types::STORAGE_KEY_BYTES],
-    ) -> StorageKey {
-        self.cache
-            .storage_key_for_domain_identity(storage_domain_id, identity)
     }
 
     pub(crate) async fn get_storage_key(
@@ -244,8 +216,8 @@ impl NetworkWorkerCache {
         operation: Operation,
         prepared: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<Option<StorageReadValue>>> + '_ {
+        let worker = prepared.route().worker();
         let storage_key = StorageKey::new(*prepared.as_bytes());
-        let worker = self.cache.owner(&storage_key);
         let pending = self.cache.try_network_request(
             worker,
             operation,
@@ -273,9 +245,9 @@ impl NetworkWorkerCache {
         value: StorageValue,
         options: StorageWriteOptions,
     ) -> impl Future<Output = StorageResult<StorageWriteOutcome>> + '_ {
+        let worker = prepared.route().worker();
         let storage_key = StorageKey::new(*prepared.as_bytes());
         let value = StoredItemValue::from_owned_range(value.into_owned_range());
-        let worker = self.cache.owner(&storage_key);
         let pending = self.cache.try_network_request(
             worker,
             operation,
@@ -305,8 +277,8 @@ impl NetworkWorkerCache {
         operation: Operation,
         prepared: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
+        let worker = prepared.route().worker();
         let storage_key = StorageKey::new(*prepared.as_bytes());
-        let worker = self.cache.owner(&storage_key);
         let pending = self.cache.try_network_request(
             worker,
             operation,
@@ -337,17 +309,11 @@ impl NetworkWorkerCache {
         scope: StorageScope<'_>,
         identity: &[u8],
     ) -> PreparedStorageAddress {
-        let key = opaque_storage_key_for_scope(&scope, identity);
-        let route = StorageRoute::from_worker(self.worker_for(&key));
-        PreparedStorageAddress::new(key.into_bytes(), route)
-    }
-
-    pub(crate) fn prepare_compatibility_address(
-        &self,
-        storage_domain_id: u64,
-        identity: &[u8; crate::types::STORAGE_KEY_BYTES],
-    ) -> PreparedStorageAddress {
-        let key = self.storage_key_for_domain_identity(storage_domain_id, identity);
+        let key = storage_keys::derive_scoped_storage_key(
+            &self.cache.storage_domain_key,
+            scope.as_bytes(),
+            identity,
+        );
         let route = StorageRoute::from_worker(self.worker_for(&key));
         PreparedStorageAddress::new(key.into_bytes(), route)
     }

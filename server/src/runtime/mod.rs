@@ -27,7 +27,8 @@ pub(crate) use network_cache::NetworkWorkerCache;
 pub(crate) use port::{completion, storage_port};
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{
-    DOMAIN_V2_CONTEXT, derive_domain_key, derive_storage_key, derive_storage_key_for_domain,
+    DOMAIN_V2_CONTEXT, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key, derive_scoped_storage_key,
+    derive_storage_key,
 };
 pub(crate) use storage_port::*;
 #[allow(unused_imports)]
@@ -524,19 +525,6 @@ impl ThreadedKvkache {
         identity: &[u8; crate::types::STORAGE_KEY_BYTES],
     ) -> StorageKey {
         storage_keys::derive_storage_key(&self.storage_domain_key, identity)
-    }
-
-    /// Derives a storage key in one opaque storage domain.
-    pub(crate) fn storage_key_for_domain_identity(
-        &self,
-        storage_domain_id: u64,
-        identity: &[u8; crate::types::STORAGE_KEY_BYTES],
-    ) -> StorageKey {
-        storage_keys::derive_storage_key_for_domain(
-            &self.storage_domain_key,
-            storage_domain_id,
-            identity,
-        )
     }
 
     /// Sends one worker request using a reusable completion slot and bounded timeouts.

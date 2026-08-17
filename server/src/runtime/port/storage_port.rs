@@ -7,32 +7,20 @@ use openkache_protocol::{OwnedRange, StableBytes};
 
 pub(crate) use crate::types::StorageWriteOptions;
 
-/// Opaque API-owned storage scope. Its bytes are never interpreted by the
-/// storage port.
+/// Borrowed API-owned storage scope whose bytes remain opaque to the port.
 ///
-/// Borrowed scopes are the default for request-local domain identifiers. The
-/// owned variant remains available when a scope must outlive its source
-/// buffer.
-#[derive(Debug)]
-pub(crate) enum StorageScope<'a> {
-    Borrowed(&'a [u8]),
-    Owned(OwnedRange),
-}
+/// Address preparation is synchronous, so request-local scope bytes never
+/// need an allocation or ownership transfer.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StorageScope<'a>(&'a [u8]);
 
 impl<'a> StorageScope<'a> {
-    pub(crate) fn from_owned(bytes: Vec<u8>) -> Self {
-        Self::Owned(OwnedRange::whole(bytes))
-    }
-
     pub(crate) const fn from_borrowed(bytes: &'a [u8]) -> Self {
-        Self::Borrowed(bytes)
+        Self(bytes)
     }
 
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(bytes) => bytes,
-            Self::Owned(bytes) => bytes.as_slice(),
-        }
+    pub(crate) const fn as_bytes(self) -> &'a [u8] {
+        self.0
     }
 }
 
