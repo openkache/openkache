@@ -5,6 +5,7 @@
 //! lifecycle stays in sibling runtime modules; generic address hashing lives
 //! here at the adapter boundary.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -13,11 +14,13 @@ use crate::observability::{NetworkWorkerId, Operation};
 use crate::types::{StoredItemBytes, StoredItemValue};
 use crate::{KvError, Result, SetOutcome, StorageKey};
 
+use super::RequestAdmissionError;
+use super::keyed_storage;
 use super::storage_port::{
     PreparedStorageAddress, StorageError, StorageMutation, StorageReadValue, StorageResult,
     StorageRoute, StorageScope, StorageValue, StorageWriteOptions, StorageWriteOutcome,
 };
-use super::ThreadedKvkache;
+use super::{ThreadedKvkache, WorkerControlRequest, WorkerRequest, WorkerResponse};
 
 const GENERIC_STORAGE_ADDRESS_DOMAIN: &[u8] = b"openkache/generic-storage-address/v1\0";
 
@@ -82,6 +85,17 @@ impl From<KvError> for StorageError {
             KvError::Io(_) | KvError::InvalidConfig(_) | KvError::Usage(_) => {
                 Self::Backend(message)
             }
+        }
+    }
+}
+
+impl From<RequestAdmissionError> for StorageError {
+    fn from(error: RequestAdmissionError) -> Self {
+        match error {
+            RequestAdmissionError::QueueFull | RequestAdmissionError::CompletionFull => {
+                Self::Overloaded(error.to_string())
+            }
+            RequestAdmissionError::Disconnected => Self::Worker(error.to_string()),
         }
     }
 }
@@ -165,21 +179,52 @@ impl NetworkWorkerCache {
     }
 
     pub(crate) async fn stats(&self, operation: Operation) -> Result<Vec<String>> {
-        self.cache
-            .stats_async_with_requester(operation, Some(self.network_worker))
-            .await
+        let mut stats = Vec::with_capacity(self.cache.worker_count());
+        for worker in 0..self.cache.worker_count() {
+            let response = self
+                .cache
+                .try_network_request(worker, operation, self.network_worker, |response| {
+                    WorkerRequest::Control(WorkerControlRequest::Stats { response })
+                })?
+                .await?;
+            match response {
+                WorkerResponse::Control(super::WorkerControlResponse::Stats(worker_stats)) => {
+                    stats.push(format!("thread={worker} {worker_stats}"));
+                }
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected stats response: {response:?}"
+                    )));
+                }
+            }
+        }
+        Ok(stats)
     }
 
     pub(crate) async fn sync(&self, operation: Operation) -> Result<()> {
-        self.cache
-            .sync_async_with_requester(operation, Some(self.network_worker))
-            .await
+        let workers = 0..self.cache.worker_count();
+        for worker in workers {
+            self.sync_worker(worker, operation).await?;
+        }
+        Ok(())
     }
 
-    pub(crate) async fn sync_workers(&self, workers: &[usize], operation: Operation) -> Result<()> {
-        self.cache
-            .sync_workers_async_with_requester(workers, operation, Some(self.network_worker))
-            .await
+    async fn sync_worker(&self, worker: usize, operation: Operation) -> Result<()> {
+        if worker >= self.cache.worker_count() {
+            return Err(KvError::Worker(format!("unknown storage worker {worker}")));
+        }
+        match self
+            .cache
+            .try_network_request(worker, operation, self.network_worker, move |response| {
+                WorkerRequest::Control(WorkerControlRequest::Sync { response })
+            })?
+            .await?
+        {
+            WorkerResponse::Control(super::WorkerControlResponse::Synced) => Ok(()),
+            response => Err(KvError::Worker(format!(
+                "unexpected sync response: {response:?}"
+            ))),
+        }
     }
 
     pub(crate) async fn sync_routes(
@@ -187,72 +232,104 @@ impl NetworkWorkerCache {
         routes: &[StorageRoute],
         operation: Operation,
     ) -> Result<()> {
-        let workers = routes
-            .iter()
-            .map(|route| route.worker())
-            .collect::<Vec<_>>();
-        self.sync_workers(&workers, operation).await
+        for route in routes {
+            self.sync_worker(route.worker(), operation).await?;
+        }
+        Ok(())
     }
 
     /// Retrieves a value through the neutral storage adapter.
-    pub(crate) async fn storage_get(
+    pub(crate) fn storage_get(
         &self,
         operation: Operation,
         prepared: PreparedStorageAddress,
-    ) -> StorageResult<Option<StorageReadValue>> {
+    ) -> impl Future<Output = StorageResult<Option<StorageReadValue>>> + '_ {
         let storage_key = StorageKey::new(*prepared.as_bytes());
-        self.cache
-            .get_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
-            .await
-            .map(|value| value.map(into_storage_read_value))
-            .map_err(StorageError::from)
+        let worker = self.cache.owner(&storage_key);
+        let pending = self.cache.try_network_request(
+            worker,
+            operation,
+            self.network_worker,
+            move |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_storage::get(operation, response),
+            },
+        );
+        async move {
+            pending
+                .map_err(StorageError::from)?
+                .await
+                .and_then(|response| keyed_storage::value_response(response, "storage get"))
+                .map(|value| value.map(into_storage_read_value))
+                .map_err(StorageError::from)
+        }
     }
 
     /// Stores a value through the neutral storage adapter.
-    pub(crate) async fn storage_set(
+    pub(crate) fn storage_set(
         &self,
         operation: Operation,
         prepared: PreparedStorageAddress,
         value: StorageValue,
         options: StorageWriteOptions,
-    ) -> StorageResult<StorageWriteOutcome> {
+    ) -> impl Future<Output = StorageResult<StorageWriteOutcome>> + '_ {
         let storage_key = StorageKey::new(*prepared.as_bytes());
         let value = StoredItemValue::from_owned_range(value.into_owned_range());
-        self.cache
-            .set_storage_key_with_requester(
+        let worker = self.cache.owner(&storage_key);
+        let pending = self.cache.try_network_request(
+            worker,
+            operation,
+            self.network_worker,
+            move |response| WorkerRequest::Keyed {
                 storage_key,
-                value,
-                options,
-                operation,
-                Some(self.network_worker),
-            )
-            .await
-            .map(|outcome| match outcome {
-                SetOutcome::Created => StorageWriteOutcome::Created,
-                SetOutcome::Replaced => StorageWriteOutcome::Replaced,
-                SetOutcome::NotStored => StorageWriteOutcome::Unchanged,
-            })
-            .map_err(StorageError::from)
+                command: keyed_storage::set(operation, value, options, response),
+            },
+        );
+        async move {
+            pending
+                .map_err(StorageError::from)?
+                .await
+                .and_then(|response| keyed_storage::set_response(response, "storage set"))
+                .map(|outcome| match outcome {
+                    SetOutcome::Created => StorageWriteOutcome::Created,
+                    SetOutcome::Replaced => StorageWriteOutcome::Replaced,
+                    SetOutcome::NotStored => StorageWriteOutcome::Unchanged,
+                })
+                .map_err(StorageError::from)
+        }
     }
 
     /// Deletes a value through the neutral storage adapter.
-    pub(crate) async fn storage_delete(
+    pub(crate) fn storage_delete(
         &self,
         operation: Operation,
         prepared: PreparedStorageAddress,
-    ) -> StorageResult<StorageMutation> {
+    ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
         let storage_key = StorageKey::new(*prepared.as_bytes());
-        self.cache
-            .delete_storage_key_with_requester(storage_key, operation, Some(self.network_worker))
-            .await
-            .map(|deleted| {
-                if deleted {
-                    StorageMutation::Applied
-                } else {
-                    StorageMutation::Unchanged
-                }
-            })
-            .map_err(StorageError::from)
+        let worker = self.cache.owner(&storage_key);
+        let pending = self.cache.try_network_request(
+            worker,
+            operation,
+            self.network_worker,
+            move |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_storage::delete(operation, response),
+            },
+        );
+        async move {
+            pending
+                .map_err(StorageError::from)?
+                .await
+                .and_then(|response| keyed_storage::delete_response(response, "storage delete"))
+                .map(|deleted| {
+                    if deleted {
+                        StorageMutation::Applied
+                    } else {
+                        StorageMutation::Unchanged
+                    }
+                })
+                .map_err(StorageError::from)
+        }
     }
 
     pub(crate) fn prepare_address(
