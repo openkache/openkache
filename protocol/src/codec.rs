@@ -182,10 +182,15 @@ pub fn validate_field_codecs_with_nested_widths(
             b"operation contract names an unknown nested codec",
         ))?;
     }
-    for codec in codecs {
+    for (index, codec) in codecs.iter().enumerate() {
         let kind =
             resolve(codec).ok_or(CodecError(b"operation contract names an unknown codec"))?;
-        validate_kind(kind, payload, enum_values, union_tags)?;
+        // Recursive validation constructs the first container cursor below.
+        // Avoid scanning the same outer list, map, or union twice while still
+        // validating any additional top-level codecs independently.
+        if index > 0 || nested_codecs.is_empty() {
+            validate_kind(kind, payload, enum_values, union_tags)?;
+        }
     }
     let Some(codec) = codecs.first() else {
         // A structure can expose nested operation fields without having one
