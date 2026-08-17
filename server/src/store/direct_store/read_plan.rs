@@ -294,8 +294,7 @@ impl PreparedReadCandidate {
                     Ok(StoredItemValue::from_segment(segment, range))
                 }
                 ObservedValue::Encoded(encoded) => {
-                    let bytes = super::value_reads::read_ram_value(encoded, &backing)?;
-                    Ok(StoredItemValue::new(bytes))
+                    super::value_reads::read_ram_value(encoded, &backing)
                 }
                 ObservedValue::OwnedInline(_) => Err(KvError::Worker(
                     "RAM keyed read has an incompatible owned inline snapshot".into(),

@@ -4,6 +4,7 @@
 //! They deliberately do not know about API operations, protocol framing, or
 //! capacity eviction policy.
 
+use crate::types::StoredItemValue;
 use crate::{KvError, Result, StorageKey};
 
 use super::policy::ttl_deadline;
@@ -55,7 +56,7 @@ pub(super) fn try_replace_value_in_place(
     lane: usize,
     previous_location: TableLocation,
     storage_key: StorageKey,
-    value: &[u8],
+    value: &mut StoredItemValue,
     ttl_ms: Option<u64>,
     eviction_protected: bool,
     large: bool,
@@ -179,7 +180,7 @@ pub(super) fn try_replace_value_in_place(
 pub(super) fn stage_mutable_value(
     generation: &mut MutableGeneration,
     lane: usize,
-    value: &[u8],
+    value: &mut StoredItemValue,
     large: bool,
     blob: bool,
 ) -> Result<Option<StagedMutableValue>> {
@@ -216,7 +217,7 @@ pub(super) fn stage_mutable_value(
         }));
     }
     Ok(Some(StagedMutableValue {
-        encoded: encode_inline_value(value),
+        encoded: encode_inline_value(value.as_ref()),
         mutable_value: None,
     }))
 }

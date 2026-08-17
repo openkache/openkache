@@ -1,5 +1,6 @@
 //! Mutable value placement and table publication.
 
+use crate::types::StoredItemValue;
 use crate::{KvError, Result, StorageKey};
 
 use super::policy::ttl_deadline;
@@ -18,7 +19,7 @@ impl Kvkache {
     pub(super) fn try_append_value(
         &mut self,
         storage_key: StorageKey,
-        value: &[u8],
+        value: &mut StoredItemValue,
         ttl_ms: Option<u64>,
         eviction_protected: bool,
         previous_location: Option<TableLocation>,

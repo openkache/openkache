@@ -1,5 +1,6 @@
 //! Worker-local slot-owned Blob staging with seal-time packing.
 
+use crate::types::{RetainedItemValue, StoredItemValue};
 use crate::*;
 
 pub(crate) fn encode_blob_handle(handle: BlobHandle) -> Vec<u8> {
@@ -43,7 +44,7 @@ impl PackedBlob {
 #[derive(Debug)]
 pub(crate) struct BlobArena {
     limit: usize,
-    payload_slots: Vec<Option<Vec<u8>>>,
+    payload_slots: Vec<Option<RetainedItemValue>>,
     free_slots: Vec<u32>,
     live_bytes: usize,
 }
@@ -58,7 +59,9 @@ impl BlobArena {
         }
     }
 
-    pub(crate) fn insert(&mut self, value: &[u8]) -> Result<BlobHandle> {
+    pub(crate) fn insert(&mut self, value: &mut StoredItemValue) -> Result<BlobHandle> {
+        let value_len = u32::try_from(value.len())
+            .map_err(|_| KvError::Usage("mutable Blob value length does not fit in u32".into()))?;
         let live_bytes = self
             .live_bytes
             .checked_add(value.len())
@@ -70,21 +73,24 @@ impl BlobArena {
             });
         }
         let slot = if let Some(slot) = self.free_slots.pop() {
-            self.payload_slots[slot as usize] = Some(value.to_vec());
+            self.payload_slots[slot as usize] = Some(RetainedItemValue::share(value));
             slot
         } else {
             let slot = u32::try_from(self.payload_slots.len())
                 .map_err(|_| KvError::Usage("mutable Blob slot does not fit in u32".into()))?;
-            self.payload_slots.push(Some(value.to_vec()));
+            self.payload_slots
+                .push(Some(RetainedItemValue::share(value)));
             slot
         };
-        let value_len = u32::try_from(value.len())
-            .map_err(|_| KvError::Usage("mutable Blob value length does not fit in u32".into()))?;
         self.live_bytes = live_bytes;
         Ok(BlobHandle { slot, value_len })
     }
 
-    pub(crate) fn replace(&mut self, previous: BlobHandle, value: &[u8]) -> Result<BlobHandle> {
+    pub(crate) fn replace(
+        &mut self,
+        previous: BlobHandle,
+        value: &mut StoredItemValue,
+    ) -> Result<BlobHandle> {
         let value_len = u32::try_from(value.len())
             .map_err(|_| KvError::Usage("mutable Blob value length does not fit in u32".into()))?;
         let previous_value = self
@@ -107,7 +113,7 @@ impl BlobArena {
                     as u64,
             });
         }
-        *previous_value = value.to_vec();
+        *previous_value = RetainedItemValue::share(value);
         self.live_bytes = live_bytes;
         Ok(BlobHandle {
             slot: previous.slot,
@@ -144,11 +150,12 @@ impl BlobArena {
         true
     }
 
-    pub(crate) fn get(&self, handle: BlobHandle) -> Option<&[u8]> {
+    pub(crate) fn get_value(&self, handle: BlobHandle) -> Option<StoredItemValue> {
         self.payload_slots
             .get(handle.slot as usize)?
-            .as_deref()
+            .as_ref()
             .filter(|value| value.len() == handle.value_len as usize)
+            .map(RetainedItemValue::to_stored_value)
     }
 
     pub(crate) fn pack(&self) -> Result<PackedBlob> {
@@ -158,7 +165,7 @@ impl BlobArena {
             let Some(value) = value else { continue };
             let offset = u32::try_from(bytes.len())
                 .map_err(|_| KvError::Usage("packed Blob offset does not fit in u32".into()))?;
-            bytes.extend_from_slice(value);
+            bytes.extend_from_slice(value.as_slice());
             offsets[slot] = Some(offset);
         }
         Ok(PackedBlob { bytes, offsets })

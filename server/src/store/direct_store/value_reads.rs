@@ -54,7 +54,7 @@ pub(super) async fn read_owned_extent(
 pub(super) fn read_mutable_value(
     encoded: Vec<u8>,
     generation: &MutableGeneration,
-) -> Result<Vec<u8>> {
+) -> Result<StoredItemValue> {
     read_arena_value(
         encoded,
         &generation.blob_arena,
@@ -70,30 +70,31 @@ pub(super) fn read_arena_value(
     large_value_arena: &BlobArena,
     invalid_blob: &'static str,
     invalid_large_value: &'static str,
-) -> Result<Vec<u8>> {
+) -> Result<StoredItemValue> {
     match decode_stored_value(&encoded)? {
         StoredValue::Inline(_) => {
             remove_stored_value_tag(&mut encoded);
-            Ok(encoded)
+            Ok(StoredItemValue::new(encoded))
         }
         StoredValue::Blob(blob_ref) => blob_arena
-            .get(BlobHandle {
+            .get_value(BlobHandle {
                 slot: blob_ref.value_offset,
                 value_len: blob_ref.value_len,
             })
-            .map(ToOwned::to_owned)
             .ok_or_else(|| KvError::Worker(invalid_blob.into())),
         StoredValue::Large(value_ref) => large_value_arena
-            .get(BlobHandle {
+            .get_value(BlobHandle {
                 slot: value_ref.value_offset,
                 value_len: value_ref.value_len,
             })
-            .map(ToOwned::to_owned)
             .ok_or_else(|| KvError::Worker(invalid_large_value.into())),
     }
 }
 
-pub(super) fn read_ram_value(encoded: Vec<u8>, backing: &super::RamBacking) -> Result<Vec<u8>> {
+pub(super) fn read_ram_value(
+    encoded: Vec<u8>,
+    backing: &super::RamBacking,
+) -> Result<StoredItemValue> {
     read_arena_value(
         encoded,
         &backing.blob_arena,
