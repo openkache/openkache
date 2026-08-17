@@ -7,8 +7,8 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use super::operation_capabilities::CapabilityKey;
 use super::NetworkWorkerCache;
+use super::operation_capabilities::CapabilityKey;
 
 use super::super::observability::Operation;
 #[allow(unused_imports)]
@@ -37,38 +37,36 @@ impl StoragePort {
         Self { backend }
     }
 
-    /// Retrieves a value using the caller's operation attribution.
+    /// Submits a read and returns its allocation-free completion future.
     #[allow(dead_code)]
-    pub(crate) async fn get(
+    pub(crate) fn get(
         &self,
         operation: Operation,
         address: PreparedStorageAddress,
-    ) -> StorageResult<Option<StorageReadValue>> {
-        self.backend.storage_get(operation, address).await
+    ) -> impl Future<Output = StorageResult<Option<StorageReadValue>>> + '_ {
+        self.backend.storage_get(operation, address)
     }
 
-    /// Stores a value using the caller's operation attribution.
+    /// Moves a value into a write and returns its allocation-free completion future.
     #[allow(dead_code)]
-    pub(crate) async fn set(
+    pub(crate) fn set(
         &self,
         operation: Operation,
         address: PreparedStorageAddress,
         value: StorageValue,
         options: StorageWriteOptions,
-    ) -> StorageResult<StorageWriteOutcome> {
-        self.backend
-            .storage_set(operation, address, value, options)
-            .await
+    ) -> impl Future<Output = StorageResult<StorageWriteOutcome>> + '_ {
+        self.backend.storage_set(operation, address, value, options)
     }
 
-    /// Deletes a value using the caller's operation attribution.
+    /// Submits a deletion and returns its allocation-free completion future.
     #[allow(dead_code)]
-    pub(crate) async fn delete(
+    pub(crate) fn delete(
         &self,
         operation: Operation,
         address: PreparedStorageAddress,
-    ) -> StorageResult<StorageMutation> {
-        self.backend.storage_delete(operation, address).await
+    ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
+        self.backend.storage_delete(operation, address)
     }
 }
 
@@ -76,6 +74,7 @@ impl StoragePort {
 ///
 /// Production uses [`StoragePort`] directly. Alternate backends retain exact
 /// future types, avoiding request-path type erasure and heap allocation.
+/// Calls submit work before returning; their futures only observe completion.
 #[allow(dead_code)]
 pub(crate) trait StorageDataPort: Send + Sync {
     fn max_item_bytes(&self) -> usize;

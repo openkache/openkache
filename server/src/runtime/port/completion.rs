@@ -353,21 +353,28 @@ impl<T> CompletionSlab<T> {
         }
     }
 
+    pub(in crate::runtime) fn try_register(
+        &self,
+    ) -> Option<(CompletionSender<T>, CompletionReceiver<'_, T>)> {
+        let id = self.pool.activate()?;
+        Some((
+            CompletionSender {
+                storage: SenderStorage::Indexed {
+                    pool: self.pool.clone(),
+                    id,
+                },
+                finished: false,
+            },
+            CompletionReceiver {
+                slab: self,
+                storage: Some(ReceiverStorage::Indexed(id)),
+            },
+        ))
+    }
+
     pub(in crate::runtime) fn register(&self) -> (CompletionSender<T>, CompletionReceiver<'_, T>) {
-        if let Some(id) = self.pool.activate() {
-            return (
-                CompletionSender {
-                    storage: SenderStorage::Indexed {
-                        pool: self.pool.clone(),
-                        id,
-                    },
-                    finished: false,
-                },
-                CompletionReceiver {
-                    slab: self,
-                    storage: Some(ReceiverStorage::Indexed(id)),
-                },
-            );
+        if let Some(completion) = self.try_register() {
+            return completion;
         }
 
         let slot = Arc::new(AtomicSlot::default());
@@ -517,7 +524,9 @@ impl<T> CompletionReceiver<'_, T> {
     }
 
     #[cfg(feature = "network-runtime-kimojio")]
-    fn try_recv(&mut self) -> Result<Option<T>, CompletionDisconnected> {
+    pub(in crate::runtime) fn try_recv(
+        &mut self,
+    ) -> Result<Option<T>, CompletionDisconnected> {
         let (slot, generation) = self.slot();
         let Some(result) = slot.try_take(generation) else {
             return Ok(None);
