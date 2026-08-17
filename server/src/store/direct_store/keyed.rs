@@ -235,10 +235,7 @@ impl Kvkache {
                         (ReadPurpose::Value | ReadPurpose::CompareExchange, Some(item))
                             if !item.is_tombstone =>
                         {
-                            Some(
-                                read_mutable_value(item.value.clone(), generation)
-                                    .map(StoredItemValue::new),
-                            )
+                            Some(read_mutable_value(item.value.clone(), generation))
                         }
                         _ => None,
                     };
@@ -459,7 +456,7 @@ impl Kvkache {
         let previous_mutable_value = previous.and_then(|located| located.mutable_value);
         if let Some(replacement) = self.try_append_value(
             storage_key,
-            &value.bytes,
+            &mut value,
             options.ttl_ms(),
             options.eviction_protected(),
             previous_location,

@@ -262,7 +262,11 @@ impl StoredItemValue {
         }
     }
 
-    pub(crate) fn clone_for_visible_state(&mut self) -> Self {
+    /// Shares the current owner without copying its visible bytes.
+    ///
+    /// A unique direct-read lease is promoted to shared ownership once; all
+    /// other representations only clone an existing reference-counted owner.
+    pub(crate) fn clone_for_retention(&mut self) -> Self {
         if let StoredItemBytes::DirectRead { buffer, range } = &mut self.bytes {
             let range = range.clone();
             let buffer = Arc::new(
@@ -279,6 +283,10 @@ impl StoredItemValue {
             };
         }
         self.clone()
+    }
+
+    pub(crate) fn clone_for_visible_state(&mut self) -> Self {
+        self.clone_for_retention()
     }
 
     pub(crate) fn into_bytes(self) -> Vec<u8> {
@@ -319,6 +327,99 @@ impl Deref for StoredItemValue {
 impl AsRef<[u8]> for StoredItemValue {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
+    }
+}
+
+/// Compact shared ownership used while a value is retained by RAM storage.
+///
+/// The owner preserves the incoming allocation and logical range. Mutable
+/// replacement publishes a new owner, so readers can retain the previous
+/// bytes without copying them.
+pub(crate) enum RetainedItemValue {
+    Owned {
+        buffer: Arc<Vec<u8>>,
+        range: Range<usize>,
+    },
+    Segment {
+        segment: Arc<DirectIoBuffer>,
+        range: Range<usize>,
+    },
+    DirectRead {
+        buffer: Arc<DirectIoBufferLease>,
+        range: Range<usize>,
+    },
+}
+
+const _: () = assert!(std::mem::size_of::<Option<RetainedItemValue>>() <= 32);
+
+impl RetainedItemValue {
+    pub(crate) fn share(value: &mut StoredItemValue) -> Self {
+        if matches!(&value.bytes, StoredItemBytes::DirectRead { .. }) {
+            let _ = value.clone_for_retention();
+        }
+        match &value.bytes {
+            StoredItemBytes::Owned(buffer) => Self::Owned {
+                range: 0..buffer.len(),
+                buffer: Arc::clone(buffer),
+            },
+            StoredItemBytes::RangedOwned { buffer, range } => Self::Owned {
+                buffer: Arc::clone(buffer),
+                range: range.clone(),
+            },
+            StoredItemBytes::Segment { segment, range } => Self::Segment {
+                segment: Arc::clone(segment),
+                range: range.clone(),
+            },
+            StoredItemBytes::DirectRead { .. } => {
+                unreachable!("direct-read values become shared before retention")
+            }
+            StoredItemBytes::SharedDirectRead { buffer, range } => Self::DirectRead {
+                buffer: Arc::clone(buffer),
+                range: range.clone(),
+            },
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned { buffer, range } => &buffer[range.clone()],
+            Self::Segment { segment, range } => &segment[range.clone()],
+            Self::DirectRead { buffer, range } => &buffer[range.clone()],
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    pub(crate) fn to_stored_value(&self) -> StoredItemValue {
+        let bytes = match self {
+            Self::Owned { buffer, range } if range.start == 0 && range.end == buffer.len() => {
+                StoredItemBytes::Owned(Arc::clone(buffer))
+            }
+            Self::Owned { buffer, range } => StoredItemBytes::RangedOwned {
+                buffer: Arc::clone(buffer),
+                range: range.clone(),
+            },
+            Self::Segment { segment, range } => StoredItemBytes::Segment {
+                segment: Arc::clone(segment),
+                range: range.clone(),
+            },
+            Self::DirectRead { buffer, range } => StoredItemBytes::SharedDirectRead {
+                buffer: Arc::clone(buffer),
+                range: range.clone(),
+            },
+        };
+        StoredItemValue { bytes }
+    }
+}
+
+impl std::fmt::Debug for RetainedItemValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("RetainedItemValue")
+            .field(&self.as_slice())
+            .finish()
     }
 }
 

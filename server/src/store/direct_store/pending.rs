@@ -84,7 +84,7 @@ impl Kvkache {
                 }
                 let Some(replacement) = self.try_append_value(
                     storage_key,
-                    &value.bytes,
+                    &mut value,
                     ttl_ms,
                     eviction_protected,
                     previous,

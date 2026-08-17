@@ -1,5 +1,6 @@
 //! Candidate lookup and backend-independent value reads.
 
+use crate::types::StoredItemValue;
 use crate::{BUCKET_BYTES, KvError, Result, StorageKey};
 
 use super::value_reads::{read_arena_value, read_owned_extent};
@@ -99,32 +100,30 @@ impl Kvkache {
         &self,
         mut encoded: Vec<u8>,
         backing: ReadBacking,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<StoredItemValue> {
         match backing {
             ReadBacking::Mutable { lane, .. } => match decode_stored_value(&encoded)? {
                 StoredValue::Inline(_) => {
                     remove_stored_value_tag(&mut encoded);
-                    Ok(encoded)
+                    Ok(StoredItemValue::new(encoded))
                 }
                 StoredValue::Blob(blob_ref) => self.mutable[lane]
                     .as_ref()
                     .and_then(|generation| {
-                        generation.blob_arena.get(BlobHandle {
+                        generation.blob_arena.get_value(BlobHandle {
                             slot: blob_ref.value_offset,
                             value_len: blob_ref.value_len,
                         })
                     })
-                    .map(ToOwned::to_owned)
                     .ok_or_else(|| KvError::Worker("mutable Blob handle is invalid".into())),
                 StoredValue::Large(value_ref) => self.mutable[lane]
                     .as_ref()
                     .and_then(|generation| {
-                        generation.large_value_arena.get(BlobHandle {
+                        generation.large_value_arena.get_value(BlobHandle {
                             slot: value_ref.value_offset,
                             value_len: value_ref.value_len,
                         })
                     })
-                    .map(ToOwned::to_owned)
                     .ok_or_else(|| KvError::Worker("mutable large-value handle is invalid".into())),
             },
             ReadBacking::Ram { backing, .. } => read_arena_value(
@@ -135,13 +134,18 @@ impl Kvkache {
                 "sealed large-value handle is invalid",
             ),
             ReadBacking::Ssd(backing) => match decode_stored_value(&encoded)? {
-                StoredValue::Inline(value) => Ok(value.to_vec()),
-                StoredValue::Blob(blob_ref) => self.read_blob(&backing.location, blob_ref).await,
+                StoredValue::Inline(value) => Ok(StoredItemValue::new(value.to_vec())),
+                StoredValue::Blob(blob_ref) => self
+                    .read_blob(&backing.location, blob_ref)
+                    .await
+                    .map(StoredItemValue::new),
                 StoredValue::Large(value_ref) => {
                     let location = backing.large_value_location.as_ref().ok_or_else(|| {
                         KvError::Worker("large-value Item has no SSD extent".into())
                     })?;
-                    self.read_large_value(location, value_ref).await
+                    self.read_large_value(location, value_ref)
+                        .await
+                        .map(StoredItemValue::new)
                 }
             },
         }

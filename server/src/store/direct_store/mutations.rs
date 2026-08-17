@@ -25,8 +25,9 @@ impl Kvkache {
         if !item_is_live_now(&located.item) {
             return Ok(None);
         }
-        let bytes = self.read_value(located.item.value, located.backing).await?;
-        Ok(Some(StoredItemValue::new(bytes)))
+        self.read_value(located.item.value, located.backing)
+            .await
+            .map(Some)
     }
 
     #[allow(dead_code)]
@@ -51,7 +52,7 @@ impl Kvkache {
     pub(crate) async fn set_encoded_with_options(
         &mut self,
         storage_key: StorageKey,
-        value: StoredItemValue,
+        mut value: StoredItemValue,
         options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
         self.drive_background_once().await?;
@@ -95,7 +96,7 @@ impl Kvkache {
                 .and_then(|located| self.mutable_value_handle(located));
             if let Some(location) = self.try_append_value(
                 storage_key,
-                &value.bytes,
+                &mut value,
                 options.ttl_ms(),
                 options.eviction_protected(),
                 previous_location,
