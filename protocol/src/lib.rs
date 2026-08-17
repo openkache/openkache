@@ -68,6 +68,8 @@ pub mod compact;
 pub mod layout;
 /// Configurable fixed-width optional-value codec.
 pub mod optional_values;
+/// Bounded, allocation-free stable-owner pooling.
+pub mod owner_pool;
 /// Operation-neutral request frame delimiting.
 pub mod request;
 mod request_encoder;
@@ -89,6 +91,7 @@ pub use optional_values::{
     encode_optional_values, optional_values_encoded_len, optional_values_encoded_len_from_lengths,
     optional_values_max_encoded_len,
 };
+pub use owner_pool::{StableOwnerLease, StableOwnerPool};
 pub use request::{
     OpaqueRequestFrame, RequestFieldProjection, RequestFrameHeader, RequestFrameLayout,
     RequestFramePackedField, RequestFramePackedValue, RequestFrameStep,

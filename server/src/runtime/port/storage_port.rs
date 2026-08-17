@@ -3,7 +3,7 @@
 //! The network/runtime implementation owns routing and worker lifecycle;
 //! API modules depend only on opaque address and storage operation contracts.
 
-use openkache_protocol::{OwnedRange, StableBytes};
+use openkache_protocol::{OwnedRange, StableBytes, StableOwnerPool};
 
 pub(crate) use crate::types::StorageWriteOptions;
 
@@ -134,6 +134,34 @@ impl AsRef<[u8]> for StorageValue {
 /// owner is held by a [`StorageReadValue`].
 pub(crate) use openkache_protocol::StableByteOwner as StorageReadOwner;
 
+/// Preallocated type-erasure storage for backend read owners.
+#[derive(Clone)]
+pub(crate) struct StorageReadOwnerPool {
+    inner: std::sync::Arc<StableOwnerPool<crate::types::StoredItemBytes>>,
+}
+
+impl StorageReadOwnerPool {
+    pub(crate) fn allocation_bytes(capacity: usize) -> Option<usize> {
+        StableOwnerPool::<crate::types::StoredItemBytes>::allocation_bytes(capacity)
+    }
+
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            inner: StableOwnerPool::new(capacity),
+        }
+    }
+
+    pub(crate) fn try_retain(
+        &self,
+        owner: crate::types::StoredItemBytes,
+    ) -> Result<StorageReadValue, crate::types::StoredItemBytes> {
+        let lease = self.inner.try_insert(owner)?;
+        Ok(StorageReadValue::from_pooled(StableBytes::from_pooled(
+            lease,
+        )))
+    }
+}
+
 /// One storage-read value with backend-independent byte ownership.
 ///
 /// API bindings can inspect or transfer this value without learning which
@@ -163,6 +191,12 @@ impl StorageReadValue {
     pub(crate) fn from_owner(owner: impl StorageReadOwner) -> Self {
         Self {
             owner: StorageReadBytes::Stable(StableBytes::new(owner)),
+        }
+    }
+
+    pub(crate) fn from_pooled(owner: StableBytes) -> Self {
+        Self {
+            owner: StorageReadBytes::Stable(owner),
         }
     }
 

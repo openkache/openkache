@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use smallvec::{Array, SmallVec};
 
-use crate::{ProtocolError, Result};
+use crate::{ProtocolError, Result, StableOwnerLease};
 
 // Keep the common framing/payload pair inline without making every frame
 // carry a large array of segment owners. Longer plans spill metadata only;
@@ -255,7 +255,13 @@ enum StableBytesOwner {
         owner: Box<dyn StableByteOwner>,
         len: usize,
     },
+    Pooled {
+        lease: StableOwnerLease,
+        len: usize,
+    },
 }
+
+const _: () = assert!(std::mem::size_of::<StableBytes>() <= 40);
 
 impl StableBytes {
     /// Erases one byte owner's concrete type.
@@ -289,6 +295,14 @@ impl StableBytes {
         })
     }
 
+    /// Retains a preallocated owner slot without allocating.
+    pub fn from_pooled(lease: StableOwnerLease) -> Self {
+        let len = lease.as_bytes().len();
+        Self {
+            owner: StableBytesOwner::Pooled { lease, len },
+        }
+    }
+
     /// Returns the stable visible bytes.
     pub fn as_slice(&self) -> &[u8] {
         match &self.owner {
@@ -302,6 +316,15 @@ impl StableBytes {
                     bytes.len(),
                     *len,
                     "stable byte owner changed its visible length"
+                );
+                bytes
+            }
+            StableBytesOwner::Pooled { lease, len } => {
+                let bytes = lease.as_bytes();
+                assert_eq!(
+                    bytes.len(),
+                    *len,
+                    "stable byte owner pool changed its visible length"
                 );
                 bytes
             }
@@ -377,6 +400,8 @@ pub enum WireSegment {
     /// Bytes retaining an operation-neutral external owner.
     External(ExternalWireBytes),
 }
+
+const _: () = assert!(std::mem::size_of::<WireSegment>() <= 48);
 
 impl WireSegment {
     /// Copies bounded framing bytes into inline storage.

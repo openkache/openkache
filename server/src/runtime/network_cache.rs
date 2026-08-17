@@ -16,8 +16,9 @@ use super::RequestAdmissionError;
 use super::keyed_storage;
 use super::storage_keys;
 use super::storage_port::{
-    PreparedStorageAddress, StorageError, StorageMutation, StorageReadValue, StorageResult,
-    StorageRoute, StorageScope, StorageValue, StorageWriteOptions, StorageWriteOutcome,
+    PreparedStorageAddress, StorageError, StorageMutation, StorageReadOwnerPool, StorageReadValue,
+    StorageResult, StorageRoute, StorageScope, StorageValue, StorageWriteOptions,
+    StorageWriteOutcome,
 };
 use super::{ThreadedKvkache, WorkerControlRequest, WorkerRequest, WorkerResponse};
 
@@ -48,6 +49,20 @@ pub(crate) fn into_storage_read_value(value: StoredItemValue) -> StorageReadValu
             StorageReadValue::from_shared_owner(buffer, range)
                 .expect("a stored item range remains within its direct-read buffer")
         }
+    }
+}
+
+pub(crate) fn into_storage_read_value_with_pool(
+    value: StoredItemValue,
+    owner_pool: &StorageReadOwnerPool,
+) -> StorageResult<StorageReadValue> {
+    match value.bytes {
+        StoredItemBytes::DirectRead { buffer, range } => owner_pool
+            .try_retain(StoredItemBytes::DirectRead { buffer, range })
+            .map_err(|_| {
+                StorageError::Overloaded("stable storage-read owner pool is exhausted".into())
+            }),
+        value => Ok(into_storage_read_value(StoredItemValue { bytes: value })),
     }
 }
 
@@ -86,11 +101,13 @@ impl From<RequestAdmissionError> for StorageError {
 pub(crate) struct NetworkWorkerCache {
     cache: Arc<ThreadedKvkache>,
     network_worker: NetworkWorkerId,
+    stable_owner_pools: Arc<[StorageReadOwnerPool]>,
 }
 
 impl NetworkWorkerCache {
     pub(crate) fn new(cache: Arc<ThreadedKvkache>, network_worker: NetworkWorkerId) -> Self {
         Self {
+            stable_owner_pools: Arc::clone(&cache.stable_owner_pools),
             cache,
             network_worker,
         }
@@ -228,12 +245,16 @@ impl NetworkWorkerCache {
             },
         );
         async move {
-            pending
+            let value = pending
                 .map_err(StorageError::from)?
                 .await
                 .and_then(|response| keyed_storage::value_response(response, "storage get"))
-                .map(|value| value.map(into_storage_read_value))
-                .map_err(StorageError::from)
+                .map_err(StorageError::from)?;
+            value
+                .map(|value| {
+                    into_storage_read_value_with_pool(value, &self.stable_owner_pools[worker])
+                })
+                .transpose()
         }
     }
 
