@@ -21,6 +21,7 @@ mod submission;
 mod worker;
 mod worker_contract;
 mod worker_control;
+mod worker_lifecycle;
 pub(crate) use network_cache::NetworkWorkerCache;
 pub(crate) use port::{completion, storage_port};
 #[allow(unused_imports)]

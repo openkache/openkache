@@ -16,6 +16,7 @@ use super::scheduler::{KeyScheduler, ScheduledTask};
 use super::worker_contract::{
     DeferredResponse, FinishedKeyedWork, KeyedWorkPort, PreparedKeyedWork, Request,
 };
+use super::worker_lifecycle::WorkerLifecyclePort;
 
 mod completion;
 use self::completion::{
@@ -112,26 +113,29 @@ where
     let mut disconnected = false;
     let mut deferred_completions: Vec<DeferredLaneCompletion<C::Response, C::VisibleState>> =
         Vec::with_capacity(io_config.max_inflight_per_worker);
-    let mut capacity_completions: Vec<C::CapacityCompletion> =
-        Vec::with_capacity(io_config.max_inflight_per_worker);
+    let mut deferred_results: Vec<
+        <C::Lifecycle as WorkerLifecyclePort<Kvkache, StorageKey>>::DeferredCompletion,
+    > = Vec::with_capacity(io_config.max_inflight_per_worker);
 
     loop {
         if !deferred_completions.is_empty() {
-            capacity_completions.clear();
-            match C::progress_capacity(&mut cache, |result| capacity_completions.push(result)) {
-                Ok(capacity_ready) => {
-                    for result in capacity_completions.drain(..) {
-                        let result = C::capacity_completion(result);
+            deferred_results.clear();
+            match C::Lifecycle::progress_deferred(&mut cache, |result| {
+                deferred_results.push(result);
+            }) {
+                Ok(deferred_ready) => {
+                    for result in deferred_results.drain(..) {
+                        let result = C::Lifecycle::project_deferred(result);
                         let index = deferred_completions
                             .iter()
                             .position(|completion| match completion {
                                 DeferredLaneCompletion::Pending { storage_key, .. }
                                 | DeferredLaneCompletion::CollapsedPending {
                                     storage_key, ..
-                                } => *storage_key == result.storage_key,
+                                } => *storage_key == result.key,
                                 DeferredLaneCompletion::Batch { .. } => false,
                             })
-                            .expect("completed capacity mutation has a deferred response");
+                            .expect("completed deferred work has a retained response");
                         let completion = deferred_completions.swap_remove(index);
                         match completion {
                             DeferredLaneCompletion::Pending {
@@ -174,11 +178,11 @@ where
                                 }
                             }
                             DeferredLaneCompletion::Batch { .. } => {
-                                unreachable!("capacity completion matched a flush batch")
+                                unreachable!("a deferred result matched a flush batch")
                             }
                         }
                     }
-                    if capacity_ready {
+                    if deferred_ready {
                         for completion in deferred_completions.drain(..) {
                             match completion {
                                 DeferredLaneCompletion::Batch {
@@ -201,7 +205,7 @@ where
                                 DeferredLaneCompletion::Pending { .. }
                                 | DeferredLaneCompletion::CollapsedPending { .. } => {
                                     unreachable!(
-                                        "capacity reported ready with an unresolved mutation"
+                                        "lifecycle reported ready with unresolved deferred work"
                                     );
                                 }
                             }
@@ -226,7 +230,7 @@ where
                                 response,
                                 reservation,
                             } => {
-                                C::cancel_pending(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
                                 retained_responses.release(reservation);
                                 let _ = response.send(Err(KvError::Worker(message.clone())));
                                 (storage_key, None)
@@ -237,7 +241,7 @@ where
                                 failure_state,
                                 ..
                             } => {
-                                C::cancel_pending(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
                                 send_failure(&mut retained_responses, responses, &message);
                                 (storage_key, Some(failure_state))
                             }
@@ -299,8 +303,9 @@ where
         let event = if can_receive {
             let mut incoming = std::pin::pin!(receiver.recv_async_storage());
             poll_fn(|context| {
-                if cache.has_background_work()
-                    && let Poll::Ready(result) = cache.poll_background(context)
+                if C::Lifecycle::has_background_work(&cache)
+                    && let Poll::Ready(result) =
+                        C::Lifecycle::poll_background(&mut cache, context)
                 {
                     return Poll::Ready(WorkerEvent::Background(result));
                 }
@@ -316,8 +321,9 @@ where
             .await
         } else {
             poll_fn(|context| {
-                if cache.has_background_work()
-                    && let Poll::Ready(result) = cache.poll_background(context)
+                if C::Lifecycle::has_background_work(&cache)
+                    && let Poll::Ready(result) =
+                        C::Lifecycle::poll_background(&mut cache, context)
                 {
                     return Poll::Ready(WorkerEvent::Background(result));
                 }
@@ -358,7 +364,7 @@ where
                                 response,
                                 reservation,
                             } => {
-                                C::cancel_pending(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
                                 retained_responses.release(reservation);
                                 let _ = response.send(Err(KvError::NoCapacity));
                                 (storage_key, None)
@@ -369,7 +375,7 @@ where
                                 failure_state,
                                 ..
                             } => {
-                                C::cancel_pending(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
                                 send_failure(
                                     &mut retained_responses,
                                     responses,
@@ -502,7 +508,7 @@ where
                         ..
                     } = completion
                     else {
-                        unreachable!("a pending completion must require capacity work");
+                        unreachable!("a pending completion must require deferred work");
                     };
                     send_success(&mut retained_responses, responses);
                     if let Some(running) = finish_scheduler_lane(
