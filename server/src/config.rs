@@ -18,6 +18,7 @@ use crate::store::BUCKET_READ_POOL_CAPACITY;
 
 pub(crate) const DEFAULT_BUCKET_CHOICE_COUNT: usize = 4;
 pub(crate) const MAX_BUCKET_READ_POOL_CAPACITY: usize = 4_096;
+const STORAGE_READ_OWNER_SOURCE_COUNT: usize = 2;
 
 const DEFAULT_MAX_ITEM_BYTES: usize = 16 * 1024 * 1024;
 
@@ -675,6 +676,21 @@ pub struct StorageConfig {
     pub max_item_size_mib: usize,
 }
 
+impl StorageConfig {
+    pub(crate) fn stable_read_owner_capacity_per_thread(&self) -> Result<usize> {
+        if !self.lease_ssd_read_buffer {
+            return Ok(0);
+        }
+        self.bucket_read_pool_capacity_per_thread
+            .checked_mul(STORAGE_READ_OWNER_SOURCE_COUNT)
+            .ok_or_else(|| {
+                KvError::InvalidConfig(
+                    "stable storage-read owner pool capacity overflows".into(),
+                )
+            })
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -936,6 +952,14 @@ impl AppConfig {
             return Err(KvError::InvalidConfig(format!(
                 "storage.bucket_read_pool_capacity_per_thread cannot exceed {MAX_BUCKET_READ_POOL_CAPACITY} buffers"
             )));
+        }
+        if self.storage.lease_ssd_read_buffer
+            && self.storage.bucket_read_pool_capacity_per_thread == 0
+        {
+            return Err(KvError::InvalidConfig(
+                "storage.bucket_read_pool_capacity_per_thread must be non-zero when SSD read leasing is enabled"
+                    .into(),
+            ));
         }
         if self.storage.max_item_size_mib == 0
             || self.storage.max_item_size_mib > self.storage.large_value_capacity_mib_per_thread

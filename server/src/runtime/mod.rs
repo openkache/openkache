@@ -82,6 +82,7 @@ pub struct ThreadedKvkache {
     storage_domain_key: [u8; 32],
     storage_device_kind: crate::platform::StorageDeviceKind,
     observability: Option<Arc<ObservabilityState>>,
+    pub(crate) stable_owner_pools: Arc<[StorageReadOwnerPool]>,
 }
 
 impl ThreadedKvkache {
@@ -213,6 +214,18 @@ impl ThreadedKvkache {
             .ok_or_else(|| {
                 KvError::InvalidConfig("storage completion capacity exceeds usize".into())
             })?;
+        let stable_owner_pool_capacity =
+            config.storage.stable_read_owner_capacity_per_thread()?;
+        let stable_owner_pool_metadata_bytes = StorageReadOwnerPool::allocation_bytes(
+            stable_owner_pool_capacity,
+        )
+        .ok_or_else(|| {
+            KvError::InvalidConfig("stable storage-read owner pool metadata exceeds usize".into())
+        })?;
+        validate_worker_metadata::<keyed_storage::Command>(
+            &config.io_uring,
+            stable_owner_pool_metadata_bytes,
+        )?;
         let mut workers = Vec::with_capacity(config.runtime.thread_count);
         let resource_guard = Arc::new(ResourceGuard::for_app_config(&config)?);
 
@@ -297,6 +310,7 @@ impl ThreadedKvkache {
                             cache,
                             receiver,
                             io_config,
+                            stable_owner_pool_metadata_bytes,
                             thread_id,
                             cpu_id,
                             observability.clone(),
@@ -361,12 +375,17 @@ impl ThreadedKvkache {
             }
         }
 
+        let stable_owner_pools = (0..config.runtime.thread_count)
+            .map(|_| StorageReadOwnerPool::new(stable_owner_pool_capacity))
+            .collect::<Vec<_>>()
+            .into();
         Ok(Self {
             config,
             workers,
             storage_domain_key,
             storage_device_kind,
             observability,
+            stable_owner_pools,
         })
     }
 

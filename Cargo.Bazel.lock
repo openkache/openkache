@@ -1,5 +1,5 @@
 {
-  "checksum": "5522f0d16a690adde2a910e75cd518513ff0784b91b0fc64cc1d5ea7cde38257",
+  "checksum": "23a653c044357b13be04029187a8adbbab0874a1fe110463da960f44f205dd6a",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -17259,6 +17259,10 @@
         "deps": {
           "common": [
             {
+              "id": "crossbeam-queue 0.3.13",
+              "target": "crossbeam_queue"
+            },
+            {
               "id": "smallvec 1.15.2",
               "target": "smallvec"
             },
@@ -31623,6 +31627,7 @@
     "compio 0.19.1",
     "compio-quic 0.8.0",
     "crc32fast 1.5.0",
+    "crossbeam-queue 0.3.13",
     "crossfire 3.1.19",
     "event-listener 5.4.2",
     "flume 0.12.0",

@@ -26,6 +26,37 @@ use self::completion::{
 
 const MAX_RETAINED_RESPONSE_METADATA_BYTES_PER_WORKER: usize = 64 * 1024 * 1024;
 
+pub(super) fn validate_worker_metadata<C>(
+    io_config: &IoUringConfig,
+    stable_owner_pool_metadata_bytes: usize,
+) -> Result<()>
+where
+    C: KeyedWorkPort<Kvkache, StorageKey>,
+{
+    let retained_response_capacity = io_config.retained_response_capacity()?;
+    let retained_response_bytes =
+        RetainedResponseArena::<DeferredResponse<C::Response>>::allocation_bytes(
+            retained_response_capacity,
+        )
+        .ok_or_else(|| {
+            KvError::InvalidConfig("io_uring retained-response arena size exceeds usize".into())
+        })?;
+    let retained_metadata_bytes = io_config
+        .max_inflight_per_worker
+        .checked_mul(std::mem::size_of::<
+            DeferredLaneCompletion<C::Response, C::VisibleState>,
+        >())
+        .and_then(|bytes| bytes.checked_add(retained_response_bytes))
+        .and_then(|bytes| bytes.checked_add(stable_owner_pool_metadata_bytes))
+        .ok_or_else(|| KvError::InvalidConfig("worker response metadata exceeds usize".into()))?;
+    if retained_metadata_bytes > MAX_RETAINED_RESPONSE_METADATA_BYTES_PER_WORKER {
+        return Err(KvError::InvalidConfig(format!(
+            "response metadata requires {retained_metadata_bytes} bytes per worker"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     while let Ok(task) = receiver.recv_async_storage().await {
         match task {
@@ -69,6 +100,7 @@ pub(super) async fn worker_loop<C, X>(
     mut cache: Kvkache,
     receiver: AsyncReceiver<Request<StorageKey, C, X>>,
     io_config: IoUringConfig,
+    stable_owner_pool_metadata_bytes: usize,
     worker_id: usize,
     affinity_id: usize,
     observability: Option<std::sync::Arc<ObservabilityState>>,
@@ -83,27 +115,7 @@ where
         .map(|state| state.storage_shard(StorageWorkerId(worker_id)));
     let waiting_capacity = io_config.waiting_capacity()?;
     let retained_response_capacity = io_config.retained_response_capacity()?;
-    let retained_response_bytes =
-        RetainedResponseArena::<DeferredResponse<C::Response>>::allocation_bytes(
-            retained_response_capacity,
-        )
-        .ok_or_else(|| {
-            KvError::InvalidConfig("io_uring retained-response arena size exceeds usize".into())
-        })?;
-    let retained_metadata_bytes = io_config
-        .max_inflight_per_worker
-        .checked_mul(std::mem::size_of::<
-            DeferredLaneCompletion<C::Response, C::VisibleState>,
-        >())
-        .and_then(|bytes| bytes.checked_add(retained_response_bytes))
-        .ok_or_else(|| {
-            KvError::InvalidConfig("io_uring retained-response metadata exceeds usize".into())
-        })?;
-    if retained_metadata_bytes > MAX_RETAINED_RESPONSE_METADATA_BYTES_PER_WORKER {
-        return Err(KvError::InvalidConfig(format!(
-            "io_uring retained-response metadata requires {retained_metadata_bytes} bytes per worker"
-        )));
-    }
+    validate_worker_metadata::<C>(&io_config, stable_owner_pool_metadata_bytes)?;
     let mut scheduler: KeyScheduler<StorageKey, C> =
         KeyScheduler::with_waiting_capacity(waiting_capacity);
     let mut retained_responses = RetainedResponseArena::new(retained_response_capacity);

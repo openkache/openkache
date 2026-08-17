@@ -63,6 +63,7 @@ rust_library(
         "src/lib.rs",
         "src/layout.rs",
         "src/optional_values.rs",
+        "src/owner_pool.rs",
         "src/request.rs",
         "src/request_encoder.rs",
         "src/response.rs",
