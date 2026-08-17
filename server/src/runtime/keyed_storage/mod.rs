@@ -5,6 +5,7 @@
 //! remains unaware of both API families and storage actions.
 
 mod completion;
+mod lifecycle;
 mod reducer;
 
 use crate::observability::Operation;
@@ -202,7 +203,7 @@ impl KeyedWorkPort<Kvkache, StorageKey> for Command {
     type PreparedJob = PreparedJob;
     type CompletedJob = CompletedJob;
     type VisibleState = VisibleState;
-    type CapacityCompletion = crate::store::PendingKeyedResult;
+    type Lifecycle = lifecycle::Lifecycle;
 
     fn metadata(&self, lifecycle: &Kvkache) -> KeyedWorkMetadata {
         Command::metadata(self, lifecycle)
@@ -238,21 +239,4 @@ impl KeyedWorkPort<Kvkache, StorageKey> for Command {
         completion::finish(lifecycle, job, include_visible_state)
     }
 
-    fn progress_capacity(
-        lifecycle: &mut Kvkache,
-        emit: impl FnMut(Self::CapacityCompletion),
-    ) -> crate::Result<bool> {
-        lifecycle.progress_capacity(emit)
-    }
-
-    fn capacity_completion(
-        completion: Self::CapacityCompletion,
-    ) -> super::worker_contract::CapacityCompletion<StorageKey, Self::Response, Self::VisibleState>
-    {
-        completion::capacity_completion(completion)
-    }
-
-    fn cancel_pending(lifecycle: &mut Kvkache, storage_key: StorageKey) {
-        lifecycle.cancel_pending_keyed_mutation(storage_key);
-    }
 }
