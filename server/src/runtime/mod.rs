@@ -2,12 +2,11 @@
 //! thread-per-core workers, each running the selected storage event loop. Handles
 //! request routing by key hash and graceful shutdown.
 
-use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::channel::{self, Sender, TrySendError};
+use crate::channel::{self, Sender};
 use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
 use crate::types::StoredItemValue;
 use crate::*;
@@ -15,6 +14,7 @@ use crate::*;
 mod keyed_storage;
 mod network_cache;
 mod port;
+mod request_admission;
 mod retained_response;
 mod scheduler;
 mod storage_keys;
@@ -25,6 +25,7 @@ mod worker_control;
 mod worker_lifecycle;
 pub(crate) use network_cache::NetworkWorkerCache;
 pub(crate) use port::{completion, storage_port};
+pub(in crate::runtime) use request_admission::RequestAdmissionError;
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{
     DOMAIN_V2_CONTEXT, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key, derive_scoped_storage_key,
@@ -35,7 +36,7 @@ pub(crate) use storage_port::*;
 pub(crate) use worker::*;
 pub use submission::{PendingStorageSubmission, StorageSubmission, SubmittedStorageValue};
 
-use self::completion::{CompletionReceiver, CompletionSlab};
+use self::completion::CompletionSlab;
 
 #[allow(unused_imports)]
 pub(crate) use crate::storage_backend::{
@@ -57,32 +58,6 @@ pub(in crate::runtime) type WorkerControlRequest = worker_control::ControlReques
 pub(in crate::runtime) type DeferredWorkerResponse =
     worker_contract::DeferredResponse<WorkerResponse>;
 
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-pub(in crate::runtime) enum RequestAdmissionError {
-    #[error("storage request queue is full")]
-    QueueFull,
-    #[error("storage completion capacity is exhausted")]
-    CompletionFull,
-    #[error("storage request queue is disconnected")]
-    Disconnected,
-}
-
-impl From<RequestAdmissionError> for KvError {
-    fn from(error: RequestAdmissionError) -> Self {
-        match error {
-            RequestAdmissionError::QueueFull => Self::CapacityExhausted {
-                resource: "storage request queue",
-            },
-            RequestAdmissionError::CompletionFull => Self::CapacityExhausted {
-                resource: "storage completion capacity",
-            },
-            RequestAdmissionError::Disconnected => {
-                Self::Worker("request queue disconnected".into())
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
     pub(crate) id: [u8; 16],
@@ -94,73 +69,6 @@ struct WorkerHandle {
     completions: CompletionSlab<Result<WorkerResponse>>,
     core_tasks: Option<Sender<CoreTask>>,
     thread: Option<std::thread::JoinHandle<Result<()>>>,
-}
-
-pub(in crate::runtime) struct PendingWorkerResponse<'a> {
-    response: CompletionReceiver<'a, Result<WorkerResponse>>,
-    cache: &'a ThreadedKvkache,
-    requester: NetworkWorkerId,
-    worker: usize,
-    operation: Operation,
-    started: std::time::Instant,
-    wait_recorded: bool,
-}
-
-impl PendingWorkerResponse<'_> {
-    fn record_wait(&self) {
-        if let Some(observability) = self.cache.observability.as_ref() {
-            observability.record_storage_wait(
-                self.requester.index(),
-                self.worker,
-                self.operation,
-                self.started.elapsed(),
-            );
-        }
-    }
-
-    fn project(
-        result: std::result::Result<Result<WorkerResponse>, completion::CompletionDisconnected>,
-    ) -> Result<WorkerResponse> {
-        result
-            .map_err(|_| KvError::Worker("worker response disconnected".into()))
-            .and_then(|result| result)
-    }
-}
-
-impl Future for PendingWorkerResponse<'_> {
-    type Output = Result<WorkerResponse>;
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        #[cfg(not(feature = "network-runtime-kimojio"))]
-        let result = std::task::ready!(std::pin::Pin::new(&mut self.response).poll(context));
-
-        #[cfg(feature = "network-runtime-kimojio")]
-        let result = match self.response.try_recv() {
-            Ok(Some(result)) => Ok(result),
-            Err(error) => Err(error),
-            Ok(None) => {
-                let mut yielding = std::pin::pin!(kimojio::operations::yield_io());
-                let yielded = yielding.as_mut().poll(context);
-                debug_assert!(yielded.is_pending());
-                return std::task::Poll::Pending;
-            }
-        };
-
-        self.record_wait();
-        self.wait_recorded = true;
-        std::task::Poll::Ready(Self::project(result))
-    }
-}
-
-impl Drop for PendingWorkerResponse<'_> {
-    fn drop(&mut self) {
-        if !self.wait_recorded {
-            self.record_wait();
-        }
-    }
 }
 
 enum CoreTask {
@@ -594,80 +502,6 @@ impl ThreadedKvkache {
             }
         }
         result
-    }
-
-    /// Admits a request without retaining its payload or enqueue future across
-    /// an await. Neutral storage ports use this compact path; the server's
-    /// outer request deadline bounds completion observation.
-    fn admit_network_request(
-        &self,
-        worker: usize,
-        operation: Operation,
-        requester: NetworkWorkerId,
-        build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
-    ) -> std::result::Result<PendingWorkerResponse<'_>, RequestAdmissionError> {
-        let request_started = std::time::Instant::now();
-        let Some((response_tx, response_rx)) = self.workers[worker].completions.try_register()
-        else {
-            if let Some(observability) = self.observability.as_ref() {
-                observability.record_storage_wait(
-                    requester.index(),
-                    worker,
-                    operation,
-                    request_started.elapsed(),
-                );
-            }
-            return Err(RequestAdmissionError::CompletionFull);
-        };
-        match self.workers[worker].sender.try_send(build(response_tx)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                if let Some(observability) = self.observability.as_ref() {
-                    observability.storage_queue_full(requester.index(), worker);
-                    observability.record_storage_wait(
-                        requester.index(),
-                        worker,
-                        operation,
-                        request_started.elapsed(),
-                    );
-                }
-                return Err(RequestAdmissionError::QueueFull);
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                if let Some(observability) = self.observability.as_ref() {
-                    observability.record_storage_wait(
-                        requester.index(),
-                        worker,
-                        operation,
-                        request_started.elapsed(),
-                    );
-                }
-                return Err(RequestAdmissionError::Disconnected);
-            }
-        }
-
-        Ok(PendingWorkerResponse {
-            response: response_rx,
-            cache: self,
-            requester,
-            worker,
-            operation,
-            started: request_started,
-            wait_recorded: false,
-        })
-    }
-
-    /// Admits a request without retaining its payload or enqueue future across
-    /// an await. Neutral storage ports use this compact path; the server's
-    /// outer request deadline bounds completion observation.
-    pub(in crate::runtime) fn try_network_request(
-        &self,
-        worker: usize,
-        operation: Operation,
-        requester: NetworkWorkerId,
-        build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
-    ) -> std::result::Result<PendingWorkerResponse<'_>, RequestAdmissionError> {
-        self.admit_network_request(worker, operation, requester, build)
     }
 
     pub async fn get(&self, storage_key: StorageKey) -> Result<Option<Vec<u8>>> {
