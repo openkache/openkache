@@ -222,7 +222,7 @@ impl ThreadedKvkache {
         .ok_or_else(|| {
             KvError::InvalidConfig("stable storage-read owner pool metadata exceeds usize".into())
         })?;
-        validate_worker_metadata::<keyed_storage::Command>(
+        validate_worker_metadata::<Kvkache, StorageKey, keyed_storage::Command>(
             &config.io_uring,
             stable_owner_pool_metadata_bytes,
         )?;
