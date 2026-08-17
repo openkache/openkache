@@ -325,6 +325,56 @@ impl NetworkWorkerCache {
         }
     }
 
+    /// Compares and conditionally exchanges one value through the keyed
+    /// worker. The command is deliberately non-collapsible so its comparison
+    /// and mutation remain one serialized storage action.
+    pub(crate) fn storage_compare_exchange(
+        &self,
+        operation: Operation,
+        prepared: PreparedStorageAddress,
+        expected: Option<StorageValue>,
+        replacement: Option<StorageValue>,
+        options: StorageWriteOptions,
+    ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
+        let worker = prepared.route().worker();
+        let storage_key = StorageKey::new(*prepared.as_bytes());
+        let expected =
+            expected.map(|value| StoredItemValue::from_owned_range(value.into_owned_range()));
+        let replacement =
+            replacement.map(|value| StoredItemValue::from_owned_range(value.into_owned_range()));
+        let pending = self.cache.try_network_request(
+            worker,
+            operation,
+            self.network_worker,
+            move |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_storage::compare_exchange(
+                    operation,
+                    expected,
+                    replacement,
+                    options,
+                    response,
+                ),
+            },
+        );
+        async move {
+            pending
+                .map_err(StorageError::from)?
+                .await
+                .and_then(|response| {
+                    keyed_storage::compare_exchange_response(response, "storage compare exchange")
+                })
+                .map(|changed| {
+                    if changed {
+                        StorageMutation::Applied
+                    } else {
+                        StorageMutation::Unchanged
+                    }
+                })
+                .map_err(StorageError::from)
+        }
+    }
+
     pub(crate) fn prepare_address(
         &self,
         scope: StorageScope<'_>,

@@ -68,6 +68,23 @@ impl StoragePort {
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
         self.backend.storage_delete(operation, address)
     }
+
+    /// Compares the current value and atomically exchanges it when it matches.
+    ///
+    /// `None` is the absence sentinel for either side. Values retain their
+    /// caller-owned ranges until the keyed worker consumes them.
+    #[allow(dead_code)]
+    pub(crate) fn compare_exchange(
+        &self,
+        operation: Operation,
+        address: PreparedStorageAddress,
+        expected: Option<StorageValue>,
+        replacement: Option<StorageValue>,
+        options: StorageWriteOptions,
+    ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
+        self.backend
+            .storage_compare_exchange(operation, address, expected, replacement, options)
+    }
 }
 
 /// Statically dispatched storage data plane.
@@ -101,6 +118,15 @@ pub(crate) trait StorageDataPort: Send + Sync {
         &self,
         operation: Operation,
         storage_address: PreparedStorageAddress,
+    ) -> impl Future<Output = StorageResult<StorageMutation>> + '_;
+
+    fn compare_exchange(
+        &self,
+        operation: Operation,
+        storage_address: PreparedStorageAddress,
+        expected: Option<StorageValue>,
+        replacement: Option<StorageValue>,
+        options: StorageWriteOptions,
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_;
 }
 
@@ -153,6 +179,24 @@ impl StorageDataPort for StoragePort {
         storage_address: PreparedStorageAddress,
     ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
         StoragePort::delete(self, operation, storage_address)
+    }
+
+    fn compare_exchange(
+        &self,
+        operation: Operation,
+        storage_address: PreparedStorageAddress,
+        expected: Option<StorageValue>,
+        replacement: Option<StorageValue>,
+        options: StorageWriteOptions,
+    ) -> impl Future<Output = StorageResult<StorageMutation>> + '_ {
+        StoragePort::compare_exchange(
+            self,
+            operation,
+            storage_address,
+            expected,
+            replacement,
+            options,
+        )
     }
 }
 
