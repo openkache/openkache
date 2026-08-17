@@ -29,12 +29,18 @@ pub(crate) enum KeyedOperation {
         options: StorageWriteOptions,
     },
     Delete,
+    CompareExchange {
+        expected: Option<StoredItemValue>,
+        replacement: Option<StoredItemValue>,
+        options: StorageWriteOptions,
+    },
 }
 
 pub(crate) enum KeyedOutcome {
     Value(Option<StoredItemValue>),
     Set(SetOutcome),
     Deleted(bool),
+    CompareExchange(bool),
 }
 
 #[derive(Clone)]
@@ -63,6 +69,11 @@ enum PreparedKeyedOperation {
         options: StorageWriteOptions,
     },
     Delete,
+    CompareExchange {
+        expected: Option<StoredItemValue>,
+        replacement: Option<StoredItemValue>,
+        options: StorageWriteOptions,
+    },
 }
 
 enum KeyedObservationPlan {
@@ -96,6 +107,12 @@ impl KeyedJob {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PendingKeyedResponse {
+    Set,
+    CompareExchange,
+}
+
 pub(super) enum PendingKeyedMutation {
     Set {
         storage_key: StorageKey,
@@ -107,6 +124,7 @@ pub(super) enum PendingKeyedMutation {
         previous_state: Option<ItemState>,
         condition: StorageWriteCondition,
         include_visible_state: bool,
+        response: PendingKeyedResponse,
     },
 }
 
@@ -144,6 +162,37 @@ impl Kvkache {
                 PreparedKeyedOperation::Delete,
                 self.keyed_read_plan(storage_key, ReadPurpose::State),
             ),
+            KeyedOperation::CompareExchange {
+                expected,
+                replacement,
+                options,
+            } => {
+                let observation = if let Some(value) = replacement.as_ref() {
+                    if options.ttl_ms() == Some(0) {
+                        KeyedObservationPlan::Error(KvError::InvalidRequest(
+                            "SET TTL must be greater than zero milliseconds".into(),
+                        ))
+                    } else if let Err(error) = validate_ttl(options.ttl_ms()) {
+                        KeyedObservationPlan::Error(error)
+                    } else if let Err(error) =
+                        self.validate_value(&value.bytes, options.ttl_ms().is_some())
+                    {
+                        KeyedObservationPlan::Error(error)
+                    } else {
+                        self.keyed_read_plan(storage_key, ReadPurpose::CompareExchange)
+                    }
+                } else {
+                    self.keyed_read_plan(storage_key, ReadPurpose::CompareExchange)
+                };
+                (
+                    PreparedKeyedOperation::CompareExchange {
+                        expected,
+                        replacement,
+                        options,
+                    },
+                    observation,
+                )
+            }
         };
         KeyedJob {
             storage_key,
@@ -183,10 +232,14 @@ impl Kvkache {
                         mutable_value_handle_for(lane, generation.logical_sg_id, &item.value)
                     });
                     let value = match (purpose, item.as_ref()) {
-                        (ReadPurpose::Value, Some(item)) if !item.is_tombstone => Some(
-                            read_mutable_value(item.value.clone(), generation)
-                                .map(StoredItemValue::new),
-                        ),
+                        (ReadPurpose::Value | ReadPurpose::CompareExchange, Some(item))
+                            if !item.is_tombstone =>
+                        {
+                            Some(
+                                read_mutable_value(item.value.clone(), generation)
+                                    .map(StoredItemValue::new),
+                            )
+                        }
                         _ => None,
                     };
                     (
@@ -267,6 +320,7 @@ impl Kvkache {
                         evaluated_at_ms,
                         previous,
                         include_visible_state,
+                        PendingKeyedResponse::Set,
                     ) {
                         Ok((outcome, visible_state, flush_required, pending)) => (
                             Ok(KeyedOutcome::Set(outcome)),
@@ -287,6 +341,70 @@ impl Kvkache {
                             false,
                         ),
                         Err(error) => (Err(error), None, false, false),
+                    }
+                }
+                (
+                    PreparedKeyedOperation::CompareExchange {
+                        expected,
+                        replacement,
+                        options,
+                    },
+                    KeyedObservation::CompareExchange { state, mut value },
+                ) => {
+                    let matches = match (expected.as_ref(), value.as_ref()) {
+                        (None, None) => true,
+                        (Some(expected), Some(current)) => expected.bytes == current.bytes,
+                        _ => false,
+                    };
+                    if !matches {
+                        let visible_state = include_visible_state.then(|| match &mut value {
+                            Some(value) => {
+                                KeyedVisibleState::Present(value.clone_for_visible_state())
+                            }
+                            None => KeyedVisibleState::Missing,
+                        });
+                        (
+                            Ok(KeyedOutcome::CompareExchange(false)),
+                            visible_state,
+                            false,
+                            false,
+                        )
+                    } else {
+                        match replacement {
+                            Some(replacement) => match self.finish_keyed_set(
+                                completed.storage_key,
+                                replacement,
+                                options,
+                                unix_time_ms(),
+                                state,
+                                include_visible_state,
+                                PendingKeyedResponse::CompareExchange,
+                            ) {
+                                Ok((outcome, visible_state, flush_required, pending)) => (
+                                    Ok(KeyedOutcome::CompareExchange(matches!(
+                                        outcome,
+                                        SetOutcome::Created | SetOutcome::Replaced
+                                    ))),
+                                    visible_state,
+                                    flush_required,
+                                    pending,
+                                ),
+                                Err(error) => (Err(error), None, false, false),
+                            },
+                            None => match self.finish_keyed_delete(
+                                completed.storage_key,
+                                unix_time_ms(),
+                                state,
+                            ) {
+                                Ok((deleted, flush_required)) => (
+                                    Ok(KeyedOutcome::CompareExchange(deleted)),
+                                    Some(KeyedVisibleState::Missing),
+                                    flush_required,
+                                    false,
+                                ),
+                                Err(error) => (Err(error), None, false, false),
+                            },
+                        }
                     }
                 }
                 _ => (
@@ -318,6 +436,7 @@ impl Kvkache {
         evaluated_at_ms: u64,
         previous: Option<LocatedKeyState>,
         include_visible_state: bool,
+        pending_response: PendingKeyedResponse,
     ) -> Result<(SetOutcome, Option<KeyedVisibleState>, bool, bool)> {
         let previous_live = previous
             .as_ref()
@@ -376,6 +495,7 @@ impl Kvkache {
                 previous_state,
                 condition: options.condition,
                 include_visible_state,
+                response: pending_response,
             });
         // The operation has not linearized yet. The worker must defer its
         // response until capacity work appends the value and re-evaluates the

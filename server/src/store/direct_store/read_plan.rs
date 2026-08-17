@@ -29,12 +29,17 @@ pub(super) struct LocatedKeyState {
 pub(super) enum KeyedObservation {
     Value(Option<StoredItemValue>),
     State(Option<LocatedKeyState>),
+    CompareExchange {
+        state: Option<LocatedKeyState>,
+        value: Option<StoredItemValue>,
+    },
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ReadPurpose {
     Value,
     State,
+    CompareExchange,
 }
 
 pub(super) enum PreparedReadBacking {
@@ -114,6 +119,10 @@ impl DirectReadPlan {
             return Ok(match purpose {
                 ReadPurpose::Value => KeyedObservation::Value(None),
                 ReadPurpose::State => KeyedObservation::State(None),
+                ReadPurpose::CompareExchange => KeyedObservation::CompareExchange {
+                    state: None,
+                    value: None,
+                },
             });
         };
         match purpose {
@@ -137,6 +146,29 @@ impl DirectReadPlan {
                 item_state: item.state,
                 mutable_value: candidate.mutable_value(),
             }))),
+            ReadPurpose::CompareExchange => {
+                let state = Some(LocatedKeyState {
+                    table_location: candidate.table_location,
+                    item_state: item.state,
+                    mutable_value: candidate.mutable_value(),
+                });
+                if !item_state_is_live_now(item.state) {
+                    return Ok(KeyedObservation::CompareExchange { state, value: None });
+                }
+                candidate
+                    .read_value(
+                        &self.data,
+                        &self.large_values,
+                        &self.config,
+                        item.value,
+                        &self.io,
+                    )
+                    .await
+                    .map(|value| KeyedObservation::CompareExchange {
+                        state,
+                        value: Some(value),
+                    })
+            }
         }
     }
 }
@@ -176,7 +208,7 @@ impl PreparedReadCandidate {
                 let range = start + range.start..start + range.end;
                 let value = match purpose {
                     ReadPurpose::State => ObservedValue::None,
-                    ReadPurpose::Value => {
+                    ReadPurpose::Value | ReadPurpose::CompareExchange => {
                         match decode_stored_value(&backing.segment[range.clone()])? {
                             StoredValue::Inline(_) => ObservedValue::RamInline {
                                 segment: Arc::clone(&backing.segment),
@@ -210,7 +242,7 @@ impl PreparedReadCandidate {
                     find_item_state_and_value_range(&bytes, &storage_key).map(|(state, range)| {
                         let value = match purpose {
                             ReadPurpose::State => ObservedValue::None,
-                            ReadPurpose::Value
+                            ReadPurpose::Value | ReadPurpose::CompareExchange
                                 if config.lease_ssd_read_buffer
                                     && bytes.get(range.start) == Some(&INLINE_VALUE_TAG) =>
                             {
@@ -219,7 +251,7 @@ impl PreparedReadCandidate {
                                     range: range.start + STORED_VALUE_TAG_BYTES..range.end,
                                 }
                             }
-                            ReadPurpose::Value
+                            ReadPurpose::Value | ReadPurpose::CompareExchange
                                 if config.copy_ssd_inline_value_once
                                     && bytes.get(range.start) == Some(&INLINE_VALUE_TAG) =>
                             {
@@ -227,7 +259,9 @@ impl PreparedReadCandidate {
                                     bytes[range.start + STORED_VALUE_TAG_BYTES..range.end].to_vec(),
                                 )
                             }
-                            ReadPurpose::Value => ObservedValue::Encoded(bytes[range].to_vec()),
+                            ReadPurpose::Value | ReadPurpose::CompareExchange => {
+                                ObservedValue::Encoded(bytes[range].to_vec())
+                            }
                         };
                         ObservedItem { state, value }
                     });

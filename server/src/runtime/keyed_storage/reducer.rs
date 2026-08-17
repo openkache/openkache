@@ -62,6 +62,9 @@ impl CollapsedBatch {
                     current = KeyedVisibleState::Missing;
                     (response, Response::Deleted(deleted), Some(operation))
                 }
+                Command::CompareExchange { .. } => {
+                    unreachable!("non-collapsible compare/exchange reached the storage reducer")
+                }
             };
             let response_index = defer(DeferredWorkerResponse {
                 sender: response,

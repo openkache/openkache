@@ -2,7 +2,9 @@
 
 use crate::{Result, StorageKey};
 
-use super::keyed::{KeyedOutcome, KeyedVisibleState, PendingKeyedMutation, PendingKeyedResult};
+use super::keyed::{
+    KeyedOutcome, KeyedVisibleState, PendingKeyedMutation, PendingKeyedResponse, PendingKeyedResult,
+};
 use super::policy::{item_state_is_live_at, set_condition_allows, unix_time_ms};
 use super::{Kvkache, SegmentFlushReason, SetOutcome};
 
@@ -63,6 +65,7 @@ impl Kvkache {
                 previous_state,
                 condition,
                 include_visible_state,
+                response,
             } => {
                 let previous_live = previous_state.is_some_and(|state| {
                     item_state_is_live_at(state, unix_time_ms())
@@ -75,7 +78,7 @@ impl Kvkache {
                 if !set_condition_allows(condition, previous_live) {
                     return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
                         storage_key,
-                        outcome: KeyedOutcome::Set(SetOutcome::NotStored),
+                        outcome: pending_outcome(response, SetOutcome::NotStored),
                         visible_state: None,
                     }));
                 }
@@ -98,6 +101,7 @@ impl Kvkache {
                         previous_state,
                         condition,
                         include_visible_state,
+                        response,
                     }));
                 };
                 let previous_disappeared = self.publish_table_location(
@@ -118,10 +122,20 @@ impl Kvkache {
                     .then(|| KeyedVisibleState::Present(value.clone_for_visible_state()));
                 return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
                     storage_key,
-                    outcome: KeyedOutcome::Set(outcome),
+                    outcome: pending_outcome(response, outcome),
                     visible_state,
                 }));
             }
         }
+    }
+}
+
+fn pending_outcome(response: PendingKeyedResponse, outcome: SetOutcome) -> KeyedOutcome {
+    match response {
+        PendingKeyedResponse::Set => KeyedOutcome::Set(outcome),
+        PendingKeyedResponse::CompareExchange => KeyedOutcome::CompareExchange(matches!(
+            outcome,
+            SetOutcome::Created | SetOutcome::Replaced
+        )),
     }
 }

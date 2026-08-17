@@ -29,6 +29,16 @@ pub(super) type VisibleState = KeyedVisibleState;
 pub(super) type PreparedJob = KeyedJob;
 pub(super) type CompletedJob = CompletedKeyedJob;
 
+/// CAS-only control envelope.
+///
+/// One typed box keeps the bounded scheduler command at its existing size.
+/// Both value owners move into it without copying payload bytes; GET, SET, and
+/// DELETE retain their allocation-free command construction.
+pub(in crate::runtime) struct CompareExchangeInput {
+    expected: Option<StoredItemValue>,
+    replacement: Option<StoredItemValue>,
+}
+
 #[derive(Clone, Copy)]
 pub(in crate::runtime) struct WriteMetadata {
     condition: StorageWriteCondition,
@@ -71,6 +81,11 @@ pub(in crate::runtime) enum Command {
         operation: Operation,
         response: WorkerResponseSender,
     },
+    CompareExchange {
+        input: Box<CompareExchangeInput>,
+        metadata: WriteMetadata,
+        response: WorkerResponseSender,
+    },
 }
 
 pub(in crate::runtime) fn get(operation: Operation, response: WorkerResponseSender) -> Command {
@@ -100,20 +115,36 @@ pub(in crate::runtime) fn delete(operation: Operation, response: WorkerResponseS
     }
 }
 
+pub(in crate::runtime) fn compare_exchange(
+    operation: Operation,
+    expected: Option<StoredItemValue>,
+    replacement: Option<StoredItemValue>,
+    options: StorageWriteOptions,
+    response: WorkerResponseSender,
+) -> Command {
+    Command::CompareExchange {
+        input: Box::new(CompareExchangeInput {
+            expected,
+            replacement,
+        }),
+        metadata: WriteMetadata::new(options, operation),
+        response,
+    }
+}
+
 impl Command {
     fn metadata(&self, cache: &Kvkache) -> KeyedWorkMetadata {
         let (operation, collapsible) = match self {
             Self::Get { operation, .. } => (*operation, true),
             Self::Set {
-                value,
-                metadata,
-                ..
+                value, metadata, ..
             } => {
                 let collapsible = metadata.options() == StorageWriteOptions::default()
                     && cache.can_collapse_set(value);
                 (metadata.operation, collapsible)
             }
             Self::Delete { operation, .. } => (*operation, true),
+            Self::CompareExchange { metadata, .. } => (metadata.operation, false),
         };
         KeyedWorkMetadata {
             operation,
@@ -141,6 +172,24 @@ impl Command {
                 response,
             ),
             Self::Delete { response, .. } => (KeyedOperation::Delete, response),
+            Self::CompareExchange {
+                input,
+                metadata,
+                response,
+            } => {
+                let CompareExchangeInput {
+                    expected,
+                    replacement,
+                } = *input;
+                (
+                    KeyedOperation::CompareExchange {
+                        expected,
+                        replacement,
+                        options: metadata.options(),
+                    },
+                    response,
+                )
+            }
         };
         PreparedKeyedWork {
             response,
@@ -179,6 +228,18 @@ pub(in crate::runtime) fn delete_response(
 ) -> crate::Result<bool> {
     match response {
         WorkerResponse::Data(Response::Deleted(deleted)) => Ok(deleted),
+        response => Err(KvError::Worker(format!(
+            "unexpected {operation} response: {response:?}"
+        ))),
+    }
+}
+
+pub(in crate::runtime) fn compare_exchange_response(
+    response: WorkerResponse,
+    operation: &'static str,
+) -> crate::Result<bool> {
+    match response {
+        WorkerResponse::Data(Response::CompareExchange(changed)) => Ok(changed),
         response => Err(KvError::Worker(format!(
             "unexpected {operation} response: {response:?}"
         ))),
@@ -238,5 +299,4 @@ impl KeyedWorkPort<Kvkache, StorageKey> for Command {
     ) -> super::worker_contract::FinishedKeyedWork<Self::Response, Self::VisibleState> {
         completion::finish(lifecycle, job, include_visible_state)
     }
-
 }
