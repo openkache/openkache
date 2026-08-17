@@ -26,12 +26,12 @@ use self::completion::{
 
 const MAX_RETAINED_RESPONSE_METADATA_BYTES_PER_WORKER: usize = 64 * 1024 * 1024;
 
-pub(super) fn validate_worker_metadata<C>(
+pub(super) fn validate_worker_metadata<L, K, C>(
     io_config: &IoUringConfig,
     stable_owner_pool_metadata_bytes: usize,
 ) -> Result<()>
 where
-    C: KeyedWorkPort<Kvkache, StorageKey>,
+    C: KeyedWorkPort<L, K>,
 {
     let retained_response_capacity = io_config.retained_response_capacity()?;
     let retained_response_bytes =
@@ -44,7 +44,7 @@ where
     let retained_metadata_bytes = io_config
         .max_inflight_per_worker
         .checked_mul(std::mem::size_of::<
-            DeferredLaneCompletion<C::Response, C::VisibleState>,
+            DeferredLaneCompletion<K, C::Response, C::VisibleState>,
         >())
         .and_then(|bytes| bytes.checked_add(retained_response_bytes))
         .and_then(|bytes| bytes.checked_add(stable_owner_pool_metadata_bytes))
@@ -96,9 +96,9 @@ enum WorkerEvent<T, Q> {
     Request(Option<Q>),
 }
 
-pub(super) async fn worker_loop<C, X>(
-    mut cache: Kvkache,
-    receiver: AsyncReceiver<Request<StorageKey, C, X>>,
+pub(super) async fn worker_loop<L, K, C, X>(
+    mut lifecycle: L,
+    receiver: AsyncReceiver<Request<K, C, X>>,
     io_config: IoUringConfig,
     stable_owner_pool_metadata_bytes: usize,
     worker_id: usize,
@@ -106,33 +106,32 @@ pub(super) async fn worker_loop<C, X>(
     observability: Option<std::sync::Arc<ObservabilityState>>,
 ) -> Result<()>
 where
-    C: KeyedWorkPort<Kvkache, StorageKey> + Send + Unpin + 'static,
+    K: Eq + std::hash::Hash + Clone + Send + Unpin,
+    C: KeyedWorkPort<L, K> + Send + Unpin + 'static,
     X: Send + Unpin + 'static,
-    Kvkache: ControlPort<X>,
+    L: ControlPort<X>,
 {
     let storage_shard = observability
         .as_deref()
         .map(|state| state.storage_shard(StorageWorkerId(worker_id)));
     let waiting_capacity = io_config.waiting_capacity()?;
     let retained_response_capacity = io_config.retained_response_capacity()?;
-    validate_worker_metadata::<C>(&io_config, stable_owner_pool_metadata_bytes)?;
-    let mut scheduler: KeyScheduler<StorageKey, C> =
-        KeyScheduler::with_waiting_capacity(waiting_capacity);
+    validate_worker_metadata::<L, K, C>(&io_config, stable_owner_pool_metadata_bytes)?;
+    let mut scheduler: KeyScheduler<K, C> = KeyScheduler::with_waiting_capacity(waiting_capacity);
     let mut retained_responses = RetainedResponseArena::new(retained_response_capacity);
     debug_assert_eq!(retained_responses.capacity(), retained_response_capacity);
     let mut inflight = FuturesUnordered::new();
     let mut barrier = None;
     let mut disconnected = false;
-    let mut deferred_completions: Vec<DeferredLaneCompletion<C::Response, C::VisibleState>> =
+    let mut deferred_completions: Vec<DeferredLaneCompletion<K, C::Response, C::VisibleState>> =
         Vec::with_capacity(io_config.max_inflight_per_worker);
-    let mut deferred_results: Vec<
-        <C::Lifecycle as WorkerLifecyclePort<Kvkache, StorageKey>>::DeferredCompletion,
-    > = Vec::with_capacity(io_config.max_inflight_per_worker);
+    let mut deferred_results: Vec<<C::Lifecycle as WorkerLifecyclePort<L, K>>::DeferredCompletion> =
+        Vec::with_capacity(io_config.max_inflight_per_worker);
 
     loop {
         if !deferred_completions.is_empty() {
             deferred_results.clear();
-            match C::Lifecycle::progress_deferred(&mut cache, |result| {
+            match C::Lifecycle::progress_deferred(&mut lifecycle, |result| {
                 deferred_results.push(result);
             }) {
                 Ok(deferred_ready) => {
@@ -144,7 +143,7 @@ where
                                 DeferredLaneCompletion::Pending { storage_key, .. }
                                 | DeferredLaneCompletion::CollapsedPending {
                                     storage_key, ..
-                                } => *storage_key == result.key,
+                                } => storage_key == &result.key,
                                 DeferredLaneCompletion::Batch { .. } => false,
                             })
                             .expect("completed deferred work has a retained response");
@@ -158,13 +157,13 @@ where
                                 retained_responses.release(reservation);
                                 let _ = response.send(Ok(result.outcome));
                                 if let Some(running) = finish_scheduler_lane(
-                                    &mut cache,
+                                    &mut lifecycle,
                                     &mut scheduler,
                                     &mut retained_responses,
                                     storage_key,
                                     result.visible_state,
                                 ) {
-                                    inflight.push(run_keyed_command::<C>(running));
+                                    inflight.push(run_keyed_command::<L, K, C>(running));
                                 }
                             }
                             DeferredLaneCompletion::CollapsedPending {
@@ -180,13 +179,13 @@ where
                                     result.outcome,
                                 );
                                 if let Some(running) = finish_scheduler_lane(
-                                    &mut cache,
+                                    &mut lifecycle,
                                     &mut scheduler,
                                     &mut retained_responses,
                                     storage_key,
                                     result.visible_state,
                                 ) {
-                                    inflight.push(run_keyed_command::<C>(running));
+                                    inflight.push(run_keyed_command::<L, K, C>(running));
                                 }
                             }
                             DeferredLaneCompletion::Batch { .. } => {
@@ -205,13 +204,13 @@ where
                                 } => {
                                     send_success(&mut retained_responses, responses);
                                     if let Some(running) = finish_scheduler_lane(
-                                        &mut cache,
+                                        &mut lifecycle,
                                         &mut scheduler,
                                         &mut retained_responses,
                                         storage_key,
                                         success_state,
                                     ) {
-                                        inflight.push(run_keyed_command::<C>(running));
+                                        inflight.push(run_keyed_command::<L, K, C>(running));
                                     }
                                 }
                                 DeferredLaneCompletion::Pending { .. }
@@ -242,7 +241,7 @@ where
                                 response,
                                 reservation,
                             } => {
-                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut lifecycle, storage_key.clone());
                                 retained_responses.release(reservation);
                                 let _ = response.send(Err(KvError::Worker(message.clone())));
                                 (storage_key, None)
@@ -253,19 +252,19 @@ where
                                 failure_state,
                                 ..
                             } => {
-                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut lifecycle, storage_key.clone());
                                 send_failure(&mut retained_responses, responses, &message);
                                 (storage_key, Some(failure_state))
                             }
                         };
                         if let Some(running) = finish_scheduler_lane(
-                            &mut cache,
+                            &mut lifecycle,
                             &mut scheduler,
                             &mut retained_responses,
                             storage_key,
                             failure_state,
                         ) {
-                            inflight.push(run_keyed_command::<C>(running));
+                            inflight.push(run_keyed_command::<L, K, C>(running));
                         }
                     }
                 }
@@ -280,8 +279,9 @@ where
                 retained_responses.release(reservation);
                 break;
             };
-            let metadata = command.metadata(&cache);
-            let PreparedKeyedWork { response, job } = command.prepare(&mut cache, storage_key);
+            let metadata = command.metadata(&lifecycle);
+            let PreparedKeyedWork { response, job } =
+                command.prepare(&mut lifecycle, storage_key.clone());
             let running = RunningKeyedCommand {
                 storage_key,
                 completion: RunningCompletion::Direct {
@@ -292,13 +292,13 @@ where
                 started_at: Instant::now(),
                 job,
             };
-            inflight.push(run_keyed_command::<C>(running));
+            inflight.push(run_keyed_command::<L, K, C>(running));
         }
 
         if inflight.is_empty() && scheduler.is_idle() {
             if let Some(command) = barrier.take() {
                 if matches!(
-                    execute_control_work(&mut cache, command, affinity_id).await?,
+                    execute_control_work(&mut lifecycle, command, affinity_id).await?,
                     ControlFlow::Stop
                 ) {
                     return Ok(());
@@ -315,9 +315,9 @@ where
         let event = if can_receive {
             let mut incoming = std::pin::pin!(receiver.recv_async_storage());
             poll_fn(|context| {
-                if C::Lifecycle::has_background_work(&cache)
+                if C::Lifecycle::has_background_work(&lifecycle)
                     && let Poll::Ready(result) =
-                        C::Lifecycle::poll_background(&mut cache, context)
+                        C::Lifecycle::poll_background(&mut lifecycle, context)
                 {
                     return Poll::Ready(WorkerEvent::Background(result));
                 }
@@ -333,9 +333,9 @@ where
             .await
         } else {
             poll_fn(|context| {
-                if C::Lifecycle::has_background_work(&cache)
+                if C::Lifecycle::has_background_work(&lifecycle)
                     && let Poll::Ready(result) =
-                        C::Lifecycle::poll_background(&mut cache, context)
+                        C::Lifecycle::poll_background(&mut lifecycle, context)
                 {
                     return Poll::Ready(WorkerEvent::Background(result));
                 }
@@ -376,7 +376,7 @@ where
                                 response,
                                 reservation,
                             } => {
-                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut lifecycle, storage_key.clone());
                                 retained_responses.release(reservation);
                                 let _ = response.send(Err(KvError::NoCapacity));
                                 (storage_key, None)
@@ -387,7 +387,7 @@ where
                                 failure_state,
                                 ..
                             } => {
-                                C::Lifecycle::cancel_deferred(&mut cache, storage_key);
+                                C::Lifecycle::cancel_deferred(&mut lifecycle, storage_key.clone());
                                 send_failure(
                                     &mut retained_responses,
                                     responses,
@@ -397,13 +397,13 @@ where
                             }
                         };
                         if let Some(running) = finish_scheduler_lane(
-                            &mut cache,
+                            &mut lifecycle,
                             &mut scheduler,
                             &mut retained_responses,
                             storage_key,
                             failure_state,
                         ) {
-                            inflight.push(run_keyed_command::<C>(running));
+                            inflight.push(run_keyed_command::<L, K, C>(running));
                         }
                     }
                 }
@@ -420,7 +420,7 @@ where
                     visible_state,
                     flush_required,
                     pending,
-                } = C::finish(&mut cache, completed.job, include_visible_state);
+                } = C::finish(&mut lifecycle, completed.job, include_visible_state);
                 let completion = match completed.completion {
                     RunningCompletion::Direct {
                         response,
@@ -430,13 +430,13 @@ where
                             retained_responses.release(reservation);
                             let _ = response.send(Ok(outcome));
                             if let Some(running) = finish_scheduler_lane(
-                                &mut cache,
+                                &mut lifecycle,
                                 &mut scheduler,
                                 &mut retained_responses,
                                 completed.storage_key,
                                 visible_state,
                             ) {
-                                inflight.push(run_keyed_command::<C>(running));
+                                inflight.push(run_keyed_command::<L, K, C>(running));
                             }
                             continue;
                         }
@@ -461,13 +461,13 @@ where
                             retained_responses.release(reservation);
                             let _ = response.send(Err(error));
                             if let Some(running) = finish_scheduler_lane(
-                                &mut cache,
+                                &mut lifecycle,
                                 &mut scheduler,
                                 &mut retained_responses,
                                 completed.storage_key,
                                 None,
                             ) {
-                                inflight.push(run_keyed_command::<C>(running));
+                                inflight.push(run_keyed_command::<L, K, C>(running));
                             }
                             continue;
                         }
@@ -498,13 +498,13 @@ where
                         Err(error) => {
                             send_failure(&mut retained_responses, responses, &error.to_string());
                             if let Some(running) = finish_scheduler_lane(
-                                &mut cache,
+                                &mut lifecycle,
                                 &mut scheduler,
                                 &mut retained_responses,
                                 completed.storage_key,
                                 Some(failure_state),
                             ) {
-                                inflight.push(run_keyed_command::<C>(running));
+                                inflight.push(run_keyed_command::<L, K, C>(running));
                             }
                             continue;
                         }
@@ -524,13 +524,13 @@ where
                     };
                     send_success(&mut retained_responses, responses);
                     if let Some(running) = finish_scheduler_lane(
-                        &mut cache,
+                        &mut lifecycle,
                         &mut scheduler,
                         &mut retained_responses,
                         storage_key,
                         success_state,
                     ) {
-                        inflight.push(run_keyed_command::<C>(running));
+                        inflight.push(run_keyed_command::<L, K, C>(running));
                     }
                 }
             }
@@ -581,12 +581,13 @@ where
     }
 }
 
-fn admit_worker_request<C, X>(
-    scheduler: &mut KeyScheduler<StorageKey, C>,
+fn admit_worker_request<K, C, X>(
+    scheduler: &mut KeyScheduler<K, C>,
     barrier: &mut Option<X>,
-    request: Request<StorageKey, C, X>,
+    request: Request<K, C, X>,
 ) -> Result<()>
 where
+    K: Eq + std::hash::Hash + Clone,
     C: ScheduledTask,
 {
     match request {

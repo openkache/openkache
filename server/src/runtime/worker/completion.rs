@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
+use crate::KvError;
 use crate::observability::Operation;
-use crate::{KvError, Kvkache, StorageKey};
 
 use super::super::retained_response::{ResponseBatch, ResponseReservation, RetainedResponseArena};
 use super::super::scheduler::KeyScheduler;
@@ -11,8 +11,8 @@ use super::super::worker_contract::{
     CollapsedKeyedWork, DeferredResponse, KeyedWorkPort, ResponseSender,
 };
 
-pub(super) struct RunningKeyedCommand<J, R, S> {
-    pub(super) storage_key: StorageKey,
+pub(super) struct RunningKeyedCommand<K, J, R, S> {
+    pub(super) storage_key: K,
     pub(super) completion: RunningCompletion<R, S>,
     pub(super) job: J,
     pub(super) operation: Operation,
@@ -32,19 +32,19 @@ pub(super) enum RunningCompletion<R, S> {
     },
 }
 
-pub(super) struct CompletedKeyedCommand<J, R, S> {
-    pub(super) storage_key: StorageKey,
+pub(super) struct CompletedKeyedCommand<K, J, R, S> {
+    pub(super) storage_key: K,
     pub(super) completion: RunningCompletion<R, S>,
     pub(super) job: J,
     pub(super) operation: Operation,
     pub(super) started_at: Instant,
 }
 
-pub(super) async fn run_keyed_command<C>(
-    running: RunningKeyedCommand<C::PreparedJob, C::Response, C::VisibleState>,
-) -> CompletedKeyedCommand<C::CompletedJob, C::Response, C::VisibleState>
+pub(super) async fn run_keyed_command<L, K, C>(
+    running: RunningKeyedCommand<K, C::PreparedJob, C::Response, C::VisibleState>,
+) -> CompletedKeyedCommand<K, C::CompletedJob, C::Response, C::VisibleState>
 where
-    C: KeyedWorkPort<Kvkache, StorageKey>,
+    C: KeyedWorkPort<L, K>,
 {
     let RunningKeyedCommand {
         storage_key,
@@ -62,20 +62,20 @@ where
     }
 }
 
-pub(super) enum DeferredLaneCompletion<R, S> {
+pub(super) enum DeferredLaneCompletion<K, R, S> {
     Batch {
-        storage_key: StorageKey,
+        storage_key: K,
         responses: ResponseBatch,
         success_state: Option<S>,
         failure_state: Option<S>,
     },
     Pending {
-        storage_key: StorageKey,
+        storage_key: K,
         response: ResponseSender<R>,
         reservation: ResponseReservation,
     },
     CollapsedPending {
-        storage_key: StorageKey,
+        storage_key: K,
         responses: ResponseBatch,
         mutation_response_index: usize,
         failure_state: S,
@@ -116,23 +116,25 @@ pub(super) fn send_failure<R>(
     }
 }
 
-pub(super) fn finish_scheduler_lane<C>(
-    cache: &mut Kvkache,
-    scheduler: &mut KeyScheduler<StorageKey, C>,
+pub(super) fn finish_scheduler_lane<L, K, C>(
+    lifecycle: &mut L,
+    scheduler: &mut KeyScheduler<K, C>,
     arena: &mut RetainedResponseArena<DeferredResponse<C::Response>>,
-    storage_key: StorageKey,
+    storage_key: K,
     visible_state: Option<C::VisibleState>,
-) -> Option<RunningKeyedCommand<C::PreparedJob, C::Response, C::VisibleState>>
+) -> Option<RunningKeyedCommand<K, C::PreparedJob, C::Response, C::VisibleState>>
 where
-    C: KeyedWorkPort<Kvkache, StorageKey>,
+    K: Eq + std::hash::Hash + Clone,
+    C: KeyedWorkPort<L, K>,
 {
     let Some(base) = visible_state else {
         scheduler.finish_running_lane(storage_key);
         return None;
     };
-    let commands = scheduler.drain_collapsible_up_to(storage_key, arena.available(), |command| {
-        command.metadata(cache).collapsible
-    });
+    let commands =
+        scheduler.drain_collapsible_up_to(storage_key.clone(), arena.available(), |command| {
+            command.metadata(lifecycle).collapsible
+        });
     if commands.len() == 0 {
         drop(commands);
         scheduler.finish_running_lane(storage_key);
@@ -140,7 +142,7 @@ where
     }
     let command_count = commands.len();
     let mut responses = arena.batch();
-    let work = C::collapse(cache, storage_key, base, commands, |response| {
+    let work = C::collapse(lifecycle, storage_key.clone(), base, commands, |response| {
         responses
             .push(response)
             .unwrap_or_else(|_| unreachable!("bounded collapse exceeded response capacity"))
