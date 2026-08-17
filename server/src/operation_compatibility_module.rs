@@ -17,7 +17,10 @@ use super::operation_compatibility_services::{
 use super::operation_composition::ApiModule;
 use super::operation_contract::OperationId;
 use super::operation_execution_state::OperationStateBindings;
-use super::operation_ports::{NAMESPACE_PORT, OBSERVABILITY_PORT};
+use super::operation_ports::{
+    NAMESPACE_CATALOG_PORT, NAMESPACE_COORDINATION_PORT, NAMESPACE_MEMBERSHIP_PORT,
+    OBSERVABILITY_PORT,
+};
 use super::operation_registration::{RegistrationBuilder, ServerOperationRegistration};
 use super::storage_port::{STORAGE_PORT, StorageDataPort};
 
@@ -27,8 +30,12 @@ fn initialize_module(
 ) -> Result<(), &'static str> {
     let storage = downcast_capability(bootstrap, STORAGE_PORT)
         .ok_or("compatibility storage port is unavailable")?;
-    let namespaces =
-        downcast_capability(bootstrap, NAMESPACE_PORT).ok_or("namespace port is unavailable")?;
+    let coordination = downcast_capability(bootstrap, NAMESPACE_COORDINATION_PORT)
+        .ok_or("namespace coordination port is unavailable")?;
+    let catalog = downcast_capability(bootstrap, NAMESPACE_CATALOG_PORT)
+        .ok_or("namespace catalog port is unavailable")?;
+    let membership = downcast_capability(bootstrap, NAMESPACE_MEMBERSHIP_PORT)
+        .ok_or("namespace membership port is unavailable")?;
     let observability = downcast_capability(bootstrap, OBSERVABILITY_PORT)
         .ok_or("observability port is unavailable")?;
     let max_item_bytes = storage.max_item_bytes();
@@ -37,14 +44,18 @@ fn initialize_module(
         OperationId::Get,
         Arc::new(GetState {
             storage: storage.clone(),
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
+            membership: Arc::clone(membership),
         }),
     )?;
     states.bind(
         OperationId::Set,
         Arc::new(SetState {
             storage: storage.clone(),
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
+            membership: Arc::clone(membership),
             max_item_bytes,
         }),
     )?;
@@ -52,14 +63,17 @@ fn initialize_module(
         OperationId::Delete,
         Arc::new(DeleteState {
             storage: storage.clone(),
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
+            membership: Arc::clone(membership),
         }),
     )?;
     states.bind(
         OperationId::Stats,
         Arc::new(StatsState {
             storage: storage.clone(),
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
             observability: Arc::clone(observability),
         }),
     )?;
@@ -67,26 +81,32 @@ fn initialize_module(
         OperationId::Sync,
         Arc::new(SyncState {
             storage: storage.clone(),
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
+            membership: Arc::clone(membership),
         }),
     )?;
     states.bind(
         OperationId::NamespaceOpen,
         Arc::new(NamespaceOpenState {
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
         }),
     )?;
     states.bind(
         OperationId::NamespaceUpdatePolicy,
         Arc::new(NamespaceUpdateState {
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
         }),
     )?;
     states.bind(
         OperationId::NamespaceDelete,
         Arc::new(NamespaceDeleteState {
             storage: storage.clone(),
-            namespaces: Arc::clone(namespaces),
+            coordination: Arc::clone(coordination),
+            catalog: Arc::clone(catalog),
+            membership: Arc::clone(membership),
         }),
     )?;
     Ok(())
@@ -139,12 +159,15 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
     .authorize(authorization_none)
     .mutation()
     .build(),
-    RegistrationBuilder::new(OperationId::NamespaceDelete, handlers::namespace_delete_handler)
-        .state::<NamespaceDeleteState>()
-        .prepare(prepare::prepare_namespace_delete)
-        .authorize(authorization_none)
-        .mutation()
-        .build(),
+    RegistrationBuilder::new(
+        OperationId::NamespaceDelete,
+        handlers::namespace_delete_handler,
+    )
+    .state::<NamespaceDeleteState>()
+    .prepare(prepare::prepare_namespace_delete)
+    .authorize(authorization_none)
+    .mutation()
+    .build(),
 ];
 
 pub(super) const API: ApiModule =

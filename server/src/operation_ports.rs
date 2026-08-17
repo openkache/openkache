@@ -18,10 +18,14 @@ use super::{
     ObservabilityState, ObservabilityStats, SetReservation,
 };
 
-/// Namespace metadata capability exposed to API behavior.
-pub(super) trait NamespaceCapability: Send + Sync {
+/// Namespace locking capability used during operation preparation.
+pub(super) trait NamespaceCoordinationCapability: Send + Sync {
     fn operation_lock(&self, namespace_id: u64) -> Option<ResourceLock>;
     fn lifecycle_lock(&self) -> Result<Arc<AsyncMutex<()>>, NamespaceError>;
+}
+
+/// Namespace descriptor and policy capability exposed to API behavior.
+pub(super) trait NamespaceCatalogCapability: Send + Sync {
     fn exists(&self, namespace_id: u64) -> bool;
     fn policy(&self, namespace_id: u64) -> Option<NamespacePolicy>;
     fn open(
@@ -37,6 +41,10 @@ pub(super) trait NamespaceCapability: Send + Sync {
         policy: NamespacePolicy,
     ) -> Result<NamespaceDescriptor, NamespaceError>;
     fn delete(&self, namespace_id: u64, expected_revision: u64) -> Result<(), NamespaceError>;
+}
+
+/// Namespace item and worker membership capability exposed to API behavior.
+pub(super) trait NamespaceMembershipCapability: Send + Sync {
     fn tracked_items(&self, namespace_id: u64) -> Option<Vec<openkache_protocol::ItemId>>;
     fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<StorageRoute>>;
     fn mark_workers_clean(&self, namespace_id: u64) -> Result<(), NamespaceError>;
@@ -72,17 +80,23 @@ pub(super) trait ObservabilityCapability: Send + Sync {
     fn stats_snapshot(&self) -> ObservabilityStats;
 }
 
-pub(super) type NamespaceCapabilityHandle = Arc<dyn NamespaceCapability>;
+pub(super) type NamespaceCoordinationCapabilityHandle = Arc<dyn NamespaceCoordinationCapability>;
+pub(super) type NamespaceCatalogCapabilityHandle = Arc<dyn NamespaceCatalogCapability>;
+pub(super) type NamespaceMembershipCapabilityHandle = Arc<dyn NamespaceMembershipCapability>;
 pub(super) type ObservabilityCapabilityHandle = Arc<dyn ObservabilityCapability>;
 
 /// Neutral capability identities. API modules may request these at startup
 /// without depending on an API family or wire version.
-pub(super) const NAMESPACE_PORT: CapabilityKey<NamespaceCapabilityHandle> =
-    CapabilityKey::new("openkache.namespace.port");
+pub(super) const NAMESPACE_COORDINATION_PORT: CapabilityKey<NamespaceCoordinationCapabilityHandle> =
+    CapabilityKey::new("openkache.namespace.coordination.port");
+pub(super) const NAMESPACE_CATALOG_PORT: CapabilityKey<NamespaceCatalogCapabilityHandle> =
+    CapabilityKey::new("openkache.namespace.catalog.port");
+pub(super) const NAMESPACE_MEMBERSHIP_PORT: CapabilityKey<NamespaceMembershipCapabilityHandle> =
+    CapabilityKey::new("openkache.namespace.membership.port");
 pub(super) const OBSERVABILITY_PORT: CapabilityKey<ObservabilityCapabilityHandle> =
     CapabilityKey::new("openkache.observability.port");
 
-impl NamespaceCapability for Mutex<NamespaceRegistry> {
+impl NamespaceCoordinationCapability for Mutex<NamespaceRegistry> {
     fn operation_lock(&self, namespace_id: u64) -> Option<ResourceLock> {
         self.lock().ok()?.operation_lock(namespace_id)
     }
@@ -92,7 +106,9 @@ impl NamespaceCapability for Mutex<NamespaceRegistry> {
             .map(|registry| registry.lifecycle_lock())
             .map_err(|_| NamespaceError::Internal)
     }
+}
 
+impl NamespaceCatalogCapability for Mutex<NamespaceRegistry> {
     fn exists(&self, namespace_id: u64) -> bool {
         self.lock()
             .ok()
@@ -133,7 +149,9 @@ impl NamespaceCapability for Mutex<NamespaceRegistry> {
             .map_err(|_| NamespaceError::Internal)?
             .delete(namespace_id, expected_revision)
     }
+}
 
+impl NamespaceMembershipCapability for Mutex<NamespaceRegistry> {
     fn tracked_items(&self, namespace_id: u64) -> Option<Vec<openkache_protocol::ItemId>> {
         self.lock().ok()?.tracked_items(namespace_id)
     }

@@ -7,47 +7,63 @@
 use super::super::types::{
     StorageWriteCondition, StorageWriteEviction, StorageWriteExpiration, StorageWriteOptions,
 };
-use super::operation_ports::{NamespaceCapabilityHandle, ObservabilityCapabilityHandle};
+use super::operation_ports::{
+    NamespaceCatalogCapabilityHandle, NamespaceCoordinationCapabilityHandle,
+    NamespaceMembershipCapabilityHandle, ObservabilityCapabilityHandle,
+};
 use super::storage_port::StoragePort;
 
-pub(super) struct GetState {
-    pub(super) storage: StoragePort,
-    pub(super) namespaces: NamespaceCapabilityHandle,
+pub(super) struct GetState<S = StoragePort> {
+    pub(super) storage: S,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
+    pub(super) membership: NamespaceMembershipCapabilityHandle,
 }
 
-pub(super) struct SetState {
-    pub(super) storage: StoragePort,
-    pub(super) namespaces: NamespaceCapabilityHandle,
+pub(super) struct SetState<S = StoragePort> {
+    pub(super) storage: S,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
+    pub(super) membership: NamespaceMembershipCapabilityHandle,
     pub(super) max_item_bytes: usize,
 }
 
-pub(super) struct DeleteState {
-    pub(super) storage: StoragePort,
-    pub(super) namespaces: NamespaceCapabilityHandle,
+pub(super) struct DeleteState<S = StoragePort> {
+    pub(super) storage: S,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
+    pub(super) membership: NamespaceMembershipCapabilityHandle,
 }
 
-pub(super) struct StatsState {
-    pub(super) storage: StoragePort,
-    pub(super) namespaces: NamespaceCapabilityHandle,
+pub(super) struct StatsState<S = StoragePort> {
+    pub(super) storage: S,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
     pub(super) observability: ObservabilityCapabilityHandle,
 }
 
-pub(super) struct SyncState {
-    pub(super) storage: StoragePort,
-    pub(super) namespaces: NamespaceCapabilityHandle,
+pub(super) struct SyncState<S = StoragePort> {
+    pub(super) storage: S,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
+    pub(super) membership: NamespaceMembershipCapabilityHandle,
 }
 
 pub(super) struct NamespaceOpenState {
-    pub(super) namespaces: NamespaceCapabilityHandle,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
 }
 
 pub(super) struct NamespaceUpdateState {
-    pub(super) namespaces: NamespaceCapabilityHandle,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
 }
 
-pub(super) struct NamespaceDeleteState {
-    pub(super) storage: StoragePort,
-    pub(super) namespaces: NamespaceCapabilityHandle,
+pub(super) struct NamespaceDeleteState<S = StoragePort> {
+    pub(super) storage: S,
+    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
+    pub(super) catalog: NamespaceCatalogCapabilityHandle,
+    pub(super) membership: NamespaceMembershipCapabilityHandle,
 }
 
 pub(crate) const fn storage_write_options(

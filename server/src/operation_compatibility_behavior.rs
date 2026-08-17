@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::future::Future;
 
-use openkache_protocol::{ItemId, Opcode, ResponseSegment};
+use openkache_protocol::{Opcode, ResponseSegment};
 
 use super::super::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
@@ -17,12 +17,14 @@ use super::operation_compatibility_decode::{
     GetInput, NamespaceDeleteInput, NamespaceInput, NamespaceOpenInput, NamespaceRevisionInput,
     SetInput,
 };
-use super::operation_compatibility_services::storage_write_options;
+use super::operation_compatibility_services::{
+    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
+    SetState, StatsState, SyncState, storage_write_options,
+};
 use super::operation_contract::{OperationStatus, telemetry_operation};
 use super::operation_outcome::{
     OperationBody, OperationError, OperationOutcome, OperationSuccessStatus,
 };
-use super::operation_ports::{NamespaceCapability, ObservabilityCapability};
 use super::storage_port::{
     CompatibilityStorageAddressPort, StorageAdministrationPort, StorageError, StorageMutation,
     StorageValue, StorageWriteOutcome,
@@ -132,20 +134,49 @@ pub(super) fn mutation_domain_error(is_set: bool, error: StorageError) -> Operat
     }
 }
 
-pub(super) fn get<'a>(
-    cache: &'a impl CompatibilityStorageAddressPort,
-    namespaces: &'a dyn NamespaceCapability,
+pub(super) fn get<'a, S: CompatibilityStorageAddressPort>(
+    state: &'a GetState<S>,
     decoded: GetInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
-    async move { execute_get(cache, decoded.namespace_id, decoded.item_id, namespaces).await }
+    async move {
+        let namespace_id = decoded.namespace_id;
+        if !state.catalog.exists(namespace_id) {
+            return domain_error(
+                OperationStatus::NamespaceNotFound,
+                b"namespace does not exist",
+            );
+        }
+        let item_id = decoded.item_id;
+        let address = state
+            .storage
+            .prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        match state
+            .storage
+            .get(telemetry_operation(Opcode::Get), address)
+            .await
+        {
+            Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value),
+            Ok(None) => {
+                if state.membership.prune_item(namespace_id, item_id).is_err() {
+                    return domain_error(
+                        OperationStatus::InternalError,
+                        b"namespace metadata is unavailable",
+                    );
+                }
+                domain_success(OperationStatus::NotFound, OperationBody::opaque(Vec::new()))
+            }
+            Err(error) => domain_storage(error),
+        }
+    }
 }
 
 pub(super) fn namespace_open<'a>(
-    namespaces: &'a dyn NamespaceCapability,
+    state: &'a NamespaceOpenState,
     decoded: NamespaceOpenInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
-        let result = namespaces.open(decoded.name, decoded.create_if_missing, decoded.policy);
+        let catalog = state.catalog.as_ref();
+        let result = catalog.open(decoded.name, decoded.create_if_missing, decoded.policy);
         match result {
             Ok((NamespaceOpenResult::Existing, descriptor)) => domain_success(
                 OperationStatus::Ok,
@@ -161,11 +192,12 @@ pub(super) fn namespace_open<'a>(
 }
 
 pub(super) fn namespace_update_policy<'a>(
-    namespaces: &'a dyn NamespaceCapability,
+    state: &'a NamespaceUpdateState,
     decoded: NamespaceRevisionInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
-        let result = namespaces.update(
+        let catalog = state.catalog.as_ref();
+        let result = catalog.update(
             decoded.namespace_id,
             decoded.expected_revision,
             decoded.policy,
@@ -180,15 +212,15 @@ pub(super) fn namespace_update_policy<'a>(
     }
 }
 
-pub(super) fn namespace_delete<'a>(
-    cache: &'a impl CompatibilityStorageAddressPort,
-    namespaces: &'a dyn NamespaceCapability,
+pub(super) fn namespace_delete<'a, S: CompatibilityStorageAddressPort>(
+    state: &'a NamespaceDeleteState<S>,
     decoded: NamespaceDeleteInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
+        let cache = &state.storage;
         let namespace_id = decoded.namespace_id;
         let expected_revision = decoded.expected_revision;
-        let tracked_items = match namespaces.tracked_items(namespace_id) {
+        let tracked_items = match state.membership.tracked_items(namespace_id) {
             Some(items) => items,
             None => {
                 return domain_error(
@@ -198,12 +230,14 @@ pub(super) fn namespace_delete<'a>(
             }
         };
         for item_id in tracked_items {
-            let address =
-                cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
+            let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
             match cache.get(telemetry_operation(Opcode::Get), address).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
-                    let pruned = namespaces.prune_item(namespace_id, item_id).map_err(|_| ());
+                    let pruned = state
+                        .membership
+                        .prune_item(namespace_id, item_id)
+                        .map_err(|_| ());
                     if pruned.is_err() {
                         return domain_error(
                             OperationStatus::InternalError,
@@ -214,7 +248,7 @@ pub(super) fn namespace_delete<'a>(
                 Err(error) => return domain_storage(error),
             }
         }
-        let result = namespaces.delete(namespace_id, expected_revision);
+        let result = state.catalog.delete(namespace_id, expected_revision);
         match result {
             Ok(()) => domain_success(OperationStatus::Deleted, OperationBody::Empty),
             Err(error) => namespace_error(error, b"namespace deletion rejected"),
@@ -222,15 +256,16 @@ pub(super) fn namespace_delete<'a>(
     }
 }
 
-pub(super) fn set<'a>(
-    cache: &'a impl CompatibilityStorageAddressPort,
-    namespaces: &'a dyn NamespaceCapability,
+pub(super) fn set<'a, S: CompatibilityStorageAddressPort>(
+    state: &'a SetState<S>,
     decoded: SetInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
+        let cache = &state.storage;
+        let catalog = state.catalog.as_ref();
         let namespace_id = decoded.namespace_id;
         let set_options = decoded.options;
-        let policy = match namespaces.policy(namespace_id) {
+        let policy = match catalog.policy(namespace_id) {
             Some(policy) => policy,
             None => {
                 return domain_error(
@@ -249,10 +284,9 @@ pub(super) fn set<'a>(
         };
         let item_id = decoded.item_id;
         let value = decoded.value;
-        let address =
-            cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
         let route = cache.route_for(&address);
-        let reservation = match namespaces.reserve_item(namespace_id, item_id, route) {
+        let reservation = match state.membership.reserve_item(namespace_id, item_id, route) {
             Ok(reservation) => reservation,
             Err(error) => {
                 return namespace_error(error, b"namespace metadata is unavailable");
@@ -274,8 +308,12 @@ pub(super) fn set<'a>(
                 domain_success(OperationStatus::Replaced, OperationBody::Empty)
             }
             Ok(StorageWriteOutcome::Unchanged) => {
-                let rollback =
-                    namespaces.rollback_set_reservation(namespace_id, item_id, route, reservation);
+                let rollback = state.membership.rollback_set_reservation(
+                    namespace_id,
+                    item_id,
+                    route,
+                    reservation,
+                );
                 match rollback {
                     Ok(()) => domain_success(OperationStatus::NotStored, OperationBody::Empty),
                     Err(_) => OperationOutcome::abandoned(),
@@ -283,8 +321,12 @@ pub(super) fn set<'a>(
             }
             Err(error) => {
                 let response = mutation_domain_error(true, error);
-                let rollback =
-                    namespaces.rollback_set_reservation(namespace_id, item_id, route, reservation);
+                let rollback = state.membership.rollback_set_reservation(
+                    namespace_id,
+                    item_id,
+                    route,
+                    reservation,
+                );
                 if rollback.is_ok() {
                     response
                 } else {
@@ -295,24 +337,24 @@ pub(super) fn set<'a>(
     }
 }
 
-pub(super) fn delete<'a>(
-    cache: &'a impl CompatibilityStorageAddressPort,
-    namespaces: &'a dyn NamespaceCapability,
+pub(super) fn delete<'a, S: CompatibilityStorageAddressPort>(
+    state: &'a DeleteState<S>,
     decoded: GetInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
+        let cache = &state.storage;
+        let catalog = state.catalog.as_ref();
         let namespace_id = decoded.namespace_id;
-        if !namespaces.exists(namespace_id) {
+        if !catalog.exists(namespace_id) {
             return domain_error(
                 OperationStatus::NamespaceNotFound,
                 b"namespace does not exist",
             );
         }
         let item_id = decoded.item_id;
-        let address =
-            cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
+        let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
         let route = cache.route_for(&address);
-        if let Err(status) = namespaces.reserve_worker(namespace_id, route) {
+        if let Err(status) = state.membership.reserve_worker(namespace_id, route) {
             return namespace_error(status, b"namespace metadata is unavailable");
         }
         let mutation = cache
@@ -321,7 +363,8 @@ pub(super) fn delete<'a>(
         match mutation {
             Ok(mutation) => {
                 let deleted = mutation == StorageMutation::Applied;
-                if namespaces
+                if state
+                    .membership
                     .mark_delete(namespace_id, item_id, deleted)
                     .is_err()
                 {
@@ -341,15 +384,15 @@ pub(super) fn delete<'a>(
     }
 }
 
-pub(super) fn stats<'a>(
-    cache: &'a impl StorageAdministrationPort,
-    namespaces: &'a dyn NamespaceCapability,
-    observability: &'a dyn ObservabilityCapability,
+pub(super) fn stats<'a, S: StorageAdministrationPort>(
+    state: &'a StatsState<S>,
     decoded: NamespaceInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
+        let cache = &state.storage;
+        let catalog = state.catalog.as_ref();
         let namespace_id = decoded.namespace_id;
-        if !namespaces.exists(namespace_id) {
+        if !catalog.exists(namespace_id) {
             return domain_error(
                 OperationStatus::NamespaceNotFound,
                 b"namespace does not exist",
@@ -367,18 +410,18 @@ pub(super) fn stats<'a>(
                     write!(payload, "{worker:?}").expect("writing to a String cannot fail");
                 }
                 payload.push_str(r#"],"observability":{"#);
-                let stats = observability.stats_snapshot();
+                let stats = state.observability.stats_snapshot();
                 write!(
-                    payload,
-                    r#""schema_version":1,"uptime_seconds":{:.3},"ready":{},"degraded":{},"active_connections":{},"active_streams":{},"requests_total":{}"#,
-                    stats.uptime_seconds,
-                    stats.ready,
-                    stats.degraded,
-                    stats.active_connections,
-                    stats.active_streams,
-                    stats.requests_total,
-                )
-                .expect("writing statistics to a String cannot fail");
+                payload,
+                r#""schema_version":1,"uptime_seconds":{:.3},"ready":{},"degraded":{},"active_connections":{},"active_streams":{},"requests_total":{}"#,
+                stats.uptime_seconds,
+                stats.ready,
+                stats.degraded,
+                stats.active_connections,
+                stats.active_streams,
+                stats.requests_total,
+            )
+            .expect("writing statistics to a String cannot fail");
                 payload.push_str("}}");
                 domain_success(
                     OperationStatus::Ok,
@@ -390,20 +433,21 @@ pub(super) fn stats<'a>(
     }
 }
 
-pub(super) fn sync<'a>(
-    cache: &'a impl StorageAdministrationPort,
-    namespaces: &'a dyn NamespaceCapability,
+pub(super) fn sync<'a, S: StorageAdministrationPort>(
+    state: &'a SyncState<S>,
     decoded: NamespaceInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
+        let cache = &state.storage;
+        let catalog = state.catalog.as_ref();
         let namespace_id = decoded.namespace_id;
-        if !namespaces.exists(namespace_id) {
+        if !catalog.exists(namespace_id) {
             return domain_error(
                 OperationStatus::NamespaceNotFound,
                 b"namespace does not exist",
             );
         }
-        let dirty_workers = match namespaces.dirty_workers(namespace_id) {
+        let dirty_workers = match state.membership.dirty_workers(namespace_id) {
             Some(workers) => workers,
             None => {
                 return domain_error(
@@ -417,7 +461,7 @@ pub(super) fn sync<'a>(
             .await
         {
             Ok(()) => {
-                let clean = namespaces.mark_workers_clean(namespace_id);
+                let clean = state.membership.mark_workers_clean(namespace_id);
                 match clean {
                     Ok(()) => domain_success(OperationStatus::Ok, OperationBody::Empty),
                     Err(_) => OperationOutcome::abandoned(),
@@ -425,33 +469,5 @@ pub(super) fn sync<'a>(
             }
             Err(_) => OperationOutcome::abandoned(),
         }
-    }
-}
-
-async fn execute_get(
-    cache: &impl CompatibilityStorageAddressPort,
-    namespace_id: u64,
-    item_id: ItemId,
-    namespaces: &dyn NamespaceCapability,
-) -> OperationOutcome {
-    if !namespaces.exists(namespace_id) {
-        return domain_error(
-            OperationStatus::NamespaceNotFound,
-            b"namespace does not exist",
-        );
-    }
-    let address = cache.prepare_compatibility_address(namespace_id, item_id.as_bytes());
-    match cache.get(telemetry_operation(Opcode::Get), address).await {
-        Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value),
-        Ok(None) => {
-            if namespaces.prune_item(namespace_id, item_id).is_err() {
-                return domain_error(
-                    OperationStatus::InternalError,
-                    b"namespace metadata is unavailable",
-                );
-            }
-            domain_success(OperationStatus::NotFound, OperationBody::opaque(Vec::new()))
-        }
-        Err(error) => domain_storage(error),
     }
 }
