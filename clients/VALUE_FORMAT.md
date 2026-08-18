@@ -268,6 +268,40 @@ levels and rejects compound or floating-point map keys when it cannot
 determine semantic key uniqueness. These are bounded-parser requirements for
 the v1 acceptance profile, not alternate payload semantics.
 
+#### 5.2.1 Draft map-key policy
+
+This subsection is intentionally provisional while the client value model is
+being implemented. It records the broad v1 starting point; a later draft MAY
+tighten the equivalence algorithm or the adapter representation without
+changing the value-envelope grammar.
+
+An untagged CBOR data item MAY be used as a map key, including an array or a
+map. Tagged items remain rejected by the no-tags rule above. The value profile
+does not require deterministic encoding of the complete payload, and it does
+not require encoders to sort maps or re-encode an otherwise valid value.
+
+For duplicate detection, key equality is based on the decoded CBOR data model,
+not on the source bytes. The provisional rules are:
+
+- integer encodings that decode to the same mathematical integer are equal;
+- text and byte strings compare by exact contents and remain distinct types;
+- arrays compare in order, element by element;
+- maps compare without regard to entry order, after their own duplicate-key
+  checks; and
+- booleans, null, and other supported simple values compare by value.
+
+Floating-point key equality, NaN handling, and the portable representation of
+compound keys remain open design questions. A decoder MUST reject a map when it
+cannot establish key uniqueness under the equality rules it implements. An
+adapter MUST NOT stringify, coerce, or silently drop a key that its native map
+type cannot represent; it MAY expose such a map as a generic key/value-entry
+collection instead.
+
+These rules preserve the wire data model without making deterministic CBOR the
+value-format goal. The implementation phase will evaluate whether key-only
+canonicalization, a more precise floating-point rule, or a restricted adapter
+subset is needed before this profile is finalized.
+
 ## 6. Compression
 
 Compression profile `1` is one standard Zstandard (Zstd) frame under
