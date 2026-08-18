@@ -12,7 +12,7 @@ Shared client topics are documented here:
 |---|---|
 | SDK inventory, implementation status, and binding boundaries | This README |
 | Shared request lifecycle, retries, API families, and configuration | [Client behavioral contract](CLIENT.md) |
-| Formatted key input, conversion, and namespace-bound Item ID derivation | [Key format](KEY_FORMAT.md) |
+| Formatted key input, compact public mapping, and protected Item ID derivation | [Key format](KEY_FORMAT.md) |
 | Formatted value bytes, compression, and application-level protection | [Value format](VALUE_FORMAT.md) |
 | QUIC framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
 | Language API, build, packaging, and runtime configuration | The implemented package's README |
@@ -44,12 +44,11 @@ layouts only. They do not connect to OpenKache or expose cache operations yet.
 The [behavioral](CLIENT.md), [key](KEY_FORMAT.md), and
 [value](VALUE_FORMAT.md) documents together form the pre-freeze v1 client
 contract. The shared core and implemented adapters enforce the restricted key
-model, namespace-bound Item ID derivation, and optional protection. The value
-envelope in the value-format document is the target of a separate value-codec
-migration; the server remains opaque to all of these client conventions.
-TypeScript's legacy metadata envelope remains a package-level compatibility
-detail; use its `set_json` / `get_json` or Raw methods for cross-language
-values.
+model, Item ID mapping, and optional protection. The value envelope in the
+value-format document is the target of a separate value-codec migration; the
+server remains opaque to all of these client conventions. TypeScript's legacy
+metadata envelope remains a package-level compatibility detail; use its
+`set_json` / `get_json` or Raw methods for cross-language values.
 
 ## Binding architecture
 

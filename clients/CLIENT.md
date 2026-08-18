@@ -163,7 +163,7 @@ Configuration that affects identity or stored bytes MUST be stable for the
 lifetime of the affected data:
 
 - key type and Item ID mapping profile;
-- Item ID root key;
+- Item ID root key, when `Hash` is selected;
 - the immutable mapping from each value-key ID to its value-protection key;
 - write protection and compression policy; and
 - read protection allowlist.
@@ -184,15 +184,17 @@ Item ID derivation and value protection use independent key domains:
 
 ```text
 item_id_root_key
-  -> stable Item ID derivation
+  -> stable `Hash` Item ID derivation
 
 value_keyring[value_key_id]
   -> rotatable value protection
 ```
 
-The Item ID root key is resolved before a formatted request can address an
-item. It MUST NOT change as part of value-key rotation. Changing it changes
-hashed Item IDs and requires an identity migration or cache repopulation.
+The Item ID root key is resolved before a `Hash` request can address an item.
+It MUST NOT change as part of value-key rotation. Changing it changes `Hash`
+Item IDs and requires an identity migration or cache repopulation.
+`CanonicalKeyOrHash` ignores the Item ID root key and uses the public mapping
+defined by the key contract.
 
 The value keyring maps a positive unsigned 64-bit `value_key_id` to one exact
 32-byte `value_key`. A key ID is public operator-assigned metadata, not key

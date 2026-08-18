@@ -84,9 +84,10 @@ let outcome = client
 and copies a dynamic buffer. Neither hashes the supplied bytes. The current
 implementation calls its combined root secret `client_root_key`; the target v1
 contracts replace that transitional coupling with a stable `item_id_root_key`
-and a rotatable value keyring. Both target derivations bind the selected
-namespace. The Rust API retains `DataProtectionKey` as a source-compatible
-alias while implementation catches up to that contract.
+and a rotatable value keyring. The target `Hash` profile binds the selected
+namespace and root key; the public `CanonicalKeyOrHash` profile uses neither.
+The Rust API retains `DataProtectionKey` as a source-compatible alias while
+implementation catches up to that contract.
 
 `ValueCodec` stores its current metadata inside the opaque value. The
 [Client Value Encoding Profile](../VALUE_FORMAT.md) is the normative target
