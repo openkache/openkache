@@ -83,21 +83,23 @@ pub(super) fn contract_error_response(
     message: &[u8],
 ) -> OperationResponse {
     let status = contract_error_status(opcode, preferred);
-    Response::new(status, message.to_vec())
-        .unwrap_or_else(|_| {
-            // Error diagnostics are API-owned bytes. A malformed adapter must not
-            // turn an oversized diagnostic into a server panic; retain the
-            // contract-valid status and send a bounded generic diagnostic instead.
-            Response::new(
-                status,
-                b"operation error exceeds the protocol limit".to_vec(),
-            )
-            .unwrap_or(Response {
-                status,
-                payload: Vec::new(),
-            })
-        })
-        .into()
+    let parts = ResponseParts::segmented(
+        status,
+        [operation_value_segment(OperationValue::inline(message))],
+    )
+    .unwrap_or_else(|_| {
+        // Error diagnostics are API-owned bytes. A malformed adapter must not
+        // turn an oversized diagnostic into a server panic; retain the
+        // contract-valid status and send a bounded generic diagnostic instead.
+        ResponseParts::segmented(
+            status,
+            [operation_value_segment(OperationValue::inline(
+                b"operation error exceeds the protocol limit",
+            ))],
+        )
+        .expect("bounded error response remains within the protocol limit")
+    });
+    OperationResponse { status, parts }
 }
 
 /// Builds a wire error response for a neutral operation selected by runtime
