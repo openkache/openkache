@@ -345,14 +345,17 @@ fn operation_error_response(
 ) -> Option<OperationResponse> {
     let contract = contract::spec(opcode);
     match error {
-        OperationError::InvalidRequest(message) => {
-            operation_status_response(opcode, contract, OperationStatus::InvalidRequest, message)
-        }
+        OperationError::InvalidRequest(message) => operation_status_response(
+            opcode,
+            contract,
+            OperationStatus::InvalidRequest,
+            OperationValue::inline(message),
+        ),
         OperationError::Status { status, message } => {
-            operation_status_response(opcode, contract, status, message)
+            operation_status_response(opcode, contract, status, OperationValue::inline(message))
         }
         OperationError::OwnedStatus { status, message } => {
-            operation_status_response(opcode, contract, status, &message)
+            operation_status_response(opcode, contract, status, OperationValue::from(message))
         }
     }
 }
@@ -361,7 +364,7 @@ fn operation_status_response(
     opcode: openkache_protocol::Opcode,
     contract: contract::OperationWireSpec,
     requested: OperationStatus,
-    message: &[u8],
+    message: impl Into<OperationValue>,
 ) -> Option<OperationResponse> {
     let requested = requested.wire_status();
     let status = Some(requested)
@@ -375,7 +378,7 @@ fn operation_status_response(
         })
         .or_else(|| contract.error_statuses.first().copied())
         .unwrap_or(Status::InternalError);
-    Some(operation_response(opcode, status, message.to_vec()))
+    Some(operation_response(opcode, status, message))
 }
 
 /// Encodes one operation response without allowing an API-owned payload to
