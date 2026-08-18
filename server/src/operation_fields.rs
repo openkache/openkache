@@ -72,11 +72,6 @@ impl OperationFieldEnvelope<'_> {
         self.nested_widths
     }
 
-    /// Returns whether the field declares a codec identifier.
-    pub(super) fn has_codec(&self, codec: &str) -> bool {
-        self.codecs.contains(&codec)
-    }
-
     /// Validates this value against its complete generated codec path.
     ///
     /// The request view already performs this check before dispatch. Keeping
@@ -100,46 +95,6 @@ impl OperationFieldEnvelope<'_> {
         .map_err(|error| error.message())
     }
 
-    /// Decodes a UTF-8 field without allocating.
-    pub(super) fn decode_utf8(&self) -> Result<&str, &'static [u8]> {
-        openkache_protocol::codec::decode_utf8(self.bytes)
-    }
-
-    /// Returns the generated enum member spellings for an enum field.
-    pub(super) fn enum_values(&self) -> &'static [&'static str] {
-        self.enum_values
-    }
-
-    pub(super) fn decode_u64(&self) -> Result<u64, &'static [u8]> {
-        openkache_protocol::codec::decode_u64_be(self.bytes)
-    }
-
-    pub(super) fn decode_i32(&self) -> Result<i32, &'static [u8]> {
-        openkache_protocol::codec::decode_i32_be(self.bytes)
-    }
-
-    pub(super) fn decode_f64(&self) -> Result<f64, &'static [u8]> {
-        openkache_protocol::codec::decode_f64_be(self.bytes)
-    }
-
-    pub(super) fn decode_bool(&self) -> Result<bool, &'static [u8]> {
-        openkache_protocol::codec::decode_bool(self.bytes)
-    }
-
-    /// Applies one API-owned transform to a packed floating-point field.
-    ///
-    /// The envelope retains codec validation and byte traversal so behavior
-    /// modules do not depend on protocol codec implementation details.
-    pub(super) fn transform_packed_f64(
-        &self,
-        transform: impl FnMut(f64) -> Option<f64>,
-    ) -> Result<Vec<u8>, &'static [u8]> {
-        if !self.has_codec("packed_f64_be") {
-            return Err(b"field does not declare packed_f64_be");
-        }
-        openkache_protocol::codec::transform_packed_f64_be(self.bytes, transform)
-    }
-
     /// Returns a borrowed list cursor for APIs that do not need a collected
     /// element vector.
     pub(super) fn list_cursor(
@@ -160,8 +115,11 @@ impl OperationFieldEnvelope<'_> {
             .map_err(|error| error.message())
     }
 
-    pub(super) fn decode_union_tag(&self) -> Result<u8, &'static [u8]> {
-        openkache_protocol::codec::validate_union(self.bytes, self.union_tags)
+    /// Returns a validated union view borrowed from the field bytes.
+    pub(super) fn union_view(
+        &self,
+    ) -> Result<openkache_protocol::codec::UnionView<'_>, &'static [u8]> {
+        openkache_protocol::codec::UnionView::new(self.bytes, self.union_tags)
             .map_err(|error| error.message())
     }
 }

@@ -31,7 +31,7 @@ impl OperationInputView {
 
     fn unsigned_long_at_index(&self, index: usize) -> Option<u64> {
         self.encoded_field_at_index(index)
-            .and_then(|field| field.decode_u64().ok())
+            .and_then(|field| openkache_protocol::codec::decode_u64_be(field.bytes()).ok())
     }
 
     fn unsigned_long_at_index_result(
@@ -40,14 +40,14 @@ impl OperationInputView {
     ) -> Result<Option<u64>, &'static [u8]> {
         index
             .and_then(|index| self.encoded_field_at_index(index))
-            .map(|field| field.decode_u64())
+            .map(|field| openkache_protocol::codec::decode_u64_be(field.bytes()))
             .transpose()
     }
 
     fn boolean_at_index(&self, index: Option<usize>) -> Result<Option<bool>, &'static [u8]> {
         index
             .and_then(|index| self.encoded_field_at_index(index))
-            .map(|field| field.decode_bool())
+            .map(|field| openkache_protocol::codec::decode_bool(field.bytes()))
             .transpose()
     }
 }
