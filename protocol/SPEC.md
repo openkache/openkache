@@ -31,7 +31,7 @@ Version 1 specifies:
 - namespace lifecycle, name, policy, and revision contracts;
 - item ID, value, expiration, eviction, and payload constraints;
 - request-ID correlation, stream ordering, and out-of-order responses;
-- malformed-frame handling, admission rejection, and timeout outcomes;
+- malformed-frame handling and admission rejection;
 - mutation error outcomes and persistence-barrier semantics.
 
 Client-side application-key derivation, serialization, compression,
@@ -127,6 +127,9 @@ administrative operations. No authentication field appears in a v1 frame.
 
 Only client-initiated bidirectional QUIC streams carry protocol frames.
 Unidirectional streams have no protocol v1 meaning.
+The server MUST NOT initiate a protocol stream. Endpoints that receive an
+unexpected server-initiated protocol stream MUST ignore it or reject it
+according to their QUIC endpoint policy; it carries no v1 frames.
 
 QUIC stream read and write boundaries have no protocol meaning. A frame MAY be
 split across any number of reads or writes, and one read MAY contain bytes from
@@ -156,18 +159,20 @@ The following rules apply:
    MUST echo its canonical bytes and MUST NOT assign ordering, uniqueness,
    deduplication, replay-protection, or idempotency meaning to it.
 3. The client owns request-ID allocation and MAY reuse an ID after receiving
-   its response. The protocol does not require connection-wide or
-   stream-lifetime uniqueness. If a client uses the same ID for multiple
-   in-flight requests, the server still treats each request independently and
-   echoes the same ID; the client is responsible for any resulting ambiguity.
-4. Complete request frames on one lane are ordered by their wire order. The
-   server MUST apply and linearize requests in stream order, or produce results
-   indistinguishable from that ordered execution. Request-ID values MUST NOT
+   its response. A lane MUST NOT have two outstanding requests with the same
+   ID. If a client violates this rule, response correlation is ambiguous and
+   the client MUST close the connection; the server is not required to detect
+   the violation and otherwise treats each request independently.
+4. Each complete request frame receives an internal sequence position in its
+   lane. The server MUST produce results equivalent to serial execution in
+   that sequence order. It MAY execute non-conflicting requests concurrently,
+   but condition checks, mutations, and other externally visible effects MUST
+   remain indistinguishable from that serial order. Request-ID values MUST NOT
    be used as an ordering key. For example, a `DELETE` followed by a `SET` for
    the same item on one lane MUST take effect as delete-then-set even if the
    `SET` response is sent first.
 5. The server MAY send responses in any order relative to stream order. For
-   every complete, well-formed request it parses, it MUST send exactly one
+   every complete, well-formed request it admits, it MUST send exactly one
    response, including an admission or semantic error, unless the lane or
    connection fails before a response can be sent. A malformed frame is not a
    parsed request and receives no response.
@@ -177,19 +182,35 @@ The following rules apply:
 7. A server MUST NOT send unsolicited responses.
 8. After a response, the lane MAY continue carrying requests while both stream
    directions remain open. A client that finishes its send direction MUST NOT
-   expect the lane to be reusable; the server MAY still send responses for
-   already processed requests.
-9. A client MAY use multiple lanes concurrently. Ordering exists only within
-   one lane; requests on different lanes have no protocol-defined relative
-   order.
+   send another request on that lane; the server continues responses for
+   already admitted requests and then finishes its send direction.
+9. A client MAY use multiple lanes concurrently. Requests on different lanes
+   have no client-visible relative ordering guarantee, except where an
+   operation explicitly establishes a namespace-scoped barrier such as
+   `SYNC`, namespace policy update, or namespace deletion.
+
+10. A client FIN is valid only at a request-frame boundary. After receiving a
+    valid FIN, the server MUST admit no further requests on that lane, MUST
+    complete responses for requests already admitted, and MUST then finish its
+    send direction. A FIN that arrives in the middle of a frame is malformed.
+11. A client `RESET_STREAM` abandons the lane. The server MUST discard all
+    uncompleted requests on that lane; their responses are not guaranteed and
+    mutation outcomes are ambiguous. A server reset has the same effect from
+    the client's perspective. `STOP_SENDING` is handled as a request to reset
+    the affected direction.
 
 If a receiver detects malformed framing, it MUST stop processing the
-connection and close it. It MUST NOT scan for a possible next frame, and it
-MUST NOT send an error response for the malformed frame. All lanes on that
+connection and close it with the v1 application error code `0x01`
+(`MALFORMED_FRAME`). It MUST NOT scan for a possible next frame, and it MUST
+NOT send an error response for the malformed frame. All lanes on that
 connection become unusable. A client MUST discard all in-flight requests on
 every lane that terminates this way. A complete frame whose fields are
 well-delimited but fail operation validation is not malformed framing; it MAY
 receive the applicable error response.
+
+`0x01` is the only v1-defined QUIC application error code. It names a
+connection-fatal framing or response-meaning failure and does not carry a
+protocol response frame. Other application error codes are unassigned to v1.
 
 The request ID is a correlation token only. It is not a nonce, ordering value,
 deduplication key, replay-protection token, or idempotency key. If a lane fails
@@ -338,8 +359,8 @@ namespace_delete         = delete_flags:u8 | namespace_id:u64be |
 nine bytes. It is client-selected and opaque to server operation logic. A
 server MUST decode enough of the field to find the opcode-specific body, but
 MUST NOT compare request IDs for ordering or enforce a uniqueness policy.
-Clients that need unambiguous response matching SHOULD avoid reusing an ID
-while its earlier response is outstanding.
+Clients MUST not reuse an ID on a lane while its earlier response is
+outstanding.
 
 `value_len` appears only in `SET`, including when the value is empty. The
 fixed Item ID and optional TTL precede it, and the value bytes follow it. A
@@ -358,9 +379,7 @@ or shorter encoding.
 Every other opcode is unassigned. A server receiving an unassigned opcode
 MUST treat the request as malformed and terminate the connection without a
 response. Because an unassigned opcode has no defined body layout, the server
-MUST NOT scan for a possible next frame. `UnsupportedOpcode` may be returned
-only for a complete request whose opcode is assigned by the negotiated version
-but has no server operation registration.
+MUST NOT scan for a possible next frame.
 
 ### Opcodes
 
@@ -377,20 +396,6 @@ but has no server operation registration.
 | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + request ID + namespaceId (8 bytes) + expectedRevision (8 bytes) + packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
 | `09` | `NAMESPACE_DELETE` | opcode + request ID + constant 0x00 + namespaceId (8 bytes) + expectedRevision (8 bytes) | empty | — | — |
 <!-- openkache:generated-protocol-operation-table:end -->
-
-<!-- openkache:generated-protocol-contract-snapshot:start -->
-| Opcode | Name | Scope | Semantics | Success statuses | Error statuses | Request plan | Response plan |
-|---|---|---|---|---|---|---|---|
-| `01` | `PING` | `global` | `pong` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `—` | `!payload@payload:PongPayload` |
-| `02` | `GET` | `item` | `value` | `ok,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>` | `?value@value:Value` |
-| `03` | `SET` | `item` | `set_outcome` | `created,replaced,not_stored` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,no_capacity,policy_conflict,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>; !value@value:Value; ?condition@condition:SetCondition{any|if_absent|if_present}; ?expiration_mode@expirationMode:ExpirationMode{inherit|no_expiry|explicit_ttl}; ?eviction_mode@evictionMode:EvictionMode{inherit|evictable|eviction_protected}; ?ttl_milliseconds@ttlMilliseconds:Long` | `!outcome@outcome:SetOutcome{created|replaced|not_stored}` |
-| `04` | `DELETE` | `item` | `delete_outcome` | `deleted,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found,namespace_not_empty` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>` | `!deleted@deleted:Boolean` |
-| `05` | `STATS` | `namespace` | `stats_json` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long` | `!json@json:String` |
-| `06` | `SYNC` | `namespace` | `empty` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long` | `—` |
-| `07` | `NAMESPACE_OPEN` | `namespace_management` | `namespace_descriptor` | `ok,created` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!name@name:String; !create_if_missing@createIfMissing:Boolean; ?policy@policy:NamespacePolicy; ?default_expiration@policy.defaultExpiration:ExpirationDefault{no_expiry|fixed_ttl}; ?default_ttl_milliseconds@policy.defaultTtlMilliseconds:Long; ?expiration_override@policy.expirationOverride:OverridePolicy{allowed|disallowed}; ?default_eviction@policy.defaultEviction:EvictionDefault{evictable|eviction_protected}; ?eviction_override@policy.evictionOverride:OverridePolicy{allowed|disallowed}` | `!descriptor@descriptor:NamespaceDescriptor; !namespace_id@descriptor.namespaceId:Long; !revision@descriptor.revision:Long; !policy@descriptor.policy:NamespacePolicy; !default_expiration@descriptor.policy.defaultExpiration:ExpirationDefault{no_expiry|fixed_ttl}; ?default_ttl_milliseconds@descriptor.policy.defaultTtlMilliseconds:Long; !expiration_override@descriptor.policy.expirationOverride:OverridePolicy{allowed|disallowed}; !default_eviction@descriptor.policy.defaultEviction:EvictionDefault{evictable|eviction_protected}; !eviction_override@descriptor.policy.evictionOverride:OverridePolicy{allowed|disallowed}; !created@created:Boolean` |
-| `08` | `NAMESPACE_UPDATE_POLICY` | `namespace_management` | `namespace_descriptor` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found` | `!namespace_id@namespaceId:Long; !expected_revision@expectedRevision:Long; !policy@policy:NamespacePolicy; !default_expiration@policy.defaultExpiration:ExpirationDefault{no_expiry|fixed_ttl}; ?default_ttl_milliseconds@policy.defaultTtlMilliseconds:Long; !expiration_override@policy.expirationOverride:OverridePolicy{allowed|disallowed}; !default_eviction@policy.defaultEviction:EvictionDefault{evictable|eviction_protected}; !eviction_override@policy.evictionOverride:OverridePolicy{allowed|disallowed}` | `!descriptor@descriptor:NamespaceDescriptor; !namespace_id@descriptor.namespaceId:Long; !revision@descriptor.revision:Long; !policy@descriptor.policy:NamespacePolicy; !default_expiration@descriptor.policy.defaultExpiration:ExpirationDefault{no_expiry|fixed_ttl}; ?default_ttl_milliseconds@descriptor.policy.defaultTtlMilliseconds:Long; !expiration_override@descriptor.policy.expirationOverride:OverridePolicy{allowed|disallowed}; !default_eviction@descriptor.policy.defaultEviction:EvictionDefault{evictable|eviction_protected}; !eviction_override@descriptor.policy.evictionOverride:OverridePolicy{allowed|disallowed}` |
-| `09` | `NAMESPACE_DELETE` | `namespace_management` | `delete_outcome` | `deleted` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found,namespace_not_empty` | `!namespace_id@namespaceId:Long; !expected_revision@expectedRevision:Long` | `—` |
-<!-- openkache:generated-protocol-contract-snapshot:end -->
 
 ### `SET` flags
 
@@ -421,12 +426,14 @@ not require a separate control-plane transport.
 `namespace_id` is a fixed eight-byte `u64be` in the numeric range
 `1..=2^64 - 1`. The server assigns it; it is an opaque, stable server-wide
 identity. Once assigned, a `namespace_id` MUST NOT be reused for a different
-namespace, including after deletion. A server MAY retain allocation tombstones
-or a monotonic allocator state to enforce this rule. `0` is reserved and MUST
-be rejected. The ID is carried per request rather than bound to a lane, so a
-lane may be reused for different namespaces and retries can be encoded
-deterministically. Clients do not allocate namespace IDs; they treat the
-server-returned ID as opaque and MUST NOT synthesize or recycle one.
+namespace, including after deletion, restart, recovery, or replica replacement
+within the lifetime of the persistent deployment. A server MUST persist the
+allocation tombstones or monotonic allocator state needed to enforce this
+rule. If that state cannot be recovered, the server MUST NOT start as a v1
+endpoint. `0` is reserved and MUST be rejected. The ID is carried per request
+rather than bound to a lane, so a lane may be reused for different namespaces.
+Clients do not allocate namespace IDs; they treat the server-returned ID as
+opaque and MUST NOT synthesize or recycle one.
 
 The wire protocol has no default namespace concept. A namespace ID of zero is
 never a selector.
@@ -464,7 +471,8 @@ resolves a name to a namespace descriptor and can create a missing named
 namespace. `NAMESPACE_UPDATE_POLICY` changes a namespace policy with an
 optimistic-concurrency check. `NAMESPACE_DELETE` removes a named namespace
 identity with an optimistic-concurrency check. Any namespace, including the
-empty-name namespace, may be deleted once no request is using it.
+empty-name namespace, may be deleted once its deletion barrier confirms that
+it contains no live items.
 Recreating a deleted name, if allowed by the deployment, creates a new
 namespace identity and therefore receives a new `namespace_id`.
 
@@ -493,11 +501,14 @@ existing policy. A newly created namespace starts at revision `1`.
 | 0–1 | `03` | `00` = `IfEmpty`; `01`–`11` = reserved |
 | 2–7 | `FC` | Reserved; MUST be zero |
 
-Version 1 accepts only the `IfEmpty` wire value for compatibility. Deletion
-linearizes after in-flight namespace requests drain and removes the namespace
-identity. A concurrent request may receive `NamespaceNotEmpty`; whether to issue
-a new deletion request is an application decision. Namespace IDs are never
-reused.
+Version 1 accepts only the `IfEmpty` wire value. `IfEmpty` means that no live
+items remain at the delete linearization point. The server MUST establish a
+namespace deletion barrier that admits no later namespace operation, drains
+only requests admitted before the barrier, checks the revision and live-item
+count, and then either removes the namespace identity or returns
+`NamespaceNotEmpty` without changing it. Requests that arrive after a
+successful deletion receive `NamespaceNotFound`. Namespace IDs are never
+reused within the persistent deployment lifetime.
 
 `revision` and `expected_revision` are fixed eight-byte `u64be` values, not
 `vu128` fields. A namespace revision is positive, starts at `1`, and increases
@@ -835,11 +846,12 @@ were written.
 expected_revision:u64be
 ```
 
-The only valid v1 `delete_flags` value is `00` (`IfEmpty`). The server checks
-the revision and waits for no in-flight namespace request before removing the
-namespace identity. Authorization is deployment-specific because v1 has no
-owner or account field. A successful deletion returns `Deleted` with an empty
-payload. There is no reserved default namespace exception in v1.
+The only valid v1 `delete_flags` value is `00` (`IfEmpty`). The server applies
+the namespace deletion barrier defined above, checks the revision and live-item
+count, and removes the namespace identity only when the namespace is empty.
+Authorization is deployment-specific because v1 has no owner or account field.
+A successful deletion returns `Deleted` with an empty payload. There is no
+reserved default namespace exception in v1.
 
 ## Response frames
 
@@ -865,103 +877,11 @@ version, flags, Item ID, or TTL.
 The status byte is first so a client can classify a normal result or an
 admission error before decoding the response body. A valid response still
 requires the request ID and payload length before its frame boundary is known.
-
-### Explicit request plans
-
-Every operation with a non-empty modeled request MUST declare `requestWire` in
-the Smithy model. The plan composes operation-neutral fixed, packed,
-length-delimited, conditional, constant, and trailing-field primitives.
-Generated frame metadata uses the plan to delimit the request, while generated
-field metadata uses the same plan to encode and project modeled field values.
-
-Explicit plans preserve compact, deterministic bytes without teaching the
-transport, dispatcher, encoder, or projector about operation names or domain
-families. Omitting `requestWire` does not select a generic sequence, dense
-tuple, opaque body, or any other implicit layout.
-
-The historical namespace/item/SET operations express the fixed prefixes
-documented above through `requestWire`, so their bytes remain unchanged. An
-unrelated future operation may compose the same primitives without adding a
-route enum or an operation-name branch.
-
-### Generic ordered field sequences
-
-The following sequence is a reusable compact payload primitive. It is not an
-automatic top-level request layout, and `requestFraming: "ordered_fields"` does
-not select it by itself. An API may use it inside an API-owned field encoding
-and expose that encoding as a field in its explicit `requestWire` plan.
-
-The transport-neutral presence-mask field sequence is:
-
-```text
-presence_mask:ceil(field_count / 8) bytes
-[field_length:vu128 | field:value_bytes for each present field before the final present field]
-[final_present_field:remaining_bytes]
-```
-
-The mask is emitted first, with field `i` represented by bit `i % 8` in byte
-`floor(i / 8)` (least-significant bit first). Fields are then emitted in
-modeled order, but only when their mask bit is set. Every present field before
-the final present field carries its raw byte length as a canonical `vu128`
-followed by exactly that many bytes. The final present field consumes the
-remaining sequence bytes and therefore has no length prefix. A cleared bit
-represents a missing optional field. A set bit with a canonical zero length is
-a present-empty non-final field; a set final-present bit with no remaining
-bytes is a present-empty final field.
-The unused high bits of the final mask byte MUST be zero. The complete
-sequence MUST remain within the protocol value limit. Requiredness and field
-codecs come from the operation descriptor; the generic codec does not
-interpret field role names.
-
-For two modeled fields, the following vectors are normative:
-
-| Fields | Encoded bytes |
-|---|---|
-| both missing | `00` |
-| field 0 present and empty; field 1 missing | `01` |
-| field 0 missing; field 1 = `AB` | `02 AB` |
-| field 0 = 127 bytes; field 1 missing | `01 <127 bytes>` |
-| field 0 = 128 bytes; field 1 missing | `01 <128 bytes>` |
-| field 0 empty; field 1 = `AB` | `03 00 AB` |
-| field 0 = `AB`; field 1 = `CD` | `03 02 AB CD` |
-
-The non-final length examples use canonical `vu128`; the payload bytes shown as
-`<n bytes>` are arbitrary value bytes of that exact length. A receiver MUST
-reject an unused mask bit, a non-canonical or truncated non-final length, a
-truncated non-final value, or bytes after a mask with no present field.
-
-A dense field tuple is another reusable compact payload primitive. It is the
-concatenation of the declared field bytes with no presence mask or per-field
-length:
-
-```text
-field_0:value_bytes | field_1:value_bytes | ...
-```
-
-The dense layout is valid only when every field is required and has an exact
-codec-declared width. It is not selected by omitting `requestWire`. A receiver
-MUST reject truncated, trailing, or width-mismatched payloads.
-
-### Compact optional-value sequences
-
-The four-byte optional-value sequence is a protocol-v1 compatibility format,
-not an implicit generic request layout. Only the compatibility
-facade/projector uses this format for current v1 operations.
-
-Each field is encoded as a four-byte big-endian length followed by that many
-value bytes. `FF FF FF FF` is the missing-value sentinel. A zero length is a
-present empty value. Fields retain their modeled order, and the complete
-sequence is bounded by the protocol's maximum value size. A future API may use
-the codec through an explicit descriptor or inside an adapter-owned field
-encoding. Omitting `requestWire` never selects it.
-
-For two optional values, the compatibility vectors are:
-
-| Values | Encoded bytes |
-|---|---|
-| both missing | `FF FF FF FF FF FF FF FF` |
-| first present empty; second missing | `00 00 00 00 FF FF FF FF` |
-| first missing; second = `AB` | `FF FF FF FF 00 00 00 01 AB` |
+Receivers MUST validate the status assignment, canonical `request_id` and
+`payload_len`, exact payload boundary, and status-specific payload contract.
+An unknown status, truncated response, non-canonical response integer, or
+payload/status mismatch is malformed and requires connection close with
+`MALFORMED_FRAME`; it receives no response.
 
 ### Status codes
 
@@ -973,21 +893,20 @@ For two optional values, the compatibility vectors are:
 | `03` | `Replaced` | `SET` replaced a live item |
 | `04` | `Deleted` | `DELETE` removed a live item or `NAMESPACE_DELETE` removed a namespace |
 | `05` | `NotStored` | A conditional `SET` made no change |
-| `80` | `InvalidRequest` | Request framing, namespace ID, flags, lengths, TTL, or semantics are invalid |
-| `81` | `UnsupportedOpcode` | The opcode is not assigned in v1 |
+| `80` | `InvalidRequest` | A complete, well-delimited request has invalid namespace ID, flags, lengths, TTL, or semantics |
 | `82` | `TooLarge` | A declared or actual item exceeds a wire or server limit |
 | `83` | `Overloaded` | The server temporarily lacks admission capacity |
-| `84` | `Timeout` | Reading, admission, execution, or response preparation timed out |
 | `85` | `Forbidden` | The authenticated identity is not authorized |
 | `86` | `InternalError` | The server could not complete the operation |
 | `87` | `NoCapacity` | The write cannot be admitted without evicting protected items |
 | `88` | `PolicyConflict` | The request selects an item policy disallowed by the namespace |
 | `89` | `Conflict` | `expected_revision` does not match the current namespace revision |
 | `8A` | `NamespaceNotFound` | The requested namespace does not exist |
-| `8B` | `NamespaceNotEmpty` | `IfEmpty` deletion raced an in-flight namespace request |
+| `8B` | `NamespaceNotEmpty` | `IfEmpty` deletion found one or more live items at its barrier |
 
-Statuses `06` through `7F` and `8C` through `FF` are unassigned. A client MUST
-treat an unassigned status as a malformed response and close the connection.
+Statuses `06` through `7F`, `81`, `84`, and `8C` through `FF` are unassigned. A
+client MUST treat an unassigned status as a malformed response and close the
+connection.
 
 Assigned statuses `80` and above are errors. Unassigned status values in that
 range are not implicitly accepted as errors; they remain malformed. Error
@@ -998,11 +917,10 @@ text.
 
 Every response, including an error response, carries the request ID for its
 complete request. `Overloaded` is a request-level rejection: the server MUST
-not begin the operation or mutation, and the lane MAY continue after the
-response. To keep the lane usable, the server MUST consume or discard the
-complete rejected body before parsing the next request. It MAY reject before
-consuming a large body only when it can discard the declared body or otherwise
-preserve the next frame boundary; otherwise it MUST terminate the lane.
+not begin the operation or mutation. The server MUST consume or discard the
+complete rejected body before sending the response, and the lane MAY continue
+afterward. If it cannot preserve the next frame boundary, it MUST close the
+connection without sending an error response.
 
 For a mutating operation (`SET`, `DELETE`, `SYNC`, namespace creation, policy
 update, or namespace deletion), an error response MUST guarantee that the
@@ -1103,18 +1021,16 @@ Malformed framing, an unassigned opcode, a non-canonical integer, or a
 truncated body is terminal for the connection: the receiver MUST close the
 connection without sending an error response. A semantic validation failure in
 a complete, well-delimited request MAY instead receive `InvalidRequest` or the
-applicable domain error. A read timeout before a complete request is available
-is handled like a terminal partial frame and produces no response. Once a
-complete read-only request has been admitted, an execution or response-
-preparation timeout MAY return `Timeout` with the request ID. A mutation or
-`SYNC` whose outcome is no longer known MUST terminate the connection without a
-timeout response.
+applicable domain error. If a complete operation cannot finish and its outcome
+is known to be unsuccessful, the server MAY return `InternalError`. If a
+mutation or `SYNC` outcome is no longer known, the server MUST terminate the
+connection without an error response.
 
-## Outcome and replay rules
+## Ambiguous outcomes
 
-The protocol does not define a retry or replay contract. A request ID provides
-response correlation only; it does not provide replay protection,
-deduplication, idempotency, or a mutation identifier.
+The request ID provides response correlation only. It does not provide replay
+protection, deduplication, idempotency, or a mutation identifier. The protocol
+does not prescribe retry behavior.
 
 If transport or connection failure occurs before a response is received, the
 client must treat the outcome of an outstanding mutation or `SYNC` as
@@ -1296,7 +1212,8 @@ A protocol v1 implementation is not complete unless it:
 - starts namespace revisions at one and enforces
   `expected_revision` on policy updates and deletion;
 - never reuses a previously assigned `namespace_id` for a different namespace,
-  including after namespace deletion;
+  including after namespace deletion, restart, recovery, or replica replacement
+  within the persistent deployment lifetime;
 - encodes namespace policies and descriptors exactly as specified;
 - accepts only `IfEmpty` for the v1 namespace-delete flags;
 - includes the request ID in every request and response envelope;
@@ -1329,9 +1246,9 @@ A protocol v1 implementation is not complete unless it:
 - returns `Overloaded` only as a correlated request-level rejection when the
   request boundary can be preserved, and does not require a
   `max_inflight_requests_per_stream` protocol limit;
-- returns `Timeout` only where the operation outcome is known to be
-  unsuccessful or the request is read-only; an ambiguous mutation or `SYNC`
-  outcome terminates the connection without a response;
+- returns `InternalError` only when a complete operation is known to have
+  failed without taking effect; an ambiguous mutation or `SYNC` outcome
+  terminates the connection without an error response;
 - guarantees that a mutating error response means no mutation or barrier
   completion;
 - discards the connection after framing or response-status meaning becomes
