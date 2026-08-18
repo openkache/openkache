@@ -27,7 +27,7 @@ This contract defines:
 - lane-local request lifecycle and cancellation behavior;
 - retry and unknown-outcome handling;
 - the distinction between formatted-key and Exact Item ID APIs; and
-- shared configuration behavior that must remain consistent across bindings.
+- shared identity-key, value-key, and rotation behavior across bindings.
 
 Language-native type names, constructors, package layout, asynchronous API
 shape, and binding-specific defaults are outside this contract. Each binding
@@ -162,7 +162,8 @@ Configuration that affects identity or stored bytes MUST be stable for the
 lifetime of the affected data:
 
 - key type and Item ID mapping profile;
-- client root key;
+- Item ID root key;
+- the immutable mapping from each value-key ID to its value-protection key;
 - write protection and compression policy; and
 - read protection allowlist.
 
@@ -170,11 +171,68 @@ Changing an identity setting changes which item is addressed. Changing a write
 setting changes newly stored bytes but MUST NOT silently mutate the read
 policy. The value profile defines the authenticated-profile migration rules
 and the explicit opt-in required to read unprotected values with a configured
-root key.
+value keyring.
 
 Bindings MAY expose different configuration syntax, but defaults and explicit
 overrides MUST resolve to the same language-neutral behavior. A per-operation
 override MUST NOT mutate connection-wide configuration.
+
+### 6.1 Identity and value-key domains
+
+Item ID derivation and value protection use independent key domains:
+
+```text
+item_id_root_key
+  -> stable Item ID derivation
+
+value_keyring[value_key_id]
+  -> rotatable value protection
+```
+
+The Item ID root key is resolved before a formatted request can address an
+item. It MUST NOT change as part of value-key rotation. Changing it changes
+hashed Item IDs and requires an identity migration or cache repopulation.
+
+The value keyring maps a positive unsigned 64-bit `value_key_id` to one exact
+32-byte `value_key`. A key ID is public metadata, not key material. Within one
+keyring:
+
+- each key ID MUST identify exactly one immutable key;
+- a retired key ID MUST NOT be reassigned;
+- independently rotated keys SHOULD be generated independently; and
+- clients that share protected entries MUST use identical mappings for every
+  ID they accept.
+
+A client MUST NOT derive Item IDs from a selected value key. Conversely,
+omitting or rotating value keys MUST NOT change item addressing. Sharing a
+value keyring across deployments intentionally permits a protected envelope to
+remain portable when its namespace and Item ID are also preserved. Deployments
+that require cryptographic isolation MUST use independent value keys; this
+profile adds no deployment, account, or client identifier to the derivation.
+
+### 6.2 Value-key rotation
+
+A write-capable protected client selects exactly one configured
+`active_value_key_id`. Every protected write uses that ID and its associated
+key; a per-operation protection-profile override MUST NOT select an inactive
+value key. A protected reader selects exactly the ID carried in the envelope;
+the value profile includes that ID in the AEAD associated data.
+
+Rotation proceeds in this order:
+
+1. Add the new immutable key-ID mapping to every reader.
+2. Change writers to the new active ID.
+3. Keep the previous mapping available for reads while old envelopes may
+   remain.
+4. Retire the previous mapping only after those envelopes have expired, been
+   rewritten, or been invalidated.
+
+Values with no expiration prevent time-based retirement; they must be
+rewritten or invalidated before their key is removed. A client that reads an
+unknown or retired value-key ID MUST reject the value without trying other
+keys and without falling back to `Unprotected`. Reusing a request ID, rewriting
+an Item ID, or changing the protection allowlist does not migrate a protected
+value.
 
 ## 7. Conformance checklist
 
@@ -188,5 +246,7 @@ A conforming client:
 - does not automatically replay mutations with unknown outcomes;
 - keeps formatted-key and Exact Item ID behavior distinct;
 - resolves namespaces before namespace-bound Item ID derivation;
+- keeps Item ID identity keys independent from rotatable value keys;
+- selects protected read keys only by the envelope's immutable value-key ID;
 - preserves explicit configuration overrides without changing defaults; and
 - documents binding-specific API names and defaults.

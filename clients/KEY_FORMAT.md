@@ -276,7 +276,7 @@ mapping profiles to derive the same Item ID deterministically. For example, a
 direct byte key consisting of a CBOR byte-string header followed by its payload
 could equal the `canonical_key_bytes` of `TypedKey::Bytes` for that payload.
 The `01` and `02` domains prevent that cross-profile alias while retaining the
-same namespace binding and root-key lifecycle.
+same namespace binding and Item ID root-key lifecycle.
 
 The profile MUST document the hash input, domain byte, and derivation key.
 Future hashed profiles MUST use a new nonzero domain byte and MUST NOT
@@ -314,9 +314,9 @@ deriving an Item ID. Omitting the namespace would make cross-namespace IDs
 stable and simpler to precompute, but would weaken domain separation and make
 accidental cross-namespace reuse easier.
 
-### 5.2 Root key and derivation visibility
+### 5.2 Item ID root key and derivation visibility
 
-`client_root_key` is an application-selected key of exactly 32 bytes. It MAY
+`item_id_root_key` is an application-selected key of exactly 32 bytes. It MAY
 be generated randomly or supplied directly. No text-to-key conversion is
 defined.
 
@@ -325,17 +325,18 @@ Item IDs remain publicly derivable in this default profile. Supplying a root
 key selects a root-bound derivation profile; changing the root changes Item
 IDs and requires migration or repopulation.
 
-The root key's use for Item ID derivation is independent from value handling.
-Whether values are enveloped, compressed, or encrypted is defined in the
-[Client Value Format](VALUE_FORMAT.md), not here. A client MAY use a root-bound
-Item ID profile with a value profile that does not encrypt payloads, subject to
-the value-format contract.
+The Item ID root key is an identity setting, not a value-protection key. It
+MUST remain stable for the lifetime of addressable data. Value-protection keys
+rotate independently and are selected from the value envelope as defined by
+the [Client Value Format](VALUE_FORMAT.md). A value-key rotation MUST NOT
+change Item ID derivation. A client MAY use a root-bound Item ID profile with
+unprotected values, or publicly derivable Item IDs with protected values.
 
 ```text
 item_id_derivation_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache item ID derivation root v1",
-    material = client_root_key[32]
+    material = item_id_root_key[32]
   )
 ```
 
@@ -356,8 +357,9 @@ The currently assigned hashed-profile domains are:
 `00` and `03..=FF` are unassigned. The Item ID has no separate version field.
 A profile that changes key identity, namespace input, hash context, derivation
 material, or input framing MUST use a distinct nonzero domain byte and MUST
-NOT reinterpret Item IDs from this contract. There is no key-rotation
-protocol.
+NOT reinterpret Item IDs from this contract. There is no in-band Item ID key
+rotation protocol. Changing `item_id_root_key` changes hashed Item IDs and is
+an identity migration, not a value-key rotation.
 
 ## 6. Limits and validation
 
@@ -399,7 +401,7 @@ noted:
 
 ```text
 namespace_id = 1
-client_root_key =
+item_id_root_key =
   00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
   10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
 
@@ -434,12 +436,12 @@ follows the hash-fallback path for the 33-byte direct byte key.
 | 32-byte direct byte key `00 01 02 ... 1f` | same 32 bytes |
 | 33-byte direct byte key `00 01 02 ... 20` | `4d 19 cb ae 58 6b 6f 9b 99 62 6a 8c 44 e5 5a cd 65 17 4b f2 5a 57 b6 75 79 40 f0 f0 71 2b 4f 59` |
 
-### 7.3 Root separation
+### 7.3 Item ID root separation
 
 For `namespace_id = 1` and `Text("abc")`:
 
 ```text
-client_root_key =
+item_id_root_key =
   ff fe fd fc fb fa f9 f8 f7 f6 f5 f4 f3 f2 f1 f0
   ef ee ed ec eb ea e9 e8 e7 e6 e5 e4 e3 e2 e1 e0
 

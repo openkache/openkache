@@ -81,11 +81,12 @@ let outcome = client
 ```
 
 `ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes. The pre-freeze
-v1 contract calls the root secret `client_root_key` and binds the selected
-namespace into both Item ID derivation and value AAD. The Rust API retains
-`DataProtectionKey` as a source-compatible alias; it is not a separate wire
-concept.
+and copies a dynamic buffer. Neither hashes the supplied bytes. The current
+implementation calls its combined root secret `client_root_key`; the target v1
+contracts replace that transitional coupling with a stable `item_id_root_key`
+and a rotatable value keyring. Both target derivations bind the selected
+namespace. The Rust API retains `DataProtectionKey` as a source-compatible
+alias while implementation catches up to that contract.
 
 `ValueCodec` stores its current metadata inside the opaque value. The packed
 codec layout shown in the pre-freeze value-format specification is the target

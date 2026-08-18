@@ -37,10 +37,11 @@ This profile does not define:
 - application registries for arbitrary payload formats; or
 - transport framing.
 
-The enclosing client profile supplies the `client_root_key` and the exact
-namespace and Item ID. This profile defines the value-key schedule derived
-from that root, the value envelope, its authenticated binding to the
-namespace and exact Item ID, and the transforms applied to its payload.
+The enclosing client profile supplies a value keyring and the exact namespace
+and Item ID. This profile defines value-key selection and derivation, the value
+envelope, its authenticated binding to the key ID, namespace, and exact Item
+ID, and the transforms applied to its payload. Item ID derivation uses an
+independent identity key defined by the client key contract.
 
 An exact Item ID API is a separate client operation: it accepts an already
 resolved `0..=32`-byte Item ID and an opaque value, and does not apply this
@@ -70,7 +71,7 @@ payload bytes.
 
 ```text
 ValueEnvelope = value_envelope_version:vu128 | version_body
-version_body  = selector_byte:u8 | envelope_body
+version_body  = selector_byte:u8 | selected_body
 ```
 
 The profile uses `value_envelope_version = 1`:
@@ -79,7 +80,11 @@ The profile uses `value_envelope_version = 1`:
 value_envelope_v1 =
     value_envelope_version:vu128(1)
   | selector_byte:u8
-  | envelope_body
+  | selected_body
+
+selected_body =
+    transformed_body                                      # Unprotected
+  | value_key_id:vu128 | protected_body                   # protected
 ```
 
 The `|` operator denotes byte concatenation. The `value_envelope_version`
@@ -94,6 +99,14 @@ The enclosing value boundary supplies the complete envelope length. This
 profile has no magic prefix and no body-length field. An encoder MUST emit one
 complete envelope; a decoder MUST consume the complete supplied envelope and
 reject truncation, overflow, overlong `vu128` encodings, and trailing bytes.
+
+The `protection_id` in `selector_byte` selects the `selected_body` grammar.
+`Unprotected` has no `value_key_id`; all bytes after the selector are its
+transformed body. Every protected body begins with one canonical
+`value_key_id:vu128` in the numeric range `1..=2^64 - 1`, followed by the
+selected protection profile's body. Zero is reserved and MUST be rejected.
+The key ID is public selection metadata, not secret key material. Its canonical
+encoding is at most nine bytes.
 
 `value_envelope_version = 0` is an application-defined envelope profile.
 OpenKache does not define or interpret its body grammar, selectors, transform
@@ -139,22 +152,28 @@ selects the protection applied to a new value. Each formatted write MAY
 override the instance write default; an override MUST NOT mutate that default.
 The selected write profile MUST be represented by `protection_id`.
 
-Without a configured client root key, the default and only valid profile is
-`Unprotected`. With a configured key, the default profile is
-`AES-256-GCM-SIV`. An omitted connection profile therefore means
-`Unprotected` without a key and `AES-256-GCM-SIV` with a key. The client MAY
-explicitly select an authenticated profile where its connection API exposes
-that choice. Selecting an authenticated protection profile without its
-required key MUST fail; a binding MUST preserve that explicit selection so the
-shared core can reject it rather than silently downgrading to `Unprotected`.
-An explicit `Unprotected` connection or operation profile MAY be used with a
-configured root key; this retains root-bound Item ID derivation while disabling
-value protection.
+With an empty value keyring, the default and only valid write profile is
+`Unprotected`. With a configured `active_value_key_id`, the default write
+profile is `AES-256-GCM-SIV`; the active ID MUST resolve to a keyring entry at
+configuration time. A nonempty read keyring MAY omit an active ID, but then an
+omitted write profile MUST fail instead of selecting `Unprotected`. Such a
+client can read protected values without being able to emit one accidentally.
+
+The client MAY explicitly select an authenticated profile where its connection
+API exposes that choice. Selecting one without an active ID and its associated
+key MUST fail; a binding MUST preserve that explicit selection so the shared
+core can reject it rather than silently downgrading to `Unprotected`.
+
+An explicit `Unprotected` connection or operation profile MAY be used while a
+value keyring is configured. Item ID derivation is independent, so enabling or
+disabling value protection MUST NOT change the Item ID. A protected write MUST
+use `active_value_key_id`; it MUST NOT select an inactive read key through a
+per-operation protection override.
 
 The read policy is an allowlist, not a second write default:
 
-- without a configured root key, it contains only `Unprotected`;
-- with a configured root key, its default contains `AES-256-GCM-SIV` and
+- without any configured value keys, it contains only `Unprotected`;
+- with a nonempty value keyring, its default contains `AES-256-GCM-SIV` and
   `AES-256-SIV-CMAC`, but not `Unprotected`;
 - a caller MAY explicitly narrow the allowlist or add `Unprotected`; and
 - an operation MAY require one exact protection ID for a stricter read without
@@ -276,11 +295,17 @@ cryptographic protection does not hide that length.
 
 ### 7.1 Value-key schedule
 
-The enclosing client profile supplies one `client_root_key` of exactly 32
-bytes. The key is application-managed; this document does not define how it is
-generated, stored, or rotated. A protected operation MUST reject a missing or
-invalid root key. The all-zero root is reserved for an explicitly unprotected
-client profile and MUST NOT be used as protected key material.
+The enclosing client profile supplies a value keyring that maps each positive
+unsigned 64-bit `value_key_id` to one immutable `value_key` of exactly 32
+bytes. A protected write uses the configured active ID. A protected read parses
+the ID before selecting its key. An unknown or retired ID MUST be rejected
+without trying another key and without falling back to `Unprotected`.
+
+Value keys are application-managed secrets. The all-zero key MUST NOT be used
+as protected key material. Independently rotated keys SHOULD be generated
+independently with a cryptographically secure random source. Keyring lifecycle
+and rotation ordering are defined by the
+[Client Behavioral Contract](CLIENT.md#62-value-key-rotation).
 
 For protected values, implementations MUST derive the value keys exactly as
 follows. BLAKE3 `DERIVE_KEY` uses the context strings as UTF-8 bytes and
@@ -288,46 +313,64 @@ returns 32 bytes. The `|` operator denotes byte concatenation without
 delimiters:
 
 ```text
-value_root_key =
+value_key = value_keyring[value_key_id]
+
+value_derivation_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 root key",
-    material = client_root_key[32]
+    material = value_key[32]
   )
 
 item_material =
-    value_root_key[32]
+    value_derivation_key[32]
+  | value_key_id:u64be
+  | namespace_id:u64be
   | item_id_length:u8
   | item_id:item_id_length
 
-compact_mac_key =
+siv_mac_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
     material = item_material
   )
 
-compact_encryption_key =
+siv_encryption_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
     material = item_material
   )
 
-robust_key =
+gcm_siv_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-GCM-SIV key",
     material = item_material
   )
 ```
 
-`item_id_length` MUST be the exact length of the Item ID, including when it is
-zero; it MUST NOT be replaced by a fixed-width 32-byte buffer. Namespace ID
-is not part of `item_material`; it is authenticated through the AAD below.
-The key schedule is deterministic, but Robust protection remains randomized
-because each write uses a fresh nonce.
+`value_key_id` is encoded as its numeric value in fixed-width big-endian form
+inside the KDF, independent of its canonical `vu128` envelope representation.
+`namespace_id` is the exact nonzero server-assigned identity.
+`item_id_length` MUST be the exact Item ID length, including zero; it MUST NOT
+be replaced by a fixed-width 32-byte buffer.
+
+The key ID, namespace, and exact Item ID intentionally appear in both the KDF
+and AAD. The KDF separates cryptographic key domains; the AAD authenticates
+the envelope's declared storage identity and key selection. Version and
+algorithm separation are already supplied by the BLAKE3 context strings.
+Compression and payload-format selection belong only in the authenticated
+selector. Request IDs, lanes, opcodes, namespace names and revisions, TTL,
+eviction policy, nonce, and value lengths MUST NOT be added to `item_material`;
+they are mutable transport or storage metadata, algorithm inputs, or already
+authenticated by the selected AEAD.
+
+The key schedule is deterministic, but AES-256-GCM-SIV protection remains
+randomized because each write uses a fresh nonce.
 
 ### 7.2 Authenticated data
 
 For a protected envelope, the authenticated data MUST include the exact
-encoded `value_envelope_version` bytes and the exact `selector_byte`.
+encoded `value_envelope_version` and `value_key_id` bytes and the exact
+`selector_byte`.
 This v1 OpenKache profile defines no additional caller-supplied associated-data
 component.
 
@@ -342,14 +385,22 @@ aad =
   | item_id:item_id_length
   | value_envelope_version:vu128
   | selector_byte:u8
+  | value_key_id:vu128
 ```
 
 `namespace_id` MUST be a nonzero server-assigned namespace identity and
 `item_id_length` MUST be the exact number of Item ID bytes (0 through 32).
-The version bytes in `aad` MUST be the same canonical bytes emitted in the
-envelope; an implementation MUST NOT re-encode the numeric version through a
-different integer representation. This binds a protected value to its
-namespace, exact variable-length Item ID, version, and selector.
+The version and key-ID bytes in `aad` MUST be the same canonical bytes emitted
+in the envelope; an implementation MUST NOT re-encode either numeric value
+through a different integer representation. This binds a protected value to
+its namespace, exact variable-length Item ID, version, selector, and selected
+value key.
+
+The AAD MUST be exactly the sequence above. It does not include request ID,
+lane, opcode, namespace name or revision, TTL, eviction policy, nonce, or
+payload, ciphertext, or envelope length. Transport and mutable server metadata
+are not available as stable decryption inputs; the selected AEAD already binds
+its nonce when present, ciphertext, and ciphertext length.
 
 The transform order is:
 
@@ -379,8 +430,8 @@ RFC 5297 SIV uses independent 32-byte authentication and encryption keys:
 
 ```text
 siv_key_material =
-    authentication_key[32]
-  | encryption_key[32]
+    siv_mac_key[32]
+  | siv_encryption_key[32]
 
 siv_body = synthetic_iv[16] | ciphertext
 ```
@@ -401,10 +452,12 @@ remain mandatory.
 | Protection profile | Envelope header | Protection overhead |
 |---|---:|---:|
 | `Unprotected` | 2 bytes | 0 bytes |
-| `AES-256-GCM-SIV` | 2 bytes | 28 bytes |
-| `AES-256-SIV-CMAC` | 2 bytes | 16 bytes |
+| `AES-256-GCM-SIV` | 3–11 bytes | 28 bytes |
+| `AES-256-SIV-CMAC` | 3–11 bytes | 16 bytes |
 
-Compression adds its own frame overhead and may enlarge small values.
+The protected header is the two-byte v1 version and selector plus a one- to
+nine-byte canonical value-key ID. Compression adds its own frame overhead and
+may enlarge small values.
 
 ### 7.7 Conformance vectors
 
@@ -412,7 +465,9 @@ All vector bytes are hexadecimal. Unless a vector says otherwise, the
 parameters are:
 
 ```text
-client_root_key =
+value_key_id = 1
+
+value_key =
   00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
   10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
 
@@ -425,7 +480,7 @@ payload = 76 61 6c 75 65  # ASCII "value"
 The common root derivation is:
 
 ```text
-value_root_key =
+value_derivation_key =
   58 56 36 33 1c 40 9f 74 c3 6b 0c 46 c2 e3 3f 45
   92 f8 72 37 34 e6 21 15 eb cf 4b 0f 7b 71 0c 33
 ```
@@ -433,64 +488,66 @@ value_root_key =
 The following vectors cover the empty, short, and maximum-length Item ID
 boundaries. These are intermediate key-schedule outputs, not envelope bytes:
 
-| Item ID | `compact_mac_key` | `compact_encryption_key` | `robust_key` |
+| Item ID | `siv_mac_key` | `siv_encryption_key` | `gcm_siv_key` |
 |---|---|---|---|
-| empty | `25 3e df 7c c6 92 f2 9f 9d a4 2e a4 b2 5c 62 9c c8 dc b7 d3 17 93 b5 c3 2e b2 a1 e6 0b 24 d4 c0` | `2e 14 ae 77 d6 c2 8c 03 ac b3 3c e1 ba 23 2e 41 95 68 22 ee 9e 3d 90 f7 85 28 88 bf b0 3c ce 7e` | `d1 89 b5 ae 69 d9 26 c3 81 13 ee 63 88 9e 79 57 06 2c 58 75 15 67 88 42 be c5 00 08 3d f5 b5 a0` |
-| `11 22 33` | `3a 54 73 80 ea 2b 78 c4 e2 f6 e9 d3 71 8c 33 28 50 07 ce 04 60 0e 48 64 49 6b 74 38 52 68 0b b8` | `ee 9d d9 3e 26 3d 11 cf f8 06 1d 32 27 06 24 87 c1 a5 a3 74 58 91 10 d5 fb 38 36 a9 fd e8 52 c8` | `07 88 8f 39 9a 84 66 6c 48 94 db 9e e7 8e 3d 42 53 68 29 a9 69 79 eb c1 17 5c a0 dc 09 a4 f0 f5` |
-| `00 01 02 ... 1f` | `bb 67 92 55 96 7b 6c 4d 9a c1 78 cd 3f a7 d1 62 29 12 cd cb 5c 3c 18 36 14 a5 fa 63 9a ff 54 47` | `3d e9 09 fb 32 30 d3 10 58 61 3e 4e d4 39 ab 6c 03 a3 4c 31 b7 27 21 ee 00 b3 e0 ef a2 39 94 15` | `f3 99 ef ee ce 06 bb a1 d9 b2 05 4b 83 3e 27 e1 db cc 2a 24 50 28 14 10 2c b9 3c b8 60 cc b2 0c` |
+| empty | `14 29 85 a0 bc e1 44 ca 51 7b 29 1f e9 9b 85 e7 a0 96 ce 46 c8 64 8d a9 4b cd 6d db b0 20 6b fa` | `2a 74 4b a3 e8 bf af 94 5c e9 39 48 7e bf e8 7f 7c 88 86 3e a2 af 65 9f b0 bb 0b c6 89 ff 9f 5b` | `42 4f 35 85 9d 43 b7 42 51 af d7 57 5d ec 9f 3e 85 06 b1 1b f1 9c 91 e0 b3 08 f1 8f 5c 52 77 27` |
+| `11 22 33` | `a6 08 ed 12 65 fc 4f 6e 06 78 4e 1b 32 eb fb 31 e1 40 9d a8 9d 20 08 ae 09 ac 3e bc ce c3 e0 c4` | `f8 85 ea f7 0a 9b df 3b 9b b7 c6 22 fe 13 c6 35 6c dd e8 fb a0 88 69 ba 0a b9 70 06 c9 c0 b6 c5` | `12 b0 b7 a6 ee 6f d8 c3 2a 6f 38 4c 11 4a 49 07 76 1f a6 fe 55 a3 d2 72 27 49 67 a8 13 e6 b4 98` |
+| `00 01 02 ... 1f` | `90 eb 89 f2 d5 53 a4 da e8 8c b2 8c 7f 5d d9 76 b7 dd c9 fb 22 3e b7 0b 21 eb 02 97 ce b5 96 d8` | `82 9b 71 3d a1 96 b9 16 ed 33 7b 93 0a 4e 5a af 61 87 b4 ee 89 17 3c 9c f9 dc ea 86 0e d1 45 7a` | `be b0 2c a6 0e fc 5f 33 ce 58 55 c2 df d7 13 2c b7 58 46 b6 61 03 7f f6 85 05 e2 02 cd 09 0e 4e` |
 
 #### Empty Item ID with AES-256-SIV-CMAC
 
-The selector is `02`. The AAD is:
+The selector is `02`; the following `01` in the envelope is the canonical
+encoding of `value_key_id = 1`. The AAD is:
 
 ```text
 6f 70 65 6e 6b 61 63 68 65 2f 76 61 6c 75 65 2d
 66 6f 72 6d 61 74 2f 61 61 64 2f 76 31
-00 00 00 00 00 00 00 01 00 01 02
+00 00 00 00 00 00 00 01 00 01 02 01
 ```
 
 The complete envelope is:
 
 ```text
-01 02 33 8a d1 0a 9d 4e ca a0 c1 89 1e 10 7e df
-66 d5 78 cf 8f 3a 29
+01 02 01 77 52 d8 b3 d8 79 fd 36 a4 fe 88 4e ad
+66 f4 f2 82 21 13 d9 f3
 ```
 
 #### Three-byte Item ID with AES-256-GCM-SIV
 
 This test fixes the nonce to `00 01 02 03 04 05 06 07 08 09 0a 0b`. Production
 encoders MUST still generate a fresh random nonce as required by §7.3. The
-selector is `01`. The AAD is:
+selector is `01`, followed by value-key ID `01`. The AAD is:
 
 ```text
 6f 70 65 6e 6b 61 63 68 65 2f 76 61 6c 75 65 2d
 66 6f 72 6d 61 74 2f 61 61 64 2f 76 31
-00 00 00 00 00 00 00 01 03 11 22 33 01 01
+00 00 00 00 00 00 00 01 03 11 22 33 01 01 01
 ```
 
 The complete envelope is:
 
 ```text
-01 01 00 01 02 03 04 05 06 07 08 09 0a 0b
-d7 dc fe 7e 7c 2e 35 b5 39 d0 43 b4 75 44 64 c4
-dc b5 6b 01 c1
+01 01 01 00 01 02 03 04 05 06 07 08 09 0a 0b
+02 09 d6 19 33 dc 4d ca 6f 44 e4 81 20 8a 68 f4
+82 7e c0 71 ad
 ```
 
 For the same Item ID, nonce, and payload with `namespace_id = 2`, the complete
 envelope is:
 
 ```text
-01 01 00 01 02 03 04 05 06 07 08 09 0a 0b
-fa dc f3 13 61 11 5d 11 45 3e 58 21 be 13 20 92
-56 17 d2 98 3d
+01 01 01 00 01 02 03 04 05 06 07 08 09 0a 0b
+c6 b9 22 82 1c 1a 45 09 9d eb 85 00 c8 bc ee 23
+37 58 28 95 94
 ```
 
-The ciphertext and tag change because the namespace is authenticated even
-though it is not part of the value-key derivation material.
+The derived `gcm_siv_key`, ciphertext, and tag all change because the namespace
+is included in both the KDF and AAD.
 
 #### Maximum-length Item ID with AES-256-SIV-CMAC
 
-For Item ID `00 01 02 ... 1f`, the selector is `02`. The AAD is:
+For Item ID `00 01 02 ... 1f`, the selector is `02`, followed by value-key ID
+`01`. The AAD is:
 
 ```text
 6f 70 65 6e 6b 61 63 68 65 2f 76 61 6c 75 65 2d
@@ -498,30 +555,73 @@ For Item ID `00 01 02 ... 1f`, the selector is `02`. The AAD is:
 00 00 00 00 00 00 00 01 20
 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
-01 02
+01 02 01
 ```
 
 The complete envelope is:
 
 ```text
-01 02 ca a9 47 04 0d 55 98 65 bc b4 9f 95 e8 50
-55 71 20 7e b4 34 e3
+01 02 01 44 25 17 06 34 6f a1 25 04 3a 5a 8e b0
+66 7b 7f 77 2f a0 03 8c
 ```
+
+#### Rotated value key and multi-byte key ID
+
+This vector uses the same namespace, three-byte Item ID, nonce, and payload as
+the GCM-SIV vector above, but selects:
+
+```text
+value_key_id = 128
+canonical value_key_id = 80 02
+
+value_key =
+  ff fe fd fc fb fa f9 f8 f7 f6 f5 f4 f3 f2 f1 f0
+  ef ee ed ec eb ea e9 e8 e7 e6 e5 e4 e3 e2 e1 e0
+
+value_derivation_key =
+  a9 99 6e bc 85 bb e9 64 9a 7f 73 8a b3 c4 ac a9
+  48 a4 2c 8d eb 30 6b fc a6 35 9b 13 ce 21 98 00
+
+gcm_siv_key =
+  77 94 bd 3b b3 a5 56 90 b9 de f4 e0 0e 11 c2 59
+  5c 47 3e 24 30 f9 fe a1 a0 3b e5 d7 d0 c5 7f b1
+```
+
+The AAD is:
+
+```text
+6f 70 65 6e 6b 61 63 68 65 2f 76 61 6c 75 65 2d
+66 6f 72 6d 61 74 2f 61 61 64 2f 76 31
+00 00 00 00 00 00 00 01 03 11 22 33 01 01 80 02
+```
+
+The complete envelope is:
+
+```text
+01 01 80 02 00 01 02 03 04 05 06 07 08 09 0a 0b
+98 a1 6f 15 1e 84 5b 9a e1 f4 cb cf 48 41 1a 92
+a5 2d 6a bf 49
+```
+
+This vector proves that the key ID uses canonical `vu128` in the envelope and
+AAD, fixed-width `u64be` in the KDF, and an independently selected value key.
 
 #### Unprotected and rejection vectors
 
 The uncompressed, unprotected envelope for the common payload is independent
-of namespace and Item ID:
+of the value keyring, namespace, and Item ID. It has no value-key ID:
 
 ```text
 01 00 76 61 6c 75 65
 ```
 
 For any protected vector above, changing the namespace ID, Item ID length,
-Item ID bytes, encoded version, selector, ciphertext, or authentication tag
-MUST cause one generic authentication failure. Truncating a nonce, synthetic
-IV, or tag MUST be rejected before decryption. A decoder MUST NOT return
-partially decrypted or decompressed bytes for any rejection case.
+Item ID bytes, encoded version, selector, value-key ID, ciphertext, or
+authentication tag MUST cause rejection. Zero, non-canonical, truncated, and
+unknown value-key IDs MUST be rejected without trying another key. Truncating
+a nonce, synthetic IV, or tag MUST be rejected before decryption. A decoder
+MUST NOT return partially decrypted or decompressed bytes for any rejection
+case.
 
 ## 8. Encoding and decoding
 
@@ -531,14 +631,17 @@ An encoder MUST:
 2. Enforce the expanded payload limit.
 3. Compress the payload only when the selected policy permits.
 4. Encode the value-envelope version and selector byte.
-5. Construct the profile-defined AAD, including the exact version and selector
-   bytes and the namespace and Item ID fields.
-6. Apply the selected protection profile.
-7. Enforce the complete envelope limit before returning the bytes.
+5. For a protected profile, resolve and encode the active nonzero value-key ID,
+   select its exact key, and derive the item-specific protection key or keys.
+6. Construct the profile-defined AAD, including the exact version, selector,
+   and key-ID bytes and the namespace and Item ID fields.
+7. Apply the selected protection profile.
+8. Enforce the complete envelope limit before returning the bytes.
 
 For this profile, the encoder MUST NOT emit a magic prefix, body length,
-unsupported selector, non-canonical `vu128`, or a transform inconsistent with
-the selector byte.
+unsupported selector, zero or non-canonical protected value-key ID, or a
+transform inconsistent with the selector byte. It MUST NOT emit a value-key ID
+for `Unprotected`.
 
 A decoder MUST:
 
@@ -547,16 +650,18 @@ A decoder MUST:
 2. Dispatch the version before parsing its version body.
 3. Parse and validate the selector byte.
 4. Enforce the caller's expected protection policy.
-5. Construct the authenticated data from the selected profile's rules.
-6. Check minimum protected-body sizes before slicing.
-7. Authenticate and decrypt before decompression or payload parsing.
-8. Validate and bounded-decompress one Zstandard frame when selected.
-9. Decode exactly one CBOR data item or return the exact `OpaqueBytes` payload.
+5. For a protected profile, parse one canonical nonzero value-key ID, look up
+   exactly that key, and derive the item-specific protection key or keys.
+6. Construct the authenticated data from the selected profile's rules.
+7. Check minimum protected-body sizes before slicing.
+8. Authenticate and decrypt before decompression or payload parsing.
+9. Validate and bounded-decompress one Zstandard frame when selected.
+10. Decode exactly one CBOR item or return the exact `OpaqueBytes` payload.
 
-Unknown versions, selector values, compression profiles, payload formats,
-malformed payloads, and disallowed trailing bytes MUST be rejected. The
-decoder MUST NOT silently downgrade, fall back, or reinterpret an unknown
-value as another payload format.
+Unknown versions, selector values, value-key IDs, compression profiles, payload
+formats, malformed payloads, and disallowed trailing bytes MUST be rejected.
+The decoder MUST NOT probe other keys, silently downgrade, fall back, or
+reinterpret an unknown value as another payload format.
 
 ## 9. Limits and rejection rules
 
@@ -566,17 +671,18 @@ value as another payload format.
 Implementations MAY use lower limits, but MUST check declared sizes, Zstd
 windows, decompressed output, and all arithmetic before allocation.
 
-Malformed `vu128` encodings, truncated headers, nonzero selector zero bits,
-unsupported selector values, invalid UTF-8 text strings, duplicate CBOR map
-keys, tagged or indefinite-length CBOR items, invalid Zstandard frames,
-authentication failures, and payloads exceeding limits MUST be rejected.
+Malformed `vu128` encodings, truncated headers, zero or unknown protected
+value-key IDs, nonzero selector zero bits, unsupported selector values, invalid
+UTF-8 text strings, duplicate CBOR map keys, tagged or indefinite-length CBOR
+items, invalid Zstandard frames, authentication failures, and payloads
+exceeding limits MUST be rejected.
 
 ## 10. Versioning and extension
 
 `value_envelope_version` selects a complete envelope grammar. It is not a
 version of the selector byte or envelope body. A future OpenKache-defined
 version MAY change selector layout and assignments, body framing, transform
-order, authentication inputs, and limits.
+order, key-selection framing, authentication inputs, and limits.
 
 This profile uses `value_envelope_version = 1`. A reader MUST reject a version
 it does not support rather than guessing its grammar. Version `0` is available
@@ -593,9 +699,21 @@ selection is independent of the payload bytes.
 Protected profiles provide confidentiality and ciphertext authentication for
 the supplied key and associated data. `Unprotected` provides neither.
 
+The value-key ID is visible and leaks which configured key epoch wrote a
+protected envelope. Changing it to another configured ID changes both the
+derived protection key and AAD and therefore causes authentication failure.
+Changing it to an unknown ID causes rejection without key probing.
+
 This profile does not provide freshness or replay protection. An older valid
 envelope can be accepted again unless the enclosing client or server protocol
 adds a generation, CAS, expiry, or equivalent freshness mechanism.
+
+The value keyring defines the cryptographic portability domain. Reusing an
+identical key-ID mapping in another deployment permits a protected envelope to
+authenticate there when the namespace ID and Item ID are also preserved.
+Deployments requiring isolation must use independent value keys. Namespace
+names, accounts, client identities, and deployment identifiers are not
+cryptographic inputs in this profile.
 
 All protected profiles leak the encoded envelope length. Compression can add
 content-dependent length leakage; callers that cannot tolerate that side
