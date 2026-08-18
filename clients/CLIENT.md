@@ -178,13 +178,6 @@ Bindings MAY expose different configuration syntax, but defaults and explicit
 overrides MUST resolve to the same language-neutral behavior. A per-operation
 override MUST NOT mutate connection-wide configuration.
 
-Clients that share entries in one namespace or application data domain MUST
-use the same `KeyType`, Item ID mapping profile, and `item_id_root_key`.
-Changing any of those settings changes identity. Mixing profiles can also make
-a directly preserved or exact Item ID address the same entry as a hashed
-output. Applications that need different identity settings SHOULD use separate
-namespaces.
-
 ### 6.1 Identity and value-key domains
 
 Item ID derivation and value protection use independent key domains:
@@ -303,7 +296,6 @@ A conforming client:
 - does not automatically replay mutations with unknown outcomes;
 - keeps formatted-key and Exact Item ID behavior distinct;
 - resolves namespaces before namespace-bound Item ID derivation;
-- uses one consistent identity configuration for clients that share entries;
 - keeps Item ID identity keys independent from rotatable value keys;
 - selects protected read keys only by the envelope's immutable value-key ID;
 - does not perform automatic read-triggered value-key rewrites;

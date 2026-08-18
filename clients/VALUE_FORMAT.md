@@ -254,24 +254,19 @@ not preferred; malformed encodings and invalid additional-information values
 remain invalid.
 
 Map order has no semantic meaning. Encoders MAY emit entries in any order, and
-decoders MUST accept any order. Map keys are restricted to untagged CBOR
-integers, text strings, and byte strings. Arrays, maps, floating-point values,
-booleans, null, and other simple values MUST NOT appear as map keys.
-
-A map MUST NOT contain duplicate keys. To determine uniqueness, a decoder MUST
-decode each permitted key, re-encode that key using RFC 8949 preferred
-serialization, and compare the resulting bytes. Integer encodings of the same
-mathematical value therefore compare equal even when one input did not use
-preferred serialization. Text and byte-string keys compare by their exact
-bytes, and their distinct CBOR major types keep them separate. No Unicode
-normalization is applied.
+decoders MUST accept any order. A map MUST NOT contain duplicate keys as
+determined by the decoded key values. A decoder that cannot determine key
+uniqueness MUST reject the map.
 
 CBOR text strings MUST contain well-formed UTF-8. Other character encodings
 MUST be represented as CBOR byte strings, with their interpretation defined by
 the application.
 
 CBOR tags are not supported by this profile. Tagged items MUST be rejected.
-Nesting depth MUST NOT exceed 128 levels.
+The core acceptance implementation additionally limits nesting depth to 128
+levels and rejects compound or floating-point map keys when it cannot
+determine semantic key uniqueness. These are bounded-parser requirements for
+the v1 acceptance profile, not alternate payload semantics.
 
 ## 6. Compression
 
