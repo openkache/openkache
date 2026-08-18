@@ -158,5 +158,6 @@ replaying an operation. Call and await `close()` when finished. The
 `client.raw()` view implements the Smithy-generated `Smithy_OpenKache_Api`
 contract for exact 32-byte item IDs and opaque protocol values.
 
-Protocol limits, operation outcomes, and retry safety follow the
-[wire protocol specification](../../protocol/SPEC.md).
+Protocol limits and operation outcomes follow the
+[wire protocol specification](../../protocol/SPEC.md); retry policy remains
+client-local.

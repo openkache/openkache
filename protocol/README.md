@@ -17,8 +17,9 @@ fields and interpreting semantic results. The protocol crate does not generate
 handlers, client methods, or API-family routing.
 
 The [wire protocol specification](SPEC.md) defines transport negotiation, frame
-bytes, operation semantics, limits, malformed input handling, and retry
-ambiguity. This README covers crate usage and implementation structure.
+bytes, operation semantics, limits, malformed input handling, and ambiguous
+operation outcomes. This README covers crate usage and implementation
+structure.
 
 ## Commands
 
