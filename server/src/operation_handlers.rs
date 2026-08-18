@@ -35,20 +35,14 @@ impl OwnedFieldProjection {
     }
 
     fn take(&mut self, start: usize, end: usize) -> Option<OwnedRange> {
-        let owner = self.owner.as_ref()?;
-        if start > end || end > owner.len() {
-            return None;
+        let owner = self.owner.take()?;
+        match owner.into_subrange(start..end) {
+            Ok(range) => Some(range),
+            Err(owner) => {
+                self.owner = Some(owner);
+                None
+            }
         }
-        let owner = self.owner.take().expect("owner was present");
-        let (buffer, owner_range) = owner.into_parts();
-        let (Some(absolute_start), Some(absolute_end)) = (
-            owner_range.start.checked_add(start),
-            owner_range.start.checked_add(end),
-        ) else {
-            self.owner = OwnedRange::new(buffer, owner_range);
-            return None;
-        };
-        OwnedRange::new(buffer, absolute_start..absolute_end)
     }
 }
 
