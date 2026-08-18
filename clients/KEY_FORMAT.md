@@ -9,8 +9,8 @@ This is the target contract for the pre-freeze draft. Client implementations
 may temporarily lag while the draft is being completed, but an implementation
 MUST NOT claim conformance until it follows this complete mapping contract.
 
-Shared request lifecycle, correlation, retry, and API-family behavior is
-specified by the [Client Behavioral Contract](CLIENT.md).
+The shared implementation used by OpenKache-maintained language bindings is
+described by the [Client Implementation Guide](CLIENT.md).
 
 For item identity, the wire protocol carries only an opaque Item ID of
 `0..=32` bytes. An application MAY invoke the Exact Item ID API to supply that

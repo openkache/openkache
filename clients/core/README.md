@@ -28,8 +28,12 @@ adapter depends on this core directly.
 
 ## Related documentation
 
-- The [client index](../README.md) covers binding architecture and
-  implementation status.
+- The [client index](../README.md) covers package inventory and implementation
+  status.
+- The [client implementation guide](../CLIENT.md) defines the shared boundary
+  between this core and maintained language adapters.
+- The [key-format specification](../KEY_FORMAT.md) defines typed keys and Item
+  ID mapping.
 - The [value-format specification](../VALUE_FORMAT.md) defines formatted value
   bytes and algorithms.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
@@ -55,14 +59,12 @@ cargo fmt --check
 The `ffi` feature builds a dedicated Compio worker around
 `LocalProtectedClient`. Protected FFI operations accept exactly one canonical
 v1 key item (the CBOR major type is the explicit `Integer`, `Text`, or `Bytes`
-discriminator), not raw application bytes. It requires the platform's io_uring driver and exports
-`openkache_client_*` symbols from the native library crate outputs. The ABI
-supports protected application-key calls, exact-item-ID calls, mutual TLS,
-PEM/DER or system trust, compression, both value-encryption profiles, retries,
-reconnect, state snapshots, and bounded request lanes. CMake, Go, and Python
-package builds regenerate the scoped Smithy-derived client contract as needed.
-Reusable ABI
-declarations are in `include/openkache/client_abi.h` (with the
+discriminator), not raw application bytes. It requires the platform's io_uring
+driver and exports `openkache_client_*` symbols from the native library crate
+outputs. The ABI exposes the shared-core operations and lifecycle required by
+native adapters. CMake, Go, and Python package builds regenerate the scoped
+Smithy-derived client contract as needed. Reusable ABI declarations are in
+`include/openkache/client_abi.h` (with the
 `include/openkache_client.h` compatibility include); the generated Smithy
 contract header is supplied by each package build.
 
@@ -81,19 +83,13 @@ let outcome = client
 ```
 
 `ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes. The current
-implementation calls its combined root secret `client_root_key`; the target v1
-contracts replace that transitional coupling with a stable `item_id_root_key`
-and a rotatable value keyring. The target `Hash` profile binds the selected
-namespace and root key; the public `CanonicalKeyOrHash` profile uses neither.
-The Rust API retains `DataProtectionKey` as a source-compatible alias while
-implementation catches up to that contract.
+and copies a dynamic buffer. Neither hashes the supplied bytes. The key-format
+specification defines the target Exact Item ID and formatted-key behavior; this
+README describes only the current Rust API surface.
 
-`ValueCodec` stores its current metadata inside the opaque value. The
-[Client Value Encoding Profile](../VALUE_FORMAT.md) is the normative target
-for the separate value-codec migration, including the protected-envelope key
-selector, transform grammar, authenticated data, and limits. Neither the wire
-protocol nor the server parses that format.
+`ValueCodec` owns the formatted-value implementation. The value-format
+specification is the source of truth for its target bytes and validation;
+neither the wire protocol nor the server parses that format.
 
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
@@ -105,6 +101,7 @@ let key = ClientRootKey::from_base64(&configured_base64_secret)?;
 let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```
+
 ## Configuration
 
 `RawClient::connect("host:port")` and `ProtectedClient::connect` use system

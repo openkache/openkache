@@ -1,306 +1,344 @@
-# OpenKache Client Behavioral Contract — Version 1 Draft
+# OpenKache Maintained Client Implementation Guide — Version 1 Draft
 
-> **Status:** Draft; this contract has not been released or finalized.
->
-> This document specifies the target behavior for conforming OpenKache v1
-> clients. Implementations may temporarily lag while the draft is completed,
-> but they MUST NOT claim conformance until they satisfy the applicable
-> requirements.
+> **Status:** Draft; this guide describes the target implementation for the
+> OpenKache-maintained client SDKs. Implementations may temporarily lag while
+> the v1 documents and shared core are completed.
 
-This contract covers client-owned behavior shared across language bindings.
-The [Wire Protocol](../protocol/SPEC.md) defines bytes exchanged with the
-server, the [Client Key Contract](KEY_FORMAT.md) defines application-key to
-Item ID mapping, and the [Client Value Encoding Profile](VALUE_FORMAT.md)
-defines formatted values.
+This guide explains how the maintained language bindings share one
+language-independent client implementation. It does not redefine the
+[Wire Protocol](../protocol/SPEC.md), the [Client Key Format](KEY_FORMAT.md),
+or the [Client Value Format](VALUE_FORMAT.md). Those documents are the sources
+of truth for interoperable bytes, identity, and formatted values.
 
-The normative terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**,
-**SHOULD NOT**, and **MAY** have the meanings specified by
-[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
-[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) when they appear in
-uppercase.
+Third-party clients do not have to copy the local API design, retry defaults,
+compression policy, runtime integration, or shared-core architecture described
+here. A client that claims compatibility with a wire, key, or value profile
+must still implement that profile exactly.
 
-## 1. Scope
+The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
+**MAY** apply only to OpenKache-maintained clients in this guide.
 
-This contract defines:
+## 1. Scope and document ownership
 
-- request-ID allocation and response correlation;
-- lane-local request lifecycle and cancellation behavior;
-- retry and unknown-outcome handling;
-- the distinction between formatted-key and Exact Item ID APIs; and
-- shared key, compression, value-protection, and rotation behavior across
-  bindings.
+This guide owns the common implementation decisions that sit above the format
+specifications:
 
-Language-native type names, constructors, package layout, asynchronous API
-shape, and configuration syntax are outside this contract. Each binding
-documents those surfaces while preserving the language-neutral behavior below.
+- the boundary between the shared Rust core and language adapters;
+- request state, response dispatch, retries, cancellation, and error mapping;
+- the public distinction between formatted and Exact Item ID operations;
+- native key and value conversion without silent semantic loss;
+- maintained-client defaults and per-operation overrides;
+- native runtime, FFI, memory, and resource ownership; and
+- generated contract and cross-language verification requirements.
 
-## 2. Request lifecycle
+The following subjects remain owned elsewhere and are referenced rather than
+restated here:
 
-### 2.1 Correlation identity
+| Subject | Source of truth |
+|---|---|
+| QUIC negotiation, frames, operations, statuses, limits, and protocol outcomes | [Wire Protocol](../protocol/SPEC.md) |
+| Typed keys, canonical key bytes, mapping profiles, and Item ID derivation | [Client Key Format](KEY_FORMAT.md) |
+| Payload formats, compression framing, protection, key selection, KDF, AAD, and value limits | [Client Value Format](VALUE_FORMAT.md) |
+| Rust core APIs, features, commands, and source layout | [Client core README](core/README.md) |
+| Native API names, package configuration, and platform requirements | Each language package's README |
 
-A client correlates a response by the pair:
+## 2. Shared implementation architecture
 
-```text
-(lane, request_id)
-```
-
-Request IDs are client-selected unsigned 64-bit values encoded as canonical
-`vu128`. They are not server-assigned identifiers, ordering keys, mutation
-identifiers, replay tokens, or idempotency keys.
-
-The wire protocol deliberately accepts duplicate request IDs because request-ID
-allocation is client-owned and the server does not interpret the value. A
-multiplexed client, however, MUST NOT have two outstanding requests with the
-same request ID on the same lane. Responses may arrive out of stream order, so
-such a duplicate would make client-side correlation ambiguous.
-
-The same request ID MAY be outstanding on different lanes. A client MAY reuse
-an ID on one lane after the complete response for its previous use has been
-received and removed from the outstanding-request table.
-
-### 2.2 Allocation
-
-An allocator MAY use a counter, random selection, a free list, or another local
-strategy. Regardless of strategy, it MUST:
-
-1. select a value in `0..=2^64 - 1`;
-2. exclude values currently outstanding on the selected lane;
-3. reserve the `(lane, request_id)` entry before the request can receive a
-   response;
-4. encode the value canonically; and
-5. release the entry only after a complete response or terminal lane failure.
-
-Counter wraparound MUST search for a free lane-local value rather than
-overwriting an outstanding entry. If no value is available, the client MUST
-apply backpressure or fail the new operation locally.
-
-### 2.3 Response dispatch
-
-For every admitted request, the client records the operation kind and the
-state needed to interpret its response. On receipt, it MUST parse the complete
-response frame, find the outstanding entry by `(lane, request_id)`, validate
-that the status and payload are allowed for that operation, and complete
-exactly that operation.
-
-A response ID with no outstanding entry on the same lane, a second response
-for an already completed entry, or a status/payload combination invalid for
-the recorded operation is a malformed response. The client MUST close the
-connection as required by the wire protocol; it MUST NOT guess which request
-the response belongs to.
-
-## 3. Lane termination and unknown outcomes
-
-A normal response establishes the operation outcome. Transport failure,
-connection close, or termination of the response direction before a response
-leaves an outstanding mutation or `SYNC` with an unknown outcome.
-
-When a lane becomes terminal, the client MUST:
-
-- prevent new requests from entering that lane;
-- remove every outstanding lane-local correlation entry;
-- complete read-only operations with a transport failure;
-- report mutations and `SYNC` as unknown when no definitive response was
-  received; and
-- avoid treating request-ID reuse on another lane as a continuation of the
-  failed operation.
-
-Request IDs provide no retry safety. A binding MUST preserve the distinction
-between a known server rejection and an unknown outcome.
-
-## 4. Retry behavior
-
-A client MAY automatically retry only when both the operation semantics and
-the observed failure make the retry safe. In particular:
-
-- a request rejected locally before any bytes are sent MAY be retried;
-- `PING`, `GET`, and diagnostic reads MAY be retried after transport failure;
-- a received error response guarantees the mutation did not occur and MAY be
-  retried according to application policy; and
-- `SET`, `DELETE`, `SYNC`, and namespace mutations MUST NOT be automatically
-  replayed after an unknown outcome.
-
-An application MAY explicitly issue a new mutation after an unknown outcome,
-but the client MUST expose that as a new independent request. Reusing the same
-request ID does not turn it into a protocol retry or deduplicated operation.
-
-## 5. Client API families
-
-### 5.1 Formatted-key APIs
-
-A formatted-key operation performs this pipeline:
+Maintained clients use this logical stack:
 
 ```text
-application key
-  -> key validation and mapping profile
-  -> exact Item ID
-  -> value encoding profile, when applicable
-  -> wire request
+language-native API
+  -> language adapter
+  -> generated client contract and native ABI, when applicable
+  -> shared client core
+  -> shared protocol implementation
+  -> OpenKache server
 ```
 
-It MUST apply the selected key contract and, for formatted writes and reads,
-the selected value-format policies. Namespace resolution occurs before any key
-mapping that binds the namespace ID.
+The shared core owns behavior that must remain consistent across maintained
+bindings:
 
-### 5.2 Exact Item ID APIs
+- connection, TLS, lane, request, and response state;
+- protocol request construction and response validation;
+- safe retry classification and unknown-outcome tracking;
+- namespace resolution needed by formatted operations;
+- key validation and Item ID mapping through the key format;
+- formatted-value serialization, compression, and protection through the
+  value format; and
+- common configuration validation and stable error categories.
 
-An Exact Item ID operation accepts the final `0..=32`-byte Item ID and bypasses
-typed-key conversion, CBOR key encoding, Item ID hashing, and formatted-value
-processing. Values are sent and returned as exact opaque bytes.
+A language adapter owns only the language-facing boundary:
 
-Exact Item ID APIs do not bypass wire framing, namespace identity, Item ID
-length validation, request correlation, authorization, expiration, eviction,
-or mutation semantics.
+- native type conversion;
+- idiomatic synchronous, asynchronous, actor, future, promise, or callback
+  shape;
+- native cancellation integration;
+- exception, result, and status projection;
+- object, handle, buffer, and runtime lifetime;
+- package construction and artifact loading; and
+- documentation of package-specific capabilities or deviations.
 
-A binding MUST make the formatted-key and Exact Item ID families
-distinguishable in its public documentation. Names containing `raw` are not
-assumed to mean either family; the binding MUST state whether a method accepts
-a logical application key and formatted value or an exact Item ID and opaque
-value.
+An adapter MUST NOT introduce an independent implementation of wire framing,
+Item ID derivation, formatted-value protection, or retry outcome
+classification. Shared behavior needed by more than one binding belongs in the
+core or generated client contract.
 
-## 6. Configuration
+## 3. Common request engine
 
-Configuration that affects identity or stored bytes MUST be stable for the
-lifetime of the affected data:
+### 3.1 Lane and request state
 
-- key type and Item ID mapping profile;
-- Item ID root key, when `Hash` is selected;
-- the immutable mapping from each value-key ID to its value-protection key;
-- write protection and compression policy; and
-- read protection allowlist.
+The core maintains one outstanding-request table per protocol lane. Each
+admitted operation records enough state to dispatch and interpret exactly one
+response, including:
 
-Changing an identity setting changes which item is addressed. Changing a write
-setting changes newly stored bytes but MUST NOT silently mutate the read
-policy. The value profile defines the authenticated-profile migration rules
-and the explicit opt-in required to read unprotected values with a configured
-value keyring.
+- the request correlation token assigned under the wire protocol;
+- the operation kind and expected response shape;
+- the completion owner used by the calling runtime;
+- whether a transport retry can remain safe; and
+- whether loss of the response can produce an unknown outcome.
 
-Bindings MAY expose different configuration syntax, but defaults and explicit
-overrides MUST resolve to the same language-neutral behavior. A per-operation
-override MUST NOT mutate connection-wide configuration.
+The core reserves the correlation entry before the request can receive a
+response and releases it only after completion or terminal lane failure. The
+allocator and table are core implementation details; adapters do not allocate
+request IDs or correlate response frames themselves.
 
-### 6.1 Identity and value-key domains
+Each lane also owns bounded admission capacity, its request-direction state,
+its response parser, and terminal failure state. A saturated lane applies
+backpressure or rejects new local work according to configured limits. It does
+not overwrite outstanding state.
 
-Item ID derivation and value protection use independent key domains:
+### 3.2 Response dispatch and terminal failure
 
-```text
-item_id_root_key
-  -> stable `Hash` Item ID derivation
+The shared protocol implementation validates response framing and
+operation-specific status and payload rules. The core then resolves the
+lane-local outstanding entry and completes only its recorded operation.
 
-value_keyring[value_key_id]
-  -> rotatable value protection
-```
+An unmatched, duplicate, or operation-incompatible response terminates the
+affected protocol connection as specified by the wire protocol. Adapters MUST
+NOT guess a destination, reinterpret the payload, or expose a partially parsed
+result.
 
-The Item ID root key is resolved before a `Hash` request can address an item.
-It MUST NOT change as part of value-key rotation. Changing it changes `Hash`
-Item IDs and requires an identity migration or cache repopulation.
-`CanonicalKeyOrHash` ignores the Item ID root key and uses the public mapping
-defined by the key contract.
+When a lane or connection becomes terminal, the core:
 
-The value keyring maps a positive unsigned 64-bit `value_key_id` to one exact
-32-byte `value_key`. A key ID is public operator-assigned metadata, not key
-material. IDs MAY be sparse. Zero is reserved and MUST NOT appear in a
-keyring. A client MUST NOT derive an ID from key bytes. Within one keyring:
+- stops admitting new work to the affected state;
+- removes and completes every affected outstanding entry;
+- reports read-only operations using the applicable transport category; and
+- preserves an unknown outcome for a mutation or persistence barrier that may
+  have taken effect without returning a response.
 
-- each key ID MUST identify exactly one immutable key;
-- the same key material MUST NOT appear under multiple IDs;
-- a retired key ID MUST NOT be reassigned;
-- independently rotated keys SHOULD be generated independently; and
-- clients that share protected entries MUST use identical mappings for every
-  ID they accept.
+### 3.3 Cancellation and shutdown
 
-A protected writer MUST configure exactly one `active_value_key_id`, and that
-ID MUST resolve to a keyring entry. A read-only protected client MAY omit the
-active ID. A convenience API that accepts one value key instead of an explicit
-keyring MUST normalize it as:
+Language cancellation requests the core to stop local waiting and, where
+supported, cancel transport work. Cancellation does not prove that a request
+was never sent or that a mutation did not occur. The core determines the final
+outcome from request progress and protocol state before the adapter maps it to
+the language runtime.
 
-```text
-value_keyring = { 1 -> supplied_value_key }
-active_value_key_id = 1
-```
+Client shutdown prevents new admission, cancels or drains owned transport
+tasks according to the selected shutdown mode, and completes every pending
+caller exactly once. Native adapters MUST keep the underlying handle and
+runtime alive until those completions no longer reference them.
 
-A client MUST NOT derive Item IDs from a selected value key. Conversely,
-omitting or rotating value keys MUST NOT change item addressing. Sharing a
-value keyring across deployments intentionally permits a protected envelope to
-remain portable when its namespace and Item ID are also preserved. Deployments
-that require cryptographic isolation MUST use independent value keys; this
-profile adds no deployment, account, or client identifier to the derivation.
+## 4. Retries, outcomes, and errors
+
+### 4.1 Common outcome model
+
+Maintained adapters preserve these language-independent distinctions even when
+their public type names differ:
+
+- a successful operation result;
+- a definitive server status;
+- local configuration or input rejection;
+- transport failure for an operation known not to have an unknown mutation
+  outcome;
+- an unknown mutation or persistence-barrier outcome;
+- malformed or unsupported protocol or formatted-value input; and
+- value authentication, decompression, or decoding failure.
+
+An adapter MUST NOT collapse an unknown mutation outcome into an ordinary
+transport failure that applications are likely to retry automatically.
+
+### 4.2 Retry policy
+
+The shared core, not each adapter, classifies retry safety. The maintained
+default may retry a request rejected locally before transmission and may retry
+read-only operations after a retryable transport failure within configured
+attempt and deadline limits.
+
+The maintained clients do not automatically replay a mutation or persistence
+barrier after an unknown outcome. A caller may issue a new operation
+explicitly, but that is not a continuation or deduplicated retry of the first
+request.
+
+Adapters MAY expose retry count, backoff, and deadline controls. An override
+changes only the selected operation or client instance; it does not change the
+wire protocol or the definition of an unknown outcome.
+
+### 4.3 Language error mapping
+
+Bindings map common errors into idiomatic exceptions, error values, result
+types, or status objects. The mapping MUST preserve the common category,
+retry-safety information, and unknown-outcome distinction. Package
+documentation lists the concrete language types and any retained server status
+or diagnostic fields.
+
+## 5. Public API and native values
+
+### 5.1 Operation families
+
+Maintained bindings expose two distinguishable operation families:
+
+- **Formatted operations** accept a logical typed key and, where applicable, a
+  logical or formatted value. The core applies the selected key and value
+  profiles.
+- **Exact Item ID operations** accept the final protocol Item ID and opaque
+  value bytes. They bypass client key mapping and formatted-value processing.
+
+The key and value documents define the behavior of those inputs. This guide
+only requires that an adapter make the families unambiguous in its API and
+package documentation. A method name such as `raw` is insufficient unless the
+documentation states which family it represents.
+
+### 5.2 Native key conversion
+
+An adapter converts a supported native key into the explicit typed-key model
+defined by the key format. It MUST preserve the selected type and exact
+contents and MUST NOT infer a key type through reflection, stringification, or
+lossy numeric conversion.
+
+Bindings may expose different native types or only a subset of the common
+typed-key model. Unsupported inputs fail locally before request construction.
+Package documentation records supported native mappings and escape hatches to
+the language-independent typed-key or canonical-key representation.
+
+### 5.3 Native value conversion
+
+Opaque byte operations preserve exact bytes. Logical CBOR operations use a
+portable value representation and convert to native values where that
+conversion is lossless and unsurprising.
+
+An adapter MUST NOT stringify, coerce, reorder with semantic loss, or silently
+drop a value or map key that its native container cannot represent. It may
+return a generic CBOR value or key/value-entry collection instead. Each package
+documents integer, floating-point, byte-string, map-key, and unsupported native
+type behavior while the draft CBOR policy is finalized.
+
+### 5.4 Runtime shape
+
+Bindings use the concurrency model expected by their language. A Rust future,
+JavaScript promise, Swift actor call, Go context operation, Python coroutine,
+or synchronous native wrapper may expose the same core operation differently.
+Those shapes do not change request semantics, retry classification, or value
+conversion rules.
+
+## 6. Configuration and maintained-client policies
+
+### 6.1 Configuration boundaries
+
+The generated client contract is the common source for configuration fields,
+identifiers, limits, and maintained defaults. Adapters translate native
+configuration into that model and let the shared core validate combinations.
+They do not duplicate profile algorithms or derive new defaults from native
+type behavior.
+
+Configuration is divided into:
+
+- connection and runtime settings, such as endpoint, trust, deadlines, lane
+  capacity, and retry policy;
+- identity settings consumed by the key format;
+- formatted-value settings consumed by the value format; and
+- per-operation overrides that do not mutate client-instance defaults.
+
+An adapter MUST keep identity configuration separate from value-protection
+configuration even when a language offers a convenience constructor. The key
+and value specifications define the actual fields and validity rules.
 
 ### 6.2 Compression policy
 
-Compression is disabled by default for every client. It is an optional
-formatted-write policy, not a property inferred from the language binding or
-payload bytes.
-
-When a caller enables compression without supplying tuning values, every
-binding uses the same convenience defaults:
+Automatic compression is enabled by default for formatted writes in the
+OpenKache-maintained clients. The maintained default policy is:
 
 ```text
-compression_level = 1
+compression_mode = Automatic
+zstd_level = 1
 minimum_input_bytes = 1,024
-minimum_savings_bytes = 1
 ```
 
-These values are client defaults, not value-envelope validity requirements.
-Callers MAY override them for their workloads without changing format
-conformance. With the shared defaults, an encoder selects Zstandard only when
-compression has produced any savings:
+For a formatted payload of at least 1,024 bytes, the shared value codec
+attempts one Zstandard level-1 compression. It emits the Zstandard form only
+when the completed frame is smaller than the original payload:
 
 ```text
 payload_length >= 1,024
 and zstd_frame_length < payload_length
 ```
 
-Otherwise it emits `Uncompressed`. A per-operation override MUST NOT mutate
-the connection-wide compression policy. Language bindings MAY expose different
-configuration syntax, but MUST NOT choose different language-specific defaults.
+Otherwise it emits the uncompressed form. This is a maintained-client policy,
+not a value-format validity or interoperability requirement. Third-party
+clients may use another selection policy while emitting valid value envelopes.
+
+All maintained bindings inherit this default from the shared core and
+generated client contract; a binding MUST NOT select a language-specific
+default. Bindings expose an explicit opt-out and MAY expose tuning controls for
+advanced callers. Exact Item ID operations do not apply formatted-value
+compression.
 
 ### 6.3 Value-key rotation
 
-A write-capable protected client selects exactly one configured
-`active_value_key_id`. Every protected write uses that ID and its associated
-key; a per-operation protection-profile override MUST NOT select an inactive
-value key. A protected reader selects exactly the ID carried in the envelope;
-the value profile includes that ID in the AEAD associated data.
-
-Rotation proceeds in this order:
+The value format owns key IDs, key selection, protection algorithms, and
+envelope validation. Maintained clients implement only the operational
+read-old/write-new lifecycle around that format:
 
 1. Add the new immutable key-ID mapping to every reader.
 2. Change writers to the new active ID.
-3. Keep the previous mapping available for reads while old envelopes may
-   remain.
-4. Retire the previous mapping only after those envelopes have expired, been
-   rewritten, or been invalidated.
+3. Keep previous mappings readable while their values may remain.
+4. Retire a previous mapping only after its values have expired, been
+   replaced, or been invalidated.
 
-Values with no expiration prevent time-based retirement; they must be
-rewritten or invalidated before their key is removed. A client that reads an
-unknown or retired value-key ID MUST reject the value without trying other
-keys and without falling back to `Unprotected`. Reusing a request ID, rewriting
-an Item ID, or changing the protection allowlist does not migrate a protected
-value.
+Maintained clients do not automatically rewrite a value merely because it was
+read under an inactive key. Such a rewrite is an ordinary mutation and can
+race with another writer without a generation, compare-and-set, or equivalent
+application contract.
 
-Version 1 clients MUST NOT automatically rewrite a value merely because it was
-read under an inactive key. A rewrite is an ordinary `SET`, can race with
-another writer, and cannot be made transparent without a compare-and-set,
-generation, or equivalent concurrency contract. Rotation therefore reads old
-and new key IDs but writes only the active ID. Old envelopes leave the cache
-through expiration, eviction, replacement, an application-coordinated rewrite,
-explicit invalidation, or namespace flush and repopulation.
+## 7. Adapter and FFI responsibilities
 
-## 7. Conformance checklist
+Bindings that use the native ABI treat it as the only boundary to the shared
+core. They MUST use generated constants and declarations rather than copying
+protocol, key-format, or value-format assignments into package source.
 
-A conforming client:
+Each adapter defines and tests:
 
-- keeps request correlation lane-local;
-- never creates an ambiguous duplicate outstanding request ID on one lane;
-- accepts out-of-order responses and dispatches them by request ID;
-- validates response status and payload against the recorded operation;
-- distinguishes definitive errors from unknown outcomes;
-- does not automatically replay mutations with unknown outcomes;
-- keeps formatted-key and Exact Item ID behavior distinct;
-- resolves namespaces before namespace-bound Item ID derivation;
-- keeps Item ID identity keys independent from rotatable value keys;
-- selects protected read keys only by the envelope's immutable value-key ID;
-- does not perform automatic read-triggered value-key rewrites;
-- applies shared compression defaults independently of binding language;
-- preserves explicit configuration overrides without changing defaults; and
-- documents binding-specific API names and configuration syntax.
+- native argument validation before crossing the ABI where practical;
+- ownership and lifetime of client, request, result, error, and buffer handles;
+- exact copy, borrow, retain, and release behavior;
+- runtime initialization and shutdown;
+- cancellation and callback or completion-thread behavior;
+- conversion between common and native error categories; and
+- package loading, linkage, and supported-platform failures.
+
+The adapter must remain thin enough that a shared behavior fix can be made once
+in the core. Platform-specific scheduling or memory integration belongs in the
+adapter and must not leak into common request or format semantics.
+
+## 8. Verification and package documentation
+
+The shared core is tested against the wire, key, and value conformance vectors.
+Every maintained binding additionally tests its native conversion, error
+mapping, cancellation, resource lifetime, and generated-contract version.
+Cross-language tests write through one maintained binding and read through
+another for every portable key and value family supported by both.
+
+Each implemented package README documents:
+
+- installation, build, and verification commands;
+- supported API families and native type mappings;
+- asynchronous or synchronous runtime behavior;
+- configuration names and maintained defaults;
+- error and unknown-outcome representation;
+- resource ownership where it is visible to callers; and
+- any deliberate deviation from this common implementation guide.
+
+A maintained binding is complete only when it delegates shared behavior to the
+core, preserves the common outcome and value semantics, and documents its
+language-specific surface without restating the underlying format
+specifications.

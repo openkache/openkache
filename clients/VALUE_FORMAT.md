@@ -11,9 +11,10 @@ may temporarily lag while the draft is being completed, but an implementation
 MUST NOT claim conformance to this profile until it implements the complete
 grammar, key schedule, and validation rules.
 
-Shared API-family, request lifecycle, and retry behavior is specified by the
-[Client Behavioral Contract](CLIENT.md). Binding-specific method names and
-defaults belong in each binding's documentation.
+The shared implementation and local policies used by OpenKache-maintained
+language bindings are described by the
+[Client Implementation Guide](CLIENT.md). Binding-specific method names and
+documented deviations belong in each binding's documentation.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -319,9 +320,9 @@ during decompression and verify the exact produced size and frame boundary
 afterward.
 
 Whether and when an encoder chooses Zstandard is client policy defined by the
-[Client Behavioral Contract](CLIENT.md#62-compression-policy), not an envelope
-validity rule. An encoder MUST accurately identify the emitted body as either
-`Uncompressed` or `Zstandard`.
+[Client Implementation Guide](CLIENT.md#62-compression-policy) for maintained
+bindings, not an envelope validity rule. An encoder MUST accurately identify
+the emitted body as either `Uncompressed` or `Zstandard`.
 
 When secret data is compressed together with attacker-influenced data,
 compression SHOULD be disabled or the components SHOULD be stored separately.
@@ -341,8 +342,8 @@ without trying another key and without falling back to `Unprotected`.
 Value keys are application-managed secrets. The all-zero key MUST NOT be used
 as protected key material. Independently rotated keys SHOULD be generated
 independently with a cryptographically secure random source. Keyring lifecycle
-and rotation ordering are defined by the
-[Client Behavioral Contract](CLIENT.md#63-value-key-rotation).
+and rotation ordering for maintained bindings are defined by the
+[Client Implementation Guide](CLIENT.md#63-value-key-rotation).
 
 For protected values, implementations MUST derive the value keys exactly as
 follows. BLAKE3 `DERIVE_KEY` uses the context strings as UTF-8 bytes and

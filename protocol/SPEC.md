@@ -37,9 +37,10 @@ Version 1 specifies:
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
 and belong to the [client key](../clients/KEY_FORMAT.md) and
-[value-format](../clients/VALUE_FORMAT.md) specifications. Shared client-side
-request lifecycle, correlation, retry, and API-family behavior is defined by
-the [Client Behavioral Contract](../clients/CLIENT.md). The physical storage
+[value-format](../clients/VALUE_FORMAT.md) specifications. The shared
+implementation choices used by OpenKache-maintained language bindings are
+described by the [Client Implementation Guide](../clients/CLIENT.md); they are
+not additional wire requirements for third-party clients. The physical storage
 layout and the namespace eviction algorithm are outside this wire protocol.
 Item expiration and eviction eligibility are part of the `SET` contract below.
 Namespace lifecycle and policy administration are carried by the

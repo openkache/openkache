@@ -11,7 +11,7 @@ Shared client topics are documented here:
 | Topic | Reference |
 |---|---|
 | SDK inventory, implementation status, and binding boundaries | This README |
-| Shared request lifecycle, retries, API families, and configuration | [Client behavioral contract](CLIENT.md) |
+| Maintained binding architecture, request engine, native conversion, and local policies | [Client implementation guide](CLIENT.md) |
 | Formatted key input, compact public mapping, and protected Item ID derivation | [Key format](KEY_FORMAT.md) |
 | Formatted value bytes, compression, and application-level protection | [Value format](VALUE_FORMAT.md) |
 | QUIC framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
@@ -41,35 +41,23 @@ formats or protocol behavior.
 Java, Kotlin, and Dart currently contain registry metadata and reserved source
 layouts only. They do not connect to OpenKache or expose cache operations yet.
 
-The [behavioral](CLIENT.md), [key](KEY_FORMAT.md), and
-[value](VALUE_FORMAT.md) documents together form the pre-freeze v1 client
-contract. The shared core and implemented adapters enforce the restricted key
-model, Item ID mapping, and optional protection. The value envelope in the
-value-format document is the target of a separate value-codec migration; the
-server remains opaque to all of these client conventions. TypeScript's legacy
+The [key](KEY_FORMAT.md) and [value](VALUE_FORMAT.md) documents define the
+language-independent pre-freeze v1 formats. The [client implementation
+guide](CLIENT.md) describes how OpenKache-maintained bindings share one core
+without making their API shape or local policy a requirement for third-party
+clients. The value envelope is the target of a separate value-codec migration;
+the server remains opaque to all client-owned formats. TypeScript's legacy
 metadata envelope remains a package-level compatibility detail; use its
-`set_json` / `get_json` or Raw methods for cross-language values.
+`set_json` / `get_json` or Exact Item ID methods for cross-language values.
 
 ## Binding architecture
 
-The shared layers have these responsibilities:
-
-- `protocol/` defines and validates server-visible wire frames.
-- `core/` handles transport, TLS, retries, raw operations, key derivation,
-  compression, encryption, and formatted-value processing.
-- implemented language packages convert native values and configuration into
-  core types, expose runtime-appropriate asynchronous APIs, and clean up native
-  resources.
-- raw APIs accept exact protocol item IDs and values and bypass formatted-value
-  processing.
-
-Language adapters must not implement their own wire framing, retry semantics,
-key derivation, compression, encryption, or value containers. Extend the shared
-core when a binding needs shared behavior.
-
-The .NET package uses the shared native ABI for transport and protocol work.
-Its managed surface remains a raw Smithy adapter; protected value handling can
-be added without introducing a second protocol implementation.
+Maintained language packages convert native values and runtime behavior at the
+edge while delegating transport, protocol, retry classification, key mapping,
+and formatted-value processing to `clients/core`. The [client implementation
+guide](CLIENT.md) defines that shared boundary. The [core README](core/README.md)
+documents the Rust crate and native ABI, and each package README documents its
+language-facing API and platform integration.
 
 ## Scaffold commands and entry points
 
@@ -94,15 +82,12 @@ package-specific linker or packaging configuration. Artifact distribution for
 the remaining scaffolds is intentionally undefined until those bindings are
 implemented.
 
-## Shared configuration
+## Generated client contract
 
-The C, C++, Python, and Swift packages use the native ABI exported by
-`clients/core`. Their adapters only marshal native values, expose their
-language-appropriate lifecycle, and own result handles; protocol, retry, TLS,
-value-format, and protection behavior remain in the core. Every operation,
-result, state, limit, and value-format identifier is generated from the two
-scoped Smithy models for each package's build output, keeping all bindings
-aligned without hand-maintained constants. The wire model in
+Every operation, result, state, limit, maintained default, and value-format
+identifier is generated from the two scoped Smithy models for each package's
+build output, keeping bindings aligned without hand-maintained constants. The
+wire model in
 [`../protocol/model/openkache.smithy`](../protocol/model/openkache.smithy)
 contains only values the server must understand; the client model in
 [`model/openkache.smithy`](model/openkache.smithy) owns adapter defaults, API
@@ -111,7 +96,9 @@ shapes, native ABI identifiers, and value-format metadata. The stable
 writes. Modules under [`generator/`](generator/) separately own Smithy
 extraction, shared contract types, literal rendering, and language-specific
 renderers. This keeps adding or changing one SDK renderer independent of the
-other language backends while preserving one generated contract.
+other language backends while preserving one generated contract. Native ABI
+and package responsibilities are specified by the [client implementation
+guide](CLIENT.md).
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
 See each implemented package README for accepted configuration fields, platform
