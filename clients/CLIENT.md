@@ -242,16 +242,17 @@ binding uses the same convenience defaults:
 ```text
 compression_level = 1
 minimum_input_bytes = 1,024
-minimum_savings_bytes = 64
+minimum_savings_bytes = 1
 ```
 
 These values are client defaults, not value-envelope validity requirements.
 Callers MAY override them for their workloads without changing format
-conformance. With the shared defaults, an encoder selects Zstandard only when:
+conformance. With the shared defaults, an encoder selects Zstandard only when
+compression has produced any savings:
 
 ```text
 payload_length >= 1,024
-and zstd_frame_length <= payload_length - 64
+and zstd_frame_length < payload_length
 ```
 
 Otherwise it emits `Uncompressed`. A per-operation override MUST NOT mutate
