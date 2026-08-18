@@ -5,6 +5,13 @@
 > This document specifies client-owned key validation and Item ID mapping. It
 > is not a server-required key encoding, and it may change before finalization.
 
+This is the target contract for the pre-freeze draft. Client implementations
+may temporarily lag while the draft is being completed, but an implementation
+MUST NOT claim conformance until it follows this complete mapping contract.
+
+Shared request lifecycle, correlation, retry, and API-family behavior is
+specified by the [Client Behavioral Contract](CLIENT.md).
+
 For item identity, the wire protocol carries only an opaque Item ID of
 `0..=32` bytes. An application MAY invoke the Exact Item ID API to supply that
 identifier directly. That API is separate from the key-mapping profiles
@@ -117,48 +124,33 @@ operation MAY supply its own explicit discriminator.
 `ByteKeyOrHash` is permitted only when the configured type is `KeyType::Bytes`.
 It is a mapping policy, not a fourth typed-key type.
 
-Bindings use different names for this same discriminator. `KeyType` is the
-normative contract term; Rust uses `KeyType`, Python uses `KeySpec`, the
-TypeScript SDK uses `Key_Spec`, the C ABI uses the generated `FfiKeySpec`
-values, and C++ uses `Key_Type`.
+### 2.3 Binding projection requirements
 
-### 2.3 Language binding requirements
+A language binding MAY expose any subset of `Integer`, `Text`, and `Bytes`, but
+it MUST document the supported native types and map them to the language-neutral
+variants above without implicit stringification or cross-type coercion.
+Binding-specific type names and current capability inventories belong in the
+binding documentation, not this format contract.
 
-| Binding | `Text` | `Bytes` | `Integer` | Floating-point |
-|---|---|---|---|---|
-| JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §3.2; otherwise reject |
-| Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
-| Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
-| C | typed ABI passes logical UTF-8 bytes with `FfiKeySpec::Text` | typed ABI passes logical bytes with `FfiKeySpec::Bytes` | typed ABI passes canonical signed decimal ASCII bytes with `FfiKeySpec::Integer` | binary float types rejected |
-| C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the convenience API | `float`, `double` rejected |
-| Go | not exposed by the convenience API | `[]byte` → `Bytes` | not exposed by the convenience API | `float32`, `float64` rejected |
-| Java / Kotlin | package scaffold | package scaffold | package scaffold | package scaffold |
-| C# / .NET | exact Item ID API only | exact Item ID API only | exact Item ID API only | exact Item ID API only |
-| Swift | `String` → `Text` | `Data` → `Bytes` | not exposed by the convenience API | `Float`, `Double` rejected |
-| Dart | package scaffold | package scaffold | package scaffold | package scaffold |
-
-All text bindings MUST reject strings that cannot encode to valid UTF-8,
+Every text projection MUST reject input that cannot encode to valid UTF-8,
 including unpaired surrogates. Text and direct byte-key inputs are
-length-delimited; neither representation is NUL-terminated. In particular, C
-bindings MUST pass an explicit buffer length and MUST NOT use a NUL-terminated
-C string as the key representation. For `FfiKeySpec::Integer`, the logical
-bytes MUST be the UTF-8 encoding of a canonical signed decimal integer:
-optional leading `-`, one or more ASCII decimal digits, no leading zeroes
-unless the value is exactly `0`, and no `-0`. Whitespace, a leading `+`,
-non-ASCII digits, and other numeric spellings MUST be rejected. The decimal
-text is an ABI transport representation only; the resulting key identity is
-the mathematical integer and is encoded using the canonical CBOR integer
-rules in §3.1.
+length-delimited; neither representation is NUL-terminated. Foreign-function
+interfaces MUST carry an explicit buffer length and discriminator rather than
+inferring a type or boundary from the byte contents.
 
-The legacy shared C ABI `openkache_client_execute` uses
-`canonical_key_bytes` as its canonical-key operation input. Its
-`application_key` buffer MUST contain exactly one complete canonical CBOR key
-item; that ABI does not infer whether arbitrary bytes represent `Text`, `Bytes`,
-or an integer. The typed ABI entry points (`openkache_client_execute_typed*`)
-instead take logical key bytes plus an explicit `FfiKeySpec`; language adapters
-MUST use those entry points for native typed values. The core performs the
-canonical encoding after receiving the logical bytes and discriminator. Exact
-Item ID operations remain separate and accept opaque Item IDs directly.
+Floating-point inputs are not typed keys. A binding MUST reject them except for
+the JavaScript safe-integer normalization defined in §3.2. An ABI that
+transports an integer as text MUST use canonical signed decimal ASCII:
+optional leading `-`, one or more digits, no leading zeroes unless the value is
+exactly `0`, and no `-0`. Whitespace, a leading `+`, non-ASCII digits, and
+other numeric spellings MUST be rejected. The decimal text is only a transport
+representation; key identity remains the mathematical integer encoded under
+§3.1.
+
+An interface that accepts `canonical_key_bytes` MUST validate exactly one
+complete canonical CBOR key item. An interface that accepts a logical typed key
+MUST receive an explicit `KeyType` and perform canonical encoding itself.
+Exact Item ID operations remain separate and accept opaque Item IDs directly.
 
 ## 3. Canonical key encoding
 
@@ -243,9 +235,12 @@ keys in different namespaces therefore produce different Item IDs.
 item_id =
   BLAKE3-KEYED-HASH(
     key   = item_id_derivation_key[32],
-    input = namespace_id:u64be | canonical_key_bytes
+    input = 01 | namespace_id:u64be | canonical_key_bytes
   )
 ```
+
+The leading `01` is the one-byte `Hash` profile domain. It is part of the hash
+input, not the resulting Item ID and not a wire field.
 
 ### 4.2 Byte-key preserve-or-hash profile (`ByteKeyOrHash`)
 
@@ -266,15 +261,27 @@ MUST remain stable:
 hash_fallback_item_id =
   BLAKE3-KEYED-HASH(
     key   = item_id_derivation_key[32],
-    input = namespace_id:u64be | direct_byte_key
+    input = 02 | namespace_id:u64be | direct_byte_key
   )
 ```
 
-The profile MUST document the hash input and derivation key. The default
-profile uses the same namespace-bound input and derivation key as the `Hash`
-profile, but does not prepend a CBOR type or length marker to
-`direct_byte_key`. A future profile that changes this input MUST use a distinct
-profile identifier and MUST NOT reinterpret existing Item IDs.
+The leading `02` is the one-byte `ByteKeyOrHash` hash-fallback domain. The
+preservation path does not add this byte because its result is the direct byte
+key itself.
+
+The two hashed paths deliberately use different domains even though they share
+the same derivation key. Without the domain byte, a long direct byte key could
+equal the complete canonical CBOR encoding of a typed key, causing distinct
+mapping profiles to derive the same Item ID deterministically. For example, a
+direct byte key consisting of a CBOR byte-string header followed by its payload
+could equal the `canonical_key_bytes` of `TypedKey::Bytes` for that payload.
+The `01` and `02` domains prevent that cross-profile alias while retaining the
+same namespace binding and root-key lifecycle.
+
+The profile MUST document the hash input, domain byte, and derivation key.
+Future hashed profiles MUST use a new nonzero domain byte and MUST NOT
+reinterpret existing Item IDs. Domain bytes are client-profile identifiers;
+they are not negotiated with or interpreted by the server.
 
 ### 4.3 Exact Item ID API
 
@@ -295,10 +302,10 @@ as the first eight bytes of the keyed-hash input:
 
 ```text
 Hash profile:
-  namespace_id:u64be | canonical_key_bytes
+  01 | namespace_id:u64be | canonical_key_bytes
 
 Hash-fallback path:
-  namespace_id:u64be | direct_byte_key
+  02 | namespace_id:u64be | direct_byte_key
 ```
 
 Including the namespace prevents equal keys in different namespaces from
@@ -339,10 +346,18 @@ requires non-public Item IDs.
 ### 5.3 Hash algorithm and profile compatibility
 
 The derivation algorithm is BLAKE3 keyed hashing with a 32-byte derived key.
-The Item ID has no separate version field. A profile that changes key identity,
-namespace input, hash context, or derivation material MUST use a distinct
-profile identifier and MUST NOT reinterpret Item IDs from this contract. There
-is no key-rotation protocol.
+The currently assigned hashed-profile domains are:
+
+| Domain byte | Profile path |
+|---:|---|
+| `01` | `Hash` |
+| `02` | `ByteKeyOrHash` hash fallback |
+
+`00` and `03..=FF` are unassigned. The Item ID has no separate version field.
+A profile that changes key identity, namespace input, hash context, derivation
+material, or input framing MUST use a distinct nonzero domain byte and MUST
+NOT reinterpret Item IDs from this contract. There is no key-rotation
+protocol.
 
 ## 6. Limits and validation
 
@@ -393,17 +408,20 @@ item_id_derivation_key =
   92 22 5d c5 82 e1 06 a0 f0 29 f9 e6 3b 91 7b 4b
 ```
 
+Hash vectors include domain byte `01`; hash-fallback vectors include domain
+byte `02`.
+
 ### 7.1 Hash Item IDs
 
 | Vector | Canonical key bytes | `item_id` |
 |---|---|---|
-| `Text("abc")` | `63 61 62 63` | `42 7b da c9 1f 3b 4a 91 e6 84 4e df 91 5f de 24 6a 8c 5f fd c6 53 8a b2 73 d9 b3 8a c7 6e d3 b5` |
-| `Bytes([00,ff])` | `42 00 ff` | `37 8f 5b c4 75 ef 94 54 49 58 3a e5 a5 34 16 45 35 28 1a 63 44 63 6b 63 ec 88 70 57 6e 0e 7e 41` |
-| `Integer(1)` | `01` | `cf 3c 3f db 98 f7 ce 3f 81 a7 04 a3 9b 88 2d e2 a0 58 37 d3 d1 c0 56 81 84 38 23 74 11 88 54 7c` |
-| `Integer(-1)` | `20` | `63 3b 3c a8 10 66 f7 25 0c 6a f1 1f 14 62 d3 a1 48 4f 12 16 a0 6f 1e f5 65 46 78 65 c3 28 81 d6` |
-| `Text("")` | `60` | `4a 09 7c c0 5f b5 4d 3b e2 1a f5 83 dc b4 b3 d9 e8 d7 6f f6 f6 5b 14 78 5f dd f7 56 d1 aa 13 bc` |
-| `Bytes([])` | `40` | `6a 45 bd 6f 9f a7 94 a0 08 9b ed 46 b1 ee f3 af 0f 69 12 ec 08 b5 0a 02 c0 f4 f3 9f be c0 5e cc` |
-| `Text("abc")`, namespace `2` | `63 61 62 63` | `8d be e5 54 99 ed f7 43 4c f2 b9 02 42 e7 d3 60 94 05 d2 08 06 a7 e5 27 5b ce 83 b7 94 f8 50 35` |
+| `Text("abc")` | `63 61 62 63` | `5b 04 c6 3d ba fe 77 0b 24 9d 2b 0f 9b bf 29 b1 ed c7 da b6 41 79 7f 5a 0c 9a 70 62 6c 5e 9c d5` |
+| `Bytes([00,ff])` | `42 00 ff` | `20 1c f1 4c 7b c6 4d ab aa e2 c5 7e 7a 62 b8 14 21 f6 27 2d f4 c0 79 7d 92 c4 4a 22 1c de 64 c3` |
+| `Integer(1)` | `01` | `fa 6e 82 8f 07 42 ab 6f c6 5d 5e 74 53 6c a9 86 22 45 b3 2e 55 d7 cb aa 73 c6 7c 5c 3e 8c 54 4c` |
+| `Integer(-1)` | `20` | `5d de e7 b9 d9 01 97 4c 70 f5 9b ac 00 92 99 30 8d 22 39 ec e6 5b 28 3c e3 cc 8f 63 93 45 f9 6a` |
+| `Text("")` | `60` | `6a 67 03 b8 32 5e fc 87 ef 67 ba 94 92 08 18 1b 31 69 c6 8d 66 57 d6 b5 3b 10 6d 5e 6f 62 49 a3` |
+| `Bytes([])` | `40` | `6d 0d 3c a0 c4 49 b9 0f 8b 18 fa 50 b1 6f d3 3e 9c 70 d9 10 94 ab 3f b2 60 64 22 92 ee eb fc 2f` |
+| `Text("abc")`, namespace `2` | `63 61 62 63` | `9b 5e ed be c7 7a 5a 57 c0 a9 df cf 40 3d cf 98 80 fa 9a ae 54 23 e1 c0 54 d3 79 53 28 1f 8e 7b` |
 
 ### 7.2 ByteKeyOrHash boundary vectors
 
@@ -414,7 +432,7 @@ follows the hash-fallback path for the 33-byte direct byte key.
 |---|---|
 | empty direct byte key | empty Item ID |
 | 32-byte direct byte key `00 01 02 ... 1f` | same 32 bytes |
-| 33-byte direct byte key `00 01 02 ... 20` | `6a b6 43 ac ea f8 cd a7 b0 61 21 4f 7f 55 dd 86 79 37 9e 94 7a c6 aa 7f 42 af 92 c5 be 31 2a 86` |
+| 33-byte direct byte key `00 01 02 ... 20` | `4d 19 cb ae 58 6b 6f 9b 99 62 6a 8c 44 e5 5a cd 65 17 4b f2 5a 57 b6 75 79 40 f0 f0 71 2b 4f 59` |
 
 ### 7.3 Root separation
 
@@ -430,8 +448,8 @@ item_id_derivation_key =
   d1 b7 dd 5c 75 43 f8 cc 07 cb 9b 18 ad 0e 2b cd
 
 item_id =
-  cc f7 df e4 e2 d9 f4 65 4d 00 44 e4 eb 2c 9b 5b
-  fc 52 2a 8d 33 0e 7b 4e 9e 30 9a 7d b5 cf b4 80
+  ab 54 07 91 c1 a7 86 db 25 70 be 9b 4d 7b 71 7c
+  40 9c 85 5c dd fa c3 02 7b 18 f0 48 25 ab cd 85
 ```
 
 ### 7.4 Rejection cases

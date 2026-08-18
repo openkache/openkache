@@ -37,11 +37,13 @@ Version 1 specifies:
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
 and belong to the [client key](../clients/KEY_FORMAT.md) and
-[value-format](../clients/VALUE_FORMAT.md) specifications. The physical
-storage layout and the namespace eviction algorithm are outside this wire
-protocol. Item expiration and eviction eligibility are part of the `SET`
-contract below. Namespace lifecycle and policy administration are carried by
-the namespace-management requests defined below.
+[value-format](../clients/VALUE_FORMAT.md) specifications. Shared client-side
+request lifecycle, correlation, retry, and API-family behavior is defined by
+the [Client Behavioral Contract](../clients/CLIENT.md). The physical storage
+layout and the namespace eviction algorithm are outside this wire protocol.
+Item expiration and eviction eligibility are part of the `SET` contract below.
+Namespace lifecycle and policy administration are carried by the
+namespace-management requests defined below.
 
 ## Terminology
 
@@ -115,9 +117,11 @@ deliberately selects an older protocol.
 
 The ALPN negotiation selects the connection's frame version. Frames contain no
 version field. Once v1 negotiation succeeds, every OpenKache frame on the
-connection uses this specification. A framing or field meaning that is
-incompatible with this document requires a different ALPN identifier. An
-implementation MUST NOT use an older common-header layout with `openkache/1`.
+connection uses this specification. During the pre-freeze draft period,
+implementations using the provisional `openkache/1` identifier MUST coordinate
+the same specification revision out of band. An implementation claiming this
+revision MUST NOT use an older common-header layout. After v1 is finalized, an
+incompatible framing or field meaning requires a different ALPN identifier.
 
 Peers without a common ALPN identifier MUST fail negotiation.
 
@@ -161,10 +165,11 @@ The following rules apply:
    MUST echo its canonical bytes and MUST NOT assign ordering, uniqueness,
    deduplication, replay-protection, or idempotency meaning to it.
 3. The client owns request-ID allocation and MAY reuse an ID after receiving
-   its response. The wire protocol imposes no request-ID uniqueness rule. A
-   client that needs unambiguous response matching MAY enforce uniqueness
-   locally; duplicate IDs do not make an otherwise well-formed frame
-   malformed.
+   its response. The wire protocol imposes no server-side request-ID
+   uniqueness rule; duplicate IDs do not make an otherwise well-formed frame
+   malformed. The client contract requires lane-local uniqueness while a
+   request is outstanding so a multiplexed client can correlate out-of-order
+   responses. That client policy does not add a server validation rule.
 4. Each complete request frame receives an internal sequence position in its
    lane. The server MUST produce results equivalent to serial execution in
    that sequence order. It MAY execute non-conflicting requests concurrently,
@@ -1131,10 +1136,16 @@ parsing.
 Protocol v1 reserves all unassigned opcodes, statuses, and flag bits. Senders
 MUST NOT use them, and receivers MUST reject them as described above.
 
-Any change that reinterprets an existing field, changes frame order, adds or
-removes mandatory fields, changes canonical integer encoding, or changes the
-meaning of existing assignments requires a new ALPN identifier. New protocol
-versions MUST NOT reuse `openkache/1` for incompatible frames.
+Before v1 is finalized, this draft MAY make incompatible changes while
+retaining its provisional `openkache/1` identifier. Draft implementations
+therefore interoperate only when they implement the same revision of this
+document.
+
+After v1 is finalized, any change that reinterprets an existing field, changes
+frame order, adds or removes mandatory fields, changes canonical integer
+encoding, or changes the meaning of existing assignments requires a new ALPN
+identifier. Finalized protocol versions MUST NOT reuse `openkache/1` for
+incompatible frames.
 
 When a client supports multiple versions, it MUST use the ALPN ordering and
 minimum-version rules in the transport section. A server MUST select the
@@ -1171,6 +1182,46 @@ A miss response is:
 ```text
 01 00 00
 ```
+
+### Request-ID and Item ID boundaries
+
+For request ID `128`, namespace ID `7`, and the maximum-length Item ID
+`00 01 02 ... 1F`, a `GET` request is:
+
+```text
+02 80 02 00 00 00 00 00 00 00 07 20
+00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
+10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F
+```
+
+`80 02` is the canonical two-byte `vu128` encoding of request ID `128`, and
+`20` is `item_id_len = 32`.
+
+The following complete request declares 33 Item ID bytes and is semantically
+invalid:
+
+```text
+02 00 00 00 00 00 00 00 00 07 21 [AA × 33]
+```
+
+Because its frame boundary is known, the server MAY return `InvalidRequest`
+with the same request ID:
+
+```text
+80 00 00
+```
+
+By contrast, this request followed by end-of-stream is truncated:
+
+```text
+02 00 00 00 00 00 00 00 00 07 03 11 22
+```
+
+It declares three Item ID bytes but supplies only two. The server MUST close
+the connection with `MALFORMED_FRAME` and MUST NOT send a response or search
+for a later opcode. Similarly, an oversized `SET` is a complete,
+well-delimited `TooLarge` request only when all bytes declared by `value_len`
+are present or can be discarded without losing the next frame boundary.
 
 ### Conditional `SET` with TTL
 

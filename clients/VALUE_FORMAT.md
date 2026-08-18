@@ -6,15 +6,14 @@ This document defines the client-side v1 value encoding before it is handed to
 the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
 
-The Rust `ValueCodec` and TypeScript `get_raw`/`set_raw` convenience methods
-use this normative format. TypeScript `get`/`set` and the legacy
-`value_envelope` module use a separate migration envelope (`OKV1` magic prefix
-plus metadata lengths); that format is not described by the grammar below.
-Low-level exact Item ID APIs, such as `RawClient` or native `raw_get`/`raw_set`
-operations, bypass this envelope and send the caller's Item ID and opaque
-value bytes directly. A binding MUST document whether a method named
-`get_raw` or `set_raw` is a logical-key convenience method using this format
-or an exact Item ID operation bypassing it.
+This is the target contract for the pre-freeze draft. Client implementations
+may temporarily lag while the draft is being completed, but an implementation
+MUST NOT claim conformance to this profile until it implements the complete
+grammar, key schedule, and validation rules.
+
+Shared API-family, request lifecycle, and retry behavior is specified by the
+[Client Behavioral Contract](CLIENT.md). Binding-specific method names and
+defaults belong in each binding's documentation.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -135,11 +134,10 @@ normative properties of the selected profile.
 | `1` | `AES-256-GCM-SIV` ([RFC 8452](https://www.rfc-editor.org/rfc/rfc8452)) | Randomized authenticated encryption with a fresh 12-byte nonce per write. |
 | `2` | `AES-256-SIV-CMAC` ([RFC 5297](https://www.rfc-editor.org/rfc/rfc5297)) | Deterministic authenticated encryption with no random nonce. |
 
-The shared client core has an instance-wide default protection profile. Each
-formatted operation MAY specify a protection-profile override when its language
-binding exposes that operation-local option. If no override is supplied, the
-operation uses the instance default; an override MUST NOT mutate that default.
-The selected operation profile MUST be represented by `protection_id`.
+Encoding and decoding use separate protection policies. The write profile
+selects the protection applied to a new value. Each formatted write MAY
+override the instance write default; an override MUST NOT mutate that default.
+The selected write profile MUST be represented by `protection_id`.
 
 Without a configured client root key, the default and only valid profile is
 `Unprotected`. With a configured key, the default profile is
@@ -151,9 +149,23 @@ required key MUST fail; a binding MUST preserve that explicit selection so the
 shared core can reject it rather than silently downgrading to `Unprotected`.
 An explicit `Unprotected` connection or operation profile MAY be used with a
 configured root key; this retains root-bound Item ID derivation while disabling
-value protection. A decoder MUST reject a value whose protection ID is
-disallowed by the caller's configured profile and MUST NOT silently downgrade
-or fall back.
+value protection.
+
+The read policy is an allowlist, not a second write default:
+
+- without a configured root key, it contains only `Unprotected`;
+- with a configured root key, its default contains `AES-256-GCM-SIV` and
+  `AES-256-SIV-CMAC`, but not `Unprotected`;
+- a caller MAY explicitly narrow the allowlist or add `Unprotected`; and
+- an operation MAY require one exact protection ID for a stricter read without
+  mutating the instance allowlist.
+
+This separation permits values written under either authenticated profile to
+remain readable while a client changes its write default. Excluding
+`Unprotected` from the keyed default prevents an attacker or stale value from
+causing a silent downgrade. A decoder MUST reject a value whose
+`protection_id` is outside the effective read allowlist and MUST NOT silently
+downgrade or fall back.
 
 ### 4.2 Compression profiles
 
@@ -247,19 +259,12 @@ skippable frame, and no trailing bytes. Decoders MUST reject missing content
 sizes, multiple frames, dictionary requirements, oversized windows, trailing
 bytes, and decompressed output above the payload limit.
 
-The generated client contract supplies Zstd level `1`, a minimum input size of
-`1,024` payload bytes, and a minimum savings threshold of `64` bytes as the
-default settings when compression is enabled. Compression enablement is a
-language-adapter policy; the current adapters use these defaults:
+When compression is enabled, the v1 selection policy uses Zstd level `1`, a
+minimum input size of `1,024` payload bytes, and a minimum savings threshold of
+`64` bytes. Whether compression is enabled by default is a binding policy, not
+part of this encoding profile. Each binding MUST document its default.
 
-| Adapter | Compression enabled when omitted |
-|---|---:|
-| Rust core, C ABI, C++, Go, Swift, CLI | No |
-| Python, TypeScript | Yes |
-| .NET | Not applicable (exact Item ID API only) |
-
-Callers sharing a workload SHOULD select the same policy. An adapter
-documentation MUST state its default explicitly. An encoder MAY select
+Callers sharing a workload SHOULD select the same policy. An encoder MAY select
 compression profile `0` when compression is not beneficial. It MUST NOT label
 an uncompressed body as Zstandard.
 When secret data is compressed together with attacker-influenced data,
@@ -400,6 +405,123 @@ remain mandatory.
 | `AES-256-SIV-CMAC` | 2 bytes | 16 bytes |
 
 Compression adds its own frame overhead and may enlarge small values.
+
+### 7.7 Conformance vectors
+
+All vector bytes are hexadecimal. Unless a vector says otherwise, the
+parameters are:
+
+```text
+client_root_key =
+  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+  10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+
+namespace_id = 1
+payload_format = OpaqueBytes
+compression = Uncompressed
+payload = 76 61 6c 75 65  # ASCII "value"
+```
+
+The common root derivation is:
+
+```text
+value_root_key =
+  58 56 36 33 1c 40 9f 74 c3 6b 0c 46 c2 e3 3f 45
+  92 f8 72 37 34 e6 21 15 eb cf 4b 0f 7b 71 0c 33
+```
+
+The following vectors cover the empty, short, and maximum-length Item ID
+boundaries. These are intermediate key-schedule outputs, not envelope bytes:
+
+| Item ID | `compact_mac_key` | `compact_encryption_key` | `robust_key` |
+|---|---|---|---|
+| empty | `25 3e df 7c c6 92 f2 9f 9d a4 2e a4 b2 5c 62 9c c8 dc b7 d3 17 93 b5 c3 2e b2 a1 e6 0b 24 d4 c0` | `2e 14 ae 77 d6 c2 8c 03 ac b3 3c e1 ba 23 2e 41 95 68 22 ee 9e 3d 90 f7 85 28 88 bf b0 3c ce 7e` | `d1 89 b5 ae 69 d9 26 c3 81 13 ee 63 88 9e 79 57 06 2c 58 75 15 67 88 42 be c5 00 08 3d f5 b5 a0` |
+| `11 22 33` | `3a 54 73 80 ea 2b 78 c4 e2 f6 e9 d3 71 8c 33 28 50 07 ce 04 60 0e 48 64 49 6b 74 38 52 68 0b b8` | `ee 9d d9 3e 26 3d 11 cf f8 06 1d 32 27 06 24 87 c1 a5 a3 74 58 91 10 d5 fb 38 36 a9 fd e8 52 c8` | `07 88 8f 39 9a 84 66 6c 48 94 db 9e e7 8e 3d 42 53 68 29 a9 69 79 eb c1 17 5c a0 dc 09 a4 f0 f5` |
+| `00 01 02 ... 1f` | `bb 67 92 55 96 7b 6c 4d 9a c1 78 cd 3f a7 d1 62 29 12 cd cb 5c 3c 18 36 14 a5 fa 63 9a ff 54 47` | `3d e9 09 fb 32 30 d3 10 58 61 3e 4e d4 39 ab 6c 03 a3 4c 31 b7 27 21 ee 00 b3 e0 ef a2 39 94 15` | `f3 99 ef ee ce 06 bb a1 d9 b2 05 4b 83 3e 27 e1 db cc 2a 24 50 28 14 10 2c b9 3c b8 60 cc b2 0c` |
+
+#### Empty Item ID with AES-256-SIV-CMAC
+
+The selector is `02`. The AAD is:
+
+```text
+6f 70 65 6e 6b 61 63 68 65 2f 76 61 6c 75 65 2d
+66 6f 72 6d 61 74 2f 61 61 64 2f 76 31
+00 00 00 00 00 00 00 01 00 01 02
+```
+
+The complete envelope is:
+
+```text
+01 02 33 8a d1 0a 9d 4e ca a0 c1 89 1e 10 7e df
+66 d5 78 cf 8f 3a 29
+```
+
+#### Three-byte Item ID with AES-256-GCM-SIV
+
+This test fixes the nonce to `00 01 02 03 04 05 06 07 08 09 0a 0b`. Production
+encoders MUST still generate a fresh random nonce as required by §7.3. The
+selector is `01`. The AAD is:
+
+```text
+6f 70 65 6e 6b 61 63 68 65 2f 76 61 6c 75 65 2d
+66 6f 72 6d 61 74 2f 61 61 64 2f 76 31
+00 00 00 00 00 00 00 01 03 11 22 33 01 01
+```
+
+The complete envelope is:
+
+```text
+01 01 00 01 02 03 04 05 06 07 08 09 0a 0b
+d7 dc fe 7e 7c 2e 35 b5 39 d0 43 b4 75 44 64 c4
+dc b5 6b 01 c1
+```
+
+For the same Item ID, nonce, and payload with `namespace_id = 2`, the complete
+envelope is:
+
+```text
+01 01 00 01 02 03 04 05 06 07 08 09 0a 0b
+fa dc f3 13 61 11 5d 11 45 3e 58 21 be 13 20 92
+56 17 d2 98 3d
+```
+
+The ciphertext and tag change because the namespace is authenticated even
+though it is not part of the value-key derivation material.
+
+#### Maximum-length Item ID with AES-256-SIV-CMAC
+
+For Item ID `00 01 02 ... 1f`, the selector is `02`. The AAD is:
+
+```text
+6f 70 65 6e 6b 61 63 68 65 2f 76 61 6c 75 65 2d
+66 6f 72 6d 61 74 2f 61 61 64 2f 76 31
+00 00 00 00 00 00 00 01 20
+00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+01 02
+```
+
+The complete envelope is:
+
+```text
+01 02 ca a9 47 04 0d 55 98 65 bc b4 9f 95 e8 50
+55 71 20 7e b4 34 e3
+```
+
+#### Unprotected and rejection vectors
+
+The uncompressed, unprotected envelope for the common payload is independent
+of namespace and Item ID:
+
+```text
+01 00 76 61 6c 75 65
+```
+
+For any protected vector above, changing the namespace ID, Item ID length,
+Item ID bytes, encoded version, selector, ciphertext, or authentication tag
+MUST cause one generic authentication failure. Truncating a nonce, synthetic
+IV, or tag MUST be rejected before decryption. A decoder MUST NOT return
+partially decrypted or decompressed bytes for any rejection case.
 
 ## 8. Encoding and decoding
 
