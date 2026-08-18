@@ -25,12 +25,8 @@ import {
 } from "./compatibility_v1_renderer"
 import { extract_compatibility_wire_contract } from "./compatibility_v1"
 import {
-  render_protocol_spec_contract_snapshot,
   render_protocol_spec_operation_table,
-  protocol_spec_contract_snapshot_issues,
   protocol_spec_operation_table_issues,
-  PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
-  PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
   PROTOCOL_SPEC_OPERATION_TABLE_END,
   PROTOCOL_SPEC_OPERATION_TABLE_START,
 } from "./wire_spec"
@@ -57,12 +53,8 @@ export function extract_generic_wire_contract(
   return extract_compatibility_wire_contract(ast, strict_operations)
 }
 export {
-  render_protocol_spec_contract_snapshot,
   render_protocol_spec_operation_table,
-  protocol_spec_contract_snapshot_issues,
   protocol_spec_operation_table_issues,
-  PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
-  PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
   PROTOCOL_SPEC_OPERATION_TABLE_END,
   PROTOCOL_SPEC_OPERATION_TABLE_START,
 } from "./wire_spec"
@@ -163,17 +155,11 @@ function update_protocol_spec(contract: Wire_Contract): void {
       `\n${rendered}\n` +
       source.slice(end)
   }
-  const with_table = replace_section(
+  const updated = replace_section(
     existing,
     PROTOCOL_SPEC_OPERATION_TABLE_START,
     PROTOCOL_SPEC_OPERATION_TABLE_END,
     render_protocol_spec_operation_table(contract),
-  )
-  const updated = replace_section(
-    with_table,
-    PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
-    PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
-    render_protocol_spec_contract_snapshot(contract),
   )
   if (updated !== existing) writeFileSync(SPEC_OUTPUT, updated)
 }
@@ -205,17 +191,11 @@ export function main(): number {
         readFileSync(SPEC_OUTPUT, "utf8"),
         contract,
       )
-      const snapshot_issues = protocol_spec_contract_snapshot_issues(
-        readFileSync(SPEC_OUTPUT, "utf8"),
-        contract,
-      )
-      if (spec_issues.length > 0 || snapshot_issues.length > 0) {
+      if (spec_issues.length > 0) {
         throw new Error(
           "generated protocol documentation is stale:\n" +
-            [...spec_issues, ...snapshot_issues]
-              .map((path) => `  - ${path}`)
-              .join("\n") +
-            "\nUpdate the marked generated contract blocks in protocol/SPEC.md.",
+            spec_issues.map((path) => `  - ${path}`).join("\n") +
+            "\nUpdate the marked generated operation table in protocol/SPEC.md.",
         )
       }
     }
