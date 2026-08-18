@@ -126,10 +126,10 @@ administrative operations. No authentication field appears in a v1 frame.
 ## Stream model
 
 Only client-initiated bidirectional QUIC streams carry protocol frames.
-Unidirectional streams have no protocol v1 meaning.
-The server MUST NOT initiate a protocol stream. Endpoints that receive an
-unexpected server-initiated protocol stream MUST ignore it or reject it
-according to their QUIC endpoint policy; it carries no v1 frames.
+Server-initiated unidirectional streams have no protocol meaning and MUST be
+ignored by the client. The server MUST NOT initiate a bidirectional protocol
+stream; a client that receives one MUST reset it without parsing protocol
+frames.
 
 QUIC stream read and write boundaries have no protocol meaning. A frame MAY be
 split across any number of reads or writes, and one read MAY contain bytes from
@@ -159,10 +159,10 @@ The following rules apply:
    MUST echo its canonical bytes and MUST NOT assign ordering, uniqueness,
    deduplication, replay-protection, or idempotency meaning to it.
 3. The client owns request-ID allocation and MAY reuse an ID after receiving
-   its response. A lane MUST NOT have two outstanding requests with the same
-   ID. If a client violates this rule, response correlation is ambiguous and
-   the client MUST close the connection; the server is not required to detect
-   the violation and otherwise treats each request independently.
+   its response. The wire protocol imposes no request-ID uniqueness rule. A
+   client that needs unambiguous response matching MAY enforce uniqueness
+   locally; duplicate IDs do not make an otherwise well-formed frame
+   malformed.
 4. Each complete request frame receives an internal sequence position in its
    lane. The server MUST produce results equivalent to serial execution in
    that sequence order. It MAY execute non-conflicting requests concurrently,
@@ -176,9 +176,8 @@ The following rules apply:
    response, including an admission or semantic error, unless the lane or
    connection fails before a response can be sent. A malformed frame is not a
    parsed request and receives no response.
-6. Response frames MUST be emitted as contiguous byte sequences. Version 1
-   does not define byte-level interleaving of two response frames. Such
-   response-byte interleaving is a TODO for a future framing revision.
+6. Response frames MUST be emitted as contiguous byte sequences. Response
+   bytes from two frames MUST NOT be interleaved.
 7. A server MUST NOT send unsolicited responses.
 8. After a response, the lane MAY continue carrying requests while both stream
    directions remain open. A client that finishes its send direction MUST NOT
@@ -193,14 +192,14 @@ The following rules apply:
     valid FIN, the server MUST admit no further requests on that lane, MUST
     complete responses for requests already admitted, and MUST then finish its
     send direction. A FIN that arrives in the middle of a frame is malformed.
-11. A client `RESET_STREAM` abandons the lane. The server MUST discard all
-    uncompleted requests on that lane; their responses are not guaranteed and
-    mutation outcomes are ambiguous. A server reset has the same effect from
-    the client's perspective. `STOP_SENDING` is handled as a request to reset
-    the affected direction.
+11. A QUIC `RESET_STREAM` aborts the lane. The peer MUST NOT expect further
+    responses on that lane. Outstanding requests receive no guaranteed
+    response, and mutation outcomes may be ambiguous. A server reset has the
+    same effect from the client's perspective. `STOP_SENDING` has no
+    protocol-specific meaning.
 
 If a receiver detects malformed framing, it MUST stop processing the
-connection and close it with the v1 application error code `0x01`
+connection and close it with application error code `0x01`
 (`MALFORMED_FRAME`). It MUST NOT scan for a possible next frame, and it MUST
 NOT send an error response for the malformed frame. All lanes on that
 connection become unusable. A client MUST discard all in-flight requests on
@@ -208,9 +207,9 @@ every lane that terminates this way. A complete frame whose fields are
 well-delimited but fail operation validation is not malformed framing; it MAY
 receive the applicable error response.
 
-`0x01` is the only v1-defined QUIC application error code. It names a
-connection-fatal framing or response-meaning failure and does not carry a
-protocol response frame. Other application error codes are unassigned to v1.
+`0x01` (`MALFORMED_FRAME`) is the QUIC application error code for a
+connection-fatal framing or response-meaning failure. It does not carry a
+protocol response frame.
 
 The request ID is a correlation token only. It is not a nonce, ordering value,
 deduplication key, replay-protection token, or idempotency key. If a lane fails
@@ -358,9 +357,8 @@ namespace_delete         = delete_flags:u8 | namespace_id:u64be |
 `request_id` is a canonical `vu128` field with a maximum encoded width of
 nine bytes. It is client-selected and opaque to server operation logic. A
 server MUST decode enough of the field to find the opcode-specific body, but
-MUST NOT compare request IDs for ordering or enforce a uniqueness policy.
-Clients MUST not reuse an ID on a lane while its earlier response is
-outstanding.
+MUST NOT compare request IDs for ordering, deduplication, or idempotency.
+The wire protocol imposes no request-ID uniqueness rule.
 
 `value_len` appears only in `SET`, including when the value is empty. The
 fixed Item ID and optional TTL precede it, and the value bytes follow it. A
@@ -507,8 +505,11 @@ namespace deletion barrier that admits no later namespace operation, drains
 only requests admitted before the barrier, checks the revision and live-item
 count, and then either removes the namespace identity or returns
 `NamespaceNotEmpty` without changing it. Requests that arrive after a
-successful deletion receive `NamespaceNotFound`. Namespace IDs are never
-reused within the persistent deployment lifetime.
+successful deletion receive `NamespaceNotFound`. Requests that arrive while
+the barrier is pending are not admitted until it resolves; if the deletion
+returns `NamespaceNotEmpty`, those requests may then proceed normally; if it
+succeeds, they receive `NamespaceNotFound`.
+Namespace IDs are never reused within the persistent deployment lifetime.
 
 `revision` and `expected_revision` are fixed eight-byte `u64be` values, not
 `vu128` fields. A namespace revision is positive, starts at `1`, and increases
@@ -777,12 +778,16 @@ by the barrier. Mutations that linearize after that point are not required to be
 included.
 
 A successful response is sent only after the configured persistence operation
-for the namespace completes. The stream-order rule prevents an earlier
-mutation on the same lane from overtaking `SYNC` in execution. Its response may
-still be emitted after the `SYNC` response. Requests on other lanes are
-ordered by the namespace's server-side operation sequence; requests concurrent
-with the barrier may linearize on either side of it. A successful `SYNC`
-response is not a response ordering fence for later requests.
+for the namespace completes for every mutation covered by the barrier. The
+configured persistence operation is deployment-defined, but a successful
+response MUST mean that the deployment's configured durability guarantee for
+those mutations has been established. The stream-order rule prevents an
+earlier mutation on the same lane from overtaking `SYNC` in execution. An
+earlier mutation's response may still be emitted after the `SYNC` response.
+Requests on other lanes are ordered by the namespace's server-side operation
+sequence; requests concurrent with the barrier may linearize on either side of
+it. A successful `SYNC` response is not a response ordering fence for later
+requests.
 
 - Authorized success: `Ok` with an empty payload, sent only after the barrier
   completes.
@@ -832,6 +837,12 @@ replaces the namespace policy and increments the revision. Authorization is
 deployment-specific because v1 has no owner or account field. A successful
 response is `Ok` with the updated `namespace_descriptor` payload. A revision
 mismatch returns `Conflict` and makes no policy change.
+
+`NAMESPACE_UPDATE_POLICY` participates in the namespace operation sequence.
+Requests admitted before the policy update retain their earlier sequence
+position; requests admitted after it observe the new policy. A request
+concurrent with the update may linearize on either side according to that
+sequence.
 
 Policy changes apply only to future `SET` operations. Existing items retain the
 expiration deadline and resolved eviction policy that were stored when they
@@ -943,18 +954,31 @@ For a valid request, the following are the domain success and result statuses:
 | `NAMESPACE_OPEN` | `Ok`, `Created` | Namespace descriptor |
 | `NAMESPACE_UPDATE_POLICY` | `Ok` | Updated namespace descriptor |
 | `NAMESPACE_DELETE` | `Deleted` | Always empty |
-Common error statuses MAY be returned when their stated condition applies. A
-client receiving a response whose request ID is not one of its in-flight IDs,
-or whose status is neither an allowed domain status nor an applicable common
-error for that request, MUST treat the response as malformed and close the
-connection.
 
-`PolicyConflict` and `NoCapacity` apply to `SET`. `Conflict` applies to
-`NAMESPACE_UPDATE_POLICY` and `NAMESPACE_DELETE`. `NamespaceNotFound` applies
-to any request that carries a namespace ID, including `GET`, `SET`, `DELETE`,
-`STATS`, and `SYNC`, as well as namespace-management operations that address a
-missing namespace. `NamespaceNotEmpty` applies to `NAMESPACE_DELETE`. These
-errors guarantee that the requested mutation was not applied.
+Common error statuses MAY be returned only when their stated condition applies:
+
+| Status | Applicable requests |
+|---|---|
+| `InvalidRequest` | Any complete, well-delimited request with invalid semantics |
+| `TooLarge` | `SET` whose value exceeds a wire or server limit |
+| `Overloaded` | Any request rejected before its operation begins |
+| `Forbidden` | Any request rejected by deployment authorization |
+| `InternalError` | Any request known to have failed without taking effect |
+| `NoCapacity` | `SET` that cannot be admitted without evicting protected items |
+| `PolicyConflict` | `SET` that selects a disallowed item-policy override |
+| `Conflict` | `NAMESPACE_UPDATE_POLICY` and `NAMESPACE_DELETE` revision mismatch |
+| `NamespaceNotFound` | Any request addressing a missing namespace |
+| `NamespaceNotEmpty` | `NAMESPACE_DELETE` whose deletion barrier finds live items |
+
+`NamespaceNotFound` includes `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`, as
+well as namespace-management operations that address a missing namespace.
+These domain and common errors guarantee that the requested mutation or
+barrier was not applied.
+
+A client receiving a response whose request ID does not identify one of its
+outstanding requests on that same lane, or whose status is neither an allowed
+domain status nor an applicable common error for that request, MUST treat the
+response as malformed and close the connection.
 
 ## Validation and malformed frames
 
@@ -1195,12 +1219,16 @@ A protocol v1 implementation is not complete unless it:
 - decodes a canonical client-selected `request_id:vu128`, accepts zero and
   every other unsigned 64-bit value, and echoes its exact bytes in the
   response;
-- does not assign request IDs ordering, uniqueness, deduplication, replay, or
-  idempotency semantics;
+- does not assign request IDs ordering, deduplication, replay, or idempotency
+  semantics, and treats uniqueness as a client-side choice;
 - executes complete requests on one lane in stream order while allowing
   correlated responses in a different order;
 - emits each response as one contiguous frame and does not interleave response
   bytes;
+- accepts FIN only at a request-frame boundary and completes responses for
+  admitted requests before finishing its send direction;
+- treats `RESET_STREAM` as a lane abort with no guaranteed responses for
+  outstanding requests;
 - derives request layout from the opcode;
 - carries a positive server-assigned eight-byte `u64be` `namespace_id` on
   every namespace-scoped request;
