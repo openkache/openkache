@@ -82,6 +82,8 @@ the namespace-management requests defined below.
   namespace mutation takes effect atomically.
 - **SYNC linearization point**: The instant at which a `SYNC` operation fixes
   the set of preceding mutations covered by its persistence barrier.
+- **Unknown outcome**: The client cannot determine from the protocol whether a
+  mutation or `SYNC` took effect because no response was received.
 
 All lengths count bytes, not characters or code points. Hexadecimal bytes are
 written as two uppercase digits, such as `7F` or `E0`.
@@ -127,9 +129,9 @@ administrative operations. No authentication field appears in a v1 frame.
 
 Only client-initiated bidirectional QUIC streams carry protocol frames.
 Server-initiated unidirectional streams have no protocol meaning and MUST be
-ignored by the client. The server MUST NOT initiate a bidirectional protocol
-stream; a client that receives one MUST reset it without parsing protocol
-frames.
+consumed and discarded by the client without parsing protocol frames. The
+server MUST NOT initiate a bidirectional protocol stream; a client that
+receives one MUST reset it without parsing protocol frames.
 
 QUIC stream read and write boundaries have no protocol meaning. A frame MAY be
 split across any number of reads or writes, and one read MAY contain bytes from
@@ -192,11 +194,24 @@ The following rules apply:
     valid FIN, the server MUST admit no further requests on that lane, MUST
     complete responses for requests already admitted, and MUST then finish its
     send direction. A FIN that arrives in the middle of a frame is malformed.
-11. A QUIC `RESET_STREAM` aborts the lane. The peer MUST NOT expect further
-    responses on that lane. Outstanding requests receive no guaranteed
-    response, and mutation outcomes may be ambiguous. A server reset has the
-    same effect from the client's perspective. `STOP_SENDING` has no
-    protocol-specific meaning.
+11. QUIC stream cancellation is directional:
+    - A client `RESET_STREAM` terminates the request direction. The server
+      MUST admit no further requests, MUST complete responses for requests
+      already admitted, and MUST then finish its response direction.
+    - A server `RESET_STREAM` terminates the response direction. The client
+      MUST send no further requests on that lane. Outstanding requests without
+      responses have an `unknown` outcome, and no further protocol response is
+      guaranteed.
+    - A client `STOP_SENDING` asks the server to stop the response direction.
+      The server MUST stop sending protocol responses, and the client MUST
+      send no further requests on that lane.
+    - A server `STOP_SENDING` asks the client to stop the request direction.
+      The client MUST stop sending requests, and the server MUST complete
+      responses for requests already admitted.
+    A response-direction reset or stop makes every outstanding mutation or
+    `SYNC` outcome unknown. The protocol does not prescribe replay. If
+    cancellation interrupts a frame, the receiver MUST discard the incomplete
+    frame; this is not malformed framing, and other lanes remain usable.
 
 If a receiver detects malformed framing, it MUST stop processing the
 connection and close it with application error code `0x01`
@@ -474,6 +489,13 @@ it contains no live items.
 Recreating a deleted name, if allowed by the deployment, creates a new
 namespace identity and therefore receives a new `namespace_id`.
 
+`NAMESPACE_OPEN`, `NAMESPACE_UPDATE_POLICY`, and `NAMESPACE_DELETE` for one
+namespace name participate in a server-side namespace operation sequence.
+`NAMESPACE_OPEN` resolves or creates the name at its sequence position;
+`CreateIfMissing` creation is atomic with that resolution. Requests that
+address a namespace ID use the sequence position of the namespace identity
+resolved at admission.
+
 An item is identified by the pair `(namespace_id, item_id)`. The same Item ID
 bytes and length in two namespaces denote two independent items.
 
@@ -504,11 +526,14 @@ items remain at the delete linearization point. The server MUST establish a
 namespace deletion barrier that admits no later namespace operation, drains
 only requests admitted before the barrier, checks the revision and live-item
 count, and then either removes the namespace identity or returns
-`NamespaceNotEmpty` without changing it. Requests that arrive after a
-successful deletion receive `NamespaceNotFound`. Requests that arrive while
-the barrier is pending are not admitted until it resolves; if the deletion
-returns `NamespaceNotEmpty`, those requests may then proceed normally; if it
-succeeds, they receive `NamespaceNotFound`.
+`NamespaceNotEmpty` without changing it. Requests that address the deleted
+namespace ID after a successful deletion receive `NamespaceNotFound`. Requests
+that arrive while the barrier is pending are not admitted until it resolves.
+If the deletion returns `NamespaceNotEmpty`, those requests may then proceed
+normally. If it succeeds, namespace-ID requests receive `NamespaceNotFound`;
+`NAMESPACE_OPEN` without `CreateIfMissing` does the same, while
+`NAMESPACE_OPEN` with `CreateIfMissing` may atomically create a new namespace
+identity for the name.
 Namespace IDs are never reused within the persistent deployment lifetime.
 
 `revision` and `expected_revision` are fixed eight-byte `u64be` values, not
@@ -789,6 +814,10 @@ sequence; requests concurrent with the barrier may linearize on either side of
 it. A successful `SYNC` response is not a response ordering fence for later
 requests.
 
+If the persistence operation cannot establish that guarantee, the server MUST
+close the connection without an error response; the outcome of `SYNC` is then
+unknown.
+
 - Authorized success: `Ok` with an empty payload, sent only after the barrier
   completes.
 - Unauthorized: `Forbidden` with an optional diagnostic payload.
@@ -842,7 +871,9 @@ mismatch returns `Conflict` and makes no policy change.
 Requests admitted before the policy update retain their earlier sequence
 position; requests admitted after it observe the new policy. A request
 concurrent with the update may linearize on either side according to that
-sequence.
+sequence. The existence check, `expected_revision` check, policy replacement,
+and revision increment are one atomic action at the policy update's
+linearization point.
 
 Policy changes apply only to future `SET` operations. Existing items retain the
 expiration deadline and resolved eviction policy that were stored when they
@@ -937,7 +968,7 @@ For a mutating operation (`SET`, `DELETE`, `SYNC`, namespace creation, policy
 update, or namespace deletion), an error response MUST guarantee that the
 mutation or persistence barrier did not take effect. If the server cannot
 establish that guarantee, it MUST close the connection without an error
-response, leaving the operation outcome ambiguous.
+response, leaving the operation outcome unknown.
 
 ## Response contract by request
 
@@ -1040,6 +1071,9 @@ The receiver MUST NOT scan for a possible next frame after malformed framing.
 A body shorter than its declared length is malformed. A client that sends a
 second request is allowed to do so before receiving the first response, but
 the second request MUST begin exactly at the first frame's boundary.
+If `RESET_STREAM` or `STOP_SENDING` explicitly cancels a direction while a
+frame is incomplete, the receiver MUST discard that incomplete frame under the
+stream-cancellation rules; it is not malformed framing.
 
 Malformed framing, an unassigned opcode, a non-canonical integer, or a
 truncated body is terminal for the connection: the receiver MUST close the
@@ -1047,19 +1081,22 @@ connection without sending an error response. A semantic validation failure in
 a complete, well-delimited request MAY instead receive `InvalidRequest` or the
 applicable domain error. If a complete operation cannot finish and its outcome
 is known to be unsuccessful, the server MAY return `InternalError`. If a
-mutation or `SYNC` outcome is no longer known, the server MUST terminate the
-connection without an error response.
+mutation or `SYNC` outcome becomes unknown because the server cannot determine
+whether the operation took effect, the server MUST terminate the connection
+without an error response. An unknown outcome caused only by directional stream
+cancellation follows the stream-cancellation rules and does not require
+connection termination.
 
-## Ambiguous outcomes
+## Unknown outcomes
 
 The request ID provides response correlation only. It does not provide replay
 protection, deduplication, idempotency, or a mutation identifier. The protocol
 does not prescribe retry behavior.
 
 If transport or connection failure occurs before a response is received, the
-client must treat the outcome of an outstanding mutation or `SYNC` as
-ambiguous. Whether to issue a new request is an application decision. A new
-request on a new lane is independent even when it reuses the same request ID.
+client must treat the outcome of an outstanding mutation or `SYNC` as unknown.
+Whether to issue a new request is an application decision. A new request on a
+new lane is independent even when it reuses the same request ID.
 
 ## Security and resource handling
 
@@ -1227,13 +1264,16 @@ A protocol v1 implementation is not complete unless it:
   bytes;
 - accepts FIN only at a request-frame boundary and completes responses for
   admitted requests before finishing its send direction;
-- treats `RESET_STREAM` as a lane abort with no guaranteed responses for
-  outstanding requests;
+- applies the directional `RESET_STREAM` and `STOP_SENDING` rules, with no
+  guaranteed responses and an `unknown` outcome for outstanding operations
+  after the response direction stops;
 - derives request layout from the opcode;
 - carries a positive server-assigned eight-byte `u64be` `namespace_id` on
   every namespace-scoped request;
 - supports `NAMESPACE_OPEN`, `NAMESPACE_UPDATE_POLICY`, and
   `NAMESPACE_DELETE` on the same protocol lanes;
+- sequences namespace-name management operations and allocates a new namespace
+  ID when a deleted name is recreated;
 - treats `name_len = 0` as a valid empty namespace name and validates all
   UTF-8 names as specified;
 - uses a one-byte namespace name length and enforces the 255-byte ceiling;
@@ -1275,13 +1315,13 @@ A protocol v1 implementation is not complete unless it:
   request boundary can be preserved, and does not require a
   `max_inflight_requests_per_stream` protocol limit;
 - returns `InternalError` only when a complete operation is known to have
-  failed without taking effect; an ambiguous mutation or `SYNC` outcome
+  failed without taking effect; an unknown mutation or `SYNC` outcome
   terminates the connection without an error response;
 - guarantees that a mutating error response means no mutation or barrier
   completion;
-- discards the connection after framing or response-status meaning becomes
-  ambiguous;
-- treats mutation outcomes as ambiguous when transport fails before a response;
+- discards the connection after framing or response-status meaning cannot be
+  determined;
+- treats mutation outcomes as unknown when transport fails before a response;
 - implements `SYNC` as the documented storage persistence barrier.
 
 ## Reference
