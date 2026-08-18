@@ -350,19 +350,14 @@ fn validate_nested_value<'a>(
             Ok(after_first.unwrap_or((&[], &[], &[], &[])))
         }
         CodecKind::Union => {
-            validate_union(payload, own_union_tags)?;
-            let union_value = payload.get(1..).ok_or(INVALID_UNION)?;
-            let (value, cursor) = read_length_delimited(union_value, 0, INVALID_UNION)?;
-            if cursor != union_value.len() {
-                return Err(INVALID_UNION);
-            }
+            let union = UnionView::new(payload, own_union_tags)?;
             let child_codec = nested_codecs
                 .first()
                 .copied()
                 .ok_or(CodecError(b"nested union codec metadata is incomplete"))?;
             validate_nested_value(
                 child_codec,
-                value,
+                union.payload(),
                 nested_widths.first().copied().unwrap_or(0),
                 depth + 1,
                 nested_enum_values.first().copied().unwrap_or(&[]),
@@ -677,22 +672,50 @@ pub fn encode_union(tag: u8, payload: &[u8], allowed_tags: &[u8]) -> Result<Vec<
     Ok(output)
 }
 
+/// Borrowed view of one validated tagged union.
+///
+/// Construction validates the tag, canonical length prefix, and complete
+/// container in one pass. The payload remains borrowed from the encoded
+/// request or response buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnionView<'a> {
+    tag: u8,
+    payload: &'a [u8],
+}
+
+impl<'a> UnionView<'a> {
+    /// Validates one tagged union and borrows its active payload.
+    pub fn new(encoded: &'a [u8], allowed_tags: &[u8]) -> Result<Self, CodecError> {
+        if encoded.len() > crate::MAX_VALUE_BYTES {
+            return Err(VALUE_TOO_LARGE);
+        }
+        let Some((&tag, rest)) = encoded.split_first() else {
+            return Err(INVALID_UNION);
+        };
+        if !allowed_tags.is_empty() && !allowed_tags.contains(&tag) {
+            return Err(INVALID_UNION);
+        }
+        let (payload, cursor) = read_length_delimited(rest, 0, INVALID_UNION)?;
+        if cursor != rest.len() {
+            return Err(INVALID_UNION);
+        }
+        Ok(Self { tag, payload })
+    }
+
+    /// Returns the active generated tag.
+    pub const fn tag(self) -> u8 {
+        self.tag
+    }
+
+    /// Returns the active payload borrowed from the encoded union.
+    pub const fn payload(self) -> &'a [u8] {
+        self.payload
+    }
+}
+
 /// Validates a tagged union and returns its active tag.
 pub fn validate_union(payload: &[u8], allowed_tags: &[u8]) -> Result<u8, CodecError> {
-    if payload.len() > crate::MAX_VALUE_BYTES {
-        return Err(VALUE_TOO_LARGE);
-    }
-    let Some((&tag, rest)) = payload.split_first() else {
-        return Err(INVALID_UNION);
-    };
-    if !allowed_tags.is_empty() && !allowed_tags.contains(&tag) {
-        return Err(INVALID_UNION);
-    }
-    let (_, cursor) = read_length_delimited(rest, 0, INVALID_UNION)?;
-    if cursor != rest.len() {
-        return Err(INVALID_UNION);
-    }
-    Ok(tag)
+    UnionView::new(payload, allowed_tags).map(UnionView::tag)
 }
 
 /// Applies a domain transform to a packed big-endian binary64 array.
