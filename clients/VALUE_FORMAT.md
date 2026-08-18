@@ -2,9 +2,19 @@
 
 > **Status: Draft — pre-freeze**
 
-This document defines the client-side encoding of a value before it is handed
-to the server. The server stores the resulting bytes opaquely and does not
+This document defines the client-side v1 value encoding before it is handed to
+the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
+
+The Rust `ValueCodec` and TypeScript `get_raw`/`set_raw` convenience methods
+use this normative format. TypeScript `get`/`set` and the legacy
+`value_envelope` module use a separate migration envelope (`OKV1` magic prefix
+plus metadata lengths); that format is not described by the grammar below.
+Low-level exact Item ID APIs, such as `RawClient` or native `raw_get`/`raw_set`
+operations, bypass this envelope and send the caller's Item ID and opaque
+value bytes directly. A binding MUST document whether a method named
+`get_raw` or `set_raw` is a logical-key convenience method using this format
+or an exact Item ID operation bypassing it.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -22,15 +32,21 @@ This profile is designed to provide:
 
 This profile does not define:
 
-- key conversion, key derivation, or identity binding;
+- application-key conversion or Item ID derivation;
 - server freshness or CAS;
 - language-native type conversion;
 - application registries for arbitrary payload formats; or
 - transport framing.
 
-The enclosing client profile supplies key material and any external associated
-data. This document defines the value envelope and the transforms applied to
-its payload.
+The enclosing client profile supplies the `client_root_key` and the exact
+namespace and Item ID. This profile defines the value-key schedule derived
+from that root, the value envelope, its authenticated binding to the
+namespace and exact Item ID, and the transforms applied to its payload.
+
+An exact Item ID API is a separate client operation: it accepts an already
+resolved `0..=32`-byte Item ID and an opaque value, and does not apply this
+value envelope. Formatted-key APIs use this profile after the client has
+resolved the Item ID. A server never interprets either representation.
 
 ## 2. Processing model
 
@@ -45,7 +61,9 @@ source value
 
 `OpaqueBytes` treats the source as an exact byte string: before optional
 compression and protection, the payload bytes are identical to the supplied
-bytes. `CBOR` accepts one CBOR data item under the rules in §5. The payload
+bytes. `CBOR` accepts one CBOR data item under the rules in §5. `Json` is an
+API convenience type, not a v1 payload selector: it is serialized as canonical
+RFC 8785 UTF-8 and carried using `OpaqueBytes` (selector `0`). The payload
 format is selected by the caller; the encoding does not infer a format from the
 payload bytes.
 
@@ -117,18 +135,25 @@ normative properties of the selected profile.
 | `1` | `AES-256-GCM-SIV` ([RFC 8452](https://www.rfc-editor.org/rfc/rfc8452)) | Randomized authenticated encryption with a fresh 12-byte nonce per write. |
 | `2` | `AES-256-SIV-CMAC` ([RFC 5297](https://www.rfc-editor.org/rfc/rfc5297)) | Deterministic authenticated encryption with no random nonce. |
 
-The client MUST have an instance-wide default protection profile. Each
-formatted operation MAY specify a protection-profile override. If no override
-is supplied, the operation uses the instance default; an override MUST NOT
-mutate that default. The selected operation profile MUST be represented by
-`protection_id`.
+The shared client core has an instance-wide default protection profile. Each
+formatted operation MAY specify a protection-profile override when its language
+binding exposes that operation-local option. If no override is supplied, the
+operation uses the instance default; an override MUST NOT mutate that default.
+The selected operation profile MUST be represented by `protection_id`.
 
-Without a configured protection key, the default and only valid profile is
+Without a configured client root key, the default and only valid profile is
 `Unprotected`. With a configured key, the default profile is
-`AES-256-GCM-SIV`; the client MAY explicitly select any supported profile.
-Selecting an authenticated protection profile without its required key MUST
-fail. A decoder MUST reject a value whose protection ID is disallowed by the
-caller's configured profile and MUST NOT silently downgrade or fall back.
+`AES-256-GCM-SIV`. An omitted connection profile therefore means
+`Unprotected` without a key and `AES-256-GCM-SIV` with a key. The client MAY
+explicitly select an authenticated profile where its connection API exposes
+that choice. Selecting an authenticated protection profile without its
+required key MUST fail; a binding MUST preserve that explicit selection so the
+shared core can reject it rather than silently downgrading to `Unprotected`.
+An explicit `Unprotected` connection or operation profile MAY be used with a
+configured root key; this retains root-bound Item ID derivation while disabling
+value protection. A decoder MUST reject a value whose protection ID is
+disallowed by the caller's configured profile and MUST NOT silently downgrade
+or fall back.
 
 ### 4.2 Compression profiles
 
@@ -207,6 +232,10 @@ MUST be represented as CBOR byte strings, with their interpretation defined by
 the application.
 
 CBOR tags are not supported by this profile. Tagged items MUST be rejected.
+The core acceptance implementation additionally limits nesting depth to 128
+levels and rejects compound or floating-point map keys when it cannot
+determine semantic key uniqueness. These are bounded-parser requirements for
+the v1 acceptance profile, not alternate payload semantics.
 
 ## 6. Compression
 
@@ -218,11 +247,21 @@ skippable frame, and no trailing bytes. Decoders MUST reject missing content
 sizes, multiple frames, dictionary requirements, oversized windows, trailing
 bytes, and decompressed output above the payload limit.
 
-The initial SDK policy is Zstd level 1, no compression below 1,024 payload
-bytes, and no compression unless it saves at least 64 bytes. An encoder MAY
-select compression profile `0` when compression is not beneficial. It MUST NOT
-label an uncompressed body as Zstandard.
+The generated client contract supplies Zstd level `1`, a minimum input size of
+`1,024` payload bytes, and a minimum savings threshold of `64` bytes as the
+default settings when compression is enabled. Compression enablement is a
+language-adapter policy; the current adapters use these defaults:
 
+| Adapter | Compression enabled when omitted |
+|---|---:|
+| Rust core, C ABI, C++, Go, Swift, CLI | No |
+| Python, TypeScript | Yes |
+| .NET | Not applicable (exact Item ID API only) |
+
+Callers sharing a workload SHOULD select the same policy. An adapter
+documentation MUST state its default explicitly. An encoder MAY select
+compression profile `0` when compression is not beneficial. It MUST NOT label
+an uncompressed body as Zstandard.
 When secret data is compressed together with attacker-influenced data,
 compression SHOULD be disabled or the components SHOULD be stored separately.
 Compression can create a side channel through the resulting ciphertext length;
@@ -230,13 +269,82 @@ cryptographic protection does not hide that length.
 
 ## 7. Cryptographic protection
 
-The enclosing client profile supplies the key material and external associated
-data. This document does not define key derivation or identity binding.
+### 7.1 Value-key schedule
+
+The enclosing client profile supplies one `client_root_key` of exactly 32
+bytes. The key is application-managed; this document does not define how it is
+generated, stored, or rotated. A protected operation MUST reject a missing or
+invalid root key. The all-zero root is reserved for an explicitly unprotected
+client profile and MUST NOT be used as protected key material.
+
+For protected values, implementations MUST derive the value keys exactly as
+follows. BLAKE3 `DERIVE_KEY` uses the context strings as UTF-8 bytes and
+returns 32 bytes. The `|` operator denotes byte concatenation without
+delimiters:
+
+```text
+value_root_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 root key",
+    material = client_root_key[32]
+  )
+
+item_material =
+    value_root_key[32]
+  | item_id_length:u8
+  | item_id:item_id_length
+
+compact_mac_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
+    material = item_material
+  )
+
+compact_encryption_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
+    material = item_material
+  )
+
+robust_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-GCM-SIV key",
+    material = item_material
+  )
+```
+
+`item_id_length` MUST be the exact length of the Item ID, including when it is
+zero; it MUST NOT be replaced by a fixed-width 32-byte buffer. Namespace ID
+is not part of `item_material`; it is authenticated through the AAD below.
+The key schedule is deterministic, but Robust protection remains randomized
+because each write uses a fresh nonce.
+
+### 7.2 Authenticated data
 
 For a protected envelope, the authenticated data MUST include the exact
-encoded `value_envelope_version` bytes and the exact `selector_byte`, in
-addition to
-any external associated data supplied by the enclosing client profile.
+encoded `value_envelope_version` bytes and the exact `selector_byte`.
+This v1 OpenKache profile defines no additional caller-supplied associated-data
+component.
+
+For the OpenKache client profile, that associated data is the following
+unambiguous byte sequence (all concatenated without delimiters):
+
+```text
+aad =
+    "openkache/value-format/aad/v1"
+  | namespace_id:u64be
+  | item_id_length:u8
+  | item_id:item_id_length
+  | value_envelope_version:vu128
+  | selector_byte:u8
+```
+
+`namespace_id` MUST be a nonzero server-assigned namespace identity and
+`item_id_length` MUST be the exact number of Item ID bytes (0 through 32).
+The version bytes in `aad` MUST be the same canonical bytes emitted in the
+envelope; an implementation MUST NOT re-encode the numeric version through a
+different integer representation. This binds a protected value to its
+namespace, exact variable-length Item ID, version, and selector.
 
 The transform order is:
 
@@ -245,10 +353,10 @@ envelope_body = Protect(Compress(payload_bytes))
 ```
 
 Protection MUST authenticate before any decompression or payload parsing. An
-authentication failure MUST use one generic error. Unauthenticated plaintext
-MUST be zeroized before that error is returned.
+authentication failure MUST use one generic error. Any decrypted working
+buffer MUST be zeroized before that error is returned.
 
-### 7.1 AES-256-GCM-SIV
+### 7.3 AES-256-GCM-SIV
 
 ```text
 gcm_siv_body = nonce[12] | ciphertext | tag[16]
@@ -260,7 +368,7 @@ fail if randomness fails and MUST NOT substitute a timestamp, payload, or
 process-local counter. The protection overhead is 28 bytes; the nonce is
 public.
 
-### 7.2 AES-256-SIV-CMAC
+### 7.4 AES-256-SIV-CMAC
 
 RFC 5297 SIV uses independent 32-byte authentication and encryption keys:
 
@@ -277,13 +385,13 @@ Do not split it into multiple S2V components or add a nonce component. The
 protection overhead is 16 bytes. Repeated identical writes with the same key,
 associated data, and payload produce identical protected bodies.
 
-### 7.3 Unprotected
+### 7.5 Unprotected
 
 The transformed body is stored directly. This profile provides no
 confidentiality or authentication; parser bounds and compression validation
 remain mandatory.
 
-### 7.4 Size comparison
+### 7.6 Size comparison
 
 | Protection profile | Envelope header | Protection overhead |
 |---|---:|---:|
@@ -301,8 +409,8 @@ An encoder MUST:
 2. Enforce the expanded payload limit.
 3. Compress the payload only when the selected policy permits.
 4. Encode the value-envelope version and selector byte.
-5. Construct authenticated data from the exact header bytes and external
-   associated data.
+5. Construct the profile-defined AAD, including the exact version and selector
+   bytes and the namespace and Item ID fields.
 6. Apply the selected protection profile.
 7. Enforce the complete envelope limit before returning the bytes.
 
