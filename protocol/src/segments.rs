@@ -170,6 +170,21 @@ impl OwnedRange {
         self.range.is_empty()
     }
 
+    /// Transfers a subrange relative to the visible bytes without copying.
+    ///
+    /// Invalid ranges return the original owner so callers can preserve the
+    /// allocation and decide how to report or recover from the error.
+    pub fn into_subrange(self, range: Range<usize>) -> std::result::Result<Self, Self> {
+        if range.start > range.end || range.end > self.range.len() {
+            return Err(self);
+        }
+        let (buffer, owner_range) = self.into_parts();
+        Ok(Self {
+            buffer,
+            range: (owner_range.start + range.start)..(owner_range.start + range.end),
+        })
+    }
+
     /// Recovers the buffer and logical range without copying.
     pub fn into_parts(self) -> (Vec<u8>, Range<usize>) {
         (self.buffer, self.range)
