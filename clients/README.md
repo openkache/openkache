@@ -11,6 +11,7 @@ Shared client topics are documented here:
 | Topic | Reference |
 |---|---|
 | SDK inventory, implementation status, and binding boundaries | This README |
+| Shared request lifecycle, retries, API families, and configuration | [Client behavioral contract](CLIENT.md) |
 | Formatted key input, conversion, and namespace-bound Item ID derivation | [Key format](KEY_FORMAT.md) |
 | Formatted value bytes, compression, and application-level protection | [Value format](VALUE_FORMAT.md) |
 | QUIC framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
@@ -40,14 +41,15 @@ formats or protocol behavior.
 Java, Kotlin, and Dart currently contain registry metadata and reserved source
 layouts only. They do not connect to OpenKache or expose cache operations yet.
 
-The [key format](KEY_FORMAT.md) and [value format](VALUE_FORMAT.md) documents
-together form the pre-freeze v1 default client contract. The shared core and
-implemented adapters enforce the restricted key model, namespace-bound Item ID
-derivation, and optional protection. The packed value flags in the value-format
-document are the target of a separate value-codec migration; the server
-remains opaque to all of these client conventions. TypeScript's legacy
-metadata envelope remains a package-level compatibility detail; use its
-`set_json` / `get_json` or Raw methods for cross-language values.
+The [behavioral](CLIENT.md), [key](KEY_FORMAT.md), and
+[value](VALUE_FORMAT.md) documents together form the pre-freeze v1 client
+contract. The shared core and implemented adapters enforce the restricted key
+model, namespace-bound Item ID derivation, and optional protection. The value
+envelope in the value-format document is the target of a separate value-codec
+migration; the server remains opaque to all of these client conventions.
+TypeScript's legacy metadata envelope remains a package-level compatibility
+detail; use its `set_json` / `get_json` or Raw methods for cross-language
+values.
 
 ## Binding architecture
 

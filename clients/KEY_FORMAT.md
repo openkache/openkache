@@ -278,6 +278,20 @@ could equal the `canonical_key_bytes` of `TypedKey::Bytes` for that payload.
 The `01` and `02` domains prevent that cross-profile alias while retaining the
 same namespace binding and Item ID root-key lifecycle.
 
+Domain separation distinguishes the two hashed inputs, but it cannot tag the
+preservation path: every `0..=32`-byte direct key is already the complete Item
+ID. Consequently, a preserved 32-byte key can equal an Item ID produced by
+either hashed path. An Exact Item ID operation can likewise address an Item ID
+produced by any formatted-key profile.
+
+This aliasing is intentional because the server sees only the final opaque
+Item ID. Clients that share entries in one namespace or application data domain
+MUST use one consistent `KeyType`, mapping profile, and `item_id_root_key`.
+Applications MUST NOT mix profiles as a key-space partitioning mechanism; they
+SHOULD use separate namespaces when they require distinct identity domains.
+Exact Item ID APIs may intentionally address an entry created by a formatted
+API, but callers then own that identity correspondence.
+
 The profile MUST document the hash input, domain byte, and derivation key.
 Future hashed profiles MUST use a new nonzero domain byte and MUST NOT
 reinterpret existing Item IDs. Domain bytes are client-profile identifiers;

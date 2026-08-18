@@ -27,11 +27,12 @@ This contract defines:
 - lane-local request lifecycle and cancellation behavior;
 - retry and unknown-outcome handling;
 - the distinction between formatted-key and Exact Item ID APIs; and
-- shared identity-key, value-key, and rotation behavior across bindings.
+- shared key, compression, value-protection, and rotation behavior across
+  bindings.
 
 Language-native type names, constructors, package layout, asynchronous API
-shape, and binding-specific defaults are outside this contract. Each binding
-documents those surfaces while preserving the behavior below.
+shape, and configuration syntax are outside this contract. Each binding
+documents those surfaces while preserving the language-neutral behavior below.
 
 ## 2. Request lifecycle
 
@@ -177,6 +178,13 @@ Bindings MAY expose different configuration syntax, but defaults and explicit
 overrides MUST resolve to the same language-neutral behavior. A per-operation
 override MUST NOT mutate connection-wide configuration.
 
+Clients that share entries in one namespace or application data domain MUST
+use the same `KeyType`, Item ID mapping profile, and `item_id_root_key`.
+Changing any of those settings changes identity. Mixing profiles can also make
+a directly preserved or exact Item ID address the same entry as a hashed
+output. Applications that need different identity settings SHOULD use separate
+namespaces.
+
 ### 6.1 Identity and value-key domains
 
 Item ID derivation and value protection use independent key domains:
@@ -194,14 +202,26 @@ item. It MUST NOT change as part of value-key rotation. Changing it changes
 hashed Item IDs and requires an identity migration or cache repopulation.
 
 The value keyring maps a positive unsigned 64-bit `value_key_id` to one exact
-32-byte `value_key`. A key ID is public metadata, not key material. Within one
-keyring:
+32-byte `value_key`. A key ID is public operator-assigned metadata, not key
+material. IDs MAY be sparse. Zero is reserved and MUST NOT appear in a
+keyring. A client MUST NOT derive an ID from key bytes. Within one keyring:
 
 - each key ID MUST identify exactly one immutable key;
+- the same key material MUST NOT appear under multiple IDs;
 - a retired key ID MUST NOT be reassigned;
 - independently rotated keys SHOULD be generated independently; and
 - clients that share protected entries MUST use identical mappings for every
   ID they accept.
+
+A protected writer MUST configure exactly one `active_value_key_id`, and that
+ID MUST resolve to a keyring entry. A read-only protected client MAY omit the
+active ID. A convenience API that accepts one value key instead of an explicit
+keyring MUST normalize it as:
+
+```text
+value_keyring = { 1 -> supplied_value_key }
+active_value_key_id = 1
+```
 
 A client MUST NOT derive Item IDs from a selected value key. Conversely,
 omitting or rotating value keys MUST NOT change item addressing. Sharing a
@@ -210,7 +230,35 @@ remain portable when its namespace and Item ID are also preserved. Deployments
 that require cryptographic isolation MUST use independent value keys; this
 profile adds no deployment, account, or client identifier to the derivation.
 
-### 6.2 Value-key rotation
+### 6.2 Compression policy
+
+Compression is disabled by default for every client. It is an optional
+formatted-write policy, not a property inferred from the language binding or
+payload bytes.
+
+When a caller enables compression without supplying tuning values, every
+binding uses the same convenience defaults:
+
+```text
+compression_level = 1
+minimum_input_bytes = 1,024
+minimum_savings_bytes = 64
+```
+
+These values are client defaults, not value-envelope validity requirements.
+Callers MAY override them for their workloads without changing format
+conformance. With the shared defaults, an encoder selects Zstandard only when:
+
+```text
+payload_length >= 1,024
+and zstd_frame_length <= payload_length - 64
+```
+
+Otherwise it emits `Uncompressed`. A per-operation override MUST NOT mutate
+the connection-wide compression policy. Language bindings MAY expose different
+configuration syntax, but MUST NOT choose different language-specific defaults.
+
+### 6.3 Value-key rotation
 
 A write-capable protected client selects exactly one configured
 `active_value_key_id`. Every protected write uses that ID and its associated
@@ -234,6 +282,14 @@ keys and without falling back to `Unprotected`. Reusing a request ID, rewriting
 an Item ID, or changing the protection allowlist does not migrate a protected
 value.
 
+Version 1 clients MUST NOT automatically rewrite a value merely because it was
+read under an inactive key. A rewrite is an ordinary `SET`, can race with
+another writer, and cannot be made transparent without a compare-and-set,
+generation, or equivalent concurrency contract. Rotation therefore reads old
+and new key IDs but writes only the active ID. Old envelopes leave the cache
+through expiration, eviction, replacement, an application-coordinated rewrite,
+explicit invalidation, or namespace flush and repopulation.
+
 ## 7. Conformance checklist
 
 A conforming client:
@@ -246,7 +302,10 @@ A conforming client:
 - does not automatically replay mutations with unknown outcomes;
 - keeps formatted-key and Exact Item ID behavior distinct;
 - resolves namespaces before namespace-bound Item ID derivation;
+- uses one consistent identity configuration for clients that share entries;
 - keeps Item ID identity keys independent from rotatable value keys;
 - selects protected read keys only by the envelope's immutable value-key ID;
+- does not perform automatic read-triggered value-key rewrites;
+- applies shared compression defaults independently of binding language;
 - preserves explicit configuration overrides without changing defaults; and
-- documents binding-specific API names and defaults.
+- documents binding-specific API names and configuration syntax.

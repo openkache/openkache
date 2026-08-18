@@ -254,19 +254,24 @@ not preferred; malformed encodings and invalid additional-information values
 remain invalid.
 
 Map order has no semantic meaning. Encoders MAY emit entries in any order, and
-decoders MUST accept any order. A map MUST NOT contain duplicate keys as
-determined by the decoded key values. A decoder that cannot determine key
-uniqueness MUST reject the map.
+decoders MUST accept any order. Map keys are restricted to untagged CBOR
+integers, text strings, and byte strings. Arrays, maps, floating-point values,
+booleans, null, and other simple values MUST NOT appear as map keys.
+
+A map MUST NOT contain duplicate keys. To determine uniqueness, a decoder MUST
+decode each permitted key, re-encode that key using RFC 8949 preferred
+serialization, and compare the resulting bytes. Integer encodings of the same
+mathematical value therefore compare equal even when one input did not use
+preferred serialization. Text and byte-string keys compare by their exact
+bytes, and their distinct CBOR major types keep them separate. No Unicode
+normalization is applied.
 
 CBOR text strings MUST contain well-formed UTF-8. Other character encodings
 MUST be represented as CBOR byte strings, with their interpretation defined by
 the application.
 
 CBOR tags are not supported by this profile. Tagged items MUST be rejected.
-The core acceptance implementation additionally limits nesting depth to 128
-levels and rejects compound or floating-point map keys when it cannot
-determine semantic key uniqueness. These are bounded-parser requirements for
-the v1 acceptance profile, not alternate payload semantics.
+Nesting depth MUST NOT exceed 128 levels.
 
 ## 6. Compression
 
@@ -275,17 +280,20 @@ Compression profile `1` is one standard Zstandard (Zstd) frame under
 
 Encoders MUST use a declared content size, no external dictionary, no
 skippable frame, and no trailing bytes. Decoders MUST reject missing content
-sizes, multiple frames, dictionary requirements, oversized windows, trailing
-bytes, and decompressed output above the payload limit.
+sizes, multiple frames, dictionary requirements, trailing bytes, and any frame
+whose declared content size, declared window size, or produced output exceeds
+the corresponding limit in §9. For a single-segment frame, the frame content
+size is also its window size and is subject to both limits. These checks MUST
+reject an excessive declared size or window before allocating the output
+buffer or beginning decompression. The decoder MUST bound produced output
+during decompression and verify the exact produced size and frame boundary
+afterward.
 
-When compression is enabled, the v1 selection policy uses Zstd level `1`, a
-minimum input size of `1,024` payload bytes, and a minimum savings threshold of
-`64` bytes. Whether compression is enabled by default is a binding policy, not
-part of this encoding profile. Each binding MUST document its default.
+Whether and when an encoder chooses Zstandard is client policy defined by the
+[Client Behavioral Contract](CLIENT.md#62-compression-policy), not an envelope
+validity rule. An encoder MUST accurately identify the emitted body as either
+`Uncompressed` or `Zstandard`.
 
-Callers sharing a workload SHOULD select the same policy. An encoder MAY select
-compression profile `0` when compression is not beneficial. It MUST NOT label
-an uncompressed body as Zstandard.
 When secret data is compressed together with attacker-influenced data,
 compression SHOULD be disabled or the components SHOULD be stored separately.
 Compression can create a side channel through the resulting ciphertext length;
@@ -305,7 +313,7 @@ Value keys are application-managed secrets. The all-zero key MUST NOT be used
 as protected key material. Independently rotated keys SHOULD be generated
 independently with a cryptographically secure random source. Keyring lifecycle
 and rotation ordering are defined by the
-[Client Behavioral Contract](CLIENT.md#62-value-key-rotation).
+[Client Behavioral Contract](CLIENT.md#63-value-key-rotation).
 
 For protected values, implementations MUST derive the value keys exactly as
 follows. BLAKE3 `DERIVE_KEY` uses the context strings as UTF-8 bytes and
@@ -449,15 +457,21 @@ remain mandatory.
 
 ### 7.6 Size comparison
 
-| Protection profile | Envelope header | Protection overhead |
-|---|---:|---:|
-| `Unprotected` | 2 bytes | 0 bytes |
-| `AES-256-GCM-SIV` | 3–11 bytes | 28 bytes |
-| `AES-256-SIV-CMAC` | 3–11 bytes | 16 bytes |
+Let `E = MAX_VALUE_ENVELOPE_BYTES` and let `k` be the one- to nine-byte
+canonical encoded width of `value_key_id`. For an uncompressed payload, the
+largest payload that can fit in the complete envelope is:
 
-The protected header is the two-byte v1 version and selector plus a one- to
-nine-byte canonical value-key ID. Compression adds its own frame overhead and
-may enlarge small values.
+| Protection profile | Envelope overhead | Maximum uncompressed payload |
+|---|---:|---:|
+| `Unprotected` | 2 bytes | `E - 2` |
+| `AES-256-GCM-SIV` | `2 + k + 28` bytes | `E - 2 - k - 28` |
+| `AES-256-SIV-CMAC` | `2 + k + 16` bytes | `E - 2 - k - 16` |
+
+With a one-byte key ID and the v1 64 MiB envelope limit, those maximums are
+`67,108,862`, `67,108,833`, and `67,108,845` bytes respectively. Compression
+replaces the uncompressed payload with a Zstandard frame, so the complete frame
+plus the same envelope overhead MUST fit within `E`; the expanded payload
+remains independently limited.
 
 ### 7.7 Conformance vectors
 
@@ -665,11 +679,29 @@ reinterpret an unknown value as another payload format.
 
 ## 9. Limits and rejection rules
 
-- Complete `ValueEnvelope`: at most 64 MiB.
-- Expanded payload: at most 64 MiB.
+```text
+MAX_VALUE_ENVELOPE_BYTES = 67,108,864  // 64 MiB
+MAX_EXPANDED_PAYLOAD_BYTES = 67,108,864
+MAX_ZSTD_WINDOW_BYTES = 67,108,864
+```
 
-Implementations MAY use lower limits, but MUST check declared sizes, Zstd
-windows, decompressed output, and all arithmetic before allocation.
+`MAX_VALUE_ENVELOPE_BYTES` applies to the complete byte string stored and
+returned opaquely by the server, including version, selector, value-key ID,
+nonce or synthetic IV, ciphertext, authentication tag, and any Zstandard frame
+overhead. It equals the wire protocol's maximum `SET` value and response
+payload.
+
+`MAX_EXPANDED_PAYLOAD_BYTES` applies to the payload after decryption and
+decompression but before CBOR parsing. `MAX_ZSTD_WINDOW_BYTES` is the largest
+declared decoder window. All three limits are independent: satisfying one does
+not waive either of the others.
+
+Implementations MAY use lower local limits, but MUST check the complete
+envelope, declared Zstandard content size and window size, produced output, and
+all arithmetic before allocation. A decoder MUST reject a frame with no
+declared content size, more than one frame, any dictionary ID, a skippable
+frame, trailing bytes, a declared or produced size above its limit, or a
+produced size different from the declared content size.
 
 Malformed `vu128` encodings, truncated headers, zero or unknown protected
 value-key IDs, nonzero selector zero bits, unsupported selector values, invalid
@@ -699,6 +731,12 @@ selection is independent of the payload bytes.
 Protected profiles provide confidentiality and ciphertext authentication for
 the supplied key and associated data. `Unprotected` provides neither.
 
+For a protected envelope, authentication covers the envelope version,
+selector, value-key ID, namespace ID, exact Item ID and its length, nonce when
+present, and the complete protected payload. It does not authenticate TTL,
+expiration behavior, eviction behavior, namespace policy or revision,
+existence, freshness, replay, ordering, or availability.
+
 The value-key ID is visible and leaks which configured key epoch wrote a
 protected envelope. Changing it to another configured ID changes both the
 derived protection key and AAD and therefore causes authentication failure.
@@ -707,6 +745,9 @@ Changing it to an unknown ID causes rejection without key probing.
 This profile does not provide freshness or replay protection. An older valid
 envelope can be accepted again unless the enclosing client or server protocol
 adds a generation, CAS, expiry, or equivalent freshness mechanism.
+Applications that require freshness, version, or expiry integrity SHOULD place
+the required generation, timestamp, or policy data inside the protected payload
+and validate it after decryption.
 
 The value keyring defines the cryptographic portability domain. Reusing an
 identical key-ID mapping in another deployment permits a protected envelope to

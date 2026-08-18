@@ -88,26 +88,11 @@ and a rotatable value keyring. Both target derivations bind the selected
 namespace. The Rust API retains `DataProtectionKey` as a source-compatible
 alias while implementation catches up to that contract.
 
-`ValueCodec` stores its current metadata inside the opaque value. The packed
-codec layout shown in the pre-freeze value-format specification is the target
-of a separate value-codec migration:
-
-```text
-value_envelope_version:vu128 | flags:u8 | body
-
-flags bits 0..1 = encryption identifier
-flags bits 2..3 = compression identifier
-flags bits 4..5 = codec identifier
-flags bits 6..7 = reserved (zero in v1)
-
-body = protect(compress(selected codec payload))
-AES-256-SIV-CMAC body = synthetic_iv[16] | ciphertext
-AES-256-GCM-SIV body = nonce[12] | ciphertext | tag[16]
-```
-
-For protected profiles, the packed flags and body are authenticated with the
-exact item ID and container header. Neither the wire protocol nor the server
-parses this format.
+`ValueCodec` stores its current metadata inside the opaque value. The
+[Client Value Encoding Profile](../VALUE_FORMAT.md) is the normative target
+for the separate value-codec migration, including the protected-envelope key
+selector, transform grammar, authenticated data, and limits. Neither the wire
+protocol nor the server parses that format.
 
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
