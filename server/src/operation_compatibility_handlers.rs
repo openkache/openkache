@@ -3,8 +3,7 @@
 use super::operation_compatibility_behavior as behavior;
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
-    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
-    SetState, StatsState, SyncState,
+    DeleteState, GetState, SetState, StatsState, SyncState,
 };
 use super::operation_contract::OperationStatus;
 use super::operation_handlers::OperationContext;
@@ -60,24 +59,6 @@ macro_rules! typed_handler {
 }
 
 typed_handler!(get_handler, GetState, decode_get, behavior::get);
-typed_handler!(
-    namespace_open_handler,
-    NamespaceOpenState,
-    mut decode_namespace_open,
-    behavior::namespace_open
-);
-typed_handler!(
-    namespace_update_policy_handler,
-    NamespaceUpdateState,
-    decode_namespace_revision,
-    behavior::namespace_update_policy
-);
-typed_handler!(
-    namespace_delete_handler,
-    NamespaceDeleteState,
-    decode_namespace_delete,
-    behavior::namespace_delete
-);
 typed_handler!(set_handler, SetState, mut decode_set, behavior::set);
 typed_handler!(delete_handler, DeleteState, decode_delete, behavior::delete);
 typed_handler!(stats_handler, StatsState, decode_stats, behavior::stats);

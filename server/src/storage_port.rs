@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use super::NetworkWorkerCache;
 use super::operation_capabilities::CapabilityKey;
+use super::super::types::StorageKey;
 
 use super::super::observability::Operation;
 #[allow(unused_imports)]
@@ -98,6 +99,10 @@ pub(crate) trait StorageDataPort: Send + Sync {
 
     fn prepare_address(&self, scope: StorageScope<'_>, identity: &[u8]) -> PreparedStorageAddress;
 
+    /// Rehydrates a previously prepared fixed storage identity without
+    /// deriving or hashing it again.
+    fn prepare_storage_key(&self, storage_key: StorageKey) -> PreparedStorageAddress;
+
     fn route_for(&self, address: &PreparedStorageAddress) -> StorageRoute;
 
     fn get(
@@ -149,6 +154,10 @@ impl StorageDataPort for StoragePort {
 
     fn prepare_address(&self, scope: StorageScope<'_>, identity: &[u8]) -> PreparedStorageAddress {
         self.backend.prepare_address(scope, identity)
+    }
+
+    fn prepare_storage_key(&self, storage_key: StorageKey) -> PreparedStorageAddress {
+        self.backend.prepare_storage_key(storage_key)
     }
 
     fn route_for(&self, address: &PreparedStorageAddress) -> StorageRoute {

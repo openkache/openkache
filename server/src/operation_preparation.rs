@@ -169,23 +169,6 @@ impl ResourceLock {
         }
     }
 
-    /// Wraps a process-wide resource that has no deletion lifecycle.
-    ///
-    /// Lifecycle locks and API-owned resources use the same bundle so the
-    /// executor has one deterministic acquisition path. The always-active
-    /// flag keeps that representation allocation-free at the call site while
-    /// preserving the stale-handle check for deletable resources.
-    pub(super) fn unconditional(lock: Arc<AsyncMutex<()>>) -> Self {
-        Self {
-            lock,
-            active: None,
-            inactive_error: PrepareError::resource_unavailable(
-                OperationStatus::InternalError,
-                b"prepared resource is no longer available",
-            ),
-        }
-    }
-
     pub(super) fn lock(&self) -> &Arc<AsyncMutex<()>> {
         &self.lock
     }

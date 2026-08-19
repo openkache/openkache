@@ -396,6 +396,11 @@ impl NetworkWorkerCache {
         PreparedStorageAddress::new(key.into_bytes(), route)
     }
 
+    pub(crate) fn prepare_storage_key(&self, storage_key: StorageKey) -> PreparedStorageAddress {
+        let route = StorageRoute::from_worker(self.worker_for(&storage_key));
+        PreparedStorageAddress::new(storage_key.into_bytes(), route)
+    }
+
     pub(crate) fn storage_route_for(&self, prepared: &PreparedStorageAddress) -> StorageRoute {
         prepared.route()
     }

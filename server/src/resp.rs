@@ -44,6 +44,8 @@ pub struct RespServer {
     cache: Arc<ThreadedKvkache>,
     network: crate::NetworkConfig,
     request_timeout: Duration,
+    experimental_api_enabled: bool,
+    experimental_api_revision: Option<String>,
     observability: ObservabilityService,
 }
 
@@ -73,6 +75,8 @@ impl RespServer {
         config.validate()?;
         let network = config.network.clone();
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
+        let experimental_api_enabled = config.enable_experimental_api;
+        let experimental_api_revision = config.experimental_api_revision.clone();
         let observability = ObservabilityService::new(
             network.worker_count,
             config.runtime.thread_count,
@@ -97,6 +101,8 @@ impl RespServer {
             cache: Arc::new(cache),
             network,
             request_timeout,
+            experimental_api_enabled,
+            experimental_api_revision,
             observability,
         })
     }
@@ -154,6 +160,8 @@ impl RespServer {
             cache,
             network,
             request_timeout,
+            experimental_api_enabled,
+            experimental_api_revision,
             observability: observability_service,
             ..
         } = self;
@@ -171,6 +179,7 @@ impl RespServer {
             let finished_tx = finished_tx.clone();
             let worker_cache = Arc::clone(&cache);
             let worker_observability = Arc::clone(&observability);
+            let worker_experimental_api_revision = experimental_api_revision.clone();
             let cpu_id = network.cpu_ids[worker_id];
             let entries = network.io_uring_entries_per_worker;
             let event_interval = network.event_interval;
@@ -194,6 +203,8 @@ impl RespServer {
                         worker_cache,
                         worker_observability,
                         request_timeout,
+                        experimental_api_enabled,
+                        worker_experimental_api_revision,
                         stop_rx,
                         reporter,
                     )
@@ -275,6 +286,8 @@ async fn run_resp_role(
     cache: Arc<ThreadedKvkache>,
     observability: Arc<ObservabilityState>,
     request_timeout: Duration,
+    experimental_api_enabled: bool,
+    experimental_api_revision: Option<String>,
     stop: AsyncReceiver<()>,
     mut reporter: NetworkWorkerReporter,
 ) -> Option<std::result::Result<(), String>> {
@@ -304,6 +317,8 @@ async fn run_resp_role(
             worker_id,
             observability,
             request_timeout,
+            experimental_api_enabled,
+            experimental_api_revision,
             stop,
         )
         .await
@@ -342,6 +357,8 @@ async fn run_resp_worker(
     worker_id: usize,
     observability: Arc<ObservabilityState>,
     request_timeout: Duration,
+    experimental_api_enabled: bool,
+    experimental_api_revision: Option<String>,
     stop: AsyncReceiver<()>,
 ) -> std::io::Result<()> {
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
@@ -362,6 +379,8 @@ async fn run_resp_worker(
                         &cache,
                         network_shard,
                         request_timeout,
+                        experimental_api_enabled,
+                        experimental_api_revision.clone(),
                     ));
                 }
                 _ = stopping => break,
@@ -381,6 +400,8 @@ async fn run_resp_worker(
                         &cache,
                         network_shard,
                         request_timeout,
+                        experimental_api_enabled,
+                        experimental_api_revision.clone(),
                     ));
                 }
                 _ = completed => {}
@@ -396,6 +417,8 @@ async fn serve_resp_connection(
     cache: &NetworkWorkerCache,
     network_shard: NetworkShard<'_>,
     request_timeout: Duration,
+    experimental_api_enabled: bool,
+    experimental_api_revision: Option<String>,
 ) -> std::io::Result<()> {
     let _connection_guard = ActiveRespConnection { network_shard };
     let mut pending = Vec::with_capacity(READ_BUFFER_BYTES);
@@ -439,7 +462,14 @@ async fn serve_resp_connection(
                     let response_start = responses.len();
                     let request_started = std::time::Instant::now();
                     let operation = operation_for_command(&command);
-                    close = execute_command(cache, &command, &mut responses).await;
+                    close = execute_command(
+                        cache,
+                        &command,
+                        &mut responses,
+                        experimental_api_enabled,
+                        experimental_api_revision.as_deref(),
+                    )
+                    .await;
                     network_shard.record_request(
                         operation,
                         status_for_resp_response(&responses[response_start..], operation),
@@ -610,6 +640,8 @@ async fn execute_command(
     cache: &NetworkWorkerCache,
     command: &[&[u8]],
     response: &mut Vec<u8>,
+    experimental_api_enabled: bool,
+    experimental_api_revision: Option<&str>,
 ) -> bool {
     match classify_command(command) {
         RespCommandKind::Ping => simple(response, "PONG"),
@@ -671,23 +703,39 @@ async fn execute_command(
                 integer(response, deleted);
             }
         }
-        RespCommandKind::Stats => match command {
-            [_] => match cache.stats(operation_for_opcode(Opcode::Stats)).await {
-                Ok(stats) => {
-                    let stats = stats.join("\n");
-                    bulk(response, Some(stats.as_bytes()));
-                }
-                Err(cache_error) => resp_cache_error(response, cache_error),
-            },
-            _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
-        },
-        RespCommandKind::Sync => match command {
-            [_] => match cache.sync(operation_for_opcode(Opcode::Sync)).await {
-                Ok(()) => simple(response, "OK"),
-                Err(cache_error) => resp_cache_error(response, cache_error),
-            },
-            _ => error(response, "wrong number of arguments for OPENKACHE.SYNC"),
-        },
+        RespCommandKind::Stats
+            if crate::operation_contract::spec(Opcode::Stats)
+                .enabled(experimental_api_enabled, experimental_api_revision) =>
+        {
+            match command {
+                [_] => match cache.stats(operation_for_opcode(Opcode::Stats)).await {
+                    Ok(stats) => {
+                        let stats = stats.join("\n");
+                        bulk(response, Some(stats.as_bytes()));
+                    }
+                    Err(cache_error) => resp_cache_error(response, cache_error),
+                },
+                _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
+            }
+        }
+        RespCommandKind::Sync
+            if crate::operation_contract::spec(Opcode::Sync)
+                .enabled(experimental_api_enabled, experimental_api_revision) =>
+        {
+            match command {
+                [_] => match cache.sync(operation_for_opcode(Opcode::Sync)).await {
+                    Ok(()) => simple(response, "OK"),
+                    Err(cache_error) => resp_cache_error(response, cache_error),
+                },
+                _ => error(response, "wrong number of arguments for OPENKACHE.SYNC"),
+            }
+        }
+        RespCommandKind::Stats | RespCommandKind::Sync => {
+            // The command maps to an unassigned experimental opcode under
+            // the current gate. Retire the lane without manufacturing a
+            // compatibility response.
+            return true;
+        }
         RespCommandKind::Select | RespCommandKind::Client => {
             simple(response, "OK");
         }

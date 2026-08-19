@@ -1,7 +1,9 @@
 use super::namespace_journal::{JournalEvent, NamespaceJournal};
 use super::namespace_metadata;
 use super::storage_port::StorageRoute;
-use super::{ItemId, NamespaceDescriptor, NamespacePolicy};
+use super::{NamespaceDescriptor, NamespacePolicy};
+use crate::runtime::derive_scoped_storage_key;
+use crate::types::StorageKey;
 use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::OwnedRange;
 use std::borrow::Borrow;
@@ -14,17 +16,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::types::STORAGE_KEY_BYTES;
+
 const NAMESPACE_METADATA_MAX_ENTRIES: u64 = 1_000_000;
 const NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY: u64 = 1_000_000_000;
 const NAMESPACE_METADATA_MAX_DIRTY_WORKERS: u64 = 1_000_000;
 static NEXT_NAMESPACE_METADATA_TEMP: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-
-fn journal_item_id(item_id: ItemId) -> ([u8; openkache_protocol::ITEM_ID_BYTES], u8) {
-    let mut bytes = [0; openkache_protocol::ITEM_ID_BYTES];
-    bytes[..item_id.len()].copy_from_slice(item_id.as_bytes());
-    (bytes, item_id.len() as u8)
-}
 
 #[derive(Clone, Debug)]
 struct NamespaceName(Arc<OwnedRange>);
@@ -65,7 +63,11 @@ impl Hash for NamespaceName {
 struct NamespaceEntry {
     descriptor: NamespaceDescriptor,
     name: NamespaceName,
-    items: HashSet<ItemId>,
+    /// Membership is recorded using the fixed internal storage identity.
+    ///
+    /// The request boundary may carry an opaque variable-length Item ID; the
+    /// storage contract is the first boundary that requires a fixed width.
+    items: HashSet<StorageKey>,
     dirty_workers: HashSet<StorageRoute>,
     operation_lock: Arc<AsyncMutex<()>>,
     active: Arc<AtomicBool>,
@@ -120,7 +122,16 @@ pub(crate) struct NamespaceRegistry {
 }
 
 impl NamespaceRegistry {
+    #[allow(dead_code)]
     pub(crate) fn load(directory: &Path, existing_storage: bool) -> std::io::Result<Self> {
+        Self::load_with_storage_key(directory, existing_storage, [0; 32])
+    }
+
+    pub(crate) fn load_with_storage_key(
+        directory: &Path,
+        existing_storage: bool,
+        storage_domain_key: [u8; 32],
+    ) -> std::io::Result<Self> {
         let metadata_path = match super::super::storage_backend::namespace_persistence(directory) {
             super::super::storage_backend::NamespacePersistence::Durable(path) => path,
             super::super::storage_backend::NamespacePersistence::Ephemeral => {
@@ -155,22 +166,28 @@ impl NamespaceRegistry {
                     .as_ref()
                     .expect("durable namespace registry has metadata path")
                     .with_extension("journal");
-                registry.journal = Some(NamespaceJournal::start(&journal_path)?);
+                registry.journal = Some(NamespaceJournal::start_with_storage_keys(
+                    &journal_path,
+                    true,
+                )?);
                 return Ok(registry);
             }
             Err(error) => return Err(error),
         };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        registry.decode_metadata(&bytes)?;
+        registry.decode_metadata(&bytes, &storage_domain_key)?;
         let journal_path = registry
             .metadata_path
             .as_ref()
             .expect("durable namespace registry has metadata path")
             .with_extension("journal");
-        let journal_events = NamespaceJournal::load_events(&journal_path)?;
-        registry.replay_journal(journal_events)?;
-        registry.journal = Some(NamespaceJournal::start(&journal_path)?);
+        let journal_records = NamespaceJournal::load_records(&journal_path)?;
+        registry.replay_journal(journal_records, &storage_domain_key)?;
+        registry.journal = Some(NamespaceJournal::start_with_storage_keys(
+            &journal_path,
+            true,
+        )?);
         Ok(registry)
     }
 
@@ -210,6 +227,7 @@ impl NamespaceRegistry {
             return Err(NamespaceError::NotFound);
         }
         let policy = policy.ok_or(NamespaceError::InvalidRequest)?;
+        namespace_metadata::encode_policy(policy).map_err(|_| NamespaceError::InvalidRequest)?;
         let name = NamespaceName::new(name);
         let previous_next_id = self.next_id;
         let namespace_id = self.allocate_id()?;
@@ -271,38 +289,6 @@ impl NamespaceRegistry {
             .map(|entry| entry.descriptor.policy)
     }
 
-    pub(crate) fn update(
-        &mut self,
-        namespace_id: u64,
-        expected_revision: u64,
-        policy: NamespacePolicy,
-    ) -> std::result::Result<NamespaceDescriptor, NamespaceError> {
-        let (previous, descriptor) = {
-            let entry = self
-                .by_id
-                .get_mut(&namespace_id)
-                .ok_or(NamespaceError::NotFound)?;
-            if entry.descriptor.revision != expected_revision {
-                return Err(NamespaceError::Conflict);
-            }
-            let previous = entry.descriptor;
-            entry.descriptor.revision = entry
-                .descriptor
-                .revision
-                .checked_add(1)
-                .ok_or(NamespaceError::Internal)?;
-            entry.descriptor.policy = policy;
-            (previous, entry.descriptor)
-        };
-        if self.persist().is_err() {
-            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                entry.descriptor = previous;
-            }
-            return Err(NamespaceError::Internal);
-        }
-        Ok(descriptor)
-    }
-
     pub(crate) fn delete(
         &mut self,
         namespace_id: u64,
@@ -339,7 +325,7 @@ impl NamespaceRegistry {
     pub(crate) fn reserve_item(
         &mut self,
         namespace_id: u64,
-        item_id: ItemId,
+        storage_key: StorageKey,
         route: StorageRoute,
     ) -> std::result::Result<SetReservation, NamespaceError> {
         let reservation = self
@@ -347,17 +333,15 @@ impl NamespaceRegistry {
             .get_mut(&namespace_id)
             .ok_or(NamespaceError::NotFound)
             .map(|entry| SetReservation {
-                inserted_item: entry.items.insert(item_id),
+                inserted_item: entry.items.insert(storage_key),
                 inserted_worker: entry.dirty_workers.insert(route),
             })?;
         if !reservation.inserted_item && !reservation.inserted_worker {
             return Ok(reservation);
         }
-        let (item_id_bytes, item_id_len) = journal_item_id(item_id);
         let event = JournalEvent::ReserveItem {
             namespace_id,
-            item_id: item_id_bytes,
-            item_id_len,
+            item_id: storage_key.into_bytes(),
             route: route.persisted(),
             inserted_item: reservation.inserted_item,
             inserted_worker: reservation.inserted_worker,
@@ -365,7 +349,7 @@ impl NamespaceRegistry {
         if self.append_event(event).is_err() {
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
                 if reservation.inserted_item {
-                    entry.items.remove(&item_id);
+                    entry.items.remove(&storage_key);
                 }
                 if reservation.inserted_worker {
                     entry.dirty_workers.remove(&route);
@@ -386,7 +370,7 @@ impl NamespaceRegistry {
     pub(crate) fn rollback_set_reservation(
         &mut self,
         namespace_id: u64,
-        item_id: ItemId,
+        storage_key: StorageKey,
         route: StorageRoute,
         reservation: SetReservation,
     ) -> std::result::Result<(), NamespaceError> {
@@ -398,18 +382,16 @@ impl NamespaceRegistry {
                 return Err(NamespaceError::NotFound);
             };
             if reservation.inserted_item {
-                entry.items.remove(&item_id);
+                entry.items.remove(&storage_key);
             }
             if reservation.inserted_worker {
                 entry.dirty_workers.remove(&route);
             }
         }
-        let (item_id_bytes, item_id_len) = journal_item_id(item_id);
         if self
             .append_event(JournalEvent::RollbackItem {
                 namespace_id,
-                item_id: item_id_bytes,
-                item_id_len,
+                item_id: storage_key.into_bytes(),
                 route: route.persisted(),
                 remove_item: reservation.inserted_item,
                 remove_worker: reservation.inserted_worker,
@@ -418,7 +400,7 @@ impl NamespaceRegistry {
         {
             if reservation.inserted_item {
                 if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                    entry.items.insert(item_id);
+                    entry.items.insert(storage_key);
                 }
             }
             if reservation.inserted_worker {
@@ -467,38 +449,31 @@ impl NamespaceRegistry {
     pub(crate) fn mark_delete(
         &mut self,
         namespace_id: u64,
-        item_id: ItemId,
+        storage_key: StorageKey,
         deleted: bool,
     ) -> std::result::Result<(), NamespaceError> {
         let removed = deleted
             && self
                 .by_id
                 .get_mut(&namespace_id)
-                .is_some_and(|entry| entry.items.remove(&item_id));
-        if removed && {
-            let (item_id_bytes, item_id_len) = journal_item_id(item_id);
-            self.append_event(JournalEvent::MarkDelete {
-                namespace_id,
-                item_id: item_id_bytes,
-                item_id_len,
-            })
-            .is_err()
-        } {
+                .is_some_and(|entry| entry.items.remove(&storage_key));
+        if removed
+            && self
+                .append_event(JournalEvent::MarkDelete {
+                    namespace_id,
+                    item_id: storage_key.into_bytes(),
+                })
+                .is_err()
+        {
             // Keeping the item in memory is conservative when persistence
             // fails; the caller closes the lane because the mutation outcome
             // can no longer be represented reliably.
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                entry.items.insert(item_id);
+                entry.items.insert(storage_key);
             }
             return Err(NamespaceError::Internal);
         }
         Ok(())
-    }
-
-    pub(crate) fn tracked_items(&self, namespace_id: u64) -> Option<Vec<ItemId>> {
-        self.by_id
-            .get(&namespace_id)
-            .map(|entry| entry.items.iter().copied().collect())
     }
 
     pub(crate) fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<StorageRoute>> {
@@ -540,25 +515,23 @@ impl NamespaceRegistry {
     pub(crate) fn prune_item(
         &mut self,
         namespace_id: u64,
-        item_id: ItemId,
+        storage_key: StorageKey,
     ) -> std::result::Result<(), NamespaceError> {
         let Some(entry) = self.by_id.get_mut(&namespace_id) else {
             return Err(NamespaceError::NotFound);
         };
-        if !entry.items.remove(&item_id) {
+        if !entry.items.remove(&storage_key) {
             return Ok(());
         }
-        let (item_id_bytes, item_id_len) = journal_item_id(item_id);
         if self
             .append_event(JournalEvent::PruneItem {
                 namespace_id,
-                item_id: item_id_bytes,
-                item_id_len,
+                item_id: storage_key.into_bytes(),
             })
             .is_err()
         {
             if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                entry.items.insert(item_id);
+                entry.items.insert(storage_key);
             }
             return Err(NamespaceError::Internal);
         }
@@ -569,37 +542,31 @@ impl NamespaceRegistry {
         if !self.persistent {
             return Ok(());
         }
-        // The legacy journal record is fixed-width and intentionally remains
-        // a compatibility reader for existing 32-byte memberships. Compact
-        // the exact variable-length snapshot for short IDs instead of
-        // padding them into a different identity.
-        let short_item = match event {
-            JournalEvent::ReserveItem { item_id_len, .. }
-            | JournalEvent::RollbackItem { item_id_len, .. }
-            | JournalEvent::MarkDelete { item_id_len, .. }
-            | JournalEvent::PruneItem { item_id_len, .. } => {
-                // `item_id_len` carries the original wire length; the fixed
-                // array is only a journal encoding buffer.
-                item_id_len < openkache_protocol::ITEM_ID_BYTES as u8
-            }
-            JournalEvent::ReserveWorker { .. } | JournalEvent::MarkWorkersClean { .. } => false,
-        };
-        if short_item {
-            return self.persist();
-        }
         self.journal
             .as_ref()
             .expect("persistent namespace registry has journal")
             .append(event)
     }
 
-    fn replay_journal(&mut self, events: Vec<JournalEvent>) -> std::io::Result<()> {
-        for event in events {
+    fn replay_journal(
+        &mut self,
+        records: Vec<super::namespace_journal::JournalRecord>,
+        storage_domain_key: &[u8; 32],
+    ) -> std::io::Result<()> {
+        for record in records {
+            let event = record.event;
+            let item_key = |namespace_id: u64, item_id: [u8; STORAGE_KEY_BYTES]| {
+                if record.storage_key {
+                    StorageKey::new(item_id)
+                } else {
+                    let scope = namespace_id.to_be_bytes();
+                    derive_scoped_storage_key(storage_domain_key, &scope, &item_id)
+                }
+            };
             match event {
                 JournalEvent::ReserveItem {
                     namespace_id,
                     item_id,
-                    item_id_len,
                     route,
                     inserted_item,
                     inserted_worker,
@@ -608,9 +575,7 @@ impl NamespaceRegistry {
                         continue;
                     };
                     if inserted_item {
-                        let item_id = ItemId::from_slice(&item_id[..usize::from(item_id_len)])
-                            .expect("journal item ID length was validated during decode");
-                        entry.items.insert(item_id);
+                        entry.items.insert(item_key(namespace_id, item_id));
                     }
                     if inserted_worker {
                         entry
@@ -621,7 +586,6 @@ impl NamespaceRegistry {
                 JournalEvent::RollbackItem {
                     namespace_id,
                     item_id,
-                    item_id_len,
                     route,
                     remove_item,
                     remove_worker,
@@ -630,9 +594,7 @@ impl NamespaceRegistry {
                         continue;
                     };
                     if remove_item {
-                        let item_id = ItemId::from_slice(&item_id[..usize::from(item_id_len)])
-                            .expect("journal item ID length was validated during decode");
-                        entry.items.remove(&item_id);
+                        entry.items.remove(&item_key(namespace_id, item_id));
                     }
                     if remove_worker {
                         entry
@@ -658,17 +620,13 @@ impl NamespaceRegistry {
                 JournalEvent::MarkDelete {
                     namespace_id,
                     item_id,
-                    item_id_len,
                 }
                 | JournalEvent::PruneItem {
                     namespace_id,
                     item_id,
-                    item_id_len,
                 } => {
                     if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                        let item_id = ItemId::from_slice(&item_id[..usize::from(item_id_len)])
-                            .expect("journal item ID length was validated during decode");
-                        entry.items.remove(&item_id);
+                        entry.items.remove(&item_key(namespace_id, item_id));
                     }
                 }
             }
@@ -703,12 +661,8 @@ impl NamespaceRegistry {
             bytes.extend_from_slice(&(entry.items.len() as u64).to_be_bytes());
             let mut items = entry.items.iter().copied().collect::<Vec<_>>();
             items.sort_unstable();
-            for item_id in items {
-                let item_id_len = u8::try_from(item_id.len()).map_err(|_| {
-                    std::io::Error::new(ErrorKind::InvalidData, "item ID is too long")
-                })?;
-                bytes.push(item_id_len);
-                bytes.extend_from_slice(item_id.as_bytes());
+            for storage_key in items {
+                bytes.extend_from_slice(storage_key.as_bytes());
             }
             bytes.extend_from_slice(&(entry.dirty_workers.len() as u64).to_be_bytes());
             let mut dirty_workers = entry.dirty_workers.iter().copied().collect::<Vec<_>>();
@@ -750,16 +704,20 @@ impl NamespaceRegistry {
         write_result
     }
 
-    fn decode_metadata(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    fn decode_metadata(
+        &mut self,
+        bytes: &[u8],
+        storage_domain_key: &[u8; 32],
+    ) -> std::io::Result<()> {
         let mut cursor = MetadataCursor::new(bytes);
         if cursor.take(namespace_metadata::MAGIC.len())? != namespace_metadata::MAGIC {
             return Err(cursor.invalid("namespace metadata magic is invalid"));
         }
         let metadata_version = cursor.u32()?;
         if metadata_version != namespace_metadata::VERSION
-            && metadata_version != namespace_metadata::LEGACY_V3_VERSION
             && metadata_version != namespace_metadata::LEGACY_V2_VERSION
             && metadata_version != namespace_metadata::LEGACY_V1_VERSION
+            && metadata_version != namespace_metadata::LEGACY_V3_VERSION
         {
             return Err(cursor.invalid("namespace metadata version is unsupported"));
         }
@@ -790,29 +748,31 @@ impl NamespaceRegistry {
             if used != policy_len {
                 return Err(cursor.invalid("namespace metadata policy has trailing bytes"));
             }
-            let item_count = cursor.u64()?;
-            let minimum_item_bytes = if metadata_version == namespace_metadata::VERSION {
-                1
+            let item_width = if metadata_version == namespace_metadata::VERSION {
+                STORAGE_KEY_BYTES
             } else {
+                // Legacy snapshots used the protocol's fixed Item ID width.
+                // It currently matches the storage width, but keep the
+                // migration boundary explicit.
                 openkache_protocol::ITEM_ID_BYTES
             };
+            let item_count = cursor.u64()?;
             if item_count > NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY
-                || item_count > (cursor.remaining() / minimum_item_bytes) as u64
+                || item_count > (cursor.remaining() / item_width) as u64
             {
                 return Err(cursor.invalid("namespace metadata item list is invalid"));
             }
             let mut items = HashSet::with_capacity(item_count as usize);
             for _ in 0..item_count {
-                let item_id = if metadata_version == namespace_metadata::VERSION {
-                    let item_len = usize::from(cursor.u8()?);
-                    let item_bytes = cursor.take(item_len)?;
-                    ItemId::from_slice(item_bytes)
-                        .map_err(|_| cursor.invalid("namespace metadata item ID is too long"))?
+                let item_bytes = cursor.take(item_width)?;
+                let item_bytes = item_bytes.try_into().expect("storage key width is fixed");
+                let storage_key = if metadata_version == namespace_metadata::VERSION {
+                    StorageKey::new(item_bytes)
                 } else {
-                    let item_bytes = cursor.take(openkache_protocol::ITEM_ID_BYTES)?;
-                    ItemId::from_slice(item_bytes).expect("legacy metadata item ID width is fixed")
+                    let scope = namespace_id.to_be_bytes();
+                    derive_scoped_storage_key(storage_domain_key, &scope, &item_bytes)
                 };
-                items.insert(item_id);
+                items.insert(storage_key);
             }
             let mut dirty_workers = HashSet::new();
             if metadata_version >= namespace_metadata::LEGACY_V2_VERSION {

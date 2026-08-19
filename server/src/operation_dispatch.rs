@@ -25,6 +25,7 @@ pub(super) struct HeaderAdmissionRejection {
     opcode: Opcode,
     request_id: u64,
     response: operation_transport::OperationResponse,
+    silent: bool,
     elapsed: std::time::Duration,
 }
 
@@ -45,6 +46,10 @@ impl HeaderAdmissionRejection {
         self.elapsed
     }
 
+    pub(super) fn silently_close(&self) -> bool {
+        self.silent
+    }
+
     pub(super) fn into_response(self) -> operation_transport::OperationResponse {
         self.response
     }
@@ -61,6 +66,22 @@ pub(super) fn admit_request_header(
     prefix: &[u8],
     runtime: &OperationRuntime,
 ) -> Result<(), HeaderAdmissionRejection> {
+    let wire = operation_contract::spec(header.opcode());
+    if !runtime.admits_wire(wire) {
+        // An experimental or out-of-band opcode that is not selected by the
+        // bind-time gate is unassigned on the data plane. The stable protocol
+        // requires the lane to close without manufacturing an error response.
+        return Err(HeaderAdmissionRejection {
+            opcode: header.opcode(),
+            response: operation_transport::contract_error_response_for_operation(
+                operation_contract::operation_id_for_opcode(header.opcode()),
+                openkache_protocol::Status::InternalError,
+                b"unassigned data-plane opcode",
+            ),
+            silent: true,
+            elapsed: std::time::Duration::ZERO,
+        });
+    }
     let operation_id = operation_contract::operation_id_for_opcode(header.opcode());
     let Some((registration, state)) = runtime.operation(operation_id) else {
         return Ok(());
@@ -88,6 +109,7 @@ pub(super) fn admit_request_header(
             opcode: header.opcode(),
             request_id: header.request_id(),
             response,
+            silent: false,
             elapsed: started.elapsed(),
         }
     })

@@ -11,8 +11,7 @@ use super::operation_capabilities::{CapabilityCatalog, downcast_capability};
 use super::operation_compatibility_handlers as handlers;
 use super::operation_compatibility_prepare as prepare;
 use super::operation_compatibility_services::{
-    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
-    SetState, StatsState, SyncState,
+    DeleteState, GetState, SetState, StatsState, SyncState,
 };
 use super::operation_composition::ApiModule;
 use super::operation_contract::OperationId;
@@ -86,29 +85,6 @@ fn initialize_module(
             membership: Arc::clone(membership),
         }),
     )?;
-    states.bind(
-        OperationId::NamespaceOpen,
-        Arc::new(NamespaceOpenState {
-            coordination: Arc::clone(coordination),
-            catalog: Arc::clone(catalog),
-        }),
-    )?;
-    states.bind(
-        OperationId::NamespaceUpdatePolicy,
-        Arc::new(NamespaceUpdateState {
-            coordination: Arc::clone(coordination),
-            catalog: Arc::clone(catalog),
-        }),
-    )?;
-    states.bind(
-        OperationId::NamespaceDelete,
-        Arc::new(NamespaceDeleteState {
-            storage: storage.clone(),
-            coordination: Arc::clone(coordination),
-            catalog: Arc::clone(catalog),
-            membership: Arc::clone(membership),
-        }),
-    )?;
     Ok(())
 }
 
@@ -144,30 +120,6 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
         .authorize(authorization_administrator)
         .mutation()
         .build(),
-    RegistrationBuilder::new(OperationId::NamespaceOpen, handlers::namespace_open_handler)
-        .state::<NamespaceOpenState>()
-        .prepare(prepare::prepare_namespace_open)
-        .authorize(authorization_none)
-        .mutation()
-        .build(),
-    RegistrationBuilder::new(
-        OperationId::NamespaceUpdatePolicy,
-        handlers::namespace_update_policy_handler,
-    )
-    .state::<NamespaceUpdateState>()
-    .prepare(prepare::prepare_namespace_update)
-    .authorize(authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::new(
-        OperationId::NamespaceDelete,
-        handlers::namespace_delete_handler,
-    )
-    .state::<NamespaceDeleteState>()
-    .prepare(prepare::prepare_namespace_delete)
-    .authorize(authorization_none)
-    .mutation()
-    .build(),
 ];
 
 pub(super) const API: ApiModule =

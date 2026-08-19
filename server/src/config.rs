@@ -361,6 +361,13 @@ impl Config {
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u32,
+    /// Enables operations marked experimental in the generated wire contract.
+    ///
+    /// Experimental operations remain unassigned unless this switch is paired
+    /// with the exact draft revision below.
+    pub enable_experimental_api: bool,
+    /// Exact generated draft revision admitted by the experimental API gate.
+    pub experimental_api_revision: Option<String>,
     pub quic: QuicConfig,
     pub tls: TlsConfig,
     pub network: NetworkConfig,
@@ -388,6 +395,8 @@ impl AppConfig {
         };
         Self {
             version: 1,
+            enable_experimental_api: false,
+            experimental_api_revision: None,
             quic: QuicConfig::default(),
             tls: TlsConfig::default(),
             network: NetworkConfig::with_cpu_ids(cpu_ids),
@@ -684,9 +693,7 @@ impl StorageConfig {
         self.bucket_read_pool_capacity_per_thread
             .checked_mul(STORAGE_READ_OWNER_SOURCE_COUNT)
             .ok_or_else(|| {
-                KvError::InvalidConfig(
-                    "stable storage-read owner pool capacity overflows".into(),
-                )
+                KvError::InvalidConfig("stable storage-read owner pool capacity overflows".into())
             })
     }
 }
@@ -748,6 +755,20 @@ impl AppConfig {
                 "unsupported config version {}",
                 self.version
             )));
+        }
+        if self.enable_experimental_api && self.experimental_api_revision.is_none() {
+            return Err(KvError::InvalidConfig(
+                "experimental_api_revision is required when enable_experimental_api=true".into(),
+            ));
+        }
+        if self
+            .experimental_api_revision
+            .as_deref()
+            .is_some_and(str::is_empty)
+        {
+            return Err(KvError::InvalidConfig(
+                "experimental_api_revision must not be empty".into(),
+            ));
         }
         self.quic.selected_backend()?;
         self.tls.validate()?;

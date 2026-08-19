@@ -1,11 +1,10 @@
 //! Durable namespace snapshot schema.
 //!
 //! This codec is intentionally independent of every network wire profile.
-//! Versions 1 and 2 used the then-current compact policy bytes; version 3
-//! added the explicit compact policy representation but still stored fixed
-//! width Item IDs. Their decoders are retained here as durable storage
-//! contracts. Version 4 owns the explicit policy representation and the
-//! variable-length Item ID list used by the current wire contract.
+//! Versions 1 and 2 used the then-current compact policy bytes; their decoder
+//! is retained here as a durable storage contract. Version 4 owns an explicit
+//! compact policy representation and fixed StorageKey membership so future
+//! wire-profile changes cannot alter recovery semantics.
 
 use std::io::{self, ErrorKind};
 
@@ -15,6 +14,8 @@ pub(crate) const MAGIC: &[u8; 8] = b"OKNSPACE";
 pub(crate) const VERSION: u32 = 4;
 pub(crate) const LEGACY_V1_VERSION: u32 = 1;
 pub(crate) const LEGACY_V2_VERSION: u32 = 2;
+/// Version 3 used the current policy encoding but still persisted raw Item IDs
+/// in namespace membership snapshots.
 pub(crate) const LEGACY_V3_VERSION: u32 = 3;
 pub(crate) const NAME_MAX_BYTES: usize = u8::MAX as usize;
 

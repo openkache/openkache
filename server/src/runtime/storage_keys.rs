@@ -4,7 +4,7 @@
 //! worker lifecycle and request routing focused on scheduling. API adapters
 //! normalize their own identity models before this boundary.
 
-use crate::StorageKey;
+use crate::types::StorageKey;
 
 pub(crate) const DOMAIN_V2_CONTEXT: &str = "OpenKache StorageKey DomainV2 root";
 pub(crate) const INTERNAL_STORAGE_DOMAIN_ID: u64 = 0;

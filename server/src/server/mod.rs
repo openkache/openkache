@@ -1,5 +1,6 @@
 //! QUIC server backed by the sharded SSD-first cache runtime.
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +18,7 @@ use crate::observability::{
     Operation,
 };
 use crate::platform::StorageDeviceKind;
-use crate::protocol::{ItemId, NamespaceDescriptor, NamespacePolicy};
+use crate::protocol::{NamespaceDescriptor, NamespacePolicy, Response};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
@@ -138,6 +139,124 @@ pub struct KacheServer {
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     network: NetworkConfig,
     request_timeout: Duration,
+    experimental_api_enabled: bool,
+    experimental_api_revision: Option<String>,
     observability: ObservabilityService,
     capabilities: Arc<dyn CapabilityCatalog>,
+}
+
+/// Result of resolving a name through the out-of-band namespace gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamespaceOpenOutcome {
+    Existing,
+    Created,
+}
+
+/// Errors returned by the out-of-band namespace lifecycle seam.
+#[derive(Debug, thiserror::Error)]
+pub enum NamespaceGateError {
+    #[error("namespace request is invalid")]
+    InvalidRequest,
+    #[error("namespace does not exist")]
+    NotFound,
+    #[error("namespace revision conflicts with the current descriptor")]
+    Conflict,
+    #[error("namespace still contains live items")]
+    NotEmpty,
+    #[error("namespace metadata is unavailable")]
+    Internal,
+}
+
+/// Explicit control-plane seam for server-assigned namespace identities.
+///
+/// Stable v1 data-plane requests never create, look up, update, or delete
+/// namespaces. A control-plane adapter obtains this handle from
+/// [`KacheServer::namespace_gate`], resolves a name to a positive server-owned
+/// ID, and then carries that ID in data-plane requests. Policy is immutable:
+/// opening an existing name returns its original descriptor and ignores any
+/// replacement policy.
+#[derive(Clone)]
+pub struct NamespaceGate {
+    registry: Arc<Mutex<NamespaceRegistry>>,
+}
+
+impl NamespaceGate {
+    fn new(registry: Arc<Mutex<NamespaceRegistry>>) -> Self {
+        Self { registry }
+    }
+
+    /// Resolves or creates a namespace under the serialized lifecycle gate.
+    pub async fn open(
+        &self,
+        name: &[u8],
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> std::result::Result<(NamespaceOpenOutcome, NamespaceDescriptor), NamespaceGateError> {
+        if std::str::from_utf8(name).is_err() {
+            return Err(NamespaceGateError::InvalidRequest);
+        }
+        let lifecycle = self
+            .registry
+            .lock()
+            .map_err(|_| NamespaceGateError::Internal)?
+            .lifecycle_lock();
+        let _guard = lifecycle.lock().await;
+        let mut registry = self
+            .registry
+            .lock()
+            .map_err(|_| NamespaceGateError::Internal)?;
+        let (outcome, descriptor) = registry
+            .open(
+                openkache_protocol::OwnedRange::whole(name.to_vec()),
+                create_if_missing,
+                policy,
+            )
+            .map_err(NamespaceGateError::from)?;
+        let outcome = match outcome {
+            NamespaceOpenResult::Existing => NamespaceOpenOutcome::Existing,
+            NamespaceOpenResult::Created => NamespaceOpenOutcome::Created,
+        };
+        Ok((outcome, descriptor))
+    }
+
+    /// Deletes an empty namespace after checking its current descriptor
+    /// revision. Existing item membership remains conservative until storage
+    /// confirms expiration or deletion, so a non-empty result is definitive.
+    pub async fn delete(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+    ) -> std::result::Result<(), NamespaceGateError> {
+        let lifecycle = self
+            .registry
+            .lock()
+            .map_err(|_| NamespaceGateError::Internal)?
+            .lifecycle_lock();
+        let _guard = lifecycle.lock().await;
+        let operation = self
+            .registry
+            .lock()
+            .map_err(|_| NamespaceGateError::Internal)?
+            .operation_lock(namespace_id)
+            .ok_or(NamespaceGateError::NotFound)?;
+        let (operation_lock, _active) = operation.into_parts();
+        let _operation_guard = operation_lock.lock().await;
+        self.registry
+            .lock()
+            .map_err(|_| NamespaceGateError::Internal)?
+            .delete(namespace_id, expected_revision)
+            .map_err(NamespaceGateError::from)
+    }
+}
+
+impl From<NamespaceError> for NamespaceGateError {
+    fn from(error: NamespaceError) -> Self {
+        match error {
+            NamespaceError::InvalidRequest => Self::InvalidRequest,
+            NamespaceError::NotFound => Self::NotFound,
+            NamespaceError::Conflict => Self::Conflict,
+            NamespaceError::NotEmpty => Self::NotEmpty,
+            NamespaceError::PolicyConflict | NamespaceError::Internal => Self::Internal,
+        }
+    }
 }

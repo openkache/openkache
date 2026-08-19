@@ -1,5 +1,5 @@
-use super::*;
 use super::connection::{NetworkWorkerLimits, prepare_network_worker, run_selected_endpoint};
+use super::*;
 
 impl KacheServer {
     /// Installs API-owned capabilities before the server starts serving.
@@ -97,6 +97,8 @@ impl KacheServer {
             return Err(ServerError::NetworkWorker(message.into()));
         }
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
+        let experimental_api_enabled = config.enable_experimental_api;
+        let experimental_api_revision = config.experimental_api_revision.clone();
         let network = config.network.clone();
         let storage_directory = config.storage.directory.clone();
         let observability = ObservabilityService::new(
@@ -112,7 +114,11 @@ impl KacheServer {
             config,
             observability_state,
         )?;
-        let namespaces = match NamespaceRegistry::load(&storage_directory, existing_storage) {
+        let namespaces = match NamespaceRegistry::load_with_storage_key(
+            &storage_directory,
+            existing_storage,
+            cache.storage_domain_key(),
+        ) {
             Ok(registry) => registry,
             Err(error) => {
                 cache.shutdown()?;
@@ -142,6 +148,8 @@ impl KacheServer {
             namespaces: Arc::new(Mutex::new(namespaces)),
             network,
             request_timeout,
+            experimental_api_enabled,
+            experimental_api_revision,
             observability,
             capabilities: Arc::new(EmptyCapabilityCatalog),
         })
@@ -194,6 +202,14 @@ impl KacheServer {
             .as_ref()
     }
 
+    /// Returns the explicit out-of-band namespace lifecycle seam.
+    ///
+    /// Namespace creation and deletion are serialized independently from the
+    /// stable data-plane operation registry.
+    pub fn namespace_gate(&self) -> NamespaceGate {
+        NamespaceGate::new(Arc::clone(&self.namespaces))
+    }
+
     /// Accepts connections until `shutdown` resolves, then flushes all cache workers.
     ///
     /// # Arguments
@@ -217,6 +233,8 @@ impl KacheServer {
             namespaces,
             network,
             request_timeout,
+            experimental_api_enabled,
+            experimental_api_revision,
             observability: observability_service,
             capabilities,
             ..
@@ -248,6 +266,8 @@ impl KacheServer {
                 namespaces: Arc::clone(&namespaces),
                 observability: Arc::clone(&observability),
                 capabilities: Arc::clone(&capabilities),
+                experimental_api_enabled,
+                experimental_api_revision: experimental_api_revision.clone(),
             };
             let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
             let role = QuicNetworkRole {
