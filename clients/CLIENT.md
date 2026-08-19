@@ -43,7 +43,7 @@ restated here:
 
 | Subject | Source of truth |
 |---|---|
-| QUIC negotiation, frames, operations, statuses, limits, and protocol outcomes | [Wire Protocol](../protocol/SPEC.md) |
+| QUIC/TLS-over-TCP negotiation, frames, operations, statuses, limits, and protocol outcomes | [Wire Protocol](../protocol/SPEC.md) |
 | Typed keys, canonical key bytes, mapping profiles, and Item ID derivation | [Client Key Format](KEY_FORMAT.md) |
 | Payload formats, compression framing, protection, key selection, KDF, AAD, and value limits | [Client Value Format](VALUE_FORMAT.md) |
 | Cross-language logical values, native mappings, representations, and the initial structured-value codec profile | [Client Value Model](value/SPEC.md) |
@@ -131,8 +131,8 @@ When a lane or connection becomes terminal, the core:
 - stops admitting new work to the affected state;
 - removes and completes every affected outstanding entry;
 - reports read-only operations using the applicable transport category; and
-- preserves an unknown outcome for a mutation or persistence barrier that may
-  have taken effect without returning a response.
+- preserves an unknown outcome for a mutation or private maintenance barrier
+  that may have taken effect without returning a response.
 
 ### 3.3 Cancellation and shutdown
 
@@ -159,7 +159,7 @@ their public type names differ:
 - local configuration or input rejection;
 - transport failure for an operation known not to have an unknown mutation
   outcome;
-- an unknown mutation or persistence-barrier outcome;
+- an unknown mutation outcome;
 - malformed or unsupported protocol or formatted-value input; and
 - value authentication, decompression, or decoding failure.
 
@@ -173,10 +173,10 @@ default may retry a request rejected locally before transmission and may retry
 read-only operations after a retryable transport failure within configured
 attempt and deadline limits.
 
-The maintained clients do not automatically replay a mutation or persistence
-barrier after an unknown outcome. A caller may issue a new operation
-explicitly, but that is not a continuation or deduplicated retry of the first
-request.
+The maintained clients do not automatically replay a mutation or private
+maintenance barrier after an unknown outcome. A caller may issue a new
+operation explicitly, but that is not a continuation or deduplicated retry of
+the first request.
 
 Adapters MAY expose retry count, backoff, and deadline controls. An override
 changes only the selected operation or client instance; it does not change the
@@ -192,7 +192,7 @@ or diagnostic fields.
 
 The maintained retry boundary is:
 
-| Situation | Read-only operation | Mutation or `SYNC` |
+| Situation | Read-only operation | Mutation |
 |---|---|---|
 | Local validation or configuration failure | Do not retry | Do not retry |
 | Failure known to occur before transmission | MAY retry within the configured budget | MAY retry within the configured budget |
@@ -290,8 +290,9 @@ new defaults from native type behavior.
 
 Configuration is divided into:
 
-- connection and runtime settings, such as endpoint, trust, deadlines, lane
-  capacity, and retry policy;
+- connection and runtime settings, such as endpoint, transport fallback, trust,
+  server-identity verification, mTLS, deadlines, lane capacity, and retry
+  policy;
 - identity settings consumed by the key format;
 - formatted-value settings consumed by the value format; and
 - per-operation overrides that do not mutate client-instance defaults.
@@ -300,7 +301,60 @@ An adapter MUST keep identity configuration separate from value-protection
 configuration even when a language offers a convenience constructor. The key
 and value specifications define the actual fields and validity rules.
 
-### 6.2 Compression policy
+The maintained identity default is the `Hash` mapping profile. When no value
+key is configured, formatted values use the `Unprotected` value-protection
+profile; that does not change the `Hash` Item ID mapping. The public
+`CanonicalKeyOrHash` mapping is an explicit benchmark/public-key choice and is
+never selected merely because the value is unprotected.
+
+### 6.2 Pre-freeze TODOs
+
+The following configuration contracts remain deliberately open and MUST be
+resolved before v1 is finalized:
+
+- **Namespace profile metadata:** decide whether profile identity is stored
+  entirely by each client, partly as opaque server-side namespace metadata, or
+  through a server-validated profile record. Until then, maintained clients
+  MUST treat mapping-profile, key-type-policy, and root-key changes as explicit
+  identity migrations rather than silently changing a namespace default.
+- **KeyType selection:** decide whether the ergonomic API selects `Integer`,
+  `Text`, or `Bytes` per operation, fixes a namespace default with an advanced
+  override, or normalizes a smaller set of native types. The key format keeps
+  the typed identities distinct while this API decision remains open.
+
+### 6.3 Transport and server-authentication policy
+
+Maintained clients support both protocol v1 transport bindings:
+
+- QUIC over TLS 1.3, with one client-initiated bidirectional stream per lane;
+- TLS 1.3 over TCP, with one TLS connection per lane.
+
+Both bindings use the same `openkache/1` ALPN and exactly the same request and
+response frame bytes. The maintained client may try its configured transport
+fallback order, but it MUST NOT invent a transport or lane identifier in a
+frame. TCP plaintext is not a conforming transport.
+
+The TLS 1.3 handshake MUST negotiate the approved post-quantum/traditional
+hybrid key agreement `X25519MLKEM768`. Classical-only X25519 fallback is not
+permitted. This is a key-agreement requirement; it does not require a
+post-quantum certificate signature.
+
+Server certificate presentation is always part of the TLS handshake. Whether
+the client verifies the certificate chain and server identity is
+deployment-configurable. Disabling verification still provides passive
+eavesdropping protection and encryption, but it does not provide active
+MITM protection; such a connection MUST NOT be treated as an authenticated
+server endpoint. Requiring a user-supplied certificate file is not a
+maintained-client requirement; system trust, generated development identities,
+or another deployment trust policy may be used.
+
+Client certificate authentication (mTLS) is optional and deployment-configured.
+It is not required for ordinary data operations. A deployment MAY require it
+for administrative or privileged operations. When mTLS is enabled, server
+authentication is also required. Omitting mTLS never disables TLS 1.3 or the
+hybrid key agreement.
+
+### 6.4 Compression policy
 
 Automatic compression is enabled by default for formatted writes in the
 OpenKache-maintained clients. The maintained default policy is:
@@ -335,7 +389,7 @@ default. Bindings expose an explicit opt-out and MAY expose tuning controls for
 advanced callers. Exact Item ID operations do not apply formatted-value
 compression.
 
-### 6.3 Value-key rotation
+### 6.5 Value-key rotation
 
 The value format owns key IDs, key selection, protection algorithms, and
 envelope validation. Maintained clients implement only the operational

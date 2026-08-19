@@ -1,13 +1,15 @@
 # OpenKache client core
 
 `openkache-client-core` is the reusable Rust engine behind OpenKache language
-bindings. Its current APIs are transitional while the draft key, value, and
-variable Item ID contracts are being implemented; this README describes the
-current crate surface, not a conformance claim for those drafts.
+bindings. The crate currently contains transitional APIs while the draft key,
+value, and variable Item ID contracts are being implemented. This README
+separates that current surface from the target draft; neither section alone is
+a conformance claim for the pre-freeze contracts.
 
 ## Purpose
 
-The core handles connection lifecycle, TLS, retries, stream concurrency,
+The core handles connection lifecycle, TLS, transport fallback, lane
+concurrency,
 protocol operations, application-key protection, compression, encryption, and
 formatted-value processing. Language adapters convert native types and
 delegate to this crate.
@@ -22,8 +24,8 @@ The main API layers are:
   and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
-- the optional `ffi` feature, which exports the stable C ABI used by C, C++,
-  Python, ctypes, and other synchronous native adapters.
+- the optional `ffi` feature, which exports the versioned public C ABI used by
+  C, C++, Python, ctypes, and other synchronous native adapters.
 
 The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
 adapter depends on this core directly.
@@ -47,6 +49,21 @@ adapter depends on this core directly.
 This README intentionally does not specify protected-value bytes. Consult the
 client index for implemented-format status and the value-format specification
 for the v1 contract.
+
+## Current implementation and draft target
+
+The current implementation remains the compatibility reference while the
+draft documents are migrated into the generated core contract. In particular,
+some current Rust and legacy adapter paths still use fixed-width Item IDs or a
+legacy value container. They MUST NOT be treated as evidence that the draft
+variable-length wire, key, or value profiles are already implemented.
+
+The target core will expose the same raw/formatted operation families with
+`0..=32`-byte Item IDs, the key mapping profiles, the value envelope, and the
+shared lane/request engine described by the linked specifications. A migration
+may change constructors and generated ABI declarations; the public C ABI is
+versioned rather than an unqualified promise that every transitional symbol
+will remain unchanged.
 
 ## Commands
 
@@ -87,10 +104,11 @@ let outcome = client
 ```
 
 `ItemId::from_bytes` preserves the current fixed-array API. `ItemId::from_slice`
-validates and copies a dynamic buffer. Neither hashes the supplied bytes. The
-key-format specification defines the target `0..=32`-byte Exact Item ID and
-formatted-key behavior; this README describes only the current Rust API
-surface until that migration is complete.
+validates and copies a dynamic input according to the current implementation.
+Neither hashes the supplied bytes. The key-format specification defines the
+target empty, short, and 32-byte Exact Item IDs and formatted-key behavior;
+this example describes the current Rust API surface until that migration is
+complete.
 
 `ValueCodec` composes the value model with the formatted-value envelope. The
 value model is the source of truth for structured-value semantics and the
@@ -116,13 +134,20 @@ trust and derive the TLS server name from the host. Builders accept a
 pre-resolved endpoint, explicit trust roots, mutual TLS identity, deadlines,
 retry attempts, compression policy, and `max_in_flight`.
 
+The target draft adds QUIC/TLS-over-TCP fallback and deployment-configurable
+server-identity verification without changing frame bytes. Both target
+transports require TLS 1.3 with `X25519MLKEM768`; plaintext TCP is not
+supported. Those target settings are not yet a claim about the transitional
+builder surface.
+
 `Endpoint` requires a positive port. A pre-resolved socket address also
 requires an explicit certificate server name because the network destination
 does not provide one.
 
 ## Core components
 
-- `src/lib.rs` provides raw lifecycle, retries, operations, and stable errors.
+- `src/lib.rs` provides raw lifecycle, retries, operations, and versioned
+  errors.
 - `src/operation_request.rs` maps client domain values to generated numeric
   request fields, selects the generated compact layout, and delegates framing
   to the shared protocol encoder.
@@ -132,7 +157,7 @@ does not provide one.
   transport attempt.
 - `src/protocol.rs` owns client-domain protocol values and semantic response
   projection without redefining request framing.
-- `src/transport.rs` manages reusable stream lanes and backend-neutral
+- `src/transport.rs` manages reusable transport lanes and backend-neutral
   deadlines and writes the ordered segments exposed by `OwnedRequestFrame`.
 - `src/config.rs` provides public transport and TLS configuration wrappers.
 - `src/key.rs` handles exact item IDs and data-protection keys.

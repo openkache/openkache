@@ -23,17 +23,23 @@ uppercase.
 
 Version 1 specifies:
 
-- QUIC application-protocol negotiation;
-- the request/response stream state machine;
+- the common request/response frame contract over QUIC and TLS-over-TCP;
+- transport negotiation and transport-specific lane lifecycle;
+- the request/response lane state machine;
 - operation-specific request frame layouts;
 - canonical unsigned `vu128` integers;
 - response frame layout;
 - opcode, flag, and status assignments;
 - namespace lifecycle, name, policy, and revision contracts;
 - item ID, value, expiration, eviction, and payload constraints;
-- request-ID correlation, stream ordering, and out-of-order responses;
+- request-ID correlation, lane ordering, and out-of-order responses;
 - malformed-frame handling and admission rejection;
-- mutation error outcomes and persistence-barrier semantics.
+- mutation error outcomes.
+
+`SYNC` is a private server-maintenance operation used by benchmark and storage
+tooling. It is not part of the public client API or the public v1 operation
+conformance surface; its private persistence contract is documented in its
+own subsection below.
 
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
@@ -48,17 +54,37 @@ Item expiration and eviction eligibility are part of the `SET` contract below.
 Namespace lifecycle and policy administration are carried by the
 namespace-management requests defined below.
 
+This document has four normative layers:
+
+1. **Wire grammar:** transport-independent frame bytes, `vu128`, field order,
+   limits, and status assignments.
+2. **Public operation semantics:** `PING`, `GET`, `SET`, `DELETE`, `STATS`, and
+   namespace management.
+3. **Namespace semantics:** namespace identity, policy, revisions, TTL, and
+   eviction behavior. These are server behavior contracts carried by public
+   frames, not additional frame fields.
+4. **Private maintenance semantics:** the optional server-only `SYNC`
+   operation. Public clients are not required to expose or implement it.
+
+The wire grammar is the compatibility boundary. A server implementation MAY
+organize the semantic layers differently, but MUST preserve the wire rules and
+public operation behavior when claiming v1 conformance.
+
 ## Terminology
 
 - **Byte**: Exactly 8 bits.
-- **Connection**: One QUIC connection negotiated for OpenKache protocol v1.
-- **Lane**: One client-initiated bidirectional QUIC stream.
+- **Connection**: One negotiated transport connection for OpenKache protocol
+  v1. A QUIC connection may contain multiple lanes; a TLS-over-TCP connection
+  contains exactly one lane.
+- **Lane**: The unit of ordered request processing. On QUIC it is one
+  client-initiated bidirectional stream. On TLS-over-TCP it is the entire TLS
+  connection.
 - **Frame**: One complete request or response encoded as specified below.
 - **Logical request**: One request frame and its correlated response frame.
 - **Request ID**: A client-selected canonical `vu128` token carried in a
   request and echoed in its response. The server treats its value as opaque.
-- **Stream order**: The order in which complete request frames occur on one
-  lane. It is independent of request-ID values and response order.
+- **Lane order**: The order in which complete request frames occur on one lane.
+  It is independent of request-ID values and response order.
 - **In-flight request**: A complete request that has not yet received its
   response.
 - **Item ID**: An opaque identifier of `0..=32` bytes used for cache equality.
@@ -85,18 +111,21 @@ namespace-management requests defined below.
   LRU or LFU) applied only to items whose eviction policy is `Evictable`.
 - **Mutation linearization point**: The instant at which a `SET`, `DELETE`, or
   namespace mutation takes effect atomically.
-- **SYNC linearization point**: The instant at which a `SYNC` operation fixes
-  the set of preceding mutations covered by its persistence barrier.
 - **Unknown outcome**: The client cannot determine from the protocol whether a
-  mutation or `SYNC` took effect because no response was received.
+  mutation took effect because no response was received.
 
 All lengths count bytes, not characters or code points. Hexadecimal bytes are
 written as two uppercase digits, such as `7F` or `E0`.
 
 ## Transport and version negotiation
 
-Protocol v1 runs over QUIC and therefore uses TLS 1.3 for transport security.
-The exact ALPN protocol identifier is the 11-byte ASCII string:
+Protocol v1 supports both QUIC and TLS 1.3 over TCP. Both transport bindings
+carry exactly the same request and response frame bytes. No frame contains a
+transport ID, lane ID, or transport-specific multiplexing header. TCP
+segments, TLS records, socket reads, and socket writes have no frame-boundary
+meaning. TCP plaintext is not a conforming v1 transport.
+
+Both bindings use the same 11-byte ASCII ALPN identifier:
 
 ```text
 openkache/1
@@ -118,6 +147,11 @@ TLS authenticates the negotiated ALPN as part of the handshake transcript. The
 minimum-version rule protects a client from an authenticated endpoint that
 deliberately selects an older protocol.
 
+Every conforming transport MUST use TLS 1.3 and MUST negotiate the approved
+post-quantum/traditional hybrid key agreement `X25519MLKEM768`. Classical-only
+X25519 fallback is not permitted. This is a key-agreement requirement; it does
+not require the server certificate signature itself to be post-quantum.
+
 The ALPN negotiation selects the connection's frame version. Frames contain no
 version field. Once v1 negotiation succeeds, every OpenKache frame on the
 connection uses this specification. During the pre-freeze draft period,
@@ -128,25 +162,27 @@ incompatible framing or field meaning requires a different ALPN identifier.
 
 Peers without a common ALPN identifier MUST fail negotiation.
 
-Authentication policy is deployment-specific. Production deployments may
-require mutual TLS and may use the authenticated client identity to authorize
-administrative operations. No authentication field appears in a v1 frame.
+The server MUST present a certificate during the TLS handshake. Whether the
+client verifies the certificate chain and server identity is
+deployment-configurable. Disabling client-side verification still provides
+encryption and passive eavesdropping protection, but does not provide active
+MITM protection. A client MUST NOT treat such a connection as an authenticated
+server endpoint. A deployment need not require users to provide a certificate
+file; system trust or an automatically generated development identity may be
+used.
 
-## Stream model
+Client certificate authentication is optional and deployment-configurable.
+Ordinary data operations do not require mTLS by default. A deployment MAY
+require an authenticated client identity for administrative or privileged
+operations. When client authentication is enabled, server authentication is
+also required. Omitting mTLS MUST NOT disable TLS 1.3 or the hybrid key
+agreement.
 
-Only client-initiated bidirectional QUIC streams carry protocol frames.
-Server-initiated unidirectional streams have no protocol meaning and MUST be
-consumed and discarded by the client without parsing protocol frames. The
-server MUST NOT initiate a bidirectional protocol stream; a client that
-receives one MUST reset it without parsing protocol frames.
+## Lane model
 
-QUIC stream read and write boundaries have no protocol meaning. A frame MAY be
-split across any number of reads or writes, and one read MAY contain bytes from
-more than one frame.
-
-Version 1 supports request pipelining (multiple outstanding requests) and
-request/response multiplexing within one lane. Each lane carries a sequence of
-logical requests. A request and its response share the request ID:
+Version 1 supports request pipelining (multiple outstanding requests) on every
+lane. Each lane carries a sequence of logical requests. A request and its
+response share the request ID:
 
 ```text
 client                                  server
@@ -181,7 +217,7 @@ The following rules apply:
    be used as an ordering key. For example, a `DELETE` followed by a `SET` for
    the same item on one lane MUST take effect as delete-then-set even if the
    `SET` response is sent first.
-5. The server MAY send responses in any order relative to stream order. For
+5. The server MAY send responses in any order relative to lane order. For
    every complete, well-formed request it admits, it MUST send exactly one
    response, including an admission or semantic error, unless the lane or
    connection fails before a response can be sent. A malformed frame is not a
@@ -189,50 +225,73 @@ The following rules apply:
 6. Response frames MUST be emitted as contiguous byte sequences. Response
    bytes from two frames MUST NOT be interleaved.
 7. A server MUST NOT send unsolicited responses.
-8. After a response, the lane MAY continue carrying requests while both stream
-   directions remain open. A client that finishes its send direction MUST NOT
-   send another request on that lane; the server continues responses for
-   already admitted requests and then finishes its send direction.
+8. After a response, the lane MAY continue carrying requests while both
+   directions remain open.
 9. A client MAY use multiple lanes concurrently. Requests on different lanes
-   have no client-visible relative ordering guarantee, except where an
-   operation explicitly establishes a namespace-scoped barrier such as
-   `SYNC`, namespace policy update, or namespace deletion.
+   have no client-visible relative ordering guarantee. Namespace policy update
+   and deletion define only their operation-specific atomic race rules; they do
+   not create a general cross-lane response or execution order.
+10. A lane request direction may be closed only by the transport-specific
+    half-close rules below. After a valid request-direction close, the server
+    MUST admit no further requests and MUST complete responses for requests
+    already admitted.
 
-10. A client FIN is valid only at a request-frame boundary. After receiving a
-    valid FIN, the server MUST admit no further requests on that lane, MUST
-    complete responses for requests already admitted, and MUST then finish its
-    send direction. A FIN that arrives in the middle of a frame is malformed.
-11. QUIC stream cancellation is directional:
-    - A client `RESET_STREAM` terminates the request direction. The server
-      MUST admit no further requests, MUST complete responses for requests
-      already admitted, and MUST then finish its response direction.
-    - A server `RESET_STREAM` terminates the response direction. The client
-      MUST send no further requests on that lane. Outstanding requests without
-      responses have an `unknown` outcome, and no further protocol response is
-      guaranteed.
-    - A client `STOP_SENDING` asks the server to stop the response direction.
-      The server MUST stop sending protocol responses, and the client MUST
-      send no further requests on that lane.
-    - A server `STOP_SENDING` asks the client to stop the request direction.
-      The client MUST stop sending requests, and the server MUST complete
-      responses for requests already admitted.
-    A response-direction reset or stop makes every outstanding mutation or
-    `SYNC` outcome unknown. The protocol does not prescribe replay. If
-    cancellation interrupts a frame, the receiver MUST discard the incomplete
-    frame; this is not malformed framing, and other lanes remain usable.
+### QUIC transport profile
 
-If a receiver detects malformed framing, it MUST stop processing the
-connection and close it with application error code `0x01`
-(`MALFORMED_FRAME`). It MUST NOT scan for a possible next frame, and it MUST
-NOT send an error response for the malformed frame. All lanes on that
-connection become unusable. A client MUST discard all in-flight requests on
-every lane that terminates this way. A complete frame whose fields are
-well-delimited but fail operation validation is not malformed framing; it MAY
-receive the applicable error response.
+Only client-initiated bidirectional QUIC streams carry protocol frames.
+Server-initiated unidirectional streams have no protocol meaning and MUST be
+consumed and discarded by the client without parsing protocol frames. The
+server MUST NOT initiate a bidirectional protocol stream; a client that
+receives one MUST reset it without parsing protocol frames.
+
+QUIC stream read and write boundaries have no protocol meaning. A frame MAY be
+split across any number of reads or writes, and one read MAY contain bytes from
+more than one frame.
+
+A client FIN received at a request-frame boundary is a normal
+request-direction half-close. The server MUST admit no later request, MUST
+complete responses for already admitted requests, and MUST then finish its
+send direction. A FIN received in the middle of a request frame is malformed.
+
+QUIC `RESET_STREAM` and `STOP_SENDING` are directional lane cancellation:
+
+- a client `RESET_STREAM` terminates the request direction;
+- a server `RESET_STREAM` terminates the response direction;
+- a client `STOP_SENDING` asks the server to stop the response direction; and
+- a server `STOP_SENDING` asks the client to stop the request direction.
+
+The affected endpoint MUST stop using that direction as specified by QUIC.
+Outstanding mutations without responses have an `unknown` outcome. If
+cancellation interrupts a frame, the receiver MUST discard the incomplete
+frame; it is not malformed framing, and other lanes remain usable.
+
+### TLS-over-TCP transport profile
+
+A TLS-over-TCP connection carries exactly one lane. TCP segment, TLS record,
+socket read, and socket write boundaries have no protocol meaning. Frames MAY
+be split across reads and a read MAY contain more than one frame.
+
+Normal request-direction half-close is expressed only by TLS `close_notify`.
+A `close_notify` received at a request-frame boundary ends that direction; the
+server MAY continue sending responses for already admitted requests. A
+`close_notify` in the middle of a frame is a truncated/malformed frame.
+
+TCP FIN/EOF without TLS `close_notify` is an unclean transport failure even
+when it happens to coincide with a frame boundary. TCP RST, a TLS error alert,
+and any other unclean TLS close terminate the lane. Outstanding mutations
+without responses have an `unknown` outcome.
+
+If a receiver detects malformed framing, it MUST stop processing the affected
+connection. On QUIC it closes the connection with application error code
+`0x01` (`MALFORMED_FRAME`). On TLS-over-TCP it closes the TLS/TCP lane without
+an error response. The receiver MUST NOT scan for a possible next frame. A
+complete frame whose fields are well-delimited but fail operation validation
+is not malformed framing; it MAY receive the applicable error response.
 
 `0x01` (`MALFORMED_FRAME`) is the QUIC application error code for a
-connection-fatal framing or response-meaning failure. It does not carry a
-protocol response frame.
+connection-fatal framing or response-meaning failure. TLS-over-TCP reports the
+same condition by closing the lane because it has no QUIC application error
+code.
 
 The request ID is a correlation token only. It is not a nonce, ordering value,
 deduplication key, replay-protection token, or idempotency key. If a lane fails
@@ -415,11 +474,20 @@ MUST NOT scan for a possible next frame.
 | `03` | `SET` | opcode + request ID + namespaceId (8 bytes) + packed(condition, expirationMode, evictionMode) + u8 itemId length + vu128 value length + if expirationMode=explicit_ttl: vu128(ttlMilliseconds) + itemId + value | empty | `raw_bytes` | — |
 | `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 itemId length + itemId | empty | `raw_bytes` | — |
 | `05` | `STATS` | opcode + request ID + namespaceId (8 bytes) | opaque payload | — | — |
-| `06` | `SYNC` | opcode + request ID + namespaceId (8 bytes) | empty | — | — |
+| `06` | private `SYNC` | opcode + request ID + namespaceId (8 bytes) | empty | — | — |
 | `07` | `NAMESPACE_OPEN` | opcode + request ID + packed(createIfMissing) + u8 length + name + if createIfMissing=true: packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
 | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + request ID + namespaceId (8 bytes) + expectedRevision (8 bytes) + packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
 | `09` | `NAMESPACE_DELETE` | opcode + request ID + constant 0x00 + namespaceId (8 bytes) + expectedRevision (8 bytes) | empty | — | — |
 <!-- openkache:generated-protocol-operation-table:end -->
+
+The operation table is a generated view of the machine-readable protocol
+model. During this pre-freeze migration, this document remains the target
+source of truth and the model may temporarily lag. After migration, the model
+becomes the source of truth for opcode assignments, field order, wire-width
+annotations, and generated client constants; this prose remains the source of
+truth for semantic explanations and rejection rules. A release or conformance
+check MUST fail when the generated table and finalized model differ.
+Hand-editing the generated table alone does not change the protocol contract.
 
 ### `SET` flags
 
@@ -448,13 +516,15 @@ management uses the same request/response protocol as data operations; it does
 not require a separate control-plane transport.
 
 `namespace_id` is a fixed eight-byte `u64be` in the numeric range
-`1..=2^64 - 1`. The server assigns it; it is an opaque, stable server-wide
-identity. Once assigned, a `namespace_id` MUST NOT be reused for a different
-namespace within the deployment's durable identity domain, including after
-deletion, restart, recovery, or replica replacement. Recovery and snapshot
-procedures MUST preserve that guarantee; a server that cannot do so MUST NOT
-start as a v1 endpoint. `0` is reserved and MUST be rejected. The ID is carried per request
-rather than bound to a lane, so a lane may be reused for different namespaces.
+`1..=2^64 - 1`. The server assigns it; it is an opaque, stable identity within
+the server's **namespace identity domain**. The domain is deployment state,
+not a wire field. Within one domain, a server MUST NOT reuse an ID for a
+different namespace after deletion, restart, recovery, or replica replacement.
+Durable allocator state and snapshots MUST preserve that rule. An operator that
+restores an independent fork or snapshot as a new deployment MUST establish a
+new identity domain rather than merging its allocator history invisibly.
+`0` is reserved and MUST be rejected. The ID is carried per request rather
+than bound to a lane, so a lane may be reused for different namespaces.
 Clients do not allocate namespace IDs; they treat the server-returned ID as
 opaque and MUST NOT synthesize or recycle one.
 
@@ -500,11 +570,11 @@ Recreating a deleted name, if allowed by the deployment, creates a new
 namespace identity and therefore receives a new `namespace_id`.
 
 `NAMESPACE_OPEN`, `NAMESPACE_UPDATE_POLICY`, and `NAMESPACE_DELETE` for one
-namespace name participate in a server-side namespace operation sequence.
-`NAMESPACE_OPEN` resolves or creates the name at its sequence position;
-`CreateIfMissing` creation is atomic with that resolution. Requests that
-address a namespace ID use the sequence position of the namespace identity
-resolved at admission.
+namespace name are serialized for name resolution and lifecycle changes.
+`NAMESPACE_OPEN` resolves or creates the name atomically. Requests that address
+a namespace ID are ordered only by the lane rules and by the atomic
+operation-specific condition they use; v1 does not require one global
+cross-lane order for ordinary data operations.
 
 An item is identified by the pair `(namespace_id, item_id)`. The same Item ID
 bytes and length in two namespaces denote two independent items.
@@ -532,18 +602,20 @@ existing policy. A newly created namespace starts at revision `1`.
 | 2–7 | `FC` | Reserved; MUST be zero |
 
 Version 1 accepts only the `IfEmpty` wire value. `IfEmpty` means that no live
-items remain at the delete linearization point. The server MUST establish a
-namespace deletion barrier that admits no later namespace operation, drains
-only requests admitted before the barrier, checks the revision and live-item
-count, and then either removes the namespace identity or returns
+items remain at the delete linearization point. The server MUST serialize the
+delete with namespace lifecycle operations, check the revision and live-item
+count atomically, and either remove the namespace identity or return
 `NamespaceNotEmpty` without changing it. Requests that address the deleted
-namespace ID after a successful deletion receive `NamespaceNotFound`. Requests
-that arrive while the barrier is pending are not admitted until it resolves.
-If the deletion returns `NamespaceNotEmpty`, those requests may then proceed
-normally. If it succeeds, namespace-ID requests receive `NamespaceNotFound`;
+namespace ID after a successful deletion receive `NamespaceNotFound`.
 `NAMESPACE_OPEN` without `CreateIfMissing` does the same, while
 `NAMESPACE_OPEN` with `CreateIfMissing` may atomically create a new namespace
 identity for the name.
+
+A data mutation concurrent with deletion linearizes either before or after the
+delete check. If it linearizes before, its live item participates in the
+`IfEmpty` result. If deletion succeeds first, the mutation returns
+`NamespaceNotFound` and makes no change. This atomic race rule does not require
+draining all lanes or assigning every namespace operation one global sequence.
 Namespace IDs are never reused within the persistent deployment lifetime.
 
 `revision` and `expected_revision` are fixed eight-byte `u64be` values, not
@@ -735,6 +807,21 @@ If a successful mutation expires before its response is delivered, the server
 still reports the mutation's success outcome. If a conditional `SET` fails,
 its TTL is not applied.
 
+For persistence and recovery, a server MUST persist enough information to
+reconstruct the expiration deadline without extending the item merely because
+the process restarted. The recommended representation is an absolute
+deployment-time expiration timestamp plus a monotonic runtime deadline. On
+restart, the server reconstructs the monotonic deadline from the persisted
+absolute timestamp and current deployment clock. An item whose deadline has
+already passed is logically absent immediately after recovery. Snapshot or
+replica restore MUST document whether it preserves the original deployment
+clock domain; restoring a snapshot into a new identity domain MUST NOT silently
+extend TTLs.
+
+Physical deletion of expired items is an implementation detail. Logical
+presence, conditional checks, and `NAMESPACE_DELETE` live-item counting MUST
+use the deadline rule above even when cleanup is deferred.
+
 ## Operation semantics
 
 The examples below use request ID `0`, whose canonical encoding is the single
@@ -786,57 +873,47 @@ item_id:item_id_len`.
 
 `STATS` has the request layout `05 | request_id:vu128 | namespace_id:u64be`.
 
-- Authorized success: `Ok` with a UTF-8 JSON object containing a `storage`
-  string and a `workers` array of strings.
+- Authorized success: `Ok` with an implementation-defined diagnostic payload.
 - Unauthorized: `Forbidden` with an optional diagnostic payload.
 
-The JSON object is an operator diagnostic snapshot of the server and its
-storage workers. Version 1 does not require the `storage` or `workers` values
-to be filtered to the requested namespace; `namespace_id` scopes the request,
-checks that the namespace exists for an authorized request, and provides the
-authorization boundary.
-Per-namespace diagnostic members MAY be added in future responses. Clients
-MUST ignore unknown object members and MUST NOT depend on individual diagnostic
-members unless a future version defines a stable schema. The JSON payload
-remains subject to the 64 MiB response limit.
+The diagnostic payload is opaque to the protocol and is intended for
+operators. A server MAY use UTF-8 JSON, but v1 does not require a particular
+format or member. Clients MUST NOT parse diagnostic fields as a stable
+programmatic interface. `namespace_id` scopes the request, checks that the
+namespace exists for an authorized request, and provides the authorization
+boundary. The payload remains subject to the 64 MiB response limit.
 
-### `SYNC`
+### Private `SYNC` maintenance operation
+
+`SYNC` is not part of the public v1 client API. The server may retain it as a
+private benchmark/storage operation, and public clients MUST NOT expose it as a
+normal cache method.
 
 An implementation MAY perform the authorization check before namespace lookup.
 For an unauthorized caller, `Forbidden` MAY therefore mask whether the supplied
 namespace ID exists. An authorized request for a missing namespace returns
 `NamespaceNotFound`.
 
-`SYNC` has the request layout `06 | request_id:vu128 | namespace_id:u64be`.
+The private request layout is
+`06 | request_id:vu128 | namespace_id:u64be`.
 
-`SYNC` is a namespace-wide storage persistence barrier. Its linearization point
-is the point at which the namespace's operation sequence admits the barrier.
-All mutations to that namespace that linearized before that point are covered
-by the barrier. Mutations that linearize after that point are not required to be
-included.
+The operation is a namespace-wide storage barrier. Its linearization point is
+the point at which the namespace's operation sequence admits the barrier. All
+mutations to that namespace that linearized before that point are covered.
+Mutations that linearize after that point are not required to be included.
 
-A successful response is sent only after the configured persistence operation
-for the namespace completes for every mutation covered by the barrier. The
-configured persistence operation is deployment-defined, but a successful
-response MUST mean that the deployment's configured durability guarantee for
-those mutations has been established. The stream-order rule prevents an
-earlier mutation on the same lane from overtaking `SYNC` in execution. An
-earlier mutation's response may still be emitted after the `SYNC` response.
-Requests on other lanes are ordered by the namespace's server-side operation
-sequence; requests concurrent with the barrier may linearize on either side of
-it. A successful `SYNC` response is not a response ordering fence for later
-requests.
+A successful response is sent only after all covered pending writes have been
+sent to disk. This is a storage visibility barrier for benchmark and server
+maintenance use: a later read MUST be able to use the durable storage state
+instead of relying on a pending-write memory buffer. It is not a public
+durability-level negotiation API.
 
-If the persistence operation cannot establish that guarantee, the server MUST
-close the connection without an error response; the outcome of `SYNC` is then
-unknown.
+If the disk barrier cannot be established, the server MUST close the lane
+without an error response; the outcome of the private operation is unknown.
 
 - Authorized success: `Ok` with an empty payload, sent only after the barrier
   completes.
 - Unauthorized: `Forbidden` with an optional diagnostic payload.
-
-Protocol v1 does not express selectable durability levels. The storage and
-deployment durability contract is outside the frame protocol.
 
 As with `STATS`, an implementation MAY authorize before looking up the
 namespace, so `Forbidden` may mask a missing namespace. An authorized request
@@ -880,13 +957,12 @@ deployment-specific because v1 has no owner or account field. A successful
 response is `Ok` with the updated `namespace_descriptor` payload. A revision
 mismatch returns `Conflict` and makes no policy change.
 
-`NAMESPACE_UPDATE_POLICY` participates in the namespace operation sequence.
-Requests admitted before the policy update retain their earlier sequence
-position; requests admitted after it observe the new policy. A request
-concurrent with the update may linearize on either side according to that
-sequence. The existence check, `expected_revision` check, policy replacement,
-and revision increment are one atomic action at the policy update's
-linearization point.
+`NAMESPACE_UPDATE_POLICY` is serialized with other lifecycle changes for the
+same namespace name. The existence check, `expected_revision` check, policy
+replacement, and revision increment are one atomic action at the policy
+update's linearization point. A concurrent `SET` resolves inherited policy at
+its own mutation linearization point; it is not required to participate in a
+global cross-lane namespace sequence.
 
 Policy changes apply only to future `SET` operations. Existing items retain the
 expiration deadline and resolved eviction policy that were stored when they
@@ -968,7 +1044,11 @@ range are not implicitly accepted as errors; they remain malformed. Error
 payloads MAY be empty or MAY contain an operator-facing diagnostic. If present,
 the diagnostic SHOULD be UTF-8. Diagnostic text is not a stable programmatic
 interface; clients MUST branch on the status byte rather than parsing error
-text.
+text. A client MUST preserve a diagnostic as opaque bytes when it does not
+decode as UTF-8 and MUST NOT expose it as a trusted server message without
+application policy. Servers SHOULD omit secrets, credentials, certificate
+material, request values, and internal filesystem paths from diagnostics.
+Diagnostics are subject to the response payload limit.
 
 Every response, including an error response, carries the request ID for its
 complete request. `Overloaded` is a request-level rejection: the server MUST
@@ -977,11 +1057,11 @@ complete rejected body before sending the response, and the lane MAY continue
 afterward. If it cannot preserve the next frame boundary, it MUST close the
 connection without sending an error response.
 
-For a mutating operation (`SET`, `DELETE`, `SYNC`, namespace creation, policy
-update, or namespace deletion), an error response MUST guarantee that the
-mutation or persistence barrier did not take effect. If the server cannot
-establish that guarantee, it MUST close the connection without an error
-response, leaving the operation outcome unknown.
+For a mutating operation (`SET`, `DELETE`, namespace creation, policy update,
+or namespace deletion), an error response MUST guarantee that the mutation did
+not take effect. If the server cannot establish that guarantee, it MUST close
+the connection without an error response, leaving the operation outcome
+unknown.
 
 ## Response contract by request
 
@@ -993,8 +1073,7 @@ For a valid request, the following are the domain success and result statuses:
 | `GET` | `Ok`, `NotFound` | Hit: exact value; miss: empty |
 | `SET` | `Created`, `Replaced`, `NotStored` | Always empty |
 | `DELETE` | `Deleted`, `NotFound` | Always empty |
-| `STATS` | `Ok`, `Forbidden` | `Ok`: required JSON object; `Forbidden`: optional diagnostic |
-| `SYNC` | `Ok`, `Forbidden` | `Ok`: empty; `Forbidden`: optional diagnostic |
+| `STATS` | `Ok` | Opaque diagnostic |
 | `NAMESPACE_OPEN` | `Ok`, `Created` | Namespace descriptor |
 | `NAMESPACE_UPDATE_POLICY` | `Ok` | Updated namespace descriptor |
 | `NAMESPACE_DELETE` | `Deleted` | Always empty |
@@ -1011,13 +1090,17 @@ Common error statuses MAY be returned only when their stated condition applies:
 | `NoCapacity` | `SET` that cannot be admitted without evicting protected items |
 | `PolicyConflict` | `SET` that selects a disallowed item-policy override |
 | `Conflict` | `NAMESPACE_UPDATE_POLICY` and `NAMESPACE_DELETE` revision mismatch |
-| `NamespaceNotFound` | Any request addressing a missing namespace |
+| `NamespaceNotFound` | Any public request addressing a missing namespace |
 | `NamespaceNotEmpty` | `NAMESPACE_DELETE` whose deletion barrier finds live items |
 
-`NamespaceNotFound` includes `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`, as
-well as namespace-management operations that address a missing namespace.
-These domain and common errors guarantee that the requested mutation or
-barrier was not applied.
+`NamespaceNotFound` includes `GET`, `SET`, `DELETE`, and `STATS`, as well as
+namespace-management operations that address a missing namespace. These
+domain and common errors guarantee that the requested mutation was not
+applied.
+
+The private `SYNC` operation uses `Ok`, `Forbidden`, `NamespaceNotFound`, and
+the common transport/error statuses only when the private server interface
+enables it. Public clients MUST NOT depend on its status applicability.
 
 A client receiving a response whose request ID does not identify one of its
 outstanding requests on that same lane, or whose status is neither an allowed
@@ -1082,6 +1165,32 @@ before allocating or reading the value body. A declared value above either
 limit maps to `TooLarge` for a complete, well-delimited request when the server
 can consume or discard its body without losing the next frame boundary.
 
+### Incremental parser state machine
+
+A conforming parser MUST make the frame boundary explicit in its state, even
+when the transport delivers bytes in arbitrary chunks. The minimum states are:
+
+```text
+NeedOpcode
+  -> NeedRequestId
+  -> NeedOperationPrefix
+  -> NeedOptionalFields
+  -> NeedItemId
+  -> NeedValue                 # SET only
+  -> Complete
+  -> Malformed
+```
+
+`NeedOperationPrefix` MUST parse enough bounded metadata to determine the
+operation and all declared lengths. For `SET`, the parser MUST validate
+`item_id_len`, `value_len`, TTL presence, and policy flags before allocating or
+reading the value body. A declared size above a wire or server limit MAY enter
+`TooLarge` only when the parser can consume exactly the declared body and
+preserve the next frame boundary; otherwise it MUST terminate the lane as
+malformed/truncated according to the transport rules. A body that ends before
+the declared length is always malformed. The parser MUST never search for an
+opcode inside a declared body.
+
 Receiving end-of-stream before a frame is complete is a truncated-frame error.
 The receiver MUST NOT scan for a possible next frame after malformed framing.
 A body shorter than its declared length is malformed. A client that sends a
@@ -1089,7 +1198,9 @@ second request is allowed to do so before receiving the first response, but
 the second request MUST begin exactly at the first frame's boundary.
 If `RESET_STREAM` or `STOP_SENDING` explicitly cancels a direction while a
 frame is incomplete, the receiver MUST discard that incomplete frame under the
-stream-cancellation rules; it is not malformed framing.
+transport-specific cancellation rules; it is not malformed framing.
+TLS `close_notify` during an incomplete frame is malformed; TCP EOF without
+`close_notify` is always an unclean transport failure.
 
 Malformed framing, an unassigned opcode, a non-canonical integer, or a
 truncated body is terminal for the connection: the receiver MUST close the
@@ -1097,11 +1208,11 @@ connection without sending an error response. A semantic validation failure in
 a complete, well-delimited request MAY instead receive `InvalidRequest` or the
 applicable domain error. If a complete operation cannot finish and its outcome
 is known to be unsuccessful, the server MAY return `InternalError`. If a
-mutation or `SYNC` outcome becomes unknown because the server cannot determine
-whether the operation took effect, the server MUST terminate the connection
-without an error response. An unknown outcome caused only by directional stream
-cancellation follows the stream-cancellation rules and does not require
-connection termination.
+mutation outcome becomes unknown because the server cannot determine whether
+the operation took effect, the server MUST terminate the connection without an
+error response. An unknown outcome caused only by a transport-specific
+direction cancellation follows that transport's lane rules and does not
+require additional protocol error data.
 
 ## Unknown outcomes
 
@@ -1110,24 +1221,31 @@ protection, deduplication, idempotency, or a mutation identifier. The protocol
 does not prescribe retry behavior.
 
 If transport or connection failure occurs before a response is received, the
-client must treat the outcome of an outstanding mutation or `SYNC` as unknown.
+client must treat the outcome of an outstanding mutation as unknown. Private
+server maintenance operations use the same rule.
 Whether to issue a new request is an application decision. A new request on a
 new lane is independent even when it reuses the same request ID.
 
 ## Security and resource handling
 
-QUIC protects frames in transit. Opaque values are not automatically
-confidential from the server or from storage; application-level value
-encryption remains a client concern.
+TLS 1.3 protects frames in transit on both conforming transports. The
+`X25519MLKEM768` hybrid key agreement is mandatory; classical-only X25519
+fallback is not allowed. Opaque values are not automatically confidential from
+the server or from storage; application-level value encryption remains a
+client concern. Certificate-chain/server-identity verification is a client
+deployment policy and, when disabled, does not provide active MITM protection.
+Optional mTLS may supply an authenticated client identity for privileged
+operations.
 
 Receivers MUST parse lengths incrementally and enforce the 64 MiB ceiling before
 allocating or reading a complete `SET` value or response payload. Servers
 SHOULD bound aggregate in-flight value memory and MAY apply implementation-local
 backpressure or reject requests with `Overloaded` under resource pressure. The
-protocol does not define a `max_inflight_requests_per_stream` limit; a server
+protocol does not define a `max_inflight_requests_per_lane` limit; a server
 may choose an admission limit, but it MUST preserve request body boundaries and
 return a correlated response for any request it admits. Version 1 does not
-specify a congestion-control algorithm beyond QUIC's transport behavior.
+specify a congestion-control algorithm beyond the selected transport's
+behavior.
 
 Canonical integer enforcement is security-relevant: it prevents multiple wire
 representations of one logical frame and simplifies bounded incremental
@@ -1261,12 +1379,12 @@ For namespace ID `7`, an empty Item ID, and an empty value:
 This is an unconditional `SET` inheriting both namespace policies, with
 an empty Item ID, no TTL field, and `value_len = 0`.
 
-### `DELETE`, `STATS`, and `SYNC`
+### `DELETE`, `STATS`, and private `SYNC`
 
 ```text
 04 00 00 00 00 00 00 00 00 07 03 11 22 33 # DELETE
 05 00 00 00 00 00 00 00 00 07             # STATS
-06 00 00 00 00 00 00 00 00 07             # SYNC
+06 00 00 00 00 00 00 00 00 07             # private SYNC
 ```
 
 ### Namespace management
@@ -1306,27 +1424,45 @@ Delete an empty namespace at an expected revision:
 The first `00` is request ID 0 and the second `00` is the only valid v1
 `delete_flags` value.
 
+The hexadecimal examples above are normative boundary fixtures. A protocol
+implementation SHOULD verify them with an independent frame encoder/decoder
+and MUST include additional cases for split reads, pipelined frames, oversized
+`SET` bodies, truncated bodies, TLS `close_notify`, TCP EOF without
+`close_notify`, and QUIC directional cancellation. Before freeze, generated
+fixtures SHOULD be checked against the machine-readable protocol model so
+opcode/status/layout drift is detected.
+
 ## Implementation conformance checklist
 
 A protocol v1 implementation is not complete unless it:
 
 - negotiates `openkache/1` for these frames;
+- supports both QUIC over TLS 1.3 and TLS-over-TCP over TLS 1.3 with identical
+  frame bytes;
+- requires the `X25519MLKEM768` hybrid key agreement and does not fall back to
+  classical-only X25519;
+- presents a TLS server certificate, while treating client-side identity
+  verification and mTLS as deployment policies;
 - supports the documented multi-version ALPN selection and minimum-version
   rules when it supports more than one protocol version;
 - emits and accepts no frame-level version byte;
-- uses client-initiated bidirectional lanes and permits multiple outstanding
-  requests on each lane;
+- maps one client-initiated bidirectional QUIC stream or one TLS-over-TCP
+  connection to each lane and permits multiple outstanding requests on it;
 - decodes a canonical client-selected `request_id:vu128`, accepts zero and
   every other unsigned 64-bit value, and echoes its exact bytes in the
   response;
 - does not assign request IDs ordering, deduplication, replay, or idempotency
   semantics, and treats uniqueness as a client-side choice;
-- executes complete requests on one lane in stream order while allowing
+- executes complete requests on one lane in lane order while allowing
   correlated responses in a different order;
 - emits each response as one contiguous frame and does not interleave response
   bytes;
-- accepts FIN only at a request-frame boundary and completes responses for
-  admitted requests before finishing its send direction;
+- accepts a QUIC request-direction close only at a request-frame boundary and
+  completes responses for admitted requests before finishing its send
+  direction;
+- accepts a TLS-over-TCP request-direction half-close only through TLS
+  `close_notify`, treats TCP FIN without it as unclean, and keeps responses
+  available for admitted requests;
 - applies the directional `RESET_STREAM` and `STOP_SENDING` rules, with no
   guaranteed responses and an `unknown` outcome for outstanding operations
   after the response direction stops;
@@ -1342,9 +1478,9 @@ A protocol v1 implementation is not complete unless it:
 - uses a one-byte namespace name length and enforces the 255-byte ceiling;
 - starts namespace revisions at one and enforces
   `expected_revision` on policy updates and deletion;
-- never reuses a previously assigned `namespace_id` for a different namespace,
-  including after namespace deletion, restart, recovery, or replica replacement
-  within the persistent deployment lifetime;
+- never reuses a previously assigned `namespace_id` for a different namespace
+  within its namespace identity domain, including after namespace deletion,
+  restart, recovery, or replica replacement;
 - encodes namespace policies and descriptors exactly as specified;
 - accepts only `IfEmpty` for the v1 namespace-delete flags;
 - includes the request ID in every request and response envelope;
@@ -1361,7 +1497,8 @@ A protocol v1 implementation is not complete unless it:
 - compares Item IDs by length and complete byte sequence;
 - validates expiration-mode/TTL correspondence before reading a large
   value;
-- computes TTL from the mutation linearization point using a monotonic clock;
+- computes TTL from the mutation linearization point using a monotonic clock
+  and reconstructs persisted deadlines without extending them on restart;
 - treats `now >= deadline` as expired;
 - resolves inherited namespace policy at `SET` linearization time;
 - enforces namespace override rules and returns `PolicyConflict` without a
@@ -1377,16 +1514,17 @@ A protocol v1 implementation is not complete unless it:
   unassigned opcodes, non-canonical integers, and truncated bodies;
 - returns `Overloaded` only as a correlated request-level rejection when the
   request boundary can be preserved, and does not require a
-  `max_inflight_requests_per_stream` protocol limit;
+  `max_inflight_requests_per_lane` protocol limit;
 - returns `InternalError` only when a complete operation is known to have
-  failed without taking effect; an unknown mutation or `SYNC` outcome
-  terminates the connection without an error response;
+  failed without taking effect; an unknown mutation outcome terminates the
+  connection without an error response;
 - guarantees that a mutating error response means no mutation or barrier
   completion;
 - discards the connection after framing or response-status meaning cannot be
   determined;
 - treats mutation outcomes as unknown when transport fails before a response;
-- implements `SYNC` as the documented storage persistence barrier.
+- implements the private `SYNC` storage barrier only when the server exposes
+  that benchmark/maintenance API.
 
 ## Reference
 

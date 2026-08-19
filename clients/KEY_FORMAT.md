@@ -117,9 +117,12 @@ the `OpaqueBytes` value format and does not mean an Exact Item ID.
 The selected Item ID mapping profile and canonicalization algorithm MUST remain
 fixed for all formatted operations addressing a namespace unless the
 application is intentionally performing an identity migration. `KeyType` MAY
-vary per operation only within that fixed mapping profile. The server does not
-know which profile produced an Item ID; a mismatch can therefore appear only
-as misses or collisions.
+vary per operation only within that fixed mapping profile. Whether maintained
+bindings expose that flexibility directly, require a namespace default, or
+offer both through separate APIs remains an open client-API decision. The
+server does not know which profile or key-type policy produced an Item ID; a
+mismatch can therefore appear only as misses or collisions unless the client
+stores and validates its own namespace profile metadata.
 
 ### 2.2 Typed-key type selection
 
@@ -139,6 +142,12 @@ operation MAY supply its own explicit discriminator.
 
 `Hash` and `CanonicalKeyOrHash` both accept every `KeyType`. A mapping profile
 is not a fourth typed-key type.
+
+The maintained-client default mapping profile is `Hash`. `CanonicalKeyOrHash`
+is an explicit public/benchmark profile for deployments that intentionally
+want short canonical bytes to remain visible when no Item ID root binding is
+used. It MUST NOT become an implicit fallback when a caller has configured
+`Hash`.
 
 ### 2.3 Binding projection requirements
 
@@ -181,7 +190,12 @@ The canonical key encoding follows deterministic CBOR
 
 - Integer encoding uses RFC 8949 preferred serialization, including standard
   bignum tags `2` and `3` when the basic integer types cannot represent the
-  value.
+  value. A non-negative integer greater than `2^64 - 1` uses tag `2` with its
+  minimal unsigned big-endian magnitude. A negative integer less than `-2^64`
+  uses tag `3` with the minimal unsigned magnitude of `-1 - value`, as required
+  by RFC 8949. The magnitude is non-empty for a bignum and MUST NOT contain
+  leading zero bytes. Values representable by the basic CBOR major types MUST
+  use those preferred major-type encodings rather than a bignum tag.
 - `Text` is exact valid UTF-8. `Bytes` is an exact CBOR byte string.
 - Canonical key bytes are exactly one complete CBOR item. Sequences, trailing
   bytes, unknown tags, and non-canonical encodings MUST be rejected.
@@ -378,6 +392,13 @@ requires non-public Item IDs.
 `CanonicalKeyOrHash` ignores `item_id_root_key` and the resulting
 `item_id_derivation_key`. Changing either has no effect on its Item IDs.
 
+Maintained clients SHOULD persist a non-secret namespace profile record
+containing the selected mapping profile, key-type policy, and a fingerprint of
+the root-key configuration. A client MAY later use server-side metadata for
+this purpose, but the v1 wire protocol does not require the server to
+interpret or validate it. Until that design is finalized, a client MUST NOT
+silently change these settings for an existing namespace.
+
 ### 5.3 Hash algorithm and profile compatibility
 
 `Hash` uses BLAKE3 keyed hashing with a 32-byte derived key.
@@ -448,6 +469,19 @@ item_id_derivation_key =
 `Hash` vectors include domain byte `01`. `CanonicalKeyOrHash` fallback vectors
 use an unkeyed BLAKE3 input beginning with domain byte `02`; they ignore the
 namespace and Item ID root parameters above.
+
+These vectors are normative fixtures, not hand-maintained implementation
+examples. A generator MUST:
+
+1. construct the typed key and canonical key bytes using the rules in §§2–3;
+2. derive the root key with BLAKE3 `DERIVE_KEY` using the exact context string;
+3. compute the profile-domain input byte-for-byte; and
+4. compare the resulting Item ID with this document.
+
+Before freeze, the fixture set SHOULD be generated and independently checked
+by at least two implementations. A future machine-readable fixture file MAY
+replace the inline tables, but its values and field meanings MUST remain
+identical.
 
 ### 7.1 Hash Item IDs
 

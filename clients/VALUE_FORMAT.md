@@ -113,16 +113,27 @@ selected protection profile's body. Zero is reserved and MUST be rejected.
 The key ID is public selection metadata, not secret key material. Its canonical
 encoding is at most nine bytes.
 
-`value_envelope_version = 0` is an application-defined envelope profile.
-OpenKache does not define or interpret its body grammar, selectors, transform
-order, authentication inputs, or limits. The maintained client implementation
-does not reject or parse version `0`: when an application explicitly selects
-that profile, the client passes the complete envelope bytes through as
-caller-owned data. It MUST NOT apply the version-1 transforms, rewrite the
-bytes, or infer a version-0 grammar. Validation and interpretation of version
-`0` belong to the application or to its separately configured profile.
+`value_envelope_version = 0` is an opaque application-envelope escape hatch,
+not a second OpenKache value grammar. OpenKache does not define or interpret
+its body grammar, selectors, transform order, authentication inputs, or
+application limits. The maintained client exposes it only through an explicit
+raw-envelope operation:
 
-Versions other than `0` and `1` MUST be rejected. A decoder MUST dispatch
+```text
+put_raw_envelope(complete_bytes)
+get_raw_envelope(...) -> complete_bytes
+```
+
+The client passes complete version-0 bytes through as caller-owned data. It
+MUST NOT apply version-1 transforms, rewrite the bytes, or infer a version-0
+grammar. The outer protocol value-size limit still applies, but version-1
+expanded-payload, Zstandard, selector, keyring, and cryptographic validation
+do not. Validation and interpretation of version `0` belong to the
+application or to its separately configured profile.
+
+Versions other than `0` and `1` MUST be rejected. A structured-value decoder
+MUST reject version `0` with a raw-envelope-required error rather than
+returning a partially interpreted value. A raw-envelope API MUST dispatch
 version `0` to the caller-owned pass-through path or select the version-1
 grammar before interpreting any version-body byte.
 
@@ -275,7 +286,7 @@ during decompression and verify the exact produced size and frame boundary
 afterward.
 
 Whether and when an encoder chooses Zstandard is client policy defined by the
-[Client Implementation Guide](CLIENT.md#62-compression-policy) for maintained
+[Client Implementation Guide](CLIENT.md#64-compression-policy) for maintained
 bindings, not an envelope validity rule. An encoder MUST accurately identify
 the emitted body as either `Uncompressed` or `Zstandard`.
 
@@ -298,7 +309,7 @@ Value keys are application-managed secrets. The all-zero key MUST NOT be used
 as protected key material. Independently rotated keys SHOULD be generated
 independently with a cryptographically secure random source. Keyring lifecycle
 and rotation ordering for maintained bindings are defined by the
-[Client Implementation Guide](CLIENT.md#63-value-key-rotation).
+[Client Implementation Guide](CLIENT.md#65-value-key-rotation).
 
 For protected values, implementations MUST derive the value keys exactly as
 follows. BLAKE3 `DERIVE_KEY` uses the context strings as UTF-8 bytes and
@@ -476,6 +487,13 @@ compression = Uncompressed
 payload = 76 61 6c 75 65  # ASCII "value"
 ```
 
+The vectors are normative fixtures. A generator MUST use the exact profile
+context strings, fixed-width KDF fields, canonical envelope `vu128` fields,
+AAD bytes, transform order, and test nonce rules in §§3–7. Before freeze, the
+fixture set SHOULD be generated and independently verified by at least two
+implementations. A future machine-readable fixture file MAY replace these
+inline tables without changing their values or field meanings.
+
 The common root derivation is:
 
 ```text
@@ -646,7 +664,8 @@ A decoder MUST:
 
 1. Parse one canonical `value_envelope_version:vu128` from the complete
    envelope.
-2. Dispatch the version before parsing its version body.
+2. Dispatch the version before parsing its version body. Version `0` returns
+   through the raw-envelope path and has no v1 body validation.
 3. Parse and validate the selector byte.
 4. Enforce the caller's expected protection policy.
 5. For a protected profile, parse one canonical nonzero value-key ID, look up
@@ -705,8 +724,9 @@ order, key-selection framing, authentication inputs, and limits.
 
 This profile uses `value_envelope_version = 1`. A reader MUST reject a version
 other than `0` or `1` rather than guessing its grammar. Version `0` is
-available only for a complete application-defined envelope profile configured
-out of band; the maintained client passes it through without interpreting it.
+available only through the explicit raw-envelope API for a complete
+application-defined envelope profile configured out of band; the maintained
+client passes it through without interpreting it.
 
 Future OpenKache versions are additive: a newer version may represent values or
 policies that this profile cannot. A client MAY choose the oldest supported
