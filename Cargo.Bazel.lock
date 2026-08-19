@@ -17398,10 +17398,6 @@
               "target": "http"
             },
             {
-              "id": "openkache-value 0.1.0",
-              "target": "openkache_value"
-            },
-            {
               "id": "polyval 0.7.3",
               "target": "polyval"
             },
