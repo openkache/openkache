@@ -1,4 +1,4 @@
-# OpenKache Security Model and Value Protection Profiles (Draft)
+# OpenKache Security Model (Draft)
 
 > **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 >
@@ -6,8 +6,9 @@
 > protected values. It is intentionally the first place to look for what
 > OpenKache protects and what it does not claim to protect.
 
-The [Client Key Format](KEY_FORMAT.md) and [Client Value Format](VALUE_FORMAT.md)
-define the bytes on the wire. The [Wire Protocol](../protocol/SPEC.md) defines
+The [Client Key Format](clients/KEY_FORMAT.md) and
+[Client Value Format](clients/VALUE_FORMAT.md) define the bytes on the wire.
+The [Wire Protocol](protocol/SPEC.md) defines
 transport security and server operations. This document defines the security
 goals, threat model, key assumptions, value-protection profiles, and
 cryptographic details that connect those formats.
@@ -128,7 +129,8 @@ envelope is the newest value.
 
 ## Application-key protection
 
-Application-key mapping is defined by [KEY_FORMAT.md](KEY_FORMAT.md). Its
+Application-key mapping is defined by
+[clients/KEY_FORMAT.md](clients/KEY_FORMAT.md). Its
 security properties are:
 
 - **`NamespaceHash`:** may provide application-key privacy when its root key
@@ -285,12 +287,13 @@ Cryptographic protection does not hide envelope length or other compression
 dependent metadata.
 
 Compression selection is a maintained-client policy in
-[CLIENT.md](CLIENT.md#64-compression-policy), not a cryptographic property of
-the protection profiles.
+[clients/CLIENT.md](clients/CLIENT.md#64-compression-policy), not a
+cryptographic property of the protection profiles.
 
 ## Interoperability vectors
 
-[`fixtures/value_format_v1.json`](fixtures/value_format_v1.json) contains
+[`clients/fixtures/value_format_v1.json`](clients/fixtures/value_format_v1.json)
+contains
 complete AES-SIV-CMAC and AES-GCM-SIV vectors, including derived keys,
 authenticated data, nonce, and envelope bytes. It covers an empty Item ID, a
 three-byte Item ID, the multi-byte `vu128` encoding of key ID `128`, namespace
