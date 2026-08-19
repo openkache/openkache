@@ -4,6 +4,7 @@ members = [
     "protocol",
     "server",
     "clients/core",
+    "clients/value",
     "clients/rust",
     "clients/cli",
     "clients/typescript/native",
@@ -12,6 +13,7 @@ default-members = [
     "protocol",
     "server",
     "clients/core",
+    "clients/value",
     "clients/rust",
     "clients/cli",
 ]

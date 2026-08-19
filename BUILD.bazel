@@ -39,6 +39,16 @@ alias(
 )
 
 alias(
+    name = "openkache_value",
+    actual = "//clients/value:openkache_value",
+)
+
+alias(
+    name = "openkache_client_value",
+    actual = "//clients/value:openkache_value",
+)
+
+alias(
     name = "openkache_client",
     actual = "//clients/rust:openkache_client",
 )
