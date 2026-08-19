@@ -1368,6 +1368,15 @@ impl ClientRootKey {
             .expect("legacy application key exceeds the key input limit")
     }
 
+    /// Returns a zeroizing copy of the root secret used by value keyrings.
+    ///
+    /// The value envelope intentionally derives its compatibility keyring
+    /// directly from the configured root. Keep this accessor crate-private so
+    /// bindings cannot retain key material beyond the core-owned codec.
+    pub(crate) fn master_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
+        Zeroizing::new(self.master_key)
+    }
+
     pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
         Zeroizing::new(self.value_root_key)
     }
