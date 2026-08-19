@@ -1,0 +1,9 @@
+[package]
+name = "openkache-value"
+version = "0.1.0"
+edition.workspace = true
+description = "Owned cross-language value model and StructuredValue-CBOR-v1 codec"
+license = "Apache-2.0"
+
+[dependencies]
+thiserror = "*"
