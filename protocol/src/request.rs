@@ -127,6 +127,7 @@ pub struct RequestFrameHeader {
     encoded_len: usize,
     body_len: usize,
     opcode: Opcode,
+    request_id: u64,
     body_field: u32,
 }
 
@@ -134,6 +135,11 @@ impl RequestFrameHeader {
     /// Returns the operation discriminator.
     pub const fn opcode(self) -> Opcode {
         self.opcode
+    }
+
+    /// Returns the client-selected correlation token carried by this frame.
+    pub const fn request_id(self) -> u64 {
+        self.request_id
     }
 
     /// Returns the number of bytes before the opaque body.
@@ -174,6 +180,7 @@ impl RequestFrameHeader {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpaqueRequestFrame<'a> {
     opcode: Opcode,
+    request_id: u64,
     frame: &'a [u8],
     body_offset: usize,
 }
@@ -223,6 +230,7 @@ impl<'a> OpaqueRequestFrame<'a> {
         }
         Ok(Self {
             opcode: header.opcode,
+            request_id: header.request_id,
             frame,
             // `encoded_len` includes every prefix step, including a
             // variable-length body prefix. Keeping the offset from the
@@ -235,6 +243,11 @@ impl<'a> OpaqueRequestFrame<'a> {
     /// Returns the operation discriminator.
     pub const fn opcode(self) -> Opcode {
         self.opcode
+    }
+
+    /// Returns the client-selected correlation token carried by this frame.
+    pub const fn request_id(self) -> u64 {
+        self.request_id
     }
 
     /// Returns the opaque operation body after the opcode.
@@ -365,7 +378,19 @@ fn decode_request_frame_metadata_progress<const PROJECT_FIELDS: bool>(
     }
     let opcode_byte = prefix[0];
     let opcode = Opcode::try_from(opcode_byte)?;
-    let mut state = RequestFrameDecodeState::new();
+    let Some((request_id, request_id_len)) =
+        crate::decode_varuint(prefix.get(OPCODE_BYTES..).unwrap_or_default(), "request ID")?
+    else {
+        let end = incomplete_varuint_end(prefix, OPCODE_BYTES)?;
+        return Ok(DecodeProgress::Need(end.checked_sub(prefix.len()).ok_or(
+            ProtocolError::InvalidFieldSequence("incomplete request ID did not advance"),
+        )?));
+    };
+    let mut state = RequestFrameDecodeState::new(
+        OPCODE_BYTES
+            .checked_add(request_id_len)
+            .ok_or(ProtocolError::FrameLengthOverflow)?,
+    );
     if let DecodeProgress::Need(additional) =
         decode_request_frame_steps::<PROJECT_FIELDS>(prefix, layout.steps, &mut state, projections)?
     {
@@ -384,6 +409,7 @@ fn decode_request_frame_metadata_progress<const PROJECT_FIELDS: bool>(
         encoded_len: state.cursor,
         body_len: state.body_len,
         opcode,
+        request_id,
         body_field: state.body_field,
     }))
 }
@@ -405,9 +431,9 @@ struct RequestFrameDecodeState {
 }
 
 impl RequestFrameDecodeState {
-    const fn new() -> Self {
+    const fn new(cursor: usize) -> Self {
         Self {
-            cursor: OPCODE_BYTES,
+            cursor,
             body_len: 0,
             body_field: NO_REQUEST_FIELD,
             body_length_seen: false,

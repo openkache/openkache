@@ -365,6 +365,13 @@ ${operation_modules.join("\n")}
             opaque_aggregate: ${operation.contract.opaque_aggregate === true},
         },
         response_payload_bound: ${formatted_decimal(response_payload_bound(contract, operation))},
+        experimental: ${operation.contract.experimental === true},
+        experimental_revision: ${
+          operation.contract.experimental_revision === undefined
+            ? "None"
+            : `Some(${rust_string_literal(operation.contract.experimental_revision)})`
+        },
+        out_of_band: ${operation.contract.out_of_band === true},
         success_statuses: ${status_slice(operation.contract.success_statuses)},
         error_statuses: ${status_slice(operation.contract.error_statuses)},
     }`
@@ -375,6 +382,22 @@ ${operation_modules.join("\n")}
       (operation, index) =>
         `    OperationRegistryEntry { opcode: Opcode::${operation.name}, wire: OPERATION_WIRE_SPECS[${index}] },`,
     )
+    .join("\n")
+  const stable_opcodes = operations
+    .filter(
+      (operation) =>
+        operation.contract.experimental !== true &&
+        operation.contract.out_of_band !== true,
+    )
+    .map((operation) => `    Opcode::${operation.name},`)
+    .join("\n")
+  const experimental_opcodes = operations
+    .filter(
+      (operation) =>
+        operation.contract.experimental === true &&
+        operation.contract.out_of_band !== true,
+    )
+    .map((operation) => `    Opcode::${operation.name},`)
     .join("\n")
   const codec_names = [
     ...new Set(
@@ -544,6 +567,12 @@ pub struct OperationWireSpec {
     pub response: OperationLayoutPlan,
     /// Conservative maximum response payload bytes derived from the output shape.
     pub response_payload_bound: usize,
+    /// Experimental operations are disabled unless the adapter explicitly
+    /// enables the matching draft revision.
+    pub experimental: bool,
+    pub experimental_revision: Option<&'static str>,
+    /// Out-of-band operations are not admitted on the protocol data plane.
+    pub out_of_band: bool,
     pub success_statuses: &'static [Status],
     pub error_statuses: &'static [Status],
 }
@@ -586,6 +615,26 @@ impl OperationWireSpec {
     pub const fn response_plan(self) -> &'static [OperationFieldPlan] {
         self.response.fields
     }
+
+    /// Returns whether this operation belongs to the stable v1 surface.
+    pub const fn is_stable(self) -> bool {
+        !self.experimental && !self.out_of_band
+    }
+
+    /// Returns whether an adapter-enabled experimental revision admits this
+    /// operation.
+    pub fn enabled(self, enable_experimental_api: bool, revision: Option<&str>) -> bool {
+        if self.out_of_band {
+            return false;
+        }
+        if !self.experimental {
+            return true;
+        }
+        enable_experimental_api
+            && self.experimental_revision.is_some_and(|expected| {
+                revision.is_some_and(|actual| actual == expected)
+            })
+    }
 }
 
 /// Returns the canonical wire spec for one protocol operation.
@@ -608,6 +657,16 @@ ${wire_metadata}
 /// Dense opcode-indexed registry used by server bind-time validation.
 pub const OPERATION_REGISTRY: [OperationRegistryEntry; Opcode::COUNT] = [
 ${registry_metadata}
+];
+
+/// Stable v1 operations generated from the model.
+pub const STABLE_OPCODES: &[Opcode] = &[
+${stable_opcodes}
+];
+
+/// Experimental operations that require an explicit adapter gate.
+pub const EXPERIMENTAL_OPCODES: &[Opcode] = &[
+${experimental_opcodes}
 ];
 
 /// Codec identifiers supported by the protocol adapters.
@@ -732,6 +791,7 @@ function max_response_frame_bytes_for_contract(contract: Wire_Contract): number 
   return (
     contract.v1.status_bytes +
     contract.v1.max_varuint_bytes +
+    contract.v1.max_varuint_bytes +
     maximum_payload
   )
 }
@@ -749,17 +809,18 @@ pub const OPCODE_BYTES: usize = ${formatted_decimal(v1.opcode_bytes)};
 pub const STATUS_BYTES: usize = ${formatted_decimal(v1.status_bytes)};
 /// Bytes before the variable-length request lengths.
 pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(v1.request_fixed_bytes)};
-/// Bytes before the variable-length response payload length.
+/// Bytes occupied by the fixed response status before variable fields.
 pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(v1.response_fixed_bytes)};
 /// Minimum bytes in one canonical unsigned \`vu128\`.
 pub const MIN_VARUINT_BYTES: usize = ${formatted_decimal(v1.min_varuint_bytes)};
 /// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
 pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(v1.max_varuint_bytes)};
-/// Bytes in every canonical item ID carried by the protocol.
+/// Maximum bytes in one opaque Item ID carried by the protocol.
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
-/// Conservative maximum complete response frame size for protocol v1.
+/// Conservative maximum complete response frame size for protocol v1,
+/// including the status, echoed request ID, payload length, and payload.
 pub const MAX_RESPONSE_FRAME_BYTES: usize =
     ${formatted_decimal(max_response_frame_bytes_for_contract(contract))};
 /// Bytes in every namespace ID and namespace revision.

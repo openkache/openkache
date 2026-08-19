@@ -78,6 +78,9 @@ const GENERIC_OPERATION_CONTRACT_MEMBERS = [
   "requestFraming",
   "responseFraming",
   "opaqueAggregate",
+  "experimental",
+  "experimentalRevision",
+  "outOfBand",
   "successStatuses",
   "errorStatuses",
 ] as const
@@ -292,6 +295,36 @@ function operation_contract(
     "opaqueAggregate",
     operation_location,
   )
+  const experimental = optional_boolean_member(
+    contract,
+    "experimental",
+    operation_location,
+  )
+  const experimental_revision = optional_string_member(
+    contract,
+    "experimentalRevision",
+    operation_location,
+  )
+  const out_of_band = optional_boolean_member(
+    contract,
+    "outOfBand",
+    operation_location,
+  )
+  if (experimental === true && (experimental_revision === undefined || experimental_revision.length === 0)) {
+    throw new Error(
+      `${operation_location}.experimentalRevision is required for experimental operations`,
+    )
+  }
+  if (experimental !== true && experimental_revision !== undefined) {
+    throw new Error(
+      `${operation_location}.experimentalRevision requires experimental: true`,
+    )
+  }
+  if (out_of_band === true && experimental === true) {
+    throw new Error(
+      `${operation_location} cannot be both outOfBand and experimental`,
+    )
+  }
   const extensions = operation_extensions(contract, operation_location, adapter)
   const derived_contract = {
     error_statuses,
@@ -306,6 +339,9 @@ function operation_contract(
       ? {}
       : { response_framing: response_framing_value as Wire_Response_Framing }),
     ...(opaque_aggregate === undefined ? {} : { opaque_aggregate }),
+    ...(experimental === undefined ? {} : { experimental }),
+    ...(experimental_revision === undefined ? {} : { experimental_revision }),
+    ...(out_of_band === undefined ? {} : { out_of_band }),
     success_statuses,
   }
   const request_framing =

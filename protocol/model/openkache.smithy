@@ -191,6 +191,19 @@ structure operationContract {
     /// `always`; server execution does not consume this value.
     retryMode: OperationRetryMode
 
+    /// Marks a modeled operation as outside the stable v1 conformance
+    /// surface. Experimental operations remain in the generated descriptor so
+    /// an adapter can gate them explicitly instead of treating their opcode
+    /// as a stable route.
+    experimental: Boolean
+
+    /// Exact draft revision required when `experimental` is true.
+    experimentalRevision: String
+
+    /// Keeps an operation modeled for private/control-plane adapters without
+    /// assigning it to the protocol data-plane registry.
+    outOfBand: Boolean
+
     @required
     successStatuses: OperationStatuses
 
@@ -476,7 +489,8 @@ operation Ping {
     scope: "item",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
-        { fixedField: { field: "itemId", bytes: 32 } }
+        { byteLengthPrefixField: { field: "itemId" } },
+        { byteField: { field: "itemId" } }
     ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
@@ -528,7 +542,8 @@ operation Get {
                 reservedMask: 192
             }
         },
-        { fixedField: { field: "itemId", bytes: 32 } },
+        { byteLengthPrefixField: { field: "itemId" } },
+        { valueLengthField: { field: "value", length: "varuint" } },
         {
             conditional: {
                 field: "expirationMode",
@@ -538,7 +553,7 @@ operation Get {
                 ]
             }
         },
-        { trailingField: { field: "value", length: "varuint" } }
+        { byteField: { field: "itemId" } }
     ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
@@ -556,7 +571,8 @@ operation Set {
     scope: "item",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
-        { fixedField: { field: "itemId", bytes: 32 } }
+        { byteLengthPrefixField: { field: "itemId" } },
+        { byteField: { field: "itemId" } }
     ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
@@ -572,6 +588,8 @@ operation Delete {
 
 @operationContract(
     scope: "namespace",
+    experimental: true,
+    experimentalRevision: "draft-2026-08-19.4",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } }
     ],
@@ -589,6 +607,8 @@ operation Stats {
 
 @operationContract(
     scope: "namespace",
+    experimental: true,
+    experimentalRevision: "draft-2026-08-19.4",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } }
     ],
@@ -606,6 +626,7 @@ operation Sync {
 
 @operationContract(
     scope: "namespace_management",
+    outOfBand: true,
     requestWire: [
         {
             packed: {
@@ -699,6 +720,7 @@ operation NamespaceOpen {
 
 @operationContract(
     scope: "namespace_management",
+    outOfBand: true,
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
         { fixedField: { field: "expectedRevision", bytes: 8 } },
@@ -770,6 +792,7 @@ operation NamespaceUpdatePolicy {
 
 @operationContract(
     scope: "namespace_management",
+    outOfBand: true,
     requestWire: [
         { constant: { hex: "00" } },
         { fixedField: { field: "namespaceId", bytes: 8 } },
@@ -805,7 +828,6 @@ structure GetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }
@@ -822,7 +844,6 @@ structure SetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 
@@ -857,7 +878,6 @@ structure DeleteInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }
