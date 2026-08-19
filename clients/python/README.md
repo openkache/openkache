@@ -24,6 +24,12 @@ without JSON or Raw fallback. The native boundary preserves unknown mutation
 and cancellation outcomes as ``OpenKacheUnknownMutationError`` and
 ``OpenKacheCancelledError``.
 
+> **Current implementation:** This package exposes canonical-JSON mapped-key
+> operations and exact `0..=32`-byte Item ID operations. Native values are
+> converted to canonical key bytes in the adapter and the shared core applies
+> the default `NamespaceHash` profile; `PublicKeyOrHash` remains an explicit
+> core-only profile until the binding options are finalized.
+
 ## Commands
 
 Run from `clients/python`:
@@ -66,14 +72,17 @@ finally:
 ```
 
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
-`get_raw` for exact bytes; empty raw values are supported. Keys infer their
-canonical `Text`, `Bytes`, or signed-i64 `Integer` discriminator per operation.
-The `key_spec` option remains accepted for source compatibility but does not
-override this per-operation inference. Empty and NUL-containing keys are
-valid. JSON numbers are finite, and integers must be exactly representable as
-IEEE-754 binary64 values. Python converts a native value to a UTF-8 JSON input
-buffer only to cross the legacy JSON ABI; the core reparses that input and
-owns canonical serialization, compression, encryption, and value framing.
+`get_raw` for exact bytes; empty raw values are supported. Each operation
+infers `Text`, `Bytes`, or signed-i64 `Integer` from the native key and
+converts it to canonical deterministic CBOR before the native ABI. The
+deprecated `key_spec` option is accepted for source compatibility but is not a
+namespace policy and does not override per-operation inference. Empty and
+NUL-containing keys are valid. JSON numbers
+are finite, and integers
+must be exactly representable as IEEE-754 binary64 values. Python converts a
+native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
+core reparses that input and owns canonical serialization, compression,
+encryption, and value framing.
 
 `client.raw` exposes the Smithy-shaped exact item-ID API:
 
@@ -88,7 +97,7 @@ from openkache import (
     SmithySetInput,
 )
 
-item_id = bytes(32)
+item_id = b"short-id"
 namespace = await client.raw.namespace_open(
     SmithyNamespaceOpenInput(
         name="example",
@@ -117,10 +126,9 @@ result = await client.raw.get(
 - `data_protection_key` is optional. When supplied it is an
   application-managed 32-byte secret shared by clients that must address the
   same protected entries. When omitted, values are unprotected.
-- The current `key_spec`/`KeySpec` names select the target `key_type`:
-  `TEXT`, `BYTES`, or `INTEGER`. They do not select an Item ID mapping profile.
-  Use the same key type and mapping profile in every language client that must
-  share entries. A future API may expose the target name `key_type` directly.
+- The deprecated `key_spec`/`KeySpec` names remain accepted for source
+  compatibility. They do not select a namespace policy or Item ID mapping
+  profile; mapped operations infer the `TypedKey` variant per call.
 - `server_name` defaults to the hostname from `address` and is used for TLS
   verification after DNS resolution.
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private

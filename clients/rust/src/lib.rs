@@ -20,14 +20,14 @@ use std::time::Duration;
 pub use openkache_client_core::contract;
 #[allow(deprecated)]
 pub use openkache_client_core::{
-    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
-    CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, ClientRootKey, DataProtection,
+    AlpnPolicy, Backend, BytePermit, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity,
+    ClientRootKey, ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
-    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, KeyError,
-    KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES, NamespaceDescriptor,
-    NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result,
-    TypedKey,
-    RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome,
+    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
+    ItemValue, KeyError, KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
+    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
+    PrivateKey, Result, RetryPolicy, RequestBudget, ServerErrorCode, ServerTrust, SetCondition,
+    SetOptions, SetOutcome, TypedKey, ValueKeyring,
     canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
@@ -202,9 +202,7 @@ macro_rules! impl_smithy_api {
                 _input: smithy::PingInput,
             ) -> std::result::Result<smithy::PingOutput, Self::Error> {
                 $client::ping(self).await?;
-                Ok(smithy::PingOutput {
-                    payload: Vec::new(),
-                })
+                Ok(smithy::PingOutput)
             }
 
             async fn get(
@@ -348,7 +346,7 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Offers protocol versions in descending order and enforces a minimum version.
+            /// Configures the supported `openkache/1` protocol.
             pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
                 self.inner = self.inner.alpn_policy(policy);
                 self
@@ -369,6 +367,12 @@ macro_rules! builder_methods {
             /// Bounds simultaneous request lanes on one QUIC connection.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.inner = self.inner.max_in_flight(maximum);
+                self
+            }
+
+            /// Sets the aggregate bytes retained across transport and value work.
+            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
+                self.inner = self.inner.max_in_flight_bytes(maximum);
                 self
             }
 
@@ -419,6 +423,12 @@ macro_rules! builder_methods {
             #[allow(deprecated)]
             pub fn key_spec(mut self, key_spec: KeyType) -> Self {
                 self.inner = self.inner.key_spec(key_spec);
+                self
+            }
+
+            /// Configures immutable value-key IDs for read-old/write-new rotation.
+            pub fn value_keyring(mut self, keyring: ValueKeyring) -> Self {
+                self.inner = self.inner.value_keyring(keyring);
                 self
             }
 

@@ -481,6 +481,27 @@ impl ThreadedKvkache {
         self.storage_domain_key
     }
 
+    /// Derives a server-owned storage address for an opaque protocol Item ID.
+    ///
+    /// Legacy maximum-width IDs retain their historical storage derivation so
+    /// existing data remains addressable. Variable-length IDs use the scoped
+    /// length-delimited derivation and are never padded or reinterpreted as a
+    /// fixed-width identity.
+    pub fn storage_key_for_item_id(&self, item_id: openkache_protocol::ItemId) -> StorageKey {
+        if item_id.len() == openkache_protocol::ITEM_ID_BYTES {
+            let identity = item_id
+                .as_bytes()
+                .try_into()
+                .expect("maximum-width Item ID has the storage identity width");
+            return self.storage_key_for_identity(identity);
+        }
+        storage_keys::derive_scoped_storage_key(
+            &self.storage_domain_key,
+            storage_keys::ITEM_ID_STORAGE_SCOPE,
+            item_id.as_bytes(),
+        )
+    }
+
     /// Sends one worker request using a reusable completion slot and bounded timeouts.
     async fn request(
         &self,

@@ -1,15 +1,12 @@
 //! Shared application-key hiding and value-protection composition.
 
-use openkache_value::Value as StructuredValue;
-
 use crate::key::validate_canonical_key;
-use crate::value::{
-    Compression, Encryption, ItemValue, Value, ValueCodec, ValueKeyring,
-};
+use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec, ValueKeyring};
 use crate::{
-    transport::RequestBudget, ClientRootKey, DataProtectionKey, ItemId, KeyFormat, KeyType,
-    Result, TypedKey,
+    ClientRootKey, DataProtectionKey, ItemId, KeyFormat, KeyType, Result, TypedKey,
+    transport::RequestBudget,
 };
+use openkache_value::Value as StructuredValue;
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
@@ -50,7 +47,8 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected(&key, compression)?;
+        let codec =
+            ValueCodec::protected(&key, compression)?.allow_read_profile(Encryption::Compact);
         Ok(Self {
             key,
             key_spec,
@@ -73,7 +71,7 @@ impl DataProtection {
         Self::with_keyring_and_key_spec(key, keyring, KeyType::Bytes, compression, encryption)
     }
 
-    /// Creates rotating value protection with an explicit key type.
+    /// Creates rotating value protection with an explicit formatted key spec.
     pub fn with_keyring_and_key_spec(
         key: ClientRootKey,
         keyring: ValueKeyring,
@@ -108,6 +106,11 @@ impl DataProtection {
     }
 
     /// Applies one aggregate byte budget to value protection work.
+    ///
+    /// The budget is retained by this transformation and shared by envelope,
+    /// decrypted, decompressed, and structured-codec allocations. Protected
+    /// network clients install their own connection budget automatically;
+    /// standalone callers can use this method to apply the same bound.
     pub fn with_budget(mut self, budget: RequestBudget) -> Self {
         self.codec = self.codec.with_budget(budget);
         self
@@ -133,7 +136,7 @@ impl DataProtection {
     ///
     /// * `key` - Application-managed data protection key.
     /// * `compression` - Compression policy applied before encryption.
-    /// * `encryption` - Compact or Robust authenticated-encryption profile.
+    /// * `encryption` - Unprotected, Compact, or Robust profile.
     ///
     /// # Returns
     ///
@@ -141,7 +144,8 @@ impl DataProtection {
     ///
     /// # Errors
     ///
-    /// Returns an error for an unprotected profile or invalid compression settings.
+    /// Returns an error for an invalid compression setting or protected profile
+    /// configuration.
     pub fn with_profile(
         key: DataProtectionKey,
         compression: Compression,
@@ -163,13 +167,18 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let alternate = match encryption {
-            Encryption::Compact => Encryption::Robust,
-            Encryption::Robust => Encryption::Compact,
-            Encryption::Unprotected => Encryption::Unprotected,
+        let codec = match encryption {
+            Encryption::Unprotected => ValueCodec::compressed(compression)?,
+            Encryption::Compact | Encryption::Robust => {
+                let alternate = match encryption {
+                    Encryption::Compact => Encryption::Robust,
+                    Encryption::Robust => Encryption::Compact,
+                    Encryption::Unprotected => unreachable!(),
+                };
+                ValueCodec::protected_with_profile(&key, compression, encryption)?
+                    .allow_read_profile(alternate)
+            }
         };
-        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?
-            .allow_read_profile(alternate);
         Ok(Self {
             key,
             key_spec,
@@ -196,13 +205,7 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let alternate = match encryption {
-            Encryption::Compact => Encryption::Robust,
-            Encryption::Robust => Encryption::Compact,
-            Encryption::Unprotected => Encryption::Unprotected,
-        };
-        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?
-            .allow_read_profile(alternate);
+        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
         Ok(Self {
             key,
             key_spec: key_type,
@@ -361,7 +364,7 @@ impl DataProtection {
             .map_err(Into::into)
     }
 
-    /// Compatibility alias for the generated structured-value ABI.
+    /// Serializes and protects a StructuredValue-CBOR-v1 value while binding its namespace.
     pub fn seal_structured_in_namespace(
         &self,
         namespace_id: u64,
@@ -414,7 +417,7 @@ impl DataProtection {
             .map_err(Into::into)
     }
 
-    /// Compatibility alias for the generated structured-value ABI.
+    /// Authenticates and decodes one StructuredValue-CBOR-v1 value.
     pub fn open_structured_in_namespace(
         &self,
         namespace_id: u64,
