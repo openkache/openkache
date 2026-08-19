@@ -242,11 +242,11 @@ unsurprising.
 
 An adapter MUST NOT stringify, coerce, reorder with semantic loss, or silently
 drop a value or map key that its native container cannot represent. It follows
-the value model's representation options: a lossless view may use a generic
-model representation, a strict native view returns a conversion error, and an
-encoded view returns the structured payload bytes. The value specification is
-the normative source for these representations; each package documents only
-its language-specific names and syntax.
+the value model's representation options: `lossless` returns the complete
+generic model, while a strict `native` view returns a conversion error when
+the language's ordinary containers cannot represent it. The value
+specification is the normative source for these representations; each package
+documents only its language-specific names and syntax.
 
 Maintained bindings SHOULD expose one `get` operation with a representation
 option equivalent to:
@@ -254,19 +254,17 @@ option equivalent to:
 ```text
 get(key, representation="lossless")
 get(key, representation="native")
-get(key, representation="encoded")
 ```
 
 The default for dynamic bindings SHOULD be `lossless`. An adapter MUST report
 ambiguous native lookups rather than silently selecting or merging an entry.
-The `encoded` option returns the exact structured-value payload bytes before
-the value envelope's compression and protection; it does not return a wrapper.
-Exact Item ID operations separately return the caller-owned opaque bytes.
+Exact Item ID and raw operations separately return caller-owned opaque bytes;
+they are not structured-value representation modes.
 
 Typed languages SHOULD preserve compile-time distinctions with overloads or
-distinct methods such as `set_native`, `set_value`, and `set_encoded`, rather
-than one unconstrained `Any` parameter. Overloads are an API-shape choice: all
-forms MUST map to the same value-model semantics and MUST reject an
+distinct methods such as `set_native` and `set_value`, rather than one
+unconstrained `Any` parameter. Overloads are an API-shape choice: all forms
+MUST map to the same value-model semantics and MUST reject an
 unsupported cross-language decode. A package MAY instead use one generic
 method with a typed input parameter when its language can express that
 contract without weakening type checking.

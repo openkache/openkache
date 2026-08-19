@@ -47,9 +47,15 @@ contract. It does not define structured value serialization; value semantics
 and the initial value codec profile are specified separately in
 [`value/SPEC.md`](value/SPEC.md).
 
-`KeyType` selects the one typed-key variant accepted by a typed-key operation.
-An adapter MAY select it globally at connection time or per operation. It is
-not a wire-protocol namespace.
+An **Item ID mapping profile** selects the algorithm that converts canonical
+key bytes into the final Item ID. The initial profiles are `Hash` and
+`CanonicalKeyOrHash`. A mapping profile is client/namespace configuration, not
+a wire-visible field.
+
+`KeyType` selects the one typed-key variant accepted by a typed-key operation:
+`Integer`, `Text`, or `Bytes`. An adapter MAY select it globally at connection
+time or per operation within the fixed mapping profile. It is not a wire-
+protocol namespace.
 
 The specification defines three distinct client-side conversion paths:
 
@@ -108,10 +114,12 @@ MUST NOT be used.
 Both formatted mapping profiles encode `Bytes` as a CBOR byte string. It is not
 the `OpaqueBytes` value format and does not mean an Exact Item ID.
 
-Mapping profiles are client/namespace configuration, not per-operation
-wire-visible metadata. A client MUST keep the selected profile fixed for a
-namespace's addressable data unless it is intentionally performing an identity
-migration. The server does not know which profile produced an Item ID.
+The selected Item ID mapping profile and canonicalization algorithm MUST remain
+fixed for all formatted operations addressing a namespace unless the
+application is intentionally performing an identity migration. `KeyType` MAY
+vary per operation only within that fixed mapping profile. The server does not
+know which profile produced an Item ID; a mismatch can therefore appear only
+as misses or collisions.
 
 ### 2.2 Typed-key type selection
 
@@ -229,7 +237,8 @@ f6                            // null
 
 ## 4. Item ID mapping profiles
 
-Mapping profiles are client-local choices. They have no wire or server field.
+Item ID mapping profiles are client-local choices. They have no wire or server
+field.
 Every profile MUST produce an Item ID accepted by the wire protocol.
 
 ### 4.1 Hash profile (`Hash`)

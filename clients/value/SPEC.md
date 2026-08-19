@@ -5,7 +5,7 @@
 This document defines the language-independent value model used by
 OpenKache-maintained clients when they exchange structured values. It is
 intentionally separate from the cache value envelope: the envelope carries
-encoded bytes, while this specification defines what those bytes mean to
+payload bytes, while this specification defines what those bytes mean to
 clients.
 
 The first structured-value profile uses CBOR as its internal codec. CBOR is an
@@ -116,7 +116,7 @@ all of those bits. Python `float` mappings preserve the runtime-observable
 binary64 bits. A JavaScript adapter MUST encode the binary64 bits observable
 from its `number` value and MUST NOT intentionally normalize a representation
 that the runtime exposes. Applications that require a particular NaN payload or
-original float width MUST use the generic model or `encoded` representation.
+original float width MUST use the generic model returned by `lossless`.
 
 Native decoding MAY map Float16 and Float32 to the language's ordinary
 binary64 floating-point type. Such a conversion preserves the numeric value
@@ -147,11 +147,20 @@ The model defines structural equality for duplicate-key detection:
 - a map key MUST NOT be compared by a language-native equality operation that
   collapses distinct model values.
 
-All model values MAY be map keys, including arrays and maps. A decoder MUST
-reject a map containing duplicate keys under these rules. If a binding cannot
-represent a map without losing key identity, it MUST return a lossless map
-view or a conversion error; it MUST NOT silently overwrite, merge, stringify,
-or drop an entry.
+Only scalar values MAY be map keys:
+
+```text
+MapKey = Null | Undefined | Boolean | Integer | Float
+       | ByteString | TextString
+```
+
+`Array` and `Map` MUST NOT be used as map keys in this profile. Applications
+that need a compound key MUST use an `Array` of key/value pairs or an explicit
+application codec. A decoder MUST reject a map containing a non-scalar key or
+duplicate scalar keys under these rules. If a binding cannot represent a map
+without losing scalar key identity, it MUST return a lossless map view or a
+conversion error; it MUST NOT silently overwrite, merge, stringify, or drop an
+entry.
 
 ## 3. Maintained language mappings
 
@@ -177,6 +186,11 @@ in Python.
 
 Python `int` is encoded as an exact `Integer` regardless of magnitude. Python
 `float` is encoded as `Float64`, including `-0.0`, infinities, and NaN.
+Python `list` and `tuple` both map to `Array`; a same-language round trip
+preserves element order and values but does not preserve list-versus-tuple
+identity. Python `dict` maps to `Map` in insertion order. Its keys MUST be
+scalar model values after conversion; an unhashable key or a key collision
+under model equality MUST be rejected before encoding.
 
 ### 3.2 JavaScript and TypeScript
 
@@ -210,6 +224,14 @@ meaning. JavaScript callers that explicitly need a compact `Integer` MAY use a
 documented integer helper or `bigint`; that opt-in is a value-construction
 choice, not automatic inference.
 
+JavaScript `Map` maps to `Map` in iteration order. Its keys MUST convert to
+scalar model values; array, object, function, and other non-scalar keys MUST
+be rejected rather than stringified. A documented plain-object mapping maps
+own enumerable string properties to `TextString` keys in the language's
+observable property iteration order. A same-language round trip preserves
+entries and order, but a plain object may be returned as a generic/lossless
+map when its key/value shape cannot be represented by a plain object.
+
 On decode, maintained JavaScript clients return:
 
 ```text
@@ -231,9 +253,22 @@ is restored only by a checked typed decode. Native `f32`/`float` and
 types such as `isize`, `usize`, `int`, and `uint` MUST NOT become wire-level
 types.
 
+Native sequence types map to `Array` and preserve element order. Native map
+types map to `Map` and preserve entry order when their runtime exposes one.
+Because this profile permits only scalar map keys, a maintained binding MUST
+either use a native map with an explicitly documented scalar-key projection or
+use its generic ordered-entry representation. It MUST reject a non-scalar
+model key or a native-key collision rather than stringify or overwrite it.
+Rust, Go, Java, .NET, and C/C++ bindings MUST document the concrete native
+collection and generic-entry types they return; they MUST not claim to
+preserve source-only container classes that the model does not represent.
+
 Each maintained package MUST document the native type returned for `Integer`,
 the behavior of Float16/Float32 decoding, and any value that cannot be
-returned in its ordinary native representation.
+returned in its ordinary native representation. A same-language round trip
+guarantees model values and observable entry order, not source-only container
+identity such as Python tuple versus list or a JavaScript plain object versus
+`Map`.
 
 ## 4. Representation options
 
@@ -244,7 +279,6 @@ may differ, but the semantics are shared:
 ```text
 get(key, representation="lossless")
 get(key, representation="native")
-get(key, representation="encoded")
 ```
 
 `lossless` SHOULD be the default for dynamic maintained bindings.
@@ -252,17 +286,17 @@ get(key, representation="encoded")
 Encoding SHOULD accept every value expressible by the binding's documented
 native mapping. Decoding into a different language's native representation
 MAY fail when that language cannot represent the value without semantic loss.
-The adapter MUST then return a conversion error for `native`, or let the
-caller select `lossless`/generic or `encoded` representation to retrieve the
-value without loss.
+The adapter MUST then return a conversion error for `native`; `lossless` is
+the cross-language fallback that returns the complete generic model without
+semantic loss.
 
 ### 4.1 Lossless representation
 
-`lossless` uses native values whenever the conversion is exact and otherwise
-returns the complete generic model or a language-native lossless view. A
-binding MAY provide wrappers, but wrappers are not required by this
-specification. If a binding provides a wrapper, it MUST support ordinary value
-access:
+`lossless` returns the complete generic model. It MUST preserve value kinds,
+numeric distinctions, scalar map-key identity, and map entry order. A binding
+MAY provide native-like wrappers or convenience accessors over that model, but
+those are not a separate representation contract. If a wrapper is provided, it
+MUST support ordinary value access:
 
 - indexing where the model is indexed;
 - lookup and membership;
@@ -301,17 +335,10 @@ value, an unrepresentable map key, or a map that would collapse entries.
 This mode is intended for APIs that require a real `dict`, plain object, or
 other native container. It is not allowed to silently lose information.
 
-### 4.3 Encoded representation
-
-`encoded` returns the exact structured payload bytes produced by the selected
-value profile, before value-envelope compression and protection. It does not
-return a wrapper or expose CBOR types as the public value model. A caller that
-needs byte-exact forwarding MUST use this mode instead of decoding and
-re-encoding the value. Complete value-envelope bytes remain outside this mode
-and are handled by the value-format API.
-
-`OpaqueBytes` operations bypass this model and return the exact application
-bytes directly.
+Opaque byte operations bypass this model and return the exact application
+bytes directly. They are not a representation option on structured-value
+`get`; callers that need byte-exact forwarding MUST use the raw or Exact Item
+ID API rather than decoding and re-encoding a structured value.
 
 ## 5. Initial codec profile: StructuredValue-CBOR-v1
 
@@ -332,7 +359,7 @@ The profile accepts exactly the following CBOR values:
 | Definite byte string | `ByteString` | Bytes are uninterpreted. |
 | Definite, valid UTF-8 text string | `TextString` | Invalid UTF-8 MUST be rejected. |
 | Definite array | `Array` | Elements are decoded recursively. |
-| Definite map | `Map` | Duplicate keys are rejected under §2.4. |
+| Definite map | `Map` | Keys must be scalar and duplicates are rejected under §2.4. |
 
 Indefinite-length arrays, maps, byte strings, and text strings MUST be
 rejected. Simple values other than `null`, booleans, and `undefined`, and tags
@@ -412,6 +439,7 @@ The following mappings are normative:
 | Python or JavaScript `-0.0`/`-0` | `Float64(-0.0)` |
 | `TextString("x")` | distinct from `ByteString(78)` |
 | `Integer(1)` map key | distinct from `Boolean(true)` and `Float64(1.0)` |
+| `Array([Integer(1)])` as a map key | Reject as a non-scalar map key |
 
 A map containing keys that are distinct in the model but collide in a native
 container MUST be returned through a lossless representation or rejected by

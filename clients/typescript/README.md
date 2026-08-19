@@ -97,11 +97,13 @@ Canonical JSON accepts only null, booleans, finite numbers, strings, dense
 arrays, and regular objects with string keys. Cycles, sparse arrays, binary
 objects, `undefined`, `bigint`, and non-finite numbers are rejected.
 
-Keys follow the configured `key_spec` (`text` by default): text keys are exact
-UTF-8 strings, byte keys are exact `Uint8Array` values, and integer keys are
-safe integer-valued `number` or `bigint` values. Empty and NUL-containing keys
-are valid; floating-point, unsupported native types, and unpaired surrogates
-are rejected.
+Keys follow the configured current `key_spec` (`text` by default), which
+selects the target `key_type`, not an Item ID mapping profile: text keys are
+exact UTF-8 strings, byte keys are exact `Uint8Array` values, and integer keys
+are safe integer-valued `number` or `bigint` values. Empty and NUL-containing
+keys are valid; floating-point, unsupported native types, and unpaired
+surrogates are rejected. A future API may expose the target name `key_type`
+directly.
 
 Use `{ condition: "if_absent" }` to create without overwriting or
 `{ condition: "if_present" }` to update only an existing item. Use `set_raw`
