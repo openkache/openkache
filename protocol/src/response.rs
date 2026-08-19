@@ -13,12 +13,13 @@ use crate::{
     validate_value_length,
 };
 
-const _: () = assert!(RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES <= 32);
+const _: () = assert!(RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES + MAX_VARUINT_BYTES <= 32);
 
 /// Metadata required to delimit one response with an opaque payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResponseHeader {
     status: Status,
+    request_id: u64,
     encoded_len: usize,
     payload_len: usize,
 }
@@ -27,6 +28,11 @@ impl ResponseHeader {
     /// Returns the decoded status.
     pub const fn status(self) -> Status {
         self.status
+    }
+
+    /// Returns the echoed request correlation token.
+    pub const fn request_id(self) -> u64 {
+        self.request_id
     }
 
     /// Returns the number of bytes before the opaque payload.
@@ -52,8 +58,18 @@ pub(crate) fn decode_response_header(prefix: &[u8]) -> Result<Option<ResponseHea
         return Ok(None);
     };
     let status = Status::try_from(status_byte)?;
-    let Some((payload_len, encoded_len)) = decode_varuint(
+    let Some((request_id, request_id_len)) = decode_varuint(
         prefix.get(RESPONSE_FIXED_BYTES..).unwrap_or_default(),
+        "response request ID",
+    )?
+    else {
+        return Ok(None);
+    };
+    let payload_offset = RESPONSE_FIXED_BYTES
+        .checked_add(request_id_len)
+        .ok_or(ProtocolError::FrameLengthOverflow)?;
+    let Some((payload_len, payload_len_bytes)) = decode_varuint(
+        prefix.get(payload_offset..).unwrap_or_default(),
         "response payload length",
     )?
     else {
@@ -64,7 +80,10 @@ pub(crate) fn decode_response_header(prefix: &[u8]) -> Result<Option<ResponseHea
     validate_value_length(payload_len)?;
     Ok(Some(ResponseHeader {
         status,
-        encoded_len: RESPONSE_FIXED_BYTES + encoded_len,
+        request_id,
+        encoded_len: payload_offset
+            .checked_add(payload_len_bytes)
+            .ok_or(ProtocolError::FrameLengthOverflow)?,
         payload_len,
     }))
 }
@@ -73,6 +92,7 @@ pub(crate) fn decode_response_header(prefix: &[u8]) -> Result<Option<ResponseHea
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResponseFrame<'a> {
     status: Status,
+    request_id: u64,
     frame: &'a [u8],
     payload_offset: usize,
 }
@@ -81,7 +101,7 @@ impl<'a> ResponseFrame<'a> {
     /// Decodes one complete response without interpreting its payload.
     pub fn decode(frame: &'a [u8]) -> Result<Self> {
         let header = decode_response_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
+            expected: RESPONSE_FIXED_BYTES + 2 * MIN_VARUINT_BYTES,
             actual: frame.len(),
         })?;
         let expected = header.frame_len()?;
@@ -93,6 +113,7 @@ impl<'a> ResponseFrame<'a> {
         }
         Ok(Self {
             status: header.status,
+            request_id: header.request_id,
             frame,
             payload_offset: header.encoded_len,
         })
@@ -101,6 +122,11 @@ impl<'a> ResponseFrame<'a> {
     /// Returns the response status.
     pub const fn status(self) -> Status {
         self.status
+    }
+
+    /// Returns the echoed request correlation token.
+    pub const fn request_id(self) -> u64 {
+        self.request_id
     }
 
     /// Returns the opaque response payload.
@@ -131,7 +157,7 @@ impl OwnedResponseFrame {
     /// Decodes one complete response while retaining its original allocation.
     pub fn decode(frame: Vec<u8>) -> Result<Self> {
         let header = Response::decode_header(&frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
+            expected: RESPONSE_FIXED_BYTES + 2 * MIN_VARUINT_BYTES,
             actual: frame.len(),
         })?;
         let expected = header.frame_len()?;
@@ -174,6 +200,8 @@ impl OwnedResponseFrame {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Response {
     pub status: Status,
+    /// Correlation token echoed from the corresponding request.
+    pub request_id: u64,
     pub payload: Vec<u8>,
 }
 
@@ -215,7 +243,7 @@ impl ResponseHeaderBytes {
     /// Returns [`ProtocolError::FrameLength`] if the bytes exceed the largest
     /// compact response header accepted by this protocol.
     pub fn push(&mut self, byte: u8) -> Result<()> {
-        let maximum = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES;
+        let maximum = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES + MAX_VARUINT_BYTES;
         if self.bytes.len() >= maximum {
             return Err(ProtocolError::FrameLength {
                 expected: maximum,
@@ -243,6 +271,31 @@ impl ResponseHeaderBytes {
 }
 
 impl ResponseParts {
+    /// Replaces the echoed request ID while preserving all payload owners.
+    pub fn with_request_id(mut self, request_id: u64) -> Result<Self> {
+        let status = *self.header.first().ok_or(ProtocolError::FrameTooShort {
+            expected: RESPONSE_FIXED_BYTES,
+            actual: 0,
+        })?;
+        let payload_len = self
+            .payload
+            .len()
+            .checked_add(self.segments.iter().try_fold(0usize, |total, segment| {
+                total
+                    .checked_add(segment.len())
+                    .ok_or(ProtocolError::FrameLengthOverflow)
+            })?)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let (id_bytes, id_len) = encode_varuint(request_id);
+        let (length_bytes, length_len) = encode_varuint(payload_len as u64);
+        let mut header = SmallVec::new();
+        header.push(status);
+        header.extend_from_slice(&id_bytes[..id_len]);
+        header.extend_from_slice(&length_bytes[..length_len]);
+        self.header = header;
+        Ok(self)
+    }
+
     /// Encodes a generated field plan into an ownership-preserving response.
     ///
     /// This is the response projection boundary for every planned operation.
@@ -269,7 +322,7 @@ impl ResponseParts {
             plan.layout,
             plan.optional_value_codec.as_ref(),
         )?;
-        Self::from_frame(status, frame)
+        Self::from_frame(status, 0, frame)
     }
 
     /// Encodes a response header over ownership-preserving body segments.
@@ -278,7 +331,7 @@ impl ResponseParts {
         I: IntoIterator<Item = T>,
         T: Into<ResponseSegment>,
     {
-        Self::from_frame(status, SegmentFrame::<[WireSegment; 8]>::new(segments)?)
+        Self::from_frame(status, 0, SegmentFrame::<[WireSegment; 8]>::new(segments)?)
     }
 
     /// Encodes a response header over an existing owned body frame.
@@ -287,6 +340,7 @@ impl ResponseParts {
     /// payload owners are neither copied nor collected into another buffer.
     pub(crate) fn from_frame(
         status: Status,
+        request_id: u64,
         frame: SegmentFrame<[WireSegment; 8]>,
     ) -> Result<Self> {
         let payload_len = frame.len();
@@ -294,6 +348,8 @@ impl ResponseParts {
         let (length, length_bytes) = encode_varuint(payload_len as u64);
         let mut header = SmallVec::new();
         header.push(status as u8);
+        let (request_id_bytes, request_id_len) = encode_varuint(request_id);
+        header.extend_from_slice(&request_id_bytes[..request_id_len]);
         header.extend_from_slice(&length[..length_bytes]);
         Ok(Self {
             header,
@@ -310,7 +366,7 @@ impl ResponseParts {
     pub fn decode(header: ResponseHeaderBytes, payload: Vec<u8>) -> Result<Self> {
         let decoded =
             Response::decode_header(header.as_slice())?.ok_or(ProtocolError::FrameTooShort {
-                expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
+                expected: RESPONSE_FIXED_BYTES + 2 * MIN_VARUINT_BYTES,
                 actual: header.len(),
             })?;
         if decoded.encoded_len() != header.len() {
@@ -392,6 +448,7 @@ impl ResponseParts {
         }
         Ok(Response {
             status: decoded.status(),
+            request_id: decoded.request_id(),
             payload,
         })
     }
@@ -400,17 +457,29 @@ impl ResponseParts {
 impl Response {
     /// Creates a response after checking the wire payload ceiling.
     pub fn new(status: Status, payload: Vec<u8>) -> Result<Self> {
+        Self::new_with_id(status, 0, payload)
+    }
+
+    /// Creates a response with an explicit echoed request ID.
+    pub fn new_with_id(status: Status, request_id: u64, payload: Vec<u8>) -> Result<Self> {
         validate_value_length(payload.len())?;
-        Ok(Self { status, payload })
+        Ok(Self {
+            status,
+            request_id,
+            payload,
+        })
     }
 
     /// Encodes this response into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
         validate_value_length(self.payload.len())?;
+        let (request_id, request_id_bytes) = encode_varuint(self.request_id);
         let (length, length_bytes) = encode_varuint(self.payload.len() as u64);
-        let mut frame =
-            Vec::with_capacity(RESPONSE_FIXED_BYTES + length_bytes + self.payload.len());
+        let mut frame = Vec::with_capacity(
+            RESPONSE_FIXED_BYTES + request_id_bytes + length_bytes + self.payload.len(),
+        );
         frame.push(self.status as u8);
+        frame.extend_from_slice(&request_id[..request_id_bytes]);
         frame.extend_from_slice(&length[..length_bytes]);
         frame.extend_from_slice(&self.payload);
         Ok(frame)
@@ -419,9 +488,11 @@ impl Response {
     /// Consumes this response without copying its payload.
     pub fn into_parts(self) -> Result<ResponseParts> {
         validate_value_length(self.payload.len())?;
+        let (request_id, request_id_bytes) = encode_varuint(self.request_id);
         let (length, length_bytes) = encode_varuint(self.payload.len() as u64);
         let mut header = SmallVec::new();
         header.push(self.status as u8);
+        header.extend_from_slice(&request_id[..request_id_bytes]);
         header.extend_from_slice(&length[..length_bytes]);
         Ok(ResponseParts {
             header,
@@ -454,7 +525,7 @@ impl Response {
     /// Decodes and validates one complete response frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
         let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
+            expected: RESPONSE_FIXED_BYTES + 2 * MIN_VARUINT_BYTES,
             actual: frame.len(),
         })?;
         let expected = header.frame_len()?;
@@ -466,6 +537,7 @@ impl Response {
         }
         Ok(Self {
             status: header.status,
+            request_id: header.request_id,
             payload: frame[header.encoded_len..].to_vec(),
         })
     }
@@ -481,6 +553,7 @@ impl Response {
         frame.truncate(header.header.payload_len());
         Ok(Self {
             status: header.header.status(),
+            request_id: header.header.request_id(),
             payload: frame,
         })
     }

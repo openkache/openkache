@@ -120,7 +120,7 @@ export function request_payload_bound(
 }
 
 function request_wire_step_bound(
-  contract: Pick<Wire_Contract, "max_value_bytes" | "v1">,
+  contract: Pick<Wire_Contract, "item_id_bytes" | "max_value_bytes" | "v1">,
   steps: readonly Wire_Request_Step[],
 ): number {
   let bound = 0
@@ -136,7 +136,10 @@ function request_wire_step_bound(
       case "packed": add(1); break
       case "byte_length_field": add(1 + Math.min(contract.max_value_bytes, 0xff)); break
       case "byte_length_prefix_field": add(1); break
-      case "byte_field": add(Math.min(contract.max_value_bytes, 0xff)); break
+      // Byte-length bodies in the v1 request plans are opaque Item IDs. Keep
+      // the bound tied to the modeled maximum rather than the u8 prefix's
+      // representable 255-byte range.
+      case "byte_field": add(contract.item_id_bytes); break
       case "varuint_field": add(contract.v1.max_varuint_bytes); break
       case "value_length_field":
         add(contract.v1.max_varuint_bytes)
@@ -159,10 +162,14 @@ function request_wire_step_bound(
  * Every request carries an opcode even when its body plan is absent or empty.
  */
 export function request_wire_frame_bound(
-  contract: Pick<Wire_Contract, "max_value_bytes" | "v1">,
+  contract: Pick<Wire_Contract, "item_id_bytes" | "max_value_bytes" | "v1">,
   operation: Pick<Wire_Operation, "contract">,
 ): number {
   const plan = operation.contract.request_wire
   return contract.v1.opcode_bytes +
+    // Every request carries the canonical request ID immediately after the
+    // opcode. Reserve the maximum nine-byte encoding for the conservative
+    // admission bound even when the concrete ID is small.
+    contract.v1.max_varuint_bytes +
     (plan === undefined ? 0 : request_wire_step_bound(contract, plan))
 }

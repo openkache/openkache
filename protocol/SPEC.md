@@ -501,12 +501,12 @@ response and MUST NOT scan for a possible next frame.
 ### Opcodes
 
 <!-- openkache:generated-protocol-operation-table:start -->
-| Opcode | Name | Request layout | Response payload |
-|---|---|---|---|
-| `01` | `PING` | opcode + request ID | `PONG` |
-| `02` | `GET` | opcode + request ID + namespace ID + Item ID | opaque value or empty |
-| `03` | `SET` | opcode + request ID + namespace ID + flags + lengths + optional TTL + Item ID + value | empty |
-| `04` | `DELETE` | opcode + request ID + namespace ID + Item ID | empty |
+| Opcode | Name | Request layout | Response payload | Request codecs | Response codecs |
+|---|---|---|---|---|---|
+| `01` | `PING` | opcode + request ID | opaque payload | — | — |
+| `02` | `GET` | opcode + request ID + namespaceId (8 bytes) + u8 length(itemId) + itemId | opaque payload | — | — |
+| `03` | `SET` | opcode + request ID + namespaceId (8 bytes) + packed(condition, expirationMode, evictionMode) + u8 length(itemId) + vu128 length(value) + if expirationMode=explicit_ttl: vu128(ttlMilliseconds) + itemId | empty | — | — |
+| `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 length(itemId) + itemId | empty | — | — |
 <!-- openkache:generated-protocol-operation-table:end -->
 
 During this pre-freeze migration, this document is the source of truth and the

@@ -39,7 +39,8 @@ directory or use `just generate-protocol-contract` from the repository root.
 
 ## Usage
 
-Encode or decode an opaque response through the shared frame type:
+Encode or decode an opaque response through the shared frame type. The response
+echoes the request correlation ID between its status and payload length:
 
 ```rust
 use openkache_protocol::{Response, Status};
@@ -47,6 +48,7 @@ use openkache_protocol::{Response, Status};
 let response_bytes = [Status::Ok as u8, 0x00, 0x04, b'P', b'O', b'N', b'G'];
 let response = Response::decode(&response_bytes)?;
 assert_eq!(response.status, Status::Ok);
+assert_eq!(response.request_id, 0);
 ```
 
 Incremental transports can use `Response::decode_header` and
