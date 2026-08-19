@@ -15,6 +15,13 @@ compression policy, runtime integration, or shared-core architecture described
 here. A client that claims compatibility with a wire, key, or value profile
 must still implement that profile exactly.
 
+The format specifications in this draft describe the target contract. The
+generated Smithy models and `clients/core` implementation may still describe
+the previous pre-freeze contract (for example, fixed-width Item IDs and the
+legacy value container). Until the implementation migration is complete, the
+draft documents are design sources of truth and the generated/core artifacts
+are current-implementation references, not evidence of conformance.
+
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.
 
@@ -183,6 +190,20 @@ retry-safety information, and unknown-outcome distinction. Package
 documentation lists the concrete language types and any retained server status
 or diagnostic fields.
 
+The maintained retry boundary is:
+
+| Situation | Read-only operation | Mutation or `SYNC` |
+|---|---|---|
+| Local validation or configuration failure | Do not retry | Do not retry |
+| Failure known to occur before transmission | MAY retry within the configured budget | MAY retry within the configured budget |
+| Request transmitted but response not received | MAY retry if the operation is otherwise retry-safe | MUST surface an unknown outcome; do not automatically replay |
+| `Overloaded` response | MAY retry with bounded backoff | MAY retry only as a new application decision; never treat it as proof of idempotency |
+| Local cancellation | Complete cancellation according to adapter policy | MUST preserve unknown-outcome information if transmission may have occurred |
+
+Conditional mutations such as `SET IfAbsent` are not automatically replayed
+after an unknown outcome. A caller that chooses to issue a new request accepts
+that it is an independent operation.
+
 ## 5. Public API and native values
 
 ### 5.1 Operation families
@@ -221,10 +242,11 @@ unsurprising.
 
 An adapter MUST NOT stringify, coerce, reorder with semantic loss, or silently
 drop a value or map key that its native container cannot represent. It follows
-the value model's representation options: a lossless view may combine native
-values with wrappers, a strict native view returns a conversion error, and an
-encoded view returns the structured payload bytes. Each package documents the
-language-specific wrapper and option syntax.
+the value model's representation options: a lossless view may use a generic
+model representation, a strict native view returns a conversion error, and an
+encoded view returns the structured payload bytes. The value specification is
+the normative source for these representations; each package documents only
+its language-specific names and syntax.
 
 Maintained bindings SHOULD expose one `get` operation with a representation
 option equivalent to:
@@ -235,11 +257,19 @@ get(key, representation="native")
 get(key, representation="encoded")
 ```
 
-The default for dynamic bindings SHOULD be `lossless`. A lossless wrapper
-supports ordinary lookup, indexing, iteration, and entry access, but is not
-required to pass every native reflection or serialization check. An adapter
-MUST report ambiguous native lookups rather than silently selecting or merging
-an entry.
+The default for dynamic bindings SHOULD be `lossless`. An adapter MUST report
+ambiguous native lookups rather than silently selecting or merging an entry.
+The `encoded` option returns the exact structured-value payload bytes before
+the value envelope's compression and protection; it does not return a wrapper.
+Exact Item ID operations separately return the caller-owned opaque bytes.
+
+Typed languages SHOULD preserve compile-time distinctions with overloads or
+distinct methods such as `set_native`, `set_value`, and `set_encoded`, rather
+than one unconstrained `Any` parameter. Overloads are an API-shape choice: all
+forms MUST map to the same value-model semantics and MUST reject an
+unsupported cross-language decode. A package MAY instead use one generic
+method with a typed input parameter when its language can express that
+contract without weakening type checking.
 
 ### 5.4 Runtime shape
 
@@ -280,6 +310,7 @@ OpenKache-maintained clients. The maintained default policy is:
 compression_mode = Automatic
 zstd_level = 1
 minimum_input_bytes = 1,024
+minimum_savings_bytes = 0
 ```
 
 For a formatted payload of at least 1,024 bytes, the shared value codec
@@ -294,6 +325,10 @@ and zstd_frame_length < payload_length
 Otherwise it emits the uncompressed form. This is a maintained-client policy,
 not a value-format validity or interoperability requirement. Third-party
 clients may use another selection policy while emitting valid value envelopes.
+
+`minimum_savings_bytes = 0` means that a completed Zstandard frame is used when
+it is even one byte smaller. The comparison is made after the complete frame
+has been produced, so frame overhead is included.
 
 All maintained bindings inherit this default from the shared core and
 generated client contract; a binding MUST NOT select a language-specific
@@ -324,7 +359,7 @@ Bindings that use the native ABI treat it as the only boundary to the shared
 core. They MUST use generated constants and declarations rather than copying
 protocol, key-format, or value-format assignments into package source.
 
-Each adapter defines and tests:
+Each adapter defines:
 
 - native argument validation before crossing the ABI where practical;
 - ownership and lifetime of client, request, result, error, and buffer handles;
@@ -338,13 +373,12 @@ The adapter must remain thin enough that a shared behavior fix can be made once
 in the core. Platform-specific scheduling or memory integration belongs in the
 adapter and must not leak into common request or format semantics.
 
-## 8. Verification and package documentation
+## 8. Conformance and package documentation
 
-The shared core is tested against the wire, key, and value conformance vectors.
-Every maintained binding additionally tests its native conversion, error
-mapping, cancellation, resource lifetime, and generated-contract version.
-Cross-language tests write through one maintained binding and read through
-another for every portable key and value family supported by both.
+The shared core and maintained bindings MUST satisfy the wire, key, and value
+conformance vectors. Native conversion, error mapping, cancellation, resource
+lifetime, generated contracts, and cross-language round trips are part of the
+maintained implementation's conformance obligations.
 
 Each implemented package README documents:
 

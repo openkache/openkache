@@ -156,7 +156,9 @@ connection. `connection_state()` reports `connected`, `reconnecting`,
 `disconnected`, `closed`, or `unknown`; `reconnect()` replaces a failed connection without
 replaying an operation. Call and await `close()` when finished. The
 `client.raw()` view implements the Smithy-generated `Smithy_OpenKache_Api`
-contract for exact 32-byte item IDs and opaque protocol values.
+contract for the current fixed-width item-ID API and opaque protocol values.
+The draft key contract targets `0..=32`-byte Item IDs and is not implemented
+by this package yet.
 
 Protocol limits and operation outcomes follow the
 [wire protocol specification](../../protocol/SPEC.md); retry policy remains

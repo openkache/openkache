@@ -66,7 +66,7 @@ source value
 
 `OpaqueBytes` treats the source as an exact byte string: before optional
 compression and protection, the payload bytes are identical to the supplied
-bytes. `StructuredValue` accepts one value-profile data item under the rules in
+bytes. `StructuredValue-CBOR-v1` accepts one value-profile data item under the rules in
 [`value/SPEC.md`](value/SPEC.md). `Json` is an API convenience type, not a v1
 payload selector: it is serialized as canonical RFC 8785 UTF-8 and carried
 using `OpaqueBytes` (selector `0`). The payload format is selected by the
@@ -203,13 +203,16 @@ downgrade or fall back.
 | ID | Payload format |
 |---:|---|
 | `0` | `OpaqueBytes` |
-| `1` | `StructuredValue` (initial profile: [`value/SPEC.md`](value/SPEC.md)) |
+| `1` | `StructuredValue-CBOR-v1` (initial profile: [`value/SPEC.md`](value/SPEC.md)) |
 
 Only the payload format IDs listed above are supported by this profile. Any
-other payload format ID MUST be rejected. This profile has no in-band
-application-format registry. Applications that need another format MUST select
-a supported profile or encode it as `OpaqueBytes` and agree on its
-interpretation out of band.
+other payload format ID MUST be rejected. Payload format ID `1` is specifically
+the CBOR v1 profile; it is not a generic alias for every future structured
+codec. A future OpenKache-defined structured codec MUST use a new payload
+format ID or a new envelope version and MUST NOT reinterpret ID `1`. This
+profile has no in-band application-format registry. Applications that need
+another format MUST select a supported profile or encode it as `OpaqueBytes`
+and agree on its interpretation out of band.
 
 ## 5. Payload formats
 
@@ -244,7 +247,7 @@ The selected payload is empty, so the envelope has no body bytes after the
 selector. The enclosing protocol frame supplies the envelope length; the
 envelope does not contain a separate payload-length field.
 
-### 5.2 StructuredValue
+### 5.2 StructuredValue-CBOR-v1
 
 The structured payload MUST conform to the initial codec profile in
 [`value/SPEC.md`](value/SPEC.md). That specification defines the complete

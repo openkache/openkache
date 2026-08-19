@@ -450,11 +450,10 @@ not require a separate control-plane transport.
 `namespace_id` is a fixed eight-byte `u64be` in the numeric range
 `1..=2^64 - 1`. The server assigns it; it is an opaque, stable server-wide
 identity. Once assigned, a `namespace_id` MUST NOT be reused for a different
-namespace, including after deletion, restart, recovery, or replica replacement
-within the lifetime of the persistent deployment. A server MUST persist the
-allocation tombstones or monotonic allocator state needed to enforce this
-rule. If that state cannot be recovered, the server MUST NOT start as a v1
-endpoint. `0` is reserved and MUST be rejected. The ID is carried per request
+namespace within the deployment's durable identity domain, including after
+deletion, restart, recovery, or replica replacement. Recovery and snapshot
+procedures MUST preserve that guarantee; a server that cannot do so MUST NOT
+start as a v1 endpoint. `0` is reserved and MUST be rejected. The ID is carried per request
 rather than bound to a lane, so a lane may be reused for different namespaces.
 Clients do not allocate namespace IDs; they treat the server-returned ID as
 opaque and MUST NOT synthesize or recycle one.
@@ -791,15 +790,15 @@ item_id:item_id_len`.
   string and a `workers` array of strings.
 - Unauthorized: `Forbidden` with an optional diagnostic payload.
 
-The JSON object is a point-in-time diagnostic snapshot of the server and its
+The JSON object is an operator diagnostic snapshot of the server and its
 storage workers. Version 1 does not require the `storage` or `workers` values
 to be filtered to the requested namespace; `namespace_id` scopes the request,
 checks that the namespace exists for an authorized request, and provides the
 authorization boundary.
 Per-namespace diagnostic members MAY be added in future responses. Clients
-MUST ignore unknown object members so diagnostics can grow without changing
-the frame protocol. The JSON payload remains subject to the 64 MiB response
-limit.
+MUST ignore unknown object members and MUST NOT depend on individual diagnostic
+members unless a future version defines a stable schema. The JSON payload
+remains subject to the 64 MiB response limit.
 
 ### `SYNC`
 

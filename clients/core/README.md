@@ -1,7 +1,9 @@
 # OpenKache client core
 
 `openkache-client-core` is the reusable Rust engine behind OpenKache language
-bindings.
+bindings. Its current APIs are transitional while the draft key, value, and
+variable Item ID contracts are being implemented; this README describes the
+current crate surface, not a conformance claim for those drafts.
 
 ## Purpose
 
@@ -84,10 +86,11 @@ let outcome = client
     .await?;
 ```
 
-`ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes. The key-format
-specification defines the target Exact Item ID and formatted-key behavior; this
-README describes only the current Rust API surface.
+`ItemId::from_bytes` preserves the current fixed-array API. `ItemId::from_slice`
+validates and copies a dynamic buffer. Neither hashes the supplied bytes. The
+key-format specification defines the target `0..=32`-byte Exact Item ID and
+formatted-key behavior; this README describes only the current Rust API
+surface until that migration is complete.
 
 `ValueCodec` composes the value model with the formatted-value envelope. The
 value model is the source of truth for structured-value semantics and the

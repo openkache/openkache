@@ -108,6 +108,11 @@ MUST NOT be used.
 Both formatted mapping profiles encode `Bytes` as a CBOR byte string. It is not
 the `OpaqueBytes` value format and does not mean an Exact Item ID.
 
+Mapping profiles are client/namespace configuration, not per-operation
+wire-visible metadata. A client MUST keep the selected profile fixed for a
+namespace's addressable data unless it is intentionally performing an identity
+migration. The server does not know which profile produced an Item ID.
+
 ### 2.2 Typed-key type selection
 
 Every typed-key operation MUST select exactly one `KeyType`:
@@ -282,6 +287,11 @@ is not added to preserved Item IDs. Neither path uses `namespace_id`,
 keys produce equal Item IDs across namespaces and client configurations under
 this profile; the wire-level `(namespace_id, item_id)` pair still identifies a
 distinct server item.
+
+Profiles do not provide isolation from one another. A short canonical key may
+coincide with an Item ID supplied through another client profile or the Exact
+Item ID API. Clients requiring profile isolation or non-public Item IDs MUST
+use `Hash` and keep the selected profile fixed for the namespace.
 
 This profile provides no key confidentiality. Its purpose is a compact,
 language-neutral mapping whose short-key path avoids per-key hashing, including

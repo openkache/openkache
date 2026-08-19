@@ -50,8 +50,20 @@ their API shape or local policy a requirement for third-party clients. The
 value envelope carries the selected value profile opaquely; the server does
 not interpret it. TypeScript's legacy metadata envelope remains a
 package-level compatibility detail; use its `set_json` / `get_json` or Exact
-Item ID methods for cross-language values until the structured-value
-implementation is complete.
+Item ID methods for caller-owned opaque bytes until the structured-value
+implementation is complete. Exact Item ID methods do not perform
+cross-language serialization.
+
+The documents above are target drafts. The current generated Smithy contract
+and shared core still contain transitional pre-freeze behavior, including the
+legacy value container and fixed-width Item ID operations. They must be
+migrated before any package claims conformance to the draft contracts.
+
+| Area | Draft target | Current implementation | Status |
+|---|---|---|---|
+| Item ID | `0..=32` bytes | Fixed-width 32 bytes | Migration pending |
+| Structured value selector `1` | `StructuredValue-CBOR-v1` | Legacy JSON container | Migration pending |
+| Maintained compression | Automatic; use a completed frame when it is at least one byte smaller | Legacy per-core/default settings | Migration pending |
 
 ## Binding architecture
 
@@ -65,14 +77,14 @@ language-facing API and platform integration.
 ## Scaffold commands and entry points
 
 Run each command from the listed package directory. These commands validate
-package structure only.
+package structure and buildability.
 
 | Package | Validation command | Reserved package surface |
 |---|---|---|
 | C | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.h` |
 | C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
 | Dart | `dart analyze` | `lib/openkache.dart` |
-| Go | `go generate && go vet ./... && go test ./... && go build ./...` | Context-aware protected client and generated Smithy API |
+| Go | `go generate && go vet ./... && go build ./...` | Context-aware protected client and generated Smithy API |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
 | CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |

@@ -20,7 +20,8 @@ profile, validation, and native-conversion rules in this document.
 
 The normative terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**,
 **SHOULD NOT**, and **MAY** are to be interpreted as described by
-[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
+[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
 
 ## 1. Scope and design goals
 
@@ -106,12 +107,14 @@ The model distinguishes `Integer(1)` from `Float64(1.0)`, and distinguishes
 positive and negative zero. Float width and raw bits MUST be preserved by the
 generic value representation and by an encoder that receives those bits.
 
-Native runtimes may expose weaker guarantees. In particular, JavaScript does
-not provide a portable way to observe or construct every NaN payload. A
-JavaScript adapter MUST encode the IEEE-754 bits observable from its runtime
-value and MUST NOT intentionally normalize a value that the runtime exposes.
-Applications that require a particular NaN payload MUST use the generic or
-encoded representation.
+The generic `Float(width, raw_bits)` representation and an encoder receiving
+that representation MUST preserve the selected width and raw bits exactly.
+Native runtime mappings have weaker guarantees when the runtime cannot expose
+all of those bits. Python `float` mappings preserve the runtime-observable
+binary64 bits. A JavaScript adapter MUST encode the binary64 bits observable
+from its `number` value and MUST NOT intentionally normalize a representation
+that the runtime exposes. Applications that require a particular NaN payload or
+original float width MUST use the generic model or `encoded` representation.
 
 Native decoding MAY map Float16 and Float32 to the language's ordinary
 binary64 floating-point type. Such a conversion preserves the numeric value
@@ -227,8 +230,8 @@ types such as `isize`, `usize`, `int`, and `uint` MUST NOT become wire-level
 types.
 
 Each maintained package MUST document the native type returned for `Integer`,
-the behavior of Float16/Float32 decoding, and any value that requires a
-lossless wrapper.
+the behavior of Float16/Float32 decoding, and any value that cannot be
+returned in its ordinary native representation.
 
 ## 4. Representation options
 
@@ -244,11 +247,20 @@ get(key, representation="encoded")
 
 `lossless` SHOULD be the default for dynamic maintained bindings.
 
+Encoding SHOULD accept every value expressible by the binding's documented
+native mapping. Decoding into a different language's native representation
+MAY fail when that language cannot represent the value without semantic loss.
+The adapter MUST then return a conversion error for `native`, or let the
+caller select `lossless`/generic or `encoded` representation to retrieve the
+value without loss.
+
 ### 4.1 Lossless representation
 
-`lossless` uses native values whenever the conversion is exact and wraps only
-the smallest subtree that cannot be represented by the language's native
-containers. A lossless wrapper MUST support ordinary value access:
+`lossless` uses native values whenever the conversion is exact and otherwise
+returns the complete generic model or a language-native lossless view. A
+binding MAY provide wrappers, but wrappers are not required by this
+specification. If a binding provides a wrapper, it MUST support ordinary value
+access:
 
 - indexing where the model is indexed;
 - lookup and membership;
@@ -261,6 +273,23 @@ test. For example, it need not be an actual Python `dict` or JavaScript plain
 object. A lookup that is ambiguous under native equality MUST report an
 ambiguity error rather than choose an entry.
 
+The following read operations are common wrapper requirements; language syntax
+may differ:
+
+| Operation | Required behavior |
+|---|---|
+| Array indexing | Return the indexed child, preserving a wrapper when needed. |
+| Map lookup | Match a complete model key when the caller supplies one; a native lookup that maps to zero or multiple model keys MUST return missing or an ambiguity error respectively. |
+| Map iteration | Iterate model-preserving keys and values in entry order. |
+| `keys`, `values`, and `entries` | Expose the same model-preserving view as map iteration. |
+| Length | Return the number of array elements or map entries. |
+
+Mutation, hashability, reflection, and native serialization of wrappers are
+language-specific and MUST be documented by each adapter. A wrapper MUST NOT
+silently mutate a map in a way that drops or merges a model key. An adapter
+that cannot expose a lossless native view MUST return the generic model or a
+conversion error; it MUST NOT silently discard information.
+
 ### 4.2 Native representation
 
 `native` requires the complete value to be representable by the binding's
@@ -272,40 +301,46 @@ other native container. It is not allowed to silently lose information.
 
 ### 4.3 Encoded representation
 
-`encoded` returns the complete structured payload bytes produced by the
-selected value profile. It does not expose CBOR types or tags as the public
-value model. A caller that needs byte-exact forwarding MUST use this mode
-instead of decoding and re-encoding the value.
+`encoded` returns the exact structured payload bytes produced by the selected
+value profile, before value-envelope compression and protection. It does not
+return a wrapper or expose CBOR types as the public value model. A caller that
+needs byte-exact forwarding MUST use this mode instead of decoding and
+re-encoding the value. Complete value-envelope bytes remain outside this mode
+and are handled by the value-format API.
 
 `OpaqueBytes` operations bypass this model and return the exact application
 bytes directly.
 
-## 5. Initial codec profile
+## 5. Initial codec profile: StructuredValue-CBOR-v1
 
 The first profile maps the model to one complete CBOR data item. It delegates
 the byte grammar to [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949) and the
 floating-point representation to IEEE-754.
 
-The profile rules are:
+The profile accepts exactly the following CBOR values:
 
-- exactly one complete CBOR data item MUST be present;
-- trailing bytes and CBOR sequences MUST be rejected;
-- arrays, maps, byte strings, and text strings MUST use definite lengths;
-- text strings MUST contain well-formed UTF-8;
-- null, booleans, undefined, and supported simple values map to their
-  corresponding logical value kinds;
-- ordinary integer values use CBOR major type 0 or 1;
-- values outside the ordinary CBOR integer range use the standard bignum
-  representation (tags 2 and 3) and decode to the same logical `Integer`;
-- encoders MUST use the ordinary integer representation whenever it can
-  represent the value and MUST NOT use bignum as a public source-type marker;
-- valid non-preferred integer encodings MAY be accepted by decoders, but they
-  MUST have the same logical value;
-- Float16, Float32, and Float64 retain their selected width and raw bits;
-- map entries are emitted in their logical order, but map order has no
-  semantic meaning; and
-- tags other than those required internally for bignum are rejected in this
-  first profile.
+| CBOR encoding | Logical value | Acceptance rule |
+|---|---|---|
+| `null` | `Null` | MUST be accepted. |
+| `true`, `false` | `Boolean` | MUST be accepted. |
+| `undefined` | `Undefined` | MUST be accepted. |
+| Major type 0 or 1 | `Integer` | MUST represent the mathematical value exactly. Preferred and valid non-preferred integer encodings MAY both be accepted; encoders MUST emit preferred serialization. |
+| Tag 2 or 3 over a definite byte string | `Integer` | MUST use a minimal, non-empty big-endian magnitude. The sign is selected by the tag. Values representable as ordinary CBOR integers MUST still be decoded as the same `Integer`; encoders MUST prefer ordinary integers. |
+| Half-, single-, or double-precision float | `Float` | Width and raw bits MUST be retained by the generic representation. |
+| Definite byte string | `ByteString` | Bytes are uninterpreted. |
+| Definite, valid UTF-8 text string | `TextString` | Invalid UTF-8 MUST be rejected. |
+| Definite array | `Array` | Elements are decoded recursively. |
+| Definite map | `Map` | Duplicate keys are rejected under §2.4. |
+
+Indefinite-length arrays, maps, byte strings, and text strings MUST be
+rejected. Simple values other than `null`, booleans, and `undefined`, and tags
+other than 2 and 3, MUST be rejected. Exactly one complete CBOR data item MUST
+be present; trailing bytes and CBOR sequences MUST be rejected.
+
+For duplicate-key detection, a decoder MUST decode each key to the logical
+model, compare keys using §2.4 structural equality, and reject a duplicate
+before exposing the map. It MUST NOT use native language equality as a
+substitute for this comparison. Map entry order does not affect the result.
 
 The profile does not require deterministic encoding of the complete payload.
 Maintained Python and JavaScript encoders SHOULD preserve the iteration order
@@ -313,9 +348,11 @@ of their input `dict`, `Map`, or lossless entry view. This is a client
 convenience and does not make map order part of wire equality or require
 third-party implementations to preserve it.
 
-The profile's parser MUST apply the common payload and nesting limits supplied
-by the enclosing client value format. This document does not add a separate
-bignum limit.
+The profile's parser MUST apply the common payload limits supplied by the
+enclosing client value format. This draft intentionally does not add separate
+container-depth, entry-count, or bignum-size limits; implementations MAY use
+lower local resource limits and MUST report such local rejections without
+silently changing the decoded value.
 
 ## 6. Standards delegation and future profiles
 
@@ -331,7 +368,7 @@ re-specifying it:
 
 Delegation does not remove the need to define cross-language behavior. This
 specification owns native numeric mappings, semantic equality, duplicate-key
-rejection, lossless/native representations, and wrapper behavior because the
+rejection, lossless/native representations, and optional view behavior because the
 underlying codec standards do not define those product-level contracts.
 
 Schema-bound formats such as protobuf are future payload profiles, not
@@ -341,9 +378,11 @@ unknown-field semantics.
 
 ## 7. Implementation boundary
 
-The reusable implementation is intended to live under `clients/value/` as a
-small shared value package. It may expose a Rust core and language adapters,
-but the logical model and profile conformance remain one specification.
+This directory currently contains the value-model specification only. No
+public package or implementation API is committed by this draft. A future
+reusable implementation is intended to live under `clients/value/` as a small
+shared value package. It may expose a Rust core and language adapters, but the
+logical model and profile conformance remain one specification.
 
 The OpenKache client core uses this package to produce structured payload
 bytes. The client value envelope then applies compression, cryptographic
@@ -354,3 +393,20 @@ complete envelope as opaque bytes.
 This specification is deliberately independent of Item ID derivation and
 formatted-key behavior, which remain defined by
 [`../KEY_FORMAT.md`](../KEY_FORMAT.md).
+
+## 8. Conformance examples
+
+The following mappings are normative:
+
+| Source value | Logical model |
+|---|---|
+| Python `1` | `Integer(1)` |
+| JavaScript `1` | `Float64(+1.0)` |
+| JavaScript `1n` | `Integer(1)` |
+| Python or JavaScript `-0.0`/`-0` | `Float64(-0.0)` |
+| `TextString("x")` | distinct from `ByteString(78)` |
+| `Integer(1)` map key | distinct from `Boolean(true)` and `Float64(1.0)` |
+
+A map containing keys that are distinct in the model but collide in a native
+container MUST be returned through a lossless representation or rejected by
+strict native conversion.
