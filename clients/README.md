@@ -17,7 +17,7 @@ Shared client topics are documented here:
 | Value-key schedule, AAD, and cryptographic protection | [Value security](VALUE_SECURITY.md) |
 | Public boundary fixtures for draft interoperability | [`fixtures/`](fixtures/) |
 | Cross-language value model, native mappings, and structured-value profiles | [Value project](value/SPEC.md) |
-| QUIC/TLS-over-TCP framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
+| Wire framing, operations, transport profiles, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
 | Language API, build, packaging, and runtime configuration | The implemented package's README |
 
 Package documentation links to these references instead of restating shared
@@ -75,8 +75,9 @@ Maintained language packages convert native values and runtime behavior at the
 edge while delegating transport, protocol, retry classification, key mapping,
 and formatted-value processing to `clients/core`. The [client implementation
 guide](CLIENT.md) defines that shared boundary. The [core README](core/README.md)
-documents the Rust crate and native ABI, and each package README documents its
-language-facing API and platform integration.
+documents the current Rust crate and native ABI; the
+[core target design](core/TARGET.md) summarizes the post-migration surface.
+Each package README documents its language-facing API and platform integration.
 
 ## Scaffold commands and entry points
 

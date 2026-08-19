@@ -1,6 +1,6 @@
 {
   "spec": "openkache/wire-protocol",
-  "spec_revision": "draft-2026-08-19.2",
+  "spec_revision": "draft-2026-08-19.3",
   "vectors": [
     {
       "kind": "positive",

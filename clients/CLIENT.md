@@ -1,6 +1,6 @@
 # OpenKache Maintained Client Implementation Guide — Version 1 Draft
 
-> **Status:** Draft `draft-2026-08-19.2`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.3`; not released or finalized.
 >
 > This guide describes the target implementation for OpenKache-maintained
 > client SDKs. Implementations may temporarily lag during migration.
@@ -185,7 +185,8 @@ attempt and deadline limits.
 The maintained clients do not automatically replay a mutation or experimental
 maintenance barrier after an unknown outcome. A caller may issue a new
 operation explicitly, but that is not a continuation or deduplicated retry of
-the first request.
+the first request. Unknown outcome is a distinct public result category, not a
+generic transport error.
 
 Adapters MAY expose retry count, backoff, and deadline controls. An override
 changes only the selected operation or client instance; it does not change the
@@ -241,6 +242,10 @@ Address and value representation are independent API axes:
 An adapter MAY use overloads, options, or distinct method names, but its
 documentation MUST identify both axes. `exact` means only “bypass key mapping”;
 `raw` means only “bypass value encoding and decoding.”
+
+Maintained high-level Exact APIs reject an empty Item ID unless the caller
+explicitly enables it. Raw protocol APIs accept the complete `0..=32` wire
+range.
 
 | Value mode | Client ownership |
 |---|---|
@@ -351,7 +356,7 @@ and value specifications define the actual fields and validity rules.
 
 The maintained identity default is `NamespaceHash`. When no value key is configured,
 formatted values use `Unprotected`; this does not change key mapping.
-`PublicKeyOrHash` is an explicit choice for deployments that trust the
+`PublicKeyOrHash` is an explicit choice for applications that trust the
 server and do not need client-side key confidentiality, namespace binding, or
 root-key isolation. It is also useful for direct-key benchmarks. It remains
 independent of value protection and ignores any Item ID root key.
@@ -364,21 +369,17 @@ The defaults are explicit rather than implicitly secure:
 | Verified TLS only | No | No | Yes |
 | Secret Item ID root and protected value | Yes | Yes | Only with server verification |
 
-### 6.2 Pre-freeze TODOs
+### 6.2 Open design points
 
-The following configuration contracts remain deliberately open and MUST be
-resolved before v1 is finalized:
+The following design points remain outside the stable v1 data contract:
 
 - **Profile metadata:** the key format currently leaves profile discovery and
   mismatch handling to client policy. A future revision may define an optional
   client-local record or opaque server metadata; it MUST NOT turn `KeyType`
-  into a server-enforced namespace schema. Until then, clients must keep
-  profile changes explicit and treat them as identity migrations.
-- **Typed-language integers:** decide whether convenience APIs accept the full
-  mathematical `Integer` range, `i64`, or another bounded native range. This
-  does not change canonical key encoding.
-- **Namespace identity:** stable v1 consumes provisioned namespace IDs.
-  `identity_domain_id` and lifecycle/discovery remain in the
+  into a server-enforced namespace schema. Until then, clients expose an
+  explicit per-operation profile override when mixing profiles.
+- **Namespace lifecycle:** stable v1 consumes server-assigned namespace IDs.
+  Lifecycle and discovery remain in the
   [namespace WIP draft](../protocol/NAMESPACE.md).
 
 ### 6.3 Transport and server-authentication policy
@@ -406,15 +407,15 @@ implementing the other.
 
 Server certificate presentation is always part of the TLS handshake. Whether
 the client verifies the certificate chain and server identity is
-deployment-configurable. Disabling verification still provides passive
+client-configurable. Disabling verification still provides passive
 eavesdropping protection and encryption, but it does not provide active
 MITM protection; such a connection MUST NOT be treated as an authenticated
 server endpoint. Requiring a user-supplied certificate file is not a
 maintained-client requirement; system trust, generated development identities,
-or another deployment trust policy may be used.
+or another configured trust policy may be used.
 
-Client certificate authentication (mTLS) is optional and deployment-configured.
-It is not required for ordinary data operations. A deployment MAY require it
+Client certificate authentication (mTLS) is optional and server-configured.
+It is not required for ordinary data operations. A server MAY require it
 for administrative or privileged operations. When mTLS is enabled, server
 authentication is also required. Omitting mTLS never disables TLS 1.3 or the
 hybrid key agreement.
@@ -465,6 +466,10 @@ Write and read policies are separate:
   but not `Unprotected`; and
 - an explicit operation override may narrow the read allowlist or select
   `Unprotected`, without mutating the client default.
+
+`Unprotected`, `AES-256-GCM-SIV`, and `AES-SIV-CMAC` are all stable v1 value
+profiles. `Unprotected` is never selected implicitly when a value key is
+configured; callers must opt in for an individual operation or client.
 
 An authenticated write without an active key fails locally. A protected read
 selects only the key ID carried by the envelope and never probes another key or

@@ -16,13 +16,16 @@ API adapters remain responsible for mapping domain values to generated numeric
 fields and interpreting semantic results. The protocol crate does not generate
 handlers, client methods, or API-family routing.
 
-The [wire protocol specification](SPEC.md) defines transport negotiation, frame
-bytes, stable operation semantics, limits, malformed input handling, and
-ambiguous operation outcomes. [Server semantics](SERVER_SEMANTICS.md) defines
-TTL recovery and eviction obligations. [Namespace lifecycle](NAMESPACE.md) is
-a WIP draft outside v1. [Experimental operations](EXPERIMENTAL.md) defines the
-optional diagnostic and maintenance API. This README covers crate usage and
-implementation structure.
+The [wire protocol specification](SPEC.md) defines the normative v1 contract.
+Use the focused entry points for reading:
+
+- [Wire format](WIRE_FORMAT.md)
+- [Operations](OPERATIONS.md)
+- [Transport profiles](TRANSPORTS.md)
+- [Conformance checklist](CONFORMANCE.md)
+- [Server semantics](SERVER_SEMANTICS.md)
+- [Namespace lifecycle](NAMESPACE.md), a WIP draft outside v1
+- [Experimental operations](EXPERIMENTAL.md)
 
 ## Commands
 

@@ -1,6 +1,6 @@
 # OpenKache Value Security Profiles (Draft)
 
-> **Status:** Draft `draft-2026-08-19.2`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.3`; not released or finalized.
 >
 > This document owns the v1 value-key schedule, associated data, cryptographic
 > profiles, and security properties. Envelope grammar and selector assignment
@@ -98,6 +98,11 @@ write. One value key MUST NOT protect more than `2^32` AES-GCM-SIV writes.
 Implementations MUST also enforce the usage bounds in RFC 8452 and rotate the
 key before any bound is reached. SIV-CMAC is deterministic and therefore
 reveals equality for equal key, AAD, and payload inputs.
+
+Key management for GCM-SIV MUST enforce the usage bound across all writers that
+share a value-key ID, for example with bounded write quotas or early rotation.
+A writer MUST fail closed when it cannot establish that its write remains
+within the assigned quota.
 
 The transform order is:
 

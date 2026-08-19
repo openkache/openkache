@@ -1,6 +1,6 @@
 {
   "spec": "openkache/client-key-format",
-  "spec_revision": "draft-2026-08-19.2",
+  "spec_revision": "draft-2026-08-19.3",
   "vectors": [
     {
       "kind": "positive",
@@ -41,6 +41,36 @@
     },
     {
       "kind": "boundary",
+      "name": "integer_signed_i64_max",
+      "input": {
+        "type": "Integer",
+        "value": "9223372036854775807"
+      },
+      "intermediate": {
+        "canonical_key_bytes_hex": "1b7fffffffffffffff"
+      },
+      "output": {
+        "canonical_key_bytes_hex": "1b7fffffffffffffff"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "integer_signed_i64_min",
+      "input": {
+        "type": "Integer",
+        "value": "-9223372036854775808"
+      },
+      "intermediate": {
+        "canonical_key_bytes_hex": "3b7fffffffffffffff"
+      },
+      "output": {
+        "canonical_key_bytes_hex": "3b7fffffffffffffff"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
       "name": "public_preserved_30_bytes",
       "input": {
         "type": "Bytes",
@@ -75,31 +105,17 @@
       "error": null
     },
     {
-      "kind": "boundary",
-      "name": "integer_positive_bignum",
+      "kind": "negative",
+      "name": "integer_outside_signed_i64_rejected",
       "input": {
         "type": "Integer",
-        "value": "18446744073709551616"
-      },
-      "intermediate": {
-        "canonical_key_bytes_hex": "c249010000000000000000"
-      },
-      "output": {
-        "canonical_key_bytes_hex": "c249010000000000000000"
-      },
-      "error": null
-    },
-    {
-      "kind": "negative",
-      "name": "nonpreferred_bignum_rejected",
-      "input": {
-        "canonical_key_bytes_hex": "c24101"
+        "value": "9223372036854775808"
       },
       "intermediate": {},
       "output": null,
       "error": {
-        "category": "noncanonical_key",
-        "reason": "Integer(1) must use basic CBOR integer encoding"
+        "category": "integer_out_of_range",
+        "reason": "v1 Integer must fit signed i64"
       }
     },
     {

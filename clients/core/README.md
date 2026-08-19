@@ -1,23 +1,19 @@
 # OpenKache client core
 
 `openkache-client-core` is the reusable Rust engine behind OpenKache language
-bindings. The crate currently contains transitional APIs while the draft key,
-value, and variable Item ID contracts are being implemented. This README
-separates that current surface from the target draft; neither section alone is
-a conformance claim for the pre-freeze contracts.
+bindings. This README documents the current transitional crate. The
+[target design](TARGET.md) describes the pre-freeze destination.
 
 ## Purpose
 
-The target core handles connection lifecycle, TLS, transport fallback, lane
-concurrency, protocol operations, native key mapping, compression, encryption,
-and formatted-value processing. Language adapters convert native types and
-delegate to this crate. The current transitional implementation does not yet
-provide every target capability described below.
+The core centralizes connection lifecycle, protocol operations, key mapping,
+value processing, and the native ABI used by maintained bindings. Language
+adapters convert native types and delegate shared behavior to this crate.
 
 The main API layers are:
 
 - raw and protected convenience clients for the current implementation;
-- the target independent address/value operations described by `CLIENT.md`;
+- the shared address/value operations described by `CLIENT.md`;
 - `ValueCodec`, which owns value serialization, optional Zstandard compression,
   and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
@@ -45,6 +41,7 @@ adapter depends on this core directly.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
   operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
+- The [target design](TARGET.md) summarizes the post-migration core contract.
 
 This README intentionally does not specify protected-value bytes. Consult the
 client index for implemented-format status and the value-format specification
@@ -57,17 +54,6 @@ documents are the target source of truth. Some current
 Rust and legacy adapter paths still use fixed-width Item IDs or a legacy value
 container. They MUST NOT be treated as evidence that the draft variable-length
 wire, key, or value profiles are already implemented.
-
-## Draft target
-
-The target core will expose independent address and value representation
-families: mapped or exact Item IDs combined with raw bytes, caller-owned v0
-envelopes, or the v1 value envelope. It will support `0..=32`-byte Item IDs,
-the `NamespaceHash` and `PublicKeyOrHash` profiles, and the shared lane/request
-engine described by the linked specifications. A migration
-may change constructors and generated ABI declarations; the public C ABI is
-versioned rather than an unqualified promise that every transitional symbol
-will remain unchanged.
 
 ## Commands
 
@@ -82,15 +68,11 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. Protected FFI operations accept exactly one complete
-canonical v1 key item validated by `KEY_FORMAT.md`, not raw application bytes.
-`Integer` includes CBOR major types 0/1 and canonical tags 2/3; `Text` and
-`Bytes` use their corresponding CBOR major types. The feature requires the
-platform's io_uring driver and exports `openkache_client_*` symbols from the
-native library crate outputs. The ABI exposes the shared-core operations and
-lifecycle required by native adapters. CMake, Go, and Python package builds
-regenerate the scoped Smithy-derived client contract as needed. Reusable ABI
-declarations are in
+`LocalProtectedClient`. It requires the platform's io_uring driver and exports
+`openkache_client_*` symbols from the native library crate outputs. The ABI
+exposes the shared-core operations and lifecycle required by native adapters.
+CMake, Go, and Python package builds regenerate the scoped Smithy-derived
+client contract as needed. Reusable ABI declarations are in
 `include/openkache/client_abi.h` (with the
 `include/openkache_client.h` compatibility include); the generated Smithy
 contract header is supplied by each package build.
@@ -139,11 +121,9 @@ trust and derive the TLS server name from the host. Builders accept a
 pre-resolved endpoint, explicit trust roots, mutual TLS identity, deadlines,
 retry attempts, compression policy, and `max_in_flight`.
 
-The target draft adds QUIC/TLS-over-TCP fallback and deployment-configurable
-server-identity verification without changing frame bytes. Both target
-transports require TLS 1.3 with `X25519MLKEM768`; plaintext TCP is not
-supported. Those target settings are not yet a claim about the transitional
-builder surface.
+Target transport and security settings are documented in
+[`TARGET.md`](TARGET.md); they are not claims about the transitional builder
+surface.
 
 `Endpoint` requires a positive port. A pre-resolved socket address also
 requires an explicit certificate server name because the network destination

@@ -2,7 +2,7 @@
 
 ## Status
 
-This document is revision `draft-2026-08-19.2` of the draft OpenKache wire
+This document is revision `draft-2026-08-19.3` of the draft OpenKache wire
 protocol version 1. Version 1 has not been released or finalized. The requirements
 below describe the current intended wire contract and may change before
 finalization. Within this draft, an implementation conforms only when its
@@ -38,7 +38,7 @@ Version 1 specifies:
 
 `STATS` and `EXPERIMENTAL_SYNC` are experimental operations. They are not part
 of the stable v1 operation conformance surface. A server MAY enable them with
-an `enable_experimental_api` deployment setting. Their current contracts are
+an `enable_experimental_api` server setting. Their current contracts are
 documented separately in [`EXPERIMENTAL.md`](EXPERIMENTAL.md). An implementation
 that does not enable the setting treats their opcodes as unassigned.
 
@@ -52,10 +52,8 @@ described by the [Client Implementation Guide](../clients/CLIENT.md); they are
 not additional wire requirements for third-party clients. The physical storage
 layout and the namespace eviction algorithm are outside this wire protocol.
 Item expiration and eviction eligibility are part of the `SET` contract below.
-Namespace lifecycle and policy administration are carried by the
-namespace-management requests defined below.
-Server recovery, clock, identity-domain, and eviction obligations are
-summarized below and detailed in
+Namespace lifecycle and discovery are outside stable v1. Server recovery,
+clock, and eviction obligations are summarized below and detailed in
 [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
 
 This document has four normative layers:
@@ -72,6 +70,11 @@ This document has four normative layers:
 The wire grammar is the compatibility boundary. A server implementation MAY
 organize the semantic layers differently, but MUST preserve the wire rules and
 public operation behavior when claiming v1 conformance.
+
+For a shorter reading path, start with [WIRE_FORMAT.md](WIRE_FORMAT.md),
+[OPERATIONS.md](OPERATIONS.md), and [TRANSPORTS.md](TRANSPORTS.md). Those files
+are navigation guides to the normative sections below; this document remains
+the single normative source during the draft.
 
 ## Terminology
 
@@ -91,7 +94,7 @@ public operation behavior when claiming v1 conformance.
 - **In-flight request**: A complete request that has not yet received its
   response.
 - **Item ID**: An opaque identifier of `0..=32` bytes used for cache equality.
-- **Account**: A deployment-defined authenticated identity. Version 1 does not
+- **Account**: A server-defined authenticated identity. Version 1 does not
   make an account the owner or scope of a namespace.
 - **Namespace**: A named server-wide collection of Item IDs with default
   expiration and eviction policies. A namespace is not nested under an
@@ -128,9 +131,9 @@ transport ID, lane ID, or transport-specific multiplexing header. TCP
 segments, TLS records, socket reads, and socket writes have no frame-boundary
 meaning. TCP plaintext is not a conforming v1 transport.
 
-OpenKache servers and maintained clients MUST support both profiles. A
-third-party implementation MAY implement one profile and claim conformance to
-that profile, but MUST identify which profile it supports.
+An implementation MUST support at least one transport profile and MUST identify
+which profile it supports. OpenKache-maintained servers and clients support both
+profiles.
 
 Both bindings use the same 11-byte ASCII ALPN identifier:
 
@@ -147,7 +150,7 @@ an older version when a mutually supported newer version was offered.
 Every client has a configured minimum acceptable protocol version. A client
 MUST abort the connection if the negotiated ALPN is below that minimum. A
 client MUST NOT silently lower its minimum in response to a negotiation
-failure. Explicit fallback to a lower version is a deployment choice and MUST
+failure. Explicit fallback to a lower version is an application choice and MUST
 be configured by the application.
 
 TLS authenticates the negotiated ALPN as part of the handshake transcript. The
@@ -161,13 +164,13 @@ implementation MUST support. Classical-only fallback is not permitted.
 Additional groups may be registered only when they provide at least the
 classical and post-quantum security strength of the mandatory group. A peer
 with no mutually supported approved group MUST fail the handshake. Every
-registry revision MUST be published with the protocol revision so deployments
+registry revision MUST be published with the protocol revision so operators
 can pin it; registry changes do not change frame bytes.
 
 Protocol v1 does not require a post-quantum certificate signature. The server
-certificate signature remains deployment-configurable because certificate
+certificate signature remains server-configurable because certificate
 algorithm support and trust infrastructure vary independently from the
-handshake key agreement. A deployment that requires post-quantum
+handshake key agreement. A server that requires post-quantum
 authentication MUST select an approved PQ signature profile. ML-DSA under
 FIPS 204 is the current intended candidate, subject to TLS certificate-profile
 and backend support; v1 does not assign a certificate signature registry.
@@ -177,24 +180,25 @@ frame bytes or v1 operation semantics.
 The ALPN negotiation selects the connection's frame version. Frames contain no
 version field. Once v1 negotiation succeeds, every OpenKache frame on the
 connection uses this specification. During the pre-freeze draft period,
-implementations using the provisional `openkache/1` identifier MUST coordinate
-the same specification revision out of band. An implementation claiming this
-revision MUST NOT use an older common-header layout. After v1 is finalized, an
-incompatible framing or field meaning requires a different ALPN identifier.
+implementations using the provisional `openkache/1` identifier coordinate the
+active draft revision out of band. An implementation claiming this revision
+MUST NOT use an older common-header layout. The draft deliberately keeps
+`openkache/1`; after v1 is finalized, an incompatible framing or field meaning
+requires a different ALPN identifier.
 
 Peers without a common ALPN identifier MUST fail negotiation.
 
 The server MUST present a certificate during the TLS handshake. Whether the
 client verifies the certificate chain and server identity is
-deployment-configurable. Disabling client-side verification still provides
+client-configurable. Disabling client-side verification still provides
 encryption and passive eavesdropping protection, but does not provide active
 MITM protection. A client MUST NOT treat such a connection as an authenticated
-server endpoint. A deployment need not require users to provide a certificate
+server endpoint. A server need not require users to provide a certificate
 file; system trust or an automatically generated development identity may be
 used.
 
-Client certificate authentication is optional and deployment-configurable.
-Ordinary data operations do not require mTLS by default. A deployment MAY
+Client certificate authentication is optional and server-configurable.
+Ordinary data operations do not require mTLS by default. A server MAY
 require an authenticated client identity for administrative or privileged
 operations. When client authentication is enabled, server authentication is
 also required. Omitting mTLS MUST NOT disable TLS 1.3 or the hybrid key
@@ -549,7 +553,7 @@ the pair `(namespace_id, item_id)`.
 Stable v1 does not define namespace creation, lookup by name, policy update, or
 deletion. The previous lifecycle proposal remains as a WIP draft in
 [`NAMESPACE.md`](NAMESPACE.md) and is not an implementation requirement.
-How a client discovers a provisioned namespace ID is deployment-specific.
+How a client discovers a provisioned namespace ID is outside stable v1.
 
 ### Namespace policy
 
@@ -576,14 +580,17 @@ eviction algorithm chooses only among resolved `Evictable` items. If a write
 cannot be admitted without evicting a protected item, the server returns
 `NoCapacity` and makes no mutation.
 
-Each successful replacement applies the policies resolved from that `SET`.
-Thus, `Inherit` on a replacement uses the current namespace defaults; retaining
-protection requires the request to select `EvictionProtected` explicitly.
+Namespace policy is immutable for the lifetime of a namespace in v1. A server
+MUST NOT change its defaults or override permissions in place. Each successful
+replacement applies the policies resolved from that `SET`; `Inherit` therefore
+always resolves against the same namespace defaults.
 
 ### Item ID
 
 An Item ID is an opaque byte sequence from `0` through `32` bytes. Empty,
-short, and 32-byte Item IDs are all valid; no byte value has special meaning.
+short, and 32-byte Item IDs are all valid on the wire; no byte value has
+special meaning. A high-level client that guards against accidental empty IDs
+MAY require an explicit opt-in without changing wire conformance.
 The wire protocol does not define an application key, an application-key
 validity rule,
 or a hash algorithm. `GET`, `SET`, and `DELETE` carry `item_id_len:u8`
@@ -740,9 +747,10 @@ payload/status mismatch is malformed and requires connection close with
 | `88` | `PolicyConflict` | The request selects an item policy disallowed by the provisioned namespace |
 | `8A` | `NamespaceNotFound` | The provisioned namespace does not exist |
 
-Statuses `06` through `7F`, `81`, `84`, `89`, `8B` through `FF` are unassigned. A
-client MUST treat an unassigned status as a malformed response and close the
-connection.
+Statuses `06` through `7F`, `81`, `84`, `89`, `8B` through `FF` are unassigned.
+A client MUST treat an unassigned status as a malformed response and close the
+connection. Assigning meaning to an unassigned status requires a new protocol
+version and ALPN; v1 has no unknown-status extension rule.
 
 Assigned statuses `80` and above are errors. Unassigned status values in that
 range are not implicitly accepted as errors; they remain malformed. Error
@@ -784,7 +792,7 @@ Common error statuses MAY be returned only when their stated condition applies:
 | `InvalidRequest` | Any complete, well-delimited request with invalid semantics |
 | `TooLarge` | `SET` whose wire-valid value exceeds a server-local limit |
 | `Overloaded` | Any request rejected before its operation begins |
-| `Forbidden` | Any request rejected by deployment authorization |
+| `Forbidden` | Any request rejected by server authorization |
 | `InternalError` | Any request known to have failed without taking effect |
 | `NoCapacity` | `SET` that cannot be admitted without evicting protected items |
 | `PolicyConflict` | `SET` that selects a disallowed item-policy override |
@@ -919,12 +927,12 @@ TLS 1.3 protects frames in transit on both conforming transports.
 `X25519MLKEM768` is the current mandatory approved hybrid group;
 classical-only fallback is not allowed. Opaque values are not automatically
 confidential from the server or storage. Certificate-chain and server-identity
-verification is deployment policy; disabling it removes active MITM
+verification is client policy; disabling it removes active MITM
 protection. Optional mTLS may authenticate clients for privileged operations.
 
 Receivers MUST parse lengths incrementally and enforce the 64 MiB ceiling before
 allocating or reading a complete `SET` value or response payload. Servers
-SHOULD bound aggregate in-flight value memory and MAY apply implementation-local
+MUST bound aggregate in-flight frame bytes and MAY apply implementation-local
 backpressure or reject requests with `Overloaded` under resource pressure. The
 protocol does not define a `max_inflight_requests_per_lane` limit; a server
 may choose an admission limit, but it MUST preserve request body boundaries and

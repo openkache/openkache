@@ -19,7 +19,7 @@ encoding, assignment, validation result, or fixture schema requires a new
 revision in the specification and every fixture that implements it.
 
 Before v1 freezes, generated fixtures must cover every opcode, status,
-selector, flag value, `vu128` boundary, Item ID length boundary, bignum
+selector, flag value, `vu128` boundary, Item ID length boundary, signed `i64`
 boundary, protected-value profile, and Zstandard rejection rule. At least two
 independent implementations must reproduce the positive vectors and reject the
 negative vectors.

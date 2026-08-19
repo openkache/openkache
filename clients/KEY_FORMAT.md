@@ -1,6 +1,6 @@
 # OpenKache Client Key Contract — Version 1 Draft
 
-> **Status:** Draft `draft-2026-08-19.2`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.3`; not released or finalized.
 >
 > This document specifies client-owned key validation and Item ID mapping. It
 > is not a server-required key encoding, and it may change before finalization.
@@ -49,11 +49,11 @@ and the initial value codec profile are specified separately in
 
 An **Item ID mapping profile** selects the algorithm that converts canonical
 key bytes into the final Item ID. The initial profiles are `NamespaceHash` and
-`PublicKeyOrHash`. A mapping profile is client-local configuration,
-optionally scoped per namespace by the client, not a wire-visible field or a
-server-enforced namespace policy. A client that addresses more than one
-namespace MUST keep its selected profile stable for each namespace it
-addresses, but the server does not store or interpret that choice.
+`PublicKeyOrHash`. A mapping profile is client-local configuration, not a
+wire-visible field or a server-enforced namespace policy. A client may select a
+profile per operation, so one namespace may contain Item IDs produced by
+different profiles. The same logical item remains addressable only when later
+operations select the same profile and identity settings.
 
 `KeyType` is the language-neutral name of the inferred `TypedKey` variant:
 `Integer`, `Text`, or `Bytes`. A language adapter MUST infer this variant from
@@ -88,9 +88,9 @@ Both formatted profiles use the same typed key and canonical encoding.
 `NamespaceHash` always produces a root- and namespace-bound 32-byte Item ID.
 `PublicKeyOrHash` exposes short canonical key bytes directly and uses an
 unkeyed hash only when the encoding does not fit. It is intended for
-deployments that trust the server and do not require client-side key
+applications that trust the server and do not require client-side key
 confidentiality or profile isolation. The selected mapping profile is part of
-item identity and MUST remain stable for addressable data.
+item identity.
 
 ## 2. Typed key
 
@@ -106,8 +106,8 @@ TypedKey = Integer | Text | Bytes
 `Text` is a length-delimited sequence of valid UTF-8 bytes. It is not
 NUL-terminated; an embedded U+0000 is ordinary text content. `Bytes` is an
 exact sequence of bytes, including empty and NUL-containing values.
-`Integer` is an exact mathematical value. Native integer width and signedness
-are not part of key identity.
+`Integer` is a signed 64-bit value. Bindings MUST reject values outside
+`-2^63..=2^63-1`.
 
 For example, `Text("abc")` contains exactly the three UTF-8 bytes `61 62 63`;
 it does not contain a trailing `00`. Its canonical key bytes are
@@ -121,14 +121,11 @@ MUST NOT be used.
 Both formatted mapping profiles encode `Bytes` as a CBOR byte string. It is not
 the `OpaqueBytes` value format and does not mean an Exact Item ID.
 
-The selected Item ID mapping profile and canonicalization algorithm MUST remain
-fixed for all formatted operations addressing a namespace unless the
-application is intentionally performing an identity migration. The inferred
-`KeyType` MAY vary between operations because it is determined by the native
-input. The server does not know which profile or native key type produced an
-Item ID; a mismatch can therefore appear only as misses or collisions. Whether
-maintained clients later persist a local profile record or use server-side
-metadata remains a client-policy TODO.
+The selected mapping profile and `KeyType` MAY vary between operations,
+including within one namespace. The canonicalization algorithm remains fixed
+by this specification. The server does not know which profile or native key
+type produced an Item ID; selecting different identity inputs may appear as a
+miss or collision.
 
 There is deliberately no namespace-level key-type policy in v1. A namespace
 does not declare an allowed key type, and the server does not reject an item
@@ -144,7 +141,7 @@ before canonical encoding:
 
 | Native input category | Inferred `KeyType` |
 |---|---|
-| Exact integer value | `Integer` |
+| Signed 64-bit integer value | `Integer` |
 | Valid UTF-8 text/string | `Text` |
 | Explicit byte sequence (`Bytes`, `byte[]`, `Buffer`, or equivalent) | `Bytes` |
 
@@ -155,7 +152,8 @@ coercion. Examples include floating-point values, booleans, null, arrays,
 objects, maps, and custom objects.
 
 JavaScript `number` follows §3.2: a finite safe integer infers `Integer`, and
-all other numbers are rejected. JavaScript `bigint` infers `Integer`.
+all other numbers are rejected. JavaScript `bigint` infers `Integer` only when
+it fits signed `i64`.
 Python `bool` MUST be rejected before Python's integer-subclass behavior is
 considered; Python `int` infers `Integer`, `str` infers `Text`, and an
 explicit bytes-like value infers `Bytes`.
@@ -165,17 +163,14 @@ containers, but that constructor must produce the same three `TypedKey`
 variants and must not introduce a fourth key type. Both mapping profiles accept
 all three variants.
 
-The normative `Integer` value is not limited to `i64`: Python integers and
-JavaScript `bigint` values outside native machine ranges remain valid
-integers, subject to `MAX_CANONICAL_KEY_BYTES`. A binding MAY provide a narrower
-native convenience API, but that convenience limit MUST NOT change the
-cross-language `Integer` contract. The maintained API still has an explicit
-pre-freeze TODO: choose between no additional native limit, an `i64` limit, or
-a different bounded representation for ergonomic typed-language overloads.
+The normative `Integer` value is exactly signed `i64`. Python integers and
+JavaScript `bigint` values outside that range MUST be rejected. A binding MAY
+offer a narrower convenience API, but it MUST NOT accept values that another
+conforming binding cannot represent.
 
 The maintained-client default mapping profile is `NamespaceHash`.
 `PublicKeyOrHash` MUST be selected explicitly. It is suitable for
-benchmarks and for deployments that fully trust the server and accept public,
+benchmarks and for applications that fully trust the server and accept public,
 cross-client key identity. Value protection is independent: either mapping
 profile may carry protected or unprotected values.
 
@@ -198,9 +193,9 @@ the JavaScript safe-integer normalization defined in §3.2. An ABI that
 transports an integer as text MUST use canonical signed decimal ASCII:
 optional leading `-`, one or more digits, no leading zeroes unless the value is
 exactly `0`, and no `-0`. Whitespace, a leading `+`, non-ASCII digits, and
-other numeric spellings MUST be rejected. The decimal text is only a transport
-representation; key identity remains the mathematical integer encoded under
-§3.1.
+other numeric spellings MUST be rejected. The value MUST fit signed `i64`. The
+decimal text is only a transport representation; key identity remains the
+integer encoded under §3.1.
 
 An interface that accepts `canonical_key_bytes` MUST validate exactly one
 complete canonical CBOR key item. An interface that accepts a logical typed key
@@ -219,18 +214,12 @@ canonical_key_bytes = deterministic_cbor(typed key)
 The canonical key encoding follows deterministic CBOR
 [RFC 8949 §4.2](https://www.rfc-editor.org/rfc/rfc8949#section-4.2):
 
-- The accepted subset contains only major types 0/1 integers, tag 2/3
-  canonical bignums, major type 2 byte strings, and major type 3 text strings.
-- Indefinite-length items, tags other than 2 and 3, sequences, and trailing
-  bytes are invalid.
-- Integer encoding uses RFC 8949 preferred serialization, including standard
-  bignum tags `2` and `3` when the basic integer types cannot represent the
-  value. A non-negative integer greater than `2^64 - 1` uses tag `2` with its
-  minimal unsigned big-endian magnitude. A negative integer less than `-2^64`
-  uses tag `3` with the minimal unsigned magnitude of `-1 - value`, as required
-  by RFC 8949. The magnitude is non-empty for a bignum and MUST NOT contain
-  leading zero bytes. Values representable by the basic CBOR major types MUST
-  use those preferred major-type encodings rather than a bignum tag.
+- The accepted subset contains only major types 0/1 integers, major type 2 byte
+  strings, and major type 3 text strings.
+- Indefinite-length items, tags, sequences, and trailing bytes are invalid.
+- Integer encoding uses RFC 8949 preferred serialization for signed `i64`.
+  A decoder MUST reject major-type values outside the signed `i64` range.
+  CBOR bignum tags are not part of v1.
 - `Text` is exact valid UTF-8. `Bytes` is an exact CBOR byte string.
 - Canonical key bytes are exactly one complete CBOR item. Sequences, trailing
   bytes, unknown tags, and non-canonical encodings MUST be rejected.
@@ -260,6 +249,7 @@ function normalizeJavaScriptNumber(x) {
 ```text
 JavaScript number 1, JavaScript 1n -> Integer(1)
 JavaScript number 1.5, -0, NaN, Infinity, unsafe number -> rejected
+JavaScript bigint outside signed i64 -> rejected
 ```
 
 ### 3.3 Canonical key bytes: examples
@@ -269,6 +259,8 @@ Text("abc")     -> 63 61 62 63
 Bytes([00,ff])  -> 42 00 ff
 Integer(1)      -> 01
 Integer(-1)     -> 20
+Integer(i64::MAX) -> 1b 7f ff ff ff ff ff ff ff
+Integer(i64::MIN) -> 3b 7f ff ff ff ff ff ff ff
 Text("")        -> 60
 Bytes([])       -> 40
 ```
@@ -282,6 +274,7 @@ fa 3f 80 00 00                // binary32 Float(1.0)
 f4                            // boolean
 f6                            // null
 60 00                         // trailing bytes
+Integer(9223372036854775808)  // outside signed i64
 ```
 
 ## 4. Item ID mapping profiles
@@ -326,9 +319,8 @@ does not produce an empty Item ID.
 The length decision applies to the complete canonical CBOR encoding, not the
 logical payload alone. A `Text` or `Bytes` payload of 30 bytes encodes to
 exactly 32 bytes and is preserved; a 31-byte payload encodes to 33 bytes and
-uses the hash fallback. Basic CBOR integers occupy at most nine bytes and are
-preserved. Larger integers may use a hash fallback when their tagged canonical
-encoding exceeds 32 bytes.
+uses the hash fallback. Signed `i64` values occupy at most nine bytes and are
+preserved.
 
 The fallback uses a domain-separated unkeyed BLAKE3 hash:
 
@@ -367,6 +359,10 @@ derivation. It still enforces the protocol Item ID length limit.
 This API is appropriate when an application already owns a wire identity. It
 is a dangerous escape hatch: the caller, not the client profile, owns identity,
 collision avoidance, and isolation.
+
+The wire accepts an empty Exact Item ID. Maintained high-level APIs reject it
+by default and require an explicit opt-in; low-level Raw APIs preserve the full
+wire range.
 
 ## 5. Derivation parameters
 
@@ -417,16 +413,15 @@ item_id_derivation_key =
 ```
 
 The all-zero root is valid for the default derivation profile. It MUST NOT be
-used as a substitute for an explicitly configured secret when a deployment
+used as a substitute for an explicitly configured secret when an application
 requires non-public Item IDs.
 
 `PublicKeyOrHash` ignores `item_id_root_key` and the resulting
 `item_id_derivation_key`. Changing either has no effect on its Item IDs.
 
-Profile persistence and mismatch detection remain a pre-freeze TODO. A future
-client may keep local metadata or opaque server metadata, but the server must
-not interpret a key profile. Until then, clients must not silently change
-identity settings for existing data.
+Profile persistence and mismatch detection remain intentionally unspecified in
+v1. APIs MUST make per-operation profile selection explicit when it differs
+from the client default; a mismatch may still appear as a miss.
 
 ### 5.3 Mapping algorithm and profile compatibility
 
@@ -455,10 +450,8 @@ oversized native inputs before allocating an encoding and MUST verify the
 final encoded length. A canonical-key ABI MUST reject an oversized input
 buffer before decoding it.
 
-Bindings MAY use a lower documented local resource limit. The maintained
-typed-language API still has a pre-freeze TODO to choose whether native
-integers are unbounded, limited to `i64`, or subject to another ergonomic
-bound; any such limit is separate from canonical encoding.
+Bindings MAY use a lower documented local resource limit. The signed `i64`
+range is part of the cross-language v1 contract, not a local limit.
 
 Every client path MUST enforce the wire protocol's `0..=32` Item ID limit.
 Empty logical keys and empty Exact Item IDs are valid. `PublicKeyOrHash`

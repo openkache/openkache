@@ -1,11 +1,11 @@
 # OpenKache Experimental Protocol Operations (Draft)
 
-> **Status:** Experimental revision `draft-2026-08-19.2`. These operations are not part of the stable v1
+> **Status:** Experimental revision `draft-2026-08-19.3`. These operations are not part of the stable v1
 > conformance surface. Their names, layouts, status behavior, and semantics
 > may change or disappear without a protocol-version change.
 
 This document defines optional diagnostic and maintenance operations. A server
-recognizes them only when its `enable_experimental_api` deployment setting is
+recognizes them only when its `enable_experimental_api` server setting is
 enabled. Otherwise their opcodes are unassigned and therefore malformed under
 the stable protocol. An unaware server closes the connection without a
 response.
