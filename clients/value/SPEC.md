@@ -189,8 +189,20 @@ Python `int` is encoded as an exact `Integer` regardless of magnitude. Python
 Python `list` and `tuple` both map to `Array`; a same-language round trip
 preserves element order and values but does not preserve list-versus-tuple
 identity. Python `dict` maps to `Map` in insertion order. Its keys MUST be
-scalar model values after conversion; an unhashable key or a key collision
-under model equality MUST be rejected before encoding.
+scalar model values after conversion. Python's own equality and hashing rules
+apply while constructing a native `dict`; callers that need both keys from a
+native collision such as `True` and `1` MUST use the generic ordered-entry
+constructor instead.
+
+The generic Python escape hatch is an ordered sequence of model pairs, for
+example:
+
+```python
+MapValue([
+    (Boolean(True), TextString("bool")),
+    (Integer(1), TextString("integer")),
+])
+```
 
 ### 3.2 JavaScript and TypeScript
 
@@ -230,7 +242,10 @@ be rejected rather than stringified. A documented plain-object mapping maps
 own enumerable string properties to `TextString` keys in the language's
 observable property iteration order. A same-language round trip preserves
 entries and order, but a plain object may be returned as a generic/lossless
-map when its key/value shape cannot be represented by a plain object.
+map when its key/value shape cannot be represented by a plain object. A plain
+object projection MUST define properties without invoking inherited setters;
+adapters SHOULD use a null-prototype object or equivalent safe property
+definition for names such as `__proto__`.
 
 On decode, maintained JavaScript clients return:
 
@@ -322,9 +337,9 @@ may differ:
 
 Mutation, hashability, reflection, and native serialization of wrappers are
 language-specific and MUST be documented by each adapter. A wrapper MUST NOT
-silently mutate a map in a way that drops or merges a model key. An adapter
-that cannot expose a lossless native view MUST return the generic model or a
-conversion error; it MUST NOT silently discard information.
+silently mutate a map in a way that drops or merges a model key. A binding
+that does not provide a wrapper still returns the generic model in `lossless`;
+it MUST NOT silently discard information.
 
 ### 4.2 Native representation
 
@@ -335,10 +350,37 @@ value, an unrepresentable map key, or a map that would collapse entries.
 This mode is intended for APIs that require a real `dict`, plain object, or
 other native container. It is not allowed to silently lose information.
 
+The maintained default native projections are:
+
+| Model value | Python | JavaScript/TypeScript |
+|---|---|---|
+| `Null` | `None` | `null` |
+| `Undefined` | conversion error | `undefined` |
+| `Boolean` | `bool` | `boolean` |
+| `Integer` | `int` | `bigint` |
+| `Float` | `float` | `number` |
+| `ByteString` | `bytes` | `Uint8Array` |
+| `TextString` | `str` | `string` |
+| `Array` | `list` | `Array` |
+| `Map` | `dict` when representable | `Map` when representable |
+
+`native` MUST return a conversion error instead of rounding an integer,
+normalizing a float distinction, collapsing scalar map keys, or silently
+changing a map's order. A binding MAY provide a separate checked convenience
+conversion, such as JavaScript safe `Integer` values to `number`, only when it
+rejects values outside the exact target range.
+
 Opaque byte operations bypass this model and return the exact application
 bytes directly. They are not a representation option on structured-value
 `get`; callers that need byte-exact forwarding MUST use the raw or Exact Item
 ID API rather than decoding and re-encoding a structured value.
+
+The structured-value API guarantees semantic round trips, not byte identity.
+Reading with `lossless` and writing again MAY produce different codec bytes
+because map ordering, preferred integer encodings, or codec implementation
+details may differ. Exact stored-envelope forwarding, replication, and backup
+are outside this representation contract and require a future low-level
+stored-bytes API if they become necessary.
 
 ## 5. Initial codec profile: StructuredValue-CBOR-v1
 
