@@ -8,16 +8,16 @@ a conformance claim for the pre-freeze contracts.
 
 ## Purpose
 
-The core handles connection lifecycle, TLS, transport fallback, lane
-concurrency,
-protocol operations, application-key protection, compression, encryption, and
-formatted-value processing. Language adapters convert native types and
-delegate to this crate.
+The target core handles connection lifecycle, TLS, transport fallback, lane
+concurrency, protocol operations, native key mapping, compression, encryption,
+and formatted-value processing. Language adapters convert native types and
+delegate to this crate. The current transitional implementation does not yet
+provide every target capability described below.
 
 The main API layers are:
 
 - `RawClient` and `LocalRawClient`, which accept exact protocol item IDs and
-  opaque values;
+  raw values;
 - `ProtectedClient` and `LocalProtectedClient`, which accept application keys
   and plaintext values;
 - `ValueCodec`, which owns value serialization, optional Zstandard compression,
@@ -42,6 +42,8 @@ adapter depends on this core directly.
   native mappings, and the initial codec profile.
 - The [value-format specification](../VALUE_FORMAT.md) defines the formatted
   value envelope, compression, and protection algorithms.
+- The [value security profiles](../VALUE_SECURITY.md) define the value-key
+  schedule, AAD, and cryptographic constructions.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
   operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
@@ -50,17 +52,21 @@ This README intentionally does not specify protected-value bytes. Consult the
 client index for implemented-format status and the value-format specification
 for the v1 contract.
 
-## Current implementation and draft target
+## What exists today
 
 The current implementation remains the compatibility reference while the
-draft documents are migrated into the generated core contract. In particular,
-some current Rust and legacy adapter paths still use fixed-width Item IDs or a
-legacy value container. They MUST NOT be treated as evidence that the draft
-variable-length wire, key, or value profiles are already implemented.
+draft documents are migrated into the generated core contract. Some current
+Rust and legacy adapter paths still use fixed-width Item IDs or a legacy value
+container. They MUST NOT be treated as evidence that the draft variable-length
+wire, key, or value profiles are already implemented.
 
-The target core will expose the same raw/formatted operation families with
-`0..=32`-byte Item IDs, the key mapping profiles, the value envelope, and the
-shared lane/request engine described by the linked specifications. A migration
+## Draft target
+
+The target core will expose independent address and value representation
+families: mapped or exact Item IDs combined with raw bytes, caller-owned v0
+envelopes, or the v1 value envelope. It will support `0..=32`-byte Item IDs,
+the key mapping profiles, and the shared lane/request engine described by the
+linked specifications. A migration
 may change constructors and generated ABI declarations; the public C ABI is
 versioned rather than an unqualified promise that every transitional symbol
 will remain unchanged.
@@ -78,13 +84,15 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. Protected FFI operations accept exactly one canonical
-v1 key item (the CBOR major type is the explicit `Integer`, `Text`, or `Bytes`
-discriminator), not raw application bytes. It requires the platform's io_uring
-driver and exports `openkache_client_*` symbols from the native library crate
-outputs. The ABI exposes the shared-core operations and lifecycle required by
-native adapters. CMake, Go, and Python package builds regenerate the scoped
-Smithy-derived client contract as needed. Reusable ABI declarations are in
+`LocalProtectedClient`. Protected FFI operations accept exactly one complete
+canonical v1 key item validated by `KEY_FORMAT.md`, not raw application bytes.
+`Integer` includes CBOR major types 0/1 and canonical tags 2/3; `Text` and
+`Bytes` use their corresponding CBOR major types. The feature requires the
+platform's io_uring driver and exports `openkache_client_*` symbols from the
+native library crate outputs. The ABI exposes the shared-core operations and
+lifecycle required by native adapters. CMake, Go, and Python package builds
+regenerate the scoped Smithy-derived client contract as needed. Reusable ABI
+declarations are in
 `include/openkache/client_abi.h` (with the
 `include/openkache_client.h` compatibility include); the generated Smithy
 contract header is supplied by each package build.

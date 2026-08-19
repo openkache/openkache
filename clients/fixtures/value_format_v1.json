@@ -1,0 +1,27 @@
+{
+  "spec": "openkache/client-value-format",
+  "revision": "draft-v1",
+  "vectors": [
+    {
+      "name": "empty_unprotected_opaque",
+      "input": {
+        "version": 1,
+        "protection": "Unprotected",
+        "compression": "Uncompressed",
+        "payload_format": "OpaqueBytes",
+        "payload_hex": ""
+      },
+      "output": {"envelope_hex": "0100"}
+    },
+    {
+      "name": "protected_aad_identity_change",
+      "input": {
+        "protection": "AES-256-GCM-SIV",
+        "item_id_hex": "112233",
+        "namespace_id": 1,
+        "value_key_id": 1
+      },
+      "rejection_reason": "changing namespace or exact Item ID fails authentication"
+    }
+  ]
+}

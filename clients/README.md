@@ -13,7 +13,9 @@ Shared client topics are documented here:
 | SDK inventory, implementation status, and binding boundaries | This README |
 | Maintained binding architecture, request engine, native conversion, and local policies | [Client implementation guide](CLIENT.md) |
 | Formatted key input, compact public mapping, and protected Item ID derivation | [Key format](KEY_FORMAT.md) |
-| Formatted value bytes, compression, and application-level protection | [Value format](VALUE_FORMAT.md) |
+| Formatted value envelope and compression selection | [Value format](VALUE_FORMAT.md) |
+| Value-key schedule, AAD, and cryptographic protection | [Value security](VALUE_SECURITY.md) |
+| Public boundary fixtures for draft interoperability | [`fixtures/`](fixtures/) |
 | Cross-language value model, native mappings, and structured-value profiles | [Value project](value/SPEC.md) |
 | QUIC framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
 | Language API, build, packaging, and runtime configuration | The implemented package's README |
@@ -39,11 +41,12 @@ formats or protocol behavior.
 | Swift | [`swift/`](swift/) | Actor-based async SDK over the shared native ABI and generated Smithy API |
 | Dart | `dart/` | Package scaffold |
 
-Java, Kotlin, and Dart currently contain registry metadata and reserved source
+Java, Kotlin, and Dart currently contain registry metadata and scaffold source
 layouts only. They do not connect to OpenKache or expose cache operations yet.
 
-The [key](KEY_FORMAT.md), [value model](value/SPEC.md), and [value
-envelope](VALUE_FORMAT.md) documents define the language-independent
+The [key](KEY_FORMAT.md), [value model](value/SPEC.md), [value
+envelope](VALUE_FORMAT.md), and [value security](VALUE_SECURITY.md) documents
+define the language-independent
 pre-freeze v1 client contracts. The [client implementation guide](CLIENT.md)
 describes how OpenKache-maintained bindings share one core without making
 their API shape or local policy a requirement for third-party clients. The

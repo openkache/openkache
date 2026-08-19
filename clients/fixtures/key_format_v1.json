@@ -1,0 +1,29 @@
+{
+  "spec": "openkache/client-key-format",
+  "revision": "draft-v1",
+  "vectors": [
+    {
+      "name": "text_abc",
+      "input": {"type": "Text", "value_utf8": "abc"},
+      "intermediate": {"canonical_key_bytes_hex": "63616263"},
+      "output": {"profile": "CanonicalKeyOrHash", "item_id_hex": "63616263"}
+    },
+    {
+      "name": "integer_one",
+      "input": {"type": "Integer", "value": "1"},
+      "intermediate": {"canonical_key_bytes_hex": "01"},
+      "output": {"profile": "CanonicalKeyOrHash", "item_id_hex": "01"}
+    },
+    {
+      "name": "empty_bytes",
+      "input": {"type": "Bytes", "value_hex": ""},
+      "intermediate": {"canonical_key_bytes_hex": "40"},
+      "output": {"profile": "CanonicalKeyOrHash", "item_id_hex": "40"}
+    },
+    {
+      "name": "float_rejected",
+      "input": {"native_type": "floating-point", "value": "1.0"},
+      "rejection_reason": "cannot infer Integer, Text, or Bytes without coercion"
+    }
+  ]
+}

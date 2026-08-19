@@ -7,8 +7,9 @@
 This guide explains how the maintained language bindings share one
 language-independent client implementation. It does not redefine the
 [Wire Protocol](../protocol/SPEC.md), the [Client Key Format](KEY_FORMAT.md),
-or the [Client Value Format](VALUE_FORMAT.md). Those documents are the sources
-of truth for interoperable bytes, identity, and formatted values.
+or the [Client Value Format](VALUE_FORMAT.md) and
+[Value Security Profiles](VALUE_SECURITY.md). Those documents are the sources
+of truth for interoperable bytes, identity, formatted values, and protection.
 
 Third-party clients do not have to copy the local API design, retry defaults,
 compression policy, runtime integration, or shared-core architecture described
@@ -45,7 +46,8 @@ restated here:
 |---|---|
 | QUIC/TLS-over-TCP negotiation, frames, operations, statuses, limits, and protocol outcomes | [Wire Protocol](../protocol/SPEC.md) |
 | Typed keys, canonical key bytes, mapping profiles, and Item ID derivation | [Client Key Format](KEY_FORMAT.md) |
-| Payload formats, compression framing, protection, key selection, KDF, AAD, and value limits | [Client Value Format](VALUE_FORMAT.md) |
+| Payload formats, compression framing, envelope selectors, and value limits | [Client Value Format](VALUE_FORMAT.md) |
+| Protection profiles, key selection, KDF, AAD, and security properties | [Value Security Profiles](VALUE_SECURITY.md) |
 | Cross-language logical values, native mappings, representations, and the initial structured-value codec profile | [Client Value Model](value/SPEC.md) |
 | Rust core APIs, features, commands, and source layout | [Client core README](core/README.md) |
 | Native API names, package configuration, and platform requirements | Each language package's README |
@@ -71,8 +73,9 @@ bindings:
 - safe retry classification and unknown-outcome tracking;
 - namespace resolution needed by formatted operations;
 - key validation and Item ID mapping through the key format;
-- formatted-value serialization, compression, and protection through the
-  value format; and
+- formatted-value serialization and compression through the value format;
+- value-key selection and cryptographic protection through the value security
+  profiles; and
 - common configuration validation and stable error categories.
 
 A language adapter owns only the language-facing boundary:
@@ -131,8 +134,8 @@ When a lane or connection becomes terminal, the core:
 - stops admitting new work to the affected state;
 - removes and completes every affected outstanding entry;
 - reports read-only operations using the applicable transport category; and
-- preserves an unknown outcome for a mutation or private maintenance barrier
-  that may have taken effect without returning a response.
+- preserves an unknown outcome for a mutation or experimental maintenance
+  barrier that may have taken effect without returning a response.
 
 ### 3.3 Cancellation and shutdown
 
@@ -173,7 +176,7 @@ default may retry a request rejected locally before transmission and may retry
 read-only operations after a retryable transport failure within configured
 attempt and deadline limits.
 
-The maintained clients do not automatically replay a mutation or private
+The maintained clients do not automatically replay a mutation or experimental
 maintenance barrier after an unknown outcome. A caller may issue a new
 operation explicitly, but that is not a continuation or deduplicated retry of
 the first request.
@@ -312,15 +315,11 @@ never selected merely because the value is unprotected.
 The following configuration contracts remain deliberately open and MUST be
 resolved before v1 is finalized:
 
-- **Namespace profile metadata:** decide whether profile identity is stored
-  entirely by each client, partly as opaque server-side namespace metadata, or
-  through a server-validated profile record. Until then, maintained clients
-  MUST treat mapping-profile, key-type-policy, and root-key changes as explicit
-  identity migrations rather than silently changing a namespace default.
-- **KeyType selection:** decide whether the ergonomic API selects `Integer`,
-  `Text`, or `Bytes` per operation, fixes a namespace default with an advanced
-  override, or normalizes a smaller set of native types. The key format keeps
-  the typed identities distinct while this API decision remains open.
+- **Namespace profile metadata:** the key format currently leaves profile
+  discovery and mismatch handling to client policy. A future revision may
+  define an optional server-visible profile record or a client-side persisted
+  profile manifest; until then, clients must keep profile changes explicit and
+  treat them as identity migrations.
 
 ### 6.3 Transport and server-authentication policy
 

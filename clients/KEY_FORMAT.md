@@ -52,10 +52,11 @@ key bytes into the final Item ID. The initial profiles are `Hash` and
 `CanonicalKeyOrHash`. A mapping profile is client/namespace configuration, not
 a wire-visible field.
 
-`KeyType` selects the one typed-key variant accepted by a typed-key operation:
-`Integer`, `Text`, or `Bytes`. An adapter MAY select it globally at connection
-time or per operation within the fixed mapping profile. It is not a wire-
-protocol namespace.
+`KeyType` is the language-neutral name of the inferred `TypedKey` variant:
+`Integer`, `Text`, or `Bytes`. A language adapter MUST infer this variant from
+the native input when the input has an unambiguous mapping. It MUST reject
+inputs that cannot be represented by one of these variants rather than
+stringifying or coercing them. `KeyType` is not a wire-protocol namespace.
 
 The specification defines three distinct client-side conversion paths:
 
@@ -116,32 +117,48 @@ the `OpaqueBytes` value format and does not mean an Exact Item ID.
 
 The selected Item ID mapping profile and canonicalization algorithm MUST remain
 fixed for all formatted operations addressing a namespace unless the
-application is intentionally performing an identity migration. `KeyType` MAY
-vary per operation only within that fixed mapping profile. Whether maintained
-bindings expose that flexibility directly, require a namespace default, or
-offer both through separate APIs remains an open client-API decision. The
-server does not know which profile or key-type policy produced an Item ID; a
-mismatch can therefore appear only as misses or collisions unless the client
-stores and validates its own namespace profile metadata.
+application is intentionally performing an identity migration. The inferred
+`KeyType` MAY vary between operations because it is determined by the native
+input. The server does not know which profile or native key type produced an
+Item ID; a mismatch can therefore appear only as misses or collisions. Whether
+maintained clients later persist a local profile record or use server-side
+metadata remains a client-policy TODO.
 
-### 2.2 Typed-key type selection
+### 2.2 Native type inference
 
-Every typed-key operation MUST select exactly one `KeyType`:
+The language adapter MUST infer exactly one `KeyType` from the native input
+before canonical encoding:
 
-```text
-KeyType::Integer
-KeyType::Text
-KeyType::Bytes
-```
+| Native input category | Inferred `KeyType` |
+|---|---|
+| Exact integer value | `Integer` |
+| Valid UTF-8 text/string | `Text` |
+| Explicit byte sequence (`Bytes`, `byte[]`, `Buffer`, or equivalent) | `Bytes` |
 
-Every typed key MUST match the `KeyType` selected for that operation. A type
-mismatch MUST be rejected before encoding or hashing. `KeyType` adds no wire
-field and has no fixed-width integer variants. When a connection-level
-`KeyType` is configured, it is the default operation selection; a typed ABI
-operation MAY supply its own explicit discriminator.
+The inference is language-specific only at the boundary; the resulting
+`TypedKey` and canonical bytes are language-independent. An adapter MUST
+reject a value when it cannot determine one of these categories without
+coercion. Examples include floating-point values, booleans, null, arrays,
+objects, maps, and custom objects.
 
-`Hash` and `CanonicalKeyOrHash` both accept every `KeyType`. A mapping profile
-is not a fourth typed-key type.
+JavaScript `number` follows §3.2: a finite safe integer infers `Integer`, and
+all other numbers are rejected. JavaScript `bigint` infers `Integer`.
+Python `bool` MUST be rejected before Python's integer-subclass behavior is
+considered; Python `int` infers `Integer`, `str` infers `Text`, and an
+explicit bytes-like value infers `Bytes`.
+
+An adapter MAY expose an explicit typed constructor for FFI or generic
+containers, but that constructor must produce the same three `TypedKey`
+variants and must not introduce a fourth key type. Both mapping profiles accept
+all three variants.
+
+The normative `Integer` value is not limited to `i64`: Python integers and
+JavaScript `bigint` values outside native machine ranges remain valid
+integers, subject to `MAX_KEY_INPUT_BYTES`. A binding MAY provide a narrower
+native convenience API, but that convenience limit MUST NOT change the
+cross-language `Integer` contract. The maintained API still has an explicit
+pre-freeze TODO: choose between no additional native limit, an `i64` limit, or
+a different bounded representation for ergonomic typed-language overloads.
 
 The maintained-client default mapping profile is `Hash`. `CanonicalKeyOrHash`
 is an explicit public/benchmark profile for deployments that intentionally
@@ -174,7 +191,8 @@ representation; key identity remains the mathematical integer encoded under
 
 An interface that accepts `canonical_key_bytes` MUST validate exactly one
 complete canonical CBOR key item. An interface that accepts a logical typed key
-MUST receive an explicit `KeyType` and perform canonical encoding itself.
+MUST infer or receive an explicit discriminator and perform canonical encoding
+itself.
 Exact Item ID operations remain separate and accept opaque Item IDs directly.
 
 ## 3. Canonical key encoding
@@ -188,6 +206,10 @@ canonical_key_bytes = deterministic_cbor(typed key)
 The canonical key encoding follows deterministic CBOR
 [RFC 8949 §4.2](https://www.rfc-editor.org/rfc/rfc8949#section-4.2):
 
+- The accepted subset contains only major types 0/1 integers, tag 2/3
+  canonical bignums, major type 2 byte strings, and major type 3 text strings.
+- Indefinite-length items, tags other than 2 and 3, sequences, and trailing
+  bytes are invalid.
 - Integer encoding uses RFC 8949 preferred serialization, including standard
   bignum tags `2` and `3` when the basic integer types cannot represent the
   value. A non-negative integer greater than `2^64 - 1` uses tag `2` with its
@@ -393,9 +415,10 @@ requires non-public Item IDs.
 `item_id_derivation_key`. Changing either has no effect on its Item IDs.
 
 Maintained clients SHOULD persist a non-secret namespace profile record
-containing the selected mapping profile, key-type policy, and a fingerprint of
-the root-key configuration. A client MAY later use server-side metadata for
-this purpose, but the v1 wire protocol does not require the server to
+containing the selected mapping profile and a fingerprint of the root-key
+configuration. Native key-type inference is per input and is not a namespace
+configuration. A client MAY later use server-side metadata for
+profile discovery, but the v1 wire protocol does not require the server to
 interpret or validate it. Until that design is finalized, a client MUST NOT
 silently change these settings for an existing namespace.
 
@@ -430,8 +453,10 @@ hashing. Its measured input is:
 
 - `Text`: the exact UTF-8 byte sequence after UTF-8 validation;
 - typed `Bytes`: the exact application byte sequence;
-- `Integer`: the minimal unsigned big-endian magnitude of the mathematical
-  value; zero has a magnitude length of zero.
+- `Integer`: the minimal unsigned magnitude of the mathematical value; zero
+  has a magnitude length of zero. For negative values, the logical magnitude
+  is `abs(value)` for this resource limit, while CBOR tag 3 still encodes
+  `-1 - value` as required by §3.1.
 
 The integer sign is part of the value but is not included in the magnitude
 length. No Unicode normalization, NUL terminator, native integer-width
@@ -531,7 +556,8 @@ item_id =
 
 Clients MUST reject:
 
-- a typed key whose `KeyType` does not match the typed-key configuration;
+- a native input that cannot be inferred as exactly one of `Integer`, `Text`,
+  or `Bytes`;
 - a non-canonical CBOR key, including trailing bytes or an unsupported type;
 - a key input larger than `MAX_KEY_INPUT_BYTES`;
 - an Item ID longer than 32 bytes.

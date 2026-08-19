@@ -1,0 +1,131 @@
+# OpenKache Value Security Profiles (Draft)
+
+> **Status:** Draft. This document owns the v1 value-key schedule, associated
+> data, cryptographic profiles, and security properties. Envelope grammar and
+> selector assignment remain in [`VALUE_FORMAT.md`](VALUE_FORMAT.md).
+
+## Ownership boundary
+
+`VALUE_FORMAT.md` defines how an envelope selects protection and compression.
+This document defines what those protection profiles mean. The server stores
+the resulting bytes opaquely and never interprets these fields.
+
+## Key schedule
+
+The enclosing client profile supplies a keyring mapping each positive unsigned
+64-bit `value_key_id` to one 32-byte value key. A protected write uses the
+configured active ID. A protected read selects exactly the ID present in the
+envelope; unknown and retired IDs fail without key probing or fallback.
+
+An all-zero value key is wire-valid, but it provides no secret protection.
+Implementations MUST NOT describe values protected only by it as confidential.
+Maintained clients MAY use it for an explicit compatibility/default profile.
+Secret rotation keys SHOULD be generated independently with a cryptographically
+secure random source.
+
+For every protected envelope:
+
+```text
+value_derivation_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 root key",
+    material = value_key[32]
+  )
+
+item_material =
+    value_derivation_key[32]
+  | value_key_id:u64be
+  | namespace_id:u64be
+  | item_id_length:u8
+  | item_id:item_id_length
+```
+
+`value_key_id` uses fixed-width `u64be` in the KDF. The exact canonical
+`vu128` bytes are used in the envelope and AAD. `namespace_id` is the
+nonzero server identity; `item_id_length` is the exact `0..=32` byte length,
+including zero.
+
+The profile-specific keys are derived with these exact BLAKE3 contexts:
+
+```text
+siv_mac_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
+    material = item_material
+  )
+
+siv_encryption_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
+    material = item_material
+  )
+
+gcm_siv_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-GCM-SIV key",
+    material = item_material
+  )
+```
+
+## Authenticated data
+
+```text
+aad =
+    "openkache/value-format/aad/v1"
+  | namespace_id:u64be
+  | item_id_length:u8
+  | item_id:item_id_length
+  | value_envelope_version:vu128
+  | selector_byte:u8
+  | value_key_id:vu128
+```
+
+The version and key-ID bytes MUST be the exact canonical bytes emitted in the
+envelope. Request ID, lane, opcode, namespace name or revision, TTL, eviction
+policy, nonce, and envelope length are not AAD inputs.
+
+## Protection profiles
+
+| Profile | Construction | Body | Overhead |
+|---|---|---|---:|
+| `AES-256-GCM-SIV` | RFC 8452 | `nonce[12] \| ciphertext \| tag[16]` | 28 bytes |
+| `AES-SIV-CMAC` | RFC 5297 with two independent AES-256 keys | `synthetic_iv[16] \| ciphertext` | 16 bytes |
+| `Unprotected` | no cryptographic transform | transformed body | 0 bytes |
+
+`AES-SIV-CMAC` uses 32 bytes for the MAC key and 32 bytes for the encryption
+key, for 64 bytes of total derived key material. GCM-SIV MUST use a fresh
+12-byte OS-random nonce for every write. SIV-CMAC is deterministic for equal
+key, AAD, and payload inputs.
+
+The transform order is:
+
+```text
+Protect(Compress(payload_bytes))
+```
+
+Authentication MUST complete before decompression or structured-value parsing.
+Authentication failures use one generic error and MUST NOT return partially
+decrypted or decompressed bytes.
+
+## Security properties
+
+Protected profiles provide confidentiality and authentication only when the
+value key is secret. They do not provide freshness, replay protection, TTL
+integrity, eviction integrity, ordering, or availability. Envelope length and
+compression-dependent length leakage remain observable.
+
+Changing namespace ID, Item ID length or bytes, selector, version, key ID, or
+authenticated payload MUST cause authentication failure. The value-key ID is
+public metadata and may reveal the key epoch.
+
+## Interoperability checklist
+
+Before freeze, every vector should be checked independently by at least two
+implementations. In particular, negative vectors MUST cover:
+
+- `value_key_id` encoded as `vu128` in the KDF;
+- omitted or padded Item ID length;
+- changed namespace or Item ID bytes;
+- changed selector or envelope version;
+- unknown and zero key IDs;
+- altered ciphertext, tag, nonce, or synthetic IV.

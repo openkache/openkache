@@ -36,10 +36,11 @@ Version 1 specifies:
 - malformed-frame handling and admission rejection;
 - mutation error outcomes.
 
-`SYNC` is a private server-maintenance operation used by benchmark and storage
-tooling. It is not part of the public client API or the public v1 operation
-conformance surface; its private persistence contract is documented in its
-own subsection below.
+`EXPERIMENTAL_SYNC` is an experimental operation used by benchmark, internal,
+and other non-production tooling. It is not part of the public v1 operation
+conformance surface. Experimental operations are version-independent and may
+change or disappear without a protocol-version change. Its current contract
+is documented separately in [`EXPERIMENTAL.md`](EXPERIMENTAL.md).
 
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
@@ -53,6 +54,9 @@ layout and the namespace eviction algorithm are outside this wire protocol.
 Item expiration and eviction eligibility are part of the `SET` contract below.
 Namespace lifecycle and policy administration are carried by the
 namespace-management requests defined below.
+Server recovery, clock, identity-domain, and eviction obligations are
+summarized below and detailed in
+[`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
 
 This document has four normative layers:
 
@@ -63,8 +67,10 @@ This document has four normative layers:
 3. **Namespace semantics:** namespace identity, policy, revisions, TTL, and
    eviction behavior. These are server behavior contracts carried by public
    frames, not additional frame fields.
-4. **Private maintenance semantics:** the optional server-only `SYNC`
-   operation. Public clients are not required to expose or implement it.
+4. **Server semantics:** namespace identity-domain, TTL recovery, and eviction
+   behavior summarized here and detailed in [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
+5. **Experimental semantics:** optional `EXPERIMENTAL_*` operations. Public
+   v1 clients are not required to expose or implement them.
 
 The wire grammar is the compatibility boundary. A server implementation MAY
 organize the semantic layers differently, but MUST preserve the wire rules and
@@ -149,8 +155,17 @@ deliberately selects an older protocol.
 
 Every conforming transport MUST use TLS 1.3 and MUST negotiate the approved
 post-quantum/traditional hybrid key agreement `X25519MLKEM768`. Classical-only
-X25519 fallback is not permitted. This is a key-agreement requirement; it does
-not require the server certificate signature itself to be post-quantum.
+X25519 fallback is not permitted. This is a key-agreement requirement.
+
+Protocol v1 does not require a post-quantum certificate signature. The server
+certificate signature remains deployment-configurable because certificate
+algorithm support and trust infrastructure vary independently from the
+handshake key agreement. A deployment that requires post-quantum
+authentication MUST select an approved PQ signature profile. ML-DSA under
+FIPS 204 is the current intended candidate, subject to TLS certificate-profile
+and backend support; v1 does not assign a certificate signature registry.
+Future approved PQ signature profiles MAY be added without changing common
+frame bytes or v1 operation semantics.
 
 The ALPN negotiation selects the connection's frame version. Frames contain no
 version field. Once v1 negotiation succeeds, every OpenKache frame on the
@@ -273,13 +288,33 @@ be split across reads and a read MAY contain more than one frame.
 
 Normal request-direction half-close is expressed only by TLS `close_notify`.
 A `close_notify` received at a request-frame boundary ends that direction; the
-server MAY continue sending responses for already admitted requests. A
-`close_notify` in the middle of a frame is a truncated/malformed frame.
+server MUST enter `DrainingResponses`, admit no later request, and continue
+sending responses for every already admitted request. After those responses
+are emitted, the server MUST send its response-direction `close_notify` and
+enter `Closed`. A `close_notify` in the middle of a frame is a
+truncated/malformed frame. Bytes received after request-direction
+`close_notify` are a protocol error and MUST NOT be parsed as another frame.
 
 TCP FIN/EOF without TLS `close_notify` is an unclean transport failure even
 when it happens to coincide with a frame boundary. TCP RST, a TLS error alert,
 and any other unclean TLS close terminate the lane. Outstanding mutations
 without responses have an `unknown` outcome.
+
+The TLS-over-TCP lane state transitions are:
+
+```text
+Open
+  -> RequestHalfClosed       # peer sends request-direction close_notify
+  -> DrainingResponses       # server completes admitted responses
+  -> ResponseHalfClosed      # server sends response-direction close_notify
+  -> Closed
+  -> UncleanFailure          # EOF/FIN without close_notify, RST, or TLS alert
+```
+
+The client MUST continue reading the response direction in
+`RequestHalfClosed` and `DrainingResponses`. A reconnect creates a new lane;
+request IDs may be reused there only as new correlation tokens and do not
+retry or deduplicate an earlier request.
 
 If a receiver detects malformed framing, it MUST stop processing the affected
 connection. On QUIC it closes the connection with application error code
@@ -414,7 +449,7 @@ fixed-width `status` first, followed by the variable-width request ID.
 request = opcode:u8 | request_id:vu128 | operation_fields
 
 operation_fields =
-    ping | get | set | delete | stats | sync |
+    ping | get | set | delete | stats |
           namespace_open | namespace_update_policy | namespace_delete
 
 ping                     = (empty)
@@ -427,7 +462,6 @@ set                      = namespace_id:u64be | set_flags:u8 |
 delete                   = namespace_id:u64be |
                            item_id_len:u8 | item_id:item_id_len
 stats                    = namespace_id:u64be
-sync                     = namespace_id:u64be
 namespace_open           = open_flags:u8 | name_len:u8 |
                            name:name_len | [namespace_policy]
 namespace_update_policy  = namespace_id:u64be |
@@ -464,6 +498,12 @@ MUST treat the request as malformed and terminate the connection without a
 response. Because an unassigned opcode has no defined body layout, the server
 MUST NOT scan for a possible next frame.
 
+Opcode `06` is not a stable v1 assignment. A server that exposes the current
+experimental operation MAY parse it according to
+[`EXPERIMENTAL.md`](EXPERIMENTAL.md); otherwise it treats `06` as an
+unassigned experimental opcode and closes the affected lane without a
+response. Its presence or absence does not affect stable v1 conformance.
+
 ### Opcodes
 
 <!-- openkache:generated-protocol-operation-table:start -->
@@ -474,20 +514,24 @@ MUST NOT scan for a possible next frame.
 | `03` | `SET` | opcode + request ID + namespaceId (8 bytes) + packed(condition, expirationMode, evictionMode) + u8 itemId length + vu128 value length + if expirationMode=explicit_ttl: vu128(ttlMilliseconds) + itemId + value | empty | `raw_bytes` | — |
 | `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 itemId length + itemId | empty | `raw_bytes` | — |
 | `05` | `STATS` | opcode + request ID + namespaceId (8 bytes) | opaque payload | — | — |
-| `06` | private `SYNC` | opcode + request ID + namespaceId (8 bytes) | empty | — | — |
+| `06` | experimental `EXPERIMENTAL_SYNC` | opcode + request ID + namespaceId (8 bytes) | empty | — | — |
 | `07` | `NAMESPACE_OPEN` | opcode + request ID + packed(createIfMissing) + u8 length + name + if createIfMissing=true: packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
 | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + request ID + namespaceId (8 bytes) + expectedRevision (8 bytes) + packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
 | `09` | `NAMESPACE_DELETE` | opcode + request ID + constant 0x00 + namespaceId (8 bytes) + expectedRevision (8 bytes) | empty | — | — |
 <!-- openkache:generated-protocol-operation-table:end -->
 
-The operation table is a generated view of the machine-readable protocol
-model. During this pre-freeze migration, this document remains the target
-source of truth and the model may temporarily lag. After migration, the model
-becomes the source of truth for opcode assignments, field order, wire-width
-annotations, and generated client constants; this prose remains the source of
-truth for semantic explanations and rejection rules. A release or conformance
-check MUST fail when the generated table and finalized model differ.
-Hand-editing the generated table alone does not change the protocol contract.
+The stable rows in this operation table are a generated view of the
+machine-readable protocol model. The `EXPERIMENTAL_SYNC` row is a
+non-conforming informational row and is defined by
+[`EXPERIMENTAL.md`](EXPERIMENTAL.md), not by the stable model. During this
+pre-freeze migration, the prose remains the target source of truth and the
+model may temporarily lag. After migration, the model becomes the source of
+truth for stable opcode assignments, field order, wire-width annotations, and
+generated client constants; this prose remains the source of truth for
+semantic explanations and rejection rules. A release or conformance check
+MUST fail when the generated stable table and finalized model differ.
+Hand-editing the generated table alone does not change the stable protocol
+contract.
 
 ### `SET` flags
 
@@ -499,15 +543,26 @@ have no flags byte.
 
 | Bits | Mask | Values |
 |---:|---:|---|
-| 0–1 | `03` | `00` = `Any`; `01` = `IfAbsent`; `10` = `IfPresent`; `11` = reserved |
-| 2–3 | `0C` | `00` = `Inherit`; `01` = `NoExpiry`; `10` = `ExplicitTtl`; `11` = reserved |
-| 4–5 | `30` | `00` = `Inherit`; `01` = `Evictable`; `10` = `EvictionProtected`; `11` = reserved |
-| 6–7 | `C0` | Reserved; MUST be zero |
+| 0–1 | `03` | `00` = `Any`; `01` = `IfAbsent`; `10` = `IfPresent`; `11` = invalid in v1 |
+| 2–3 | `0C` | `00` = `Inherit`; `01` = `NoExpiry`; `10` = `ExplicitTtl`; `11` = invalid in v1 |
+| 4–5 | `30` | `00` = `Inherit`; `01` = `Evictable`; `10` = `EvictionProtected`; `11` = invalid in v1 |
+| 6–7 | `C0` | Invalid in v1; MUST be zero |
 
 The expiration selection controls the presence of `ttl_ms`: `ExplicitTtl`
 requires one, while `Inherit` and `NoExpiry` omit it. A receiver MUST reject a
-`SET` with any reserved value or reserved bit set. Policy conflicts are
+`SET` with any invalid value or invalid bit set. Policy conflicts are
 described in [Namespace policy](#namespace-policy).
+
+An expiration-mode value selects whether the following `ttl_ms` field is
+present. Therefore an invalid expiration-mode value makes the request shape
+undecidable and is a malformed request: the receiver MUST close the affected
+lane without a response. Invalid condition, eviction, or upper flag bits do
+not change the request shape; once the complete frame is delimited, they MAY
+receive `InvalidRequest`.
+
+Invalid v1 values have no forward-compatible meaning. Assigning meaning to
+one of them requires a new protocol version and ALPN; a v1 implementation MUST
+not accept it based on a local extension.
 
 ### Namespace
 
@@ -523,7 +578,7 @@ different namespace after deletion, restart, recovery, or replica replacement.
 Durable allocator state and snapshots MUST preserve that rule. An operator that
 restores an independent fork or snapshot as a new deployment MUST establish a
 new identity domain rather than merging its allocator history invisibly.
-`0` is reserved and MUST be rejected. The ID is carried per request rather
+`0` is invalid and MUST be rejected. The ID is carried per request rather
 than bound to a lane, so a lane may be reused for different namespaces.
 Clients do not allocate namespace IDs; they treat the server-returned ID as
 opaque and MUST NOT synthesize or recycle one.
@@ -558,7 +613,7 @@ account-local namespace or changes the namespace name or ID.
 These rules are protocol rules, not cloud-provider resource-name rules. The
 wire protocol does not require a narrower cloud-portable naming profile.
 
-`GET`, `SET`, `DELETE`, `STATS`, and `SYNC` are namespace-scoped and carry a
+`GET`, `SET`, `DELETE`, `STATS`, and `EXPERIMENTAL_SYNC` are namespace-scoped and carry a
 `namespace_id`. `PING` is connection-scoped and carries none. `NAMESPACE_OPEN`
 resolves a name to a namespace descriptor and can create a missing named
 namespace. `NAMESPACE_UPDATE_POLICY` changes a namespace policy with an
@@ -586,7 +641,7 @@ bytes and length in two namespaces denote two independent items.
 | Bit | Mask | Meaning |
 |---:|---:|---|
 | 0 | `01` | `CreateIfMissing` |
-| 1–7 | `FE` | Reserved; MUST be zero |
+| 1–7 | `FE` | Invalid in v1; MUST be zero |
 
 When `CreateIfMissing` is clear, the request contains no
 `namespace_policy` and only resolves an existing namespace. When it is set,
@@ -598,8 +653,8 @@ existing policy. A newly created namespace starts at revision `1`.
 
 | Bits | Mask | Values |
 |---:|---:|---|
-| 0–1 | `03` | `00` = `IfEmpty`; `01`–`11` = reserved |
-| 2–7 | `FC` | Reserved; MUST be zero |
+| 0–1 | `03` | `00` = `IfEmpty`; `01`–`11` = invalid in v1 |
+| 2–7 | `FC` | Invalid in v1; MUST be zero |
 
 Version 1 accepts only the `IfEmpty` wire value. `IfEmpty` means that no live
 items remain at the delete linearization point. The server MUST serialize the
@@ -696,16 +751,16 @@ The `policy_flags` byte has this layout:
 
 | Bits | Mask | Values |
 |---:|---:|---|
-| 0–1 | `03` | `00` = `NoExpiry`; `01` = `FixedTtl`; `10`–`11` = reserved |
+| 0–1 | `03` | `00` = `NoExpiry`; `01` = `FixedTtl`; `10`–`11` = invalid in v1 |
 | 2 | `04` | `0` = expiration `Disallowed`; `1` = expiration `Allowed` |
 | 3 | `08` | `0` = default `Evictable`; `1` = default `EvictionProtected` |
 | 4 | `10` | `0` = eviction `Disallowed`; `1` = eviction `Allowed` |
-| 5–7 | `E0` | Reserved; MUST be zero |
+| 5–7 | `E0` | Invalid in v1; MUST be zero |
 
 `default_ttl_ms` is present exactly when the default expiration bits select
 `FixedTtl`. It is a canonical positive `vu128` count of milliseconds and MUST
-be absent for `NoExpiry`. A receiver MUST reject a policy with a reserved bit,
-a reserved default value, an unexpected TTL field, or a zero TTL.
+be absent for `NoExpiry`. A receiver MUST reject a policy with an invalid bit,
+an invalid default value, an unexpected TTL field, or a zero TTL.
 
 Namespace descriptors returned by `NAMESPACE_OPEN` and
 `NAMESPACE_UPDATE_POLICY` have this payload layout:
@@ -752,13 +807,15 @@ protection requires the request to select `EvictionProtected` explicitly.
 ### Item ID
 
 An Item ID is an opaque byte sequence from `0` through `32` bytes. Empty,
-short, and 32-byte Item IDs are all valid; no byte value is reserved. The wire
-protocol does not define an application key, an application-key validity rule,
+short, and 32-byte Item IDs are all valid; no byte value has special meaning.
+The wire protocol does not define an application key, an application-key
+validity rule,
 or a hash algorithm. `GET`, `SET`, and `DELETE` carry `item_id_len:u8`
 followed by exactly `item_id_len` Item ID bytes.
 
 Servers MUST compare both the Item ID length and every Item ID byte.
-`PING`, `STATS`, and `SYNC` carry no Item ID. The namespace and Item ID pair is
+`PING`, `STATS`, and `EXPERIMENTAL_SYNC` carry no Item ID. The namespace and
+Item ID pair is
 the cache identity; an Item ID is not a server-generated identifier.
 
 The mapping from an application key to an Item ID is client-owned and is
@@ -807,20 +864,11 @@ If a successful mutation expires before its response is delivered, the server
 still reports the mutation's success outcome. If a conditional `SET` fails,
 its TTL is not applied.
 
-For persistence and recovery, a server MUST persist enough information to
-reconstruct the expiration deadline without extending the item merely because
-the process restarted. The recommended representation is an absolute
-deployment-time expiration timestamp plus a monotonic runtime deadline. On
-restart, the server reconstructs the monotonic deadline from the persisted
-absolute timestamp and current deployment clock. An item whose deadline has
-already passed is logically absent immediately after recovery. Snapshot or
-replica restore MUST document whether it preserves the original deployment
-clock domain; restoring a snapshot into a new identity domain MUST NOT silently
-extend TTLs.
-
-Physical deletion of expired items is an implementation detail. Logical
-presence, conditional checks, and `NAMESPACE_DELETE` live-item counting MUST
-use the deadline rule above even when cleanup is deferred.
+Persistence, clock, snapshot, and recovery requirements are defined in
+[`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md). Physical deletion remains an
+implementation detail; logical presence, conditional checks, and
+`NAMESPACE_DELETE` live-item counting MUST follow the deadline rule even when
+cleanup is deferred.
 
 ## Operation semantics
 
@@ -881,43 +929,14 @@ operators. A server MAY use UTF-8 JSON, but v1 does not require a particular
 format or member. Clients MUST NOT parse diagnostic fields as a stable
 programmatic interface. `namespace_id` scopes the request, checks that the
 namespace exists for an authorized request, and provides the authorization
-boundary. The payload remains subject to the 64 MiB response limit.
+boundary. The payload remains subject to a server-selected diagnostic limit
+that MUST NOT exceed the 64 MiB response limit. If the diagnostic exceeds that
+limit, the server MUST either deterministically truncate it or return
+`InternalError`; it MUST NOT emit an oversized response.
 
-### Private `SYNC` maintenance operation
-
-`SYNC` is not part of the public v1 client API. The server may retain it as a
-private benchmark/storage operation, and public clients MUST NOT expose it as a
-normal cache method.
-
-An implementation MAY perform the authorization check before namespace lookup.
-For an unauthorized caller, `Forbidden` MAY therefore mask whether the supplied
-namespace ID exists. An authorized request for a missing namespace returns
-`NamespaceNotFound`.
-
-The private request layout is
-`06 | request_id:vu128 | namespace_id:u64be`.
-
-The operation is a namespace-wide storage barrier. Its linearization point is
-the point at which the namespace's operation sequence admits the barrier. All
-mutations to that namespace that linearized before that point are covered.
-Mutations that linearize after that point are not required to be included.
-
-A successful response is sent only after all covered pending writes have been
-sent to disk. This is a storage visibility barrier for benchmark and server
-maintenance use: a later read MUST be able to use the durable storage state
-instead of relying on a pending-write memory buffer. It is not a public
-durability-level negotiation API.
-
-If the disk barrier cannot be established, the server MUST close the lane
-without an error response; the outcome of the private operation is unknown.
-
-- Authorized success: `Ok` with an empty payload, sent only after the barrier
-  completes.
-- Unauthorized: `Forbidden` with an optional diagnostic payload.
-
-As with `STATS`, an implementation MAY authorize before looking up the
-namespace, so `Forbidden` may mask a missing namespace. An authorized request
-for a missing namespace returns `NamespaceNotFound`.
+Experimental operation layouts and semantics are defined in
+[`EXPERIMENTAL.md`](EXPERIMENTAL.md), not in the stable operation semantics
+below.
 
 ### `NAMESPACE_OPEN`
 
@@ -982,7 +1001,7 @@ the namespace deletion barrier defined above, checks the revision and live-item
 count, and removes the namespace identity only when the namespace is empty.
 Authorization is deployment-specific because v1 has no owner or account field.
 A successful deletion returns `Deleted` with an empty payload. There is no
-reserved default namespace exception in v1.
+special default-namespace exception in v1.
 
 ## Response frames
 
@@ -1098,9 +1117,9 @@ namespace-management operations that address a missing namespace. These
 domain and common errors guarantee that the requested mutation was not
 applied.
 
-The private `SYNC` operation uses `Ok`, `Forbidden`, `NamespaceNotFound`, and
-the common transport/error statuses only when the private server interface
-enables it. Public clients MUST NOT depend on its status applicability.
+`EXPERIMENTAL_SYNC` uses `Ok`, `Forbidden`, `NamespaceNotFound`, and the
+common transport/error statuses only when the experimental interface enables
+it. Public clients MUST NOT depend on its status applicability.
 
 A client receiving a response whose request ID does not identify one of its
 outstanding requests on that same lane, or whose status is neither an allowed
@@ -1160,10 +1179,13 @@ The brackets indicate fields selected by the `SET` expiration policy or by
 eight bytes whenever present. `name_len = 0` is a valid empty name; every name
 must satisfy the UTF-8 and name rules above.
 
-A receiver MUST enforce the 64 MiB value ceiling and any smaller server limit
-before allocating or reading the value body. A declared value above either
-limit maps to `TooLarge` for a complete, well-delimited request when the server
-can consume or discard its body without losing the next frame boundary.
+A receiver MUST enforce the 64 MiB wire ceiling and any smaller server limit
+before allocating or reading the value body. A `value_len` greater than the
+64 MiB wire ceiling is outside the v1 frame contract and MUST terminate the
+affected lane without a response; the receiver MUST NOT wait for or discard
+the declared unbounded body. A value within the wire ceiling but above a
+server-local operational limit MAY receive `TooLarge` when the receiver can
+consume exactly that bounded body and preserve the next frame boundary.
 
 ### Incremental parser state machine
 
@@ -1184,8 +1206,9 @@ NeedOpcode
 `NeedOperationPrefix` MUST parse enough bounded metadata to determine the
 operation and all declared lengths. For `SET`, the parser MUST validate
 `item_id_len`, `value_len`, TTL presence, and policy flags before allocating or
-reading the value body. A declared size above a wire or server limit MAY enter
-`TooLarge` only when the parser can consume exactly the declared body and
+reading the value body. A declared size above the wire ceiling is terminal
+without a response. A declared size above a server-local limit MAY enter
+`TooLarge` only when the parser can consume exactly the bounded body and
 preserve the next frame boundary; otherwise it MUST terminate the lane as
 malformed/truncated according to the transport rules. A body that ends before
 the declared length is always malformed. The parser MUST never search for an
@@ -1221,8 +1244,8 @@ protection, deduplication, idempotency, or a mutation identifier. The protocol
 does not prescribe retry behavior.
 
 If transport or connection failure occurs before a response is received, the
-client must treat the outcome of an outstanding mutation as unknown. Private
-server maintenance operations use the same rule.
+client must treat the outcome of an outstanding mutation as unknown.
+Experimental server maintenance operations use the same rule.
 Whether to issue a new request is an application decision. A new request on a
 new lane is independent even when it reuses the same request ID.
 
@@ -1253,19 +1276,19 @@ parsing.
 
 ## Version evolution
 
-Protocol v1 reserves all unassigned opcodes, statuses, and flag bits. Senders
-MUST NOT use them, and receivers MUST reject them as described above.
+Protocol v1 assigns no meaning to unassigned opcodes, statuses, or flag bits.
+Senders MUST NOT use them, and receivers MUST reject them as described above.
 
 Before v1 is finalized, this draft MAY make incompatible changes while
 retaining its provisional `openkache/1` identifier. Draft implementations
 therefore interoperate only when they implement the same revision of this
 document.
 
-After v1 is finalized, any change that reinterprets an existing field, changes
-frame order, adds or removes mandatory fields, changes canonical integer
-encoding, or changes the meaning of existing assignments requires a new ALPN
-identifier. Finalized protocol versions MUST NOT reuse `openkache/1` for
-incompatible frames.
+After v1 is finalized, any change that reinterprets an existing field, assigns
+meaning to an invalid flag/value, changes frame order, adds or removes
+mandatory fields, changes canonical integer encoding, or changes the meaning
+of existing assignments requires a new ALPN identifier. Finalized protocol
+versions MUST NOT reuse `openkache/1` for incompatible frames.
 
 When a client supports multiple versions, it MUST use the ALPN ordering and
 minimum-version rules in the transport section. A server MUST select the
@@ -1379,12 +1402,12 @@ For namespace ID `7`, an empty Item ID, and an empty value:
 This is an unconditional `SET` inheriting both namespace policies, with
 an empty Item ID, no TTL field, and `value_len = 0`.
 
-### `DELETE`, `STATS`, and private `SYNC`
+### `DELETE`, `STATS`, and experimental `EXPERIMENTAL_SYNC`
 
 ```text
 04 00 00 00 00 00 00 00 00 07 03 11 22 33 # DELETE
 05 00 00 00 00 00 00 00 00 07             # STATS
-06 00 00 00 00 00 00 00 00 07             # private SYNC
+06 00 00 00 00 00 00 00 00 07             # experimental EXPERIMENTAL_SYNC
 ```
 
 ### Namespace management
@@ -1508,7 +1531,7 @@ A protocol v1 implementation is not complete unless it:
   cannot proceed;
 - keeps compression and application-encryption metadata out of frames;
 - preserves all value bytes without interpretation;
-- rejects reserved `SET` flag bits and unassigned status values;
+- rejects invalid `SET` flag bits and unassigned status values;
 - enforces the 64 MiB wire ceiling before unbounded allocation or body reads;
 - terminates the connection without an error response for malformed framing,
   unassigned opcodes, non-canonical integers, and truncated bodies;
@@ -1523,8 +1546,9 @@ A protocol v1 implementation is not complete unless it:
 - discards the connection after framing or response-status meaning cannot be
   determined;
 - treats mutation outcomes as unknown when transport fails before a response;
-- implements the private `SYNC` storage barrier only when the server exposes
-  that benchmark/maintenance API.
+- implements `EXPERIMENTAL_SYNC` only when the server exposes that
+  experimental benchmark/maintenance API, and does not treat it as a public
+  v1 operation.
 
 ## Reference
 
