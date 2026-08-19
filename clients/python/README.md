@@ -66,16 +66,14 @@ finally:
 ```
 
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
-`get_raw` for exact bytes; empty raw values are supported. A `str` key is the
-v1 `Text` PortableKey by default. Select `key_spec=KeySpec.BYTES` or
-`key_spec=KeySpec.INTEGER` when the keyspace uses exact bytes or arbitrary
-precision integers. The selected spec is enforced for every formatted
-operation and the key is converted to canonical deterministic CBOR before the
-native ABI. Empty and NUL-containing keys are valid. JSON numbers are finite,
-and integers must be exactly representable as IEEE-754 binary64 values. Python
-converts a native value to a UTF-8 JSON input buffer only to cross the legacy
-JSON ABI; the core reparses that input and owns canonical serialization,
-compression, encryption, and value framing.
+`get_raw` for exact bytes; empty raw values are supported. Keys infer their
+canonical `Text`, `Bytes`, or signed-i64 `Integer` discriminator per operation.
+The `key_spec` option remains accepted for source compatibility but does not
+override this per-operation inference. Empty and NUL-containing keys are
+valid. JSON numbers are finite, and integers must be exactly representable as
+IEEE-754 binary64 values. Python converts a native value to a UTF-8 JSON input
+buffer only to cross the legacy JSON ABI; the core reparses that input and
+owns canonical serialization, compression, encryption, and value framing.
 
 `client.raw` exposes the Smithy-shaped exact item-ID API:
 

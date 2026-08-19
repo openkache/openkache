@@ -349,27 +349,39 @@ func (state ConnectionState) String() string {
 	}
 }
 
-// ItemID is the exact fixed-width identifier carried by the wire protocol.
-type ItemID [SmithyItemIDBytes]byte
+// ItemID is the exact opaque identifier carried by the wire protocol.
+//
+// The wire contract accepts zero through SmithyItemIDBytes bytes. The
+// maximum-width backing array keeps the value allocation-free while length
+// preserves the exact identity.
+type ItemID struct {
+	bytes  [SmithyItemIDBytes]byte
+	length uint8
+}
 
-// NewItemID copies an exact protocol-width wire item ID.
+// NewItemID copies an exact wire item ID without hashing or padding it.
 func NewItemID(value []byte) (ItemID, error) {
 	var itemID ItemID
-	if len(value) != SmithyItemIDBytes {
+	if len(value) > SmithyItemIDBytes {
 		return itemID, validationError(
 			"item_id",
-			fmt.Sprintf("must contain exactly %d bytes, got %d", SmithyItemIDBytes, len(value)),
+			fmt.Sprintf("must contain at most %d bytes, got %d", SmithyItemIDBytes, len(value)),
 		)
 	}
-	copy(itemID[:], value)
+	copy(itemID.bytes[:], value)
+	itemID.length = uint8(len(value))
 	return itemID, nil
 }
 
 // Bytes returns a copy of the exact item-ID bytes.
 func (id ItemID) Bytes() []byte {
-	value := make([]byte, len(id))
-	copy(value, id[:])
+	value := make([]byte, int(id.length))
+	copy(value, id.bytes[:id.length])
 	return value
+}
+
+func (id ItemID) wireBytes() []byte {
+	return id.bytes[:id.length]
 }
 
 // SetOutcome is the result of a successful SET operation.

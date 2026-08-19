@@ -371,6 +371,20 @@ The wire accepts an empty Exact Item ID. Maintained high-level APIs reject it
 by default and require an explicit opt-in; low-level wire-operation APIs
 preserve the full wire range.
 
+### 4.4 Compatibility mapping paths
+
+The v1 profiles MUST NOT be used to reinterpret Item IDs written by the
+pre-contract implementation. The old `Hash` profile omitted the v1 domain
+string, and the old `ByteKeyOrHash` profile preserved raw application bytes
+instead of canonical CBOR. Implementations that must address those entries
+MUST select an explicitly named legacy API or compatibility profile; those
+paths MUST retain the old input framing and MUST NOT be the default for new
+operations.
+
+Migrating an existing keyspace to v1 is an application operation: read through
+the legacy path, write through `NamespaceHash` or `PublicKeyOrHash`, and
+retire the legacy path only after the old entries are no longer needed.
+
 ## 5. Derivation parameters
 
 ### 5.1 Namespace binding

@@ -18,15 +18,16 @@ use std::time::Duration;
 
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
 pub use openkache_client_core::contract;
+#[allow(deprecated)]
 pub use openkache_client_core::{
-    AlpnPolicy, Backend, BytePermit, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity,
-    ClientRootKey, ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection,
+    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
+    CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, ClientRootKey, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
-    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
-    ItemValue, KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, NamespaceDescriptor, NamespacePolicy,
-    Operation, OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result, RetryPolicy,
-    RequestBudget, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome,
-    ValueKeyring,
+    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, KeyError,
+    KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES, NamespaceDescriptor,
+    NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result,
+    TypedKey,
+    RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome,
     canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
@@ -345,7 +346,7 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Configures the supported `openkache/1` protocol.
+            /// Offers protocol versions in descending order and enforces a minimum version.
             pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
                 self.inner = self.inner.alpn_policy(policy);
                 self
@@ -366,12 +367,6 @@ macro_rules! builder_methods {
             /// Bounds simultaneous request lanes on one QUIC connection.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.inner = self.inner.max_in_flight(maximum);
-                self
-            }
-
-            /// Sets the aggregate bytes retained across transport and value work.
-            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
-                self.inner = self.inner.max_in_flight_bytes(maximum);
                 self
             }
 
@@ -413,15 +408,25 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Selects the exact key type accepted by this formatted keyspace.
-            pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
+            /// Retains the pre-contract key-type selector for source
+            /// compatibility.
+            ///
+            /// v1 infers `TypedKey` from each operation; a namespace does not
+            /// enforce one key type. New callers should omit this setting.
+            #[deprecated(note = "TypedKey is inferred per operation in v1")]
+            #[allow(deprecated)]
+            pub fn key_spec(mut self, key_spec: KeyType) -> Self {
                 self.inner = self.inner.key_spec(key_spec);
                 self
             }
 
-            /// Configures immutable value-key IDs for read-old/write-new rotation.
-            pub fn value_keyring(mut self, keyring: ValueKeyring) -> Self {
-                self.inner = self.inner.value_keyring(keyring);
+            /// Selects the client-local Item ID mapping profile.
+            ///
+            /// `NamespaceHash` is the default and binds mapped keys to the
+            /// configured root and namespace. `PublicKeyOrHash` is an
+            /// explicit opt-in for public, cross-namespace key identity.
+            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
+                self.inner = self.inner.key_format(key_format);
                 self
             }
         }
@@ -478,27 +483,27 @@ macro_rules! client_methods {
             }
 
             /// Retrieves and decodes a value for a portable key.
-            pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
+            pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
                 self.inner.get(key).await
             }
 
             /// Retrieves and decodes a value in the shared logical value model.
             pub async fn get_value(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
             ) -> Result<GetOutcome<value::Value>> {
                 self.inner.get_value(key).await
             }
 
             /// Deletes a value for a portable key.
-            pub async fn delete(&self, key: impl Into<PortableKey>) -> Result<DeleteOutcome> {
+            pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
                 self.inner.delete(key).await
             }
 
             /// Serializes, protects, and stores a value in the shared logical value model.
             pub async fn set_value(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: value::Value,
                 options: SetOptions,
             ) -> Result<SetOutcome> {
@@ -533,7 +538,7 @@ macro_rules! client_methods {
             /// Starts an awaitable set request inheriting namespace policy defaults.
             pub fn set<'a>(
                 &'a self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: impl IntoValue,
             ) -> $request<'a> {
                 self.set_with_options(key, value, SetOptions::new())
@@ -542,7 +547,7 @@ macro_rules! client_methods {
             /// Starts an awaitable set request with explicit wire-level options.
             pub fn set_with_options<'a>(
                 &'a self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: impl IntoValue,
                 options: SetOptions,
             ) -> $request<'a> {
@@ -745,7 +750,7 @@ impl IntoValue for Arc<Vec<u8>> {
 /// Awaitable Tokio set request with optional condition and TTL modifiers.
 pub struct SetRequest<'a> {
     client: &'a Client,
-    application_key: PortableKey,
+    application_key: TypedKey,
     value: Vec<u8>,
     options: SetOptions,
 }
@@ -754,7 +759,7 @@ pub struct SetRequest<'a> {
 /// Awaitable Compio set request with optional condition and TTL modifiers.
 pub struct LocalSetRequest<'a> {
     client: &'a LocalClient,
-    application_key: PortableKey,
+    application_key: TypedKey,
     value: Vec<u8>,
     options: SetOptions,
 }

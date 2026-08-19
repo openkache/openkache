@@ -101,9 +101,9 @@ _ = (output, smithyOutput)
 ```
 
 Keys are exact UTF-8 or binary bytes, including empty and NUL-containing keys.
-Empty values are valid for the protected adapter. Raw item IDs must contain exactly
-`Smithy_Value_Format.itemIdBytes` bytes. `dataProtectionKey` must contain
-exactly 32 persistent random bytes.
+Empty values are valid for the protected adapter. Raw item IDs accept
+`0...Smithy_Value_Format.itemIdBytes` opaque bytes. `dataProtectionKey` must
+contain exactly 32 persistent random bytes.
 `certificate` may be one DER certificate or a PEM chain; omit it to use system
 roots. A numeric address may provide a separate `serverName` for certificate
 verification.

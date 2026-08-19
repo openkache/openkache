@@ -3,12 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ValueKeyring;
 use crate::value::{Compression, Encryption, Value};
 use crate::{
-    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeySpec, NamespaceDescriptor,
-    NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
+    DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
+    NamespaceDescriptor, NamespacePolicy, TypedKey, Result, RetryPolicy, ServerTrust,
+    SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -21,8 +21,8 @@ struct ProtectionSettings {
     encryption: Encryption,
     encryption_explicit: bool,
     key: Option<DataProtectionKey>,
-    keyring: Option<ValueKeyring>,
-    key_spec: KeySpec,
+    key_spec: KeyType,
+    key_format: KeyFormat,
 }
 
 impl ProtectionSettings {
@@ -40,28 +40,21 @@ impl ProtectionSettings {
             encryption: Encryption::Robust,
             encryption_explicit: false,
             key,
-            keyring: None,
-            key_spec: KeySpec::Bytes,
+            key_spec: KeyType::Bytes,
+            key_format: KeyFormat::NamespaceHash,
         }
     }
 
-    fn finish_with_budget(self, budget: crate::RequestBudget) -> Result<Arc<DataProtection>> {
-        let protection = match self.key {
-            Some(key) => match self.keyring {
-                Some(keyring) => DataProtection::with_keyring_and_key_spec(
-                    key,
-                    keyring,
-                    self.key_spec,
-                    self.compression,
-                    self.encryption,
-                ),
-                None => DataProtection::with_profile_and_key_spec(
-                    key,
-                    self.key_spec,
-                    self.compression,
-                    self.encryption,
-                ),
-            },
+    fn finish(self) -> Result<Arc<DataProtection>> {
+        match self.key {
+            Some(key) => DataProtection::with_profile_and_key_type_and_format(
+                key,
+                self.key_spec,
+                self.key_format,
+                self.compression,
+                self.encryption,
+            )
+            .map(Arc::new),
             None => {
                 if self.encryption_explicit && self.encryption != Encryption::Unprotected {
                     return Err(crate::Error::configuration(
@@ -69,10 +62,16 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected(self.key_spec, self.compression)
+                DataProtection::with_profile_and_key_type_and_format(
+                    ClientRootKey::zero(),
+                    self.key_spec,
+                    self.key_format,
+                    self.compression,
+                    Encryption::Unprotected,
+                )
+                .map(Arc::new)
             }
-        }?;
-        Ok(Arc::new(protection.with_budget(budget)))
+        }
     }
 }
 
@@ -97,7 +96,7 @@ macro_rules! protected_builder_methods {
                 self
             }
 
-            /// Configures the supported `openkache/1` protocol.
+            /// Offers protocol versions in descending order and enforces a minimum version.
             pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
                 self.raw = self.raw.alpn_policy(policy);
                 self
@@ -118,12 +117,6 @@ macro_rules! protected_builder_methods {
             /// Bounds simultaneous request lanes on one QUIC connection.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.raw = self.raw.max_in_flight(maximum);
-                self
-            }
-
-            /// Sets the aggregate bytes retained across transport and value work.
-            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
-                self.raw = self.raw.max_in_flight_bytes(maximum);
                 self
             }
 
@@ -155,7 +148,7 @@ macro_rules! protected_builder_methods {
             ///
             /// # Arguments
             ///
-            /// * `encryption` - Unprotected, Compact, or Robust value profile.
+            /// * `encryption` - Compact or Robust authenticated-encryption profile.
             ///
             /// # Returns
             ///
@@ -166,15 +159,25 @@ macro_rules! protected_builder_methods {
                 self
             }
 
-            /// Selects the exact key type accepted by this formatted keyspace.
-            pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
+            /// Retains the pre-contract key-type selector for source
+            /// compatibility.
+            ///
+            /// v1 infers `TypedKey` from each operation; a namespace does not
+            /// enforce one key type. New callers should omit this setting.
+            #[deprecated(note = "TypedKey is inferred per operation in v1")]
+            pub fn key_spec(mut self, key_spec: KeyType) -> Self {
                 self.protection.key_spec = key_spec;
                 self
             }
 
-            /// Configures immutable value-key IDs for read-old/write-new rotation.
-            pub fn value_keyring(mut self, keyring: ValueKeyring) -> Self {
-                self.protection.keyring = Some(keyring);
+            /// Selects the client-local Item ID mapping profile.
+            ///
+            /// `NamespaceHash` is the default and binds mapped keys to the
+            /// configured root and namespace. `PublicKeyOrHash` must be
+            /// selected explicitly when public, cross-namespace key identity
+            /// is intended.
+            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
+                self.protection.key_format = key_format;
                 self
             }
         }
@@ -234,7 +237,7 @@ macro_rules! protected_client_methods {
         }
 
         /// Retrieves, authenticates, and decodes a value for a portable key.
-        pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
+        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
             match self.get_value(key).await? {
                 GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
                 GetOutcome::Found(Value::Json(_)) => {
@@ -258,7 +261,7 @@ macro_rules! protected_client_methods {
         ///
         /// Returns an error when transport, authentication, decompression, or deserialization
         /// fails.
-        pub async fn get_value(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Value>> {
+        pub async fn get_value(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Value>> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
             self.get_value_at_item_id(namespace_id, item_id).await
@@ -302,7 +305,7 @@ macro_rules! protected_client_methods {
         /// language adapter.
         ///
         /// The bytes must be exactly one canonical v1 key item. This method
-        /// intentionally does not apply the configured `KeySpec`; the CBOR
+        /// intentionally does not apply the configured `KeyType`; the CBOR
         /// major type is the low-level ABI's explicit type discriminator.
         #[cfg(feature = "ffi")]
         pub(crate) async fn get_canonical_key_unchecked(
@@ -337,11 +340,7 @@ macro_rules! protected_client_methods {
             namespace_id: u64,
             item_id: crate::ItemId,
         ) -> Result<GetOutcome<Value>> {
-            match self
-                .raw
-                .get_in_namespace_with_permit(namespace_id, item_id)
-                .await?
-            {
+            match self.raw.get_in_namespace(namespace_id, item_id).await? {
                 GetOutcome::Found(value) => self
                     .protection
                     .decode_in_namespace(namespace_id, item_id, value)
@@ -371,7 +370,7 @@ macro_rules! protected_client_methods {
         /// Protects and stores plaintext bytes for a portable key.
         pub async fn set(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             plaintext: Vec<u8>,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -396,7 +395,7 @@ macro_rules! protected_client_methods {
         /// fails.
         pub async fn set_value(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -508,7 +507,7 @@ macro_rules! protected_client_methods {
         }
 
         /// Deletes a value for a portable key.
-        pub async fn delete(&self, key: impl Into<PortableKey>) -> Result<DeleteOutcome> {
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
             self.raw.delete_in_namespace(namespace_id, item_id).await
@@ -589,8 +588,8 @@ protected_builder_methods!(ProtectedClientBuilder);
 impl ProtectedClientBuilder {
     /// Connects a client with mandatory application-key and value protection.
     pub async fn connect(self) -> Result<ProtectedClient> {
+        let protection = self.protection.finish()?;
         let raw = self.raw.connect().await?;
-        let protection = self.protection.finish_with_budget(raw.request_budget())?;
         Ok(ProtectedClient { raw, protection })
     }
 }
@@ -643,8 +642,8 @@ protected_builder_methods!(LocalProtectedClientBuilder);
 impl LocalProtectedClientBuilder {
     /// Connects a Compio client with mandatory application-key and value protection.
     pub async fn connect(self) -> Result<LocalProtectedClient> {
+        let protection = self.protection.finish()?;
         let raw = self.raw.connect().await?;
-        let protection = self.protection.finish_with_budget(raw.request_budget())?;
         Ok(LocalProtectedClient { raw, protection })
     }
 }

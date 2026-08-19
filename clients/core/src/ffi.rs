@@ -1501,11 +1501,11 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
         };
         match operation {
             FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-                if item_id.len() != crate::ITEM_ID_BYTES =>
+                if item_id.len() > crate::MAX_ITEM_ID_BYTES =>
             {
                 Err(format!(
-                    "item_id must contain exactly {} bytes, got {}",
-                    crate::ITEM_ID_BYTES,
+                    "item_id must contain at most {} bytes, got {}",
+                    crate::MAX_ITEM_ID_BYTES,
                     item_id.len()
                 ))
             }
@@ -1782,11 +1782,11 @@ fn execute_entry_inner(
                 operation,
                 FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
             )
-            && application_key.len() != crate::ITEM_ID_BYTES
+            && application_key.len() > crate::MAX_ITEM_ID_BYTES
         {
             return Err(format!(
-                "item_id must contain exactly {} bytes, got {}",
-                crate::ITEM_ID_BYTES,
+                "item_id must contain at most {} bytes, got {}",
+                crate::MAX_ITEM_ID_BYTES,
                 application_key.len()
             ));
         }
