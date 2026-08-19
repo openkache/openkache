@@ -12,6 +12,11 @@ is the source of the generated operation types, client constants, and native ABI
 implements those exact item-ID operations. `Client` adds protected
 application-key operations and JSON values.
 
+> **Current implementation:** This package currently exposes the legacy
+> canonical-JSON and fixed-width Item ID APIs. The draft key, value, and
+> variable Item ID contracts linked from the client index are migration
+> targets, not claims of current conformance.
+
 ## Commands
 
 Run from `clients/python`:

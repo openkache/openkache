@@ -49,21 +49,27 @@ describes how OpenKache-maintained bindings share one core without making
 their API shape or local policy a requirement for third-party clients. The
 value envelope carries the selected value profile opaquely; the server does
 not interpret it. TypeScript's legacy metadata envelope remains a
-package-level compatibility detail; use its `set_json` / `get_json` or Exact
-Item ID methods for caller-owned opaque bytes until the structured-value
-implementation is complete. Exact Item ID methods do not perform
-cross-language serialization.
+package-level compatibility detail. In the current implementation, use
+`set_json` / `get_json` for the legacy cross-language JSON API and Exact Item ID
+or raw methods for caller-owned opaque bytes. Exact Item ID methods do not
+perform cross-language serialization.
 
 The documents above are target drafts. The current generated Smithy contract
 and shared core still contain transitional pre-freeze behavior, including the
 legacy value container and fixed-width Item ID operations. They must be
-migrated before any package claims conformance to the draft contracts.
+migrated before any package claims conformance to the draft contracts. Until
+then, package READMEs describe current behavior and must not be read as
+implementation of the target profiles.
 
 | Area | Draft target | Current implementation | Status |
 |---|---|---|---|
 | Item ID | `0..=32` bytes | Fixed-width 32 bytes | Migration pending |
 | Structured value selector `1` | `StructuredValue-CBOR-v1` | Legacy JSON container | Migration pending |
 | Maintained compression | Automatic; use a completed frame when it is at least one byte smaller | Legacy per-core/default settings | Migration pending |
+
+The draft documents are the source of truth for the post-migration contract.
+Generated Smithy files and current core defaults are derived implementation
+artifacts until that migration is complete.
 
 ## Binding architecture
 

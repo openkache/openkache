@@ -115,11 +115,15 @@ encoding is at most nine bytes.
 
 `value_envelope_version = 0` is an application-defined envelope profile.
 OpenKache does not define or interpret its body grammar, selectors, transform
-order, authentication inputs, or limits. Communicating parties MAY use it only
-when they configure the complete profile out of band. A reader without the
-matching profile MUST reject it and MUST NOT parse it using this profile.
+order, authentication inputs, or limits. The maintained client implementation
+does not reject or parse version `0`: when an application explicitly selects
+that profile, the client passes the complete envelope bytes through as
+caller-owned data. It MUST NOT apply the version-1 transforms, rewrite the
+bytes, or infer a version-0 grammar. Validation and interpretation of version
+`0` belong to the application or to its separately configured profile.
 
-Unsupported versions MUST be rejected. A decoder MUST select the version
+Versions other than `0` and `1` MUST be rejected. A decoder MUST dispatch
+version `0` to the caller-owned pass-through path or select the version-1
 grammar before interpreting any version-body byte.
 
 ## 4. Selector byte
@@ -654,10 +658,12 @@ A decoder MUST:
 10. Decode exactly one structured-value item using the selected profile, or
     return the exact `OpaqueBytes` payload.
 
-Unknown versions, selector values, value-key IDs, compression profiles, payload
-formats, malformed payloads, and disallowed trailing bytes MUST be rejected.
-The decoder MUST NOT probe other keys, silently downgrade, fall back, or
-reinterpret an unknown value as another payload format.
+Unknown versions other than caller-owned version `0`, selector values,
+value-key IDs, compression profiles, payload formats, malformed payloads, and
+disallowed trailing bytes MUST be rejected. The decoder MUST NOT probe other
+keys, silently downgrade, fall back, or reinterpret an unknown value as
+another payload format. Version `0` is returned through the caller-owned
+pass-through path without parsing.
 
 ## 9. Limits and rejection rules
 
@@ -698,9 +704,9 @@ version MAY change selector layout and assignments, body framing, transform
 order, key-selection framing, authentication inputs, and limits.
 
 This profile uses `value_envelope_version = 1`. A reader MUST reject a version
-it does not support rather than guessing its grammar. Version `0` is available
-only for a complete application-defined envelope profile configured out of
-band.
+other than `0` or `1` rather than guessing its grammar. Version `0` is
+available only for a complete application-defined envelope profile configured
+out of band; the maintained client passes it through without interpreting it.
 
 Future OpenKache versions are additive: a newer version may represent values or
 policies that this profile cannot. A client MAY choose the oldest supported

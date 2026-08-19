@@ -5,6 +5,11 @@ Deno. A packaged Node-API adapter delegates network, retries, value protection,
 and canonical JSON behavior to `openkache-client-core`; applications need no
 helper process or runtime npm dependencies.
 
+> **Current implementation:** This package currently exposes the legacy
+> canonical-JSON and fixed-width Item ID APIs. The draft key, value, and
+> variable Item ID contracts linked below are migration targets, not claims of
+> current conformance.
+
 ## Purpose
 
 The package converts JavaScript values and configuration into shared-core

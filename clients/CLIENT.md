@@ -283,11 +283,12 @@ conversion rules.
 
 ### 6.1 Configuration boundaries
 
-The generated client contract is the common source for configuration fields,
-identifiers, limits, and maintained defaults. Adapters translate native
-configuration into that model and let the shared core validate combinations.
-They do not duplicate profile algorithms or derive new defaults from native
-type behavior.
+After migration, the generated client contract will be the derived common
+source for configuration fields, identifiers, limits, and maintained defaults.
+The draft format documents remain the source of truth until then. Adapters
+translate native configuration into the generated model and let the shared
+core validate combinations; they do not duplicate profile algorithms or derive
+new defaults from native type behavior.
 
 Configuration is divided into:
 

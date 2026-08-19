@@ -9,9 +9,11 @@ encoded bytes, while this specification defines what those bytes mean to
 clients.
 
 The first structured-value profile uses CBOR as its internal codec. CBOR is an
-implementation profile, not the public value API. A future profile may use
-another self-describing codec, or a schema-bound codec such as protobuf, while
-retaining a separate compatibility contract.
+implementation profile, not the public value API. The Value Model v1 defined
+here owns logical semantics; `StructuredValue-CBOR-v1` is the first payload
+codec profile for that model. A future profile may use another self-describing
+codec, or a schema-bound codec such as protobuf, while retaining a separate
+compatibility contract.
 
 This document is a target specification. The shared implementation and
 language adapters may temporarily lag while the draft is completed. An
@@ -343,16 +345,20 @@ before exposing the map. It MUST NOT use native language equality as a
 substitute for this comparison. Map entry order does not affect the result.
 
 The profile does not require deterministic encoding of the complete payload.
-Maintained Python and JavaScript encoders SHOULD preserve the iteration order
-of their input `dict`, `Map`, or lossless entry view. This is a client
-convenience and does not make map order part of wire equality or require
-third-party implementations to preserve it.
+Maintained Python and JavaScript encoders MUST preserve the observable
+iteration order of their input `dict`, `Map`, or lossless entry view, and
+decoders MUST preserve that order in their lossless result. This is a
+same-language round-trip guarantee and does not make map order part of wire
+equality or require third-party implementations to preserve it.
+
+The profile does not impose additional wire-level depth, entry-count, or
+bignum-size limits. A conforming decoder MUST nevertheless use stack-safe
+parsing or an equivalent bounded traversal strategy. An implementation MAY
+apply lower local structural budgets and MUST report a local resource
+rejection without returning a partially decoded value.
 
 The profile's parser MUST apply the common payload limits supplied by the
-enclosing client value format. This draft intentionally does not add separate
-container-depth, entry-count, or bignum-size limits; implementations MAY use
-lower local resource limits and MUST report such local rejections without
-silently changing the decoded value.
+enclosing client value format.
 
 ## 6. Standards delegation and future profiles
 
@@ -410,3 +416,18 @@ The following mappings are normative:
 A map containing keys that are distinct in the model but collide in a native
 container MUST be returned through a lossless representation or rejected by
 strict native conversion.
+
+The following initial codec vectors are normative:
+
+| Logical value or case | `StructuredValue-CBOR-v1` bytes | Result |
+|---|---|---|
+| `Integer(1)` | `01` | Decode as `Integer(1)`. |
+| `Integer(2^64)` | `c2 49 01 00 00 00 00 00 00 00 00` | Decode as `Integer(18446744073709551616)`. |
+| `Float16(+1.0)` | `f9 3c 00` | Preserve width 16 and raw bits `0x3c00`. |
+| `Float32(+1.0)` | `fa 3f 80 00 00` | Preserve width 32 and raw bits `0x3f800000`. |
+| `Float64(-0.0)` | `fb 80 00 00 00 00 00 00 00` | Preserve the negative-zero bit pattern. |
+| `TextString("x")` | `61 78` | Distinct from `ByteString([78])`. |
+| `ByteString([78])` | `41 78` | Distinct from `TextString("x")`. |
+| `Map([(Integer(1), Null)])` | `a1 01 f6` | Decode as one map entry. |
+| Duplicate logical key `Integer(1)` | `a2 01 f6 01 f7` | Reject before exposing the map. |
+| Non-preferred integer encoding `Integer(1)` | `18 01` | MAY be accepted by a decoder; encoders MUST emit `01`. |
