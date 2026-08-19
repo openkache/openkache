@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use crate::value::{Compression, Encryption, Value};
 use crate::{
-    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeySpec, NamespaceDescriptor,
-    NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
+    DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
+    NamespaceDescriptor, NamespacePolicy, TypedKey, Result, RetryPolicy, ServerTrust,
+    SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -19,7 +20,8 @@ struct ProtectionSettings {
     encryption: Encryption,
     encryption_explicit: bool,
     key: Option<DataProtectionKey>,
-    key_spec: KeySpec,
+    key_spec: KeyType,
+    key_format: KeyFormat,
 }
 
 impl ProtectionSettings {
@@ -37,22 +39,20 @@ impl ProtectionSettings {
             encryption: Encryption::Robust,
             encryption_explicit: false,
             key,
-            key_spec: KeySpec::Bytes,
+            key_spec: KeyType::Bytes,
+            key_format: KeyFormat::NamespaceHash,
         }
     }
 
     fn finish(self) -> Result<Arc<DataProtection>> {
         match self.key {
-            Some(key) => if self.encryption == Encryption::Unprotected {
-                DataProtection::unprotected(self.key_spec, self.compression)
-            } else {
-                DataProtection::with_profile_and_key_spec(
-                    key,
-                    self.key_spec,
-                    self.compression,
-                    self.encryption,
-                )
-            }
+            Some(key) => DataProtection::with_profile_and_key_type_and_format(
+                key,
+                self.key_spec,
+                self.key_format,
+                self.compression,
+                self.encryption,
+            )
             .map(Arc::new),
             None => {
                 if self.encryption_explicit && self.encryption != Encryption::Unprotected {
@@ -61,7 +61,14 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected(self.key_spec, self.compression).map(Arc::new)
+                DataProtection::with_profile_and_key_type_and_format(
+                    ClientRootKey::zero(),
+                    self.key_spec,
+                    self.key_format,
+                    self.compression,
+                    Encryption::Unprotected,
+                )
+                .map(Arc::new)
             }
         }
     }
@@ -151,9 +158,25 @@ macro_rules! protected_builder_methods {
                 self
             }
 
-            /// Selects the exact key type accepted by this formatted keyspace.
-            pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
+            /// Retains the pre-contract key-type selector for source
+            /// compatibility.
+            ///
+            /// v1 infers `TypedKey` from each operation; a namespace does not
+            /// enforce one key type. New callers should omit this setting.
+            #[deprecated(note = "TypedKey is inferred per operation in v1")]
+            pub fn key_spec(mut self, key_spec: KeyType) -> Self {
                 self.protection.key_spec = key_spec;
+                self
+            }
+
+            /// Selects the client-local Item ID mapping profile.
+            ///
+            /// `NamespaceHash` is the default and binds mapped keys to the
+            /// configured root and namespace. `PublicKeyOrHash` must be
+            /// selected explicitly when public, cross-namespace key identity
+            /// is intended.
+            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
+                self.protection.key_format = key_format;
                 self
             }
         }
@@ -213,7 +236,7 @@ macro_rules! protected_client_methods {
         }
 
         /// Retrieves, authenticates, and decodes a value for a portable key.
-        pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
+        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
             match self.get_value(key).await? {
                 GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
                 GetOutcome::Found(Value::Json(_)) => {
@@ -237,7 +260,7 @@ macro_rules! protected_client_methods {
         ///
         /// Returns an error when transport, authentication, decompression, or deserialization
         /// fails.
-        pub async fn get_value(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Value>> {
+        pub async fn get_value(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Value>> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
             self.get_value_at_item_id(namespace_id, item_id).await
@@ -259,7 +282,7 @@ macro_rules! protected_client_methods {
         /// language adapter.
         ///
         /// The bytes must be exactly one canonical v1 key item. This method
-        /// intentionally does not apply the configured `KeySpec`; the CBOR
+        /// intentionally does not apply the configured `KeyType`; the CBOR
         /// major type is the low-level ABI's explicit type discriminator.
         #[cfg(feature = "ffi")]
         pub(crate) async fn get_canonical_key_unchecked(
@@ -290,7 +313,7 @@ macro_rules! protected_client_methods {
         /// Protects and stores plaintext bytes for a portable key.
         pub async fn set(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             plaintext: Vec<u8>,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -315,7 +338,7 @@ macro_rules! protected_client_methods {
         /// fails.
         pub async fn set_value(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -370,7 +393,7 @@ macro_rules! protected_client_methods {
         }
 
         /// Deletes a value for a portable key.
-        pub async fn delete(&self, key: impl Into<PortableKey>) -> Result<DeleteOutcome> {
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
             self.raw.delete_in_namespace(namespace_id, item_id).await

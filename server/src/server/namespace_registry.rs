@@ -20,6 +20,12 @@ const NAMESPACE_METADATA_MAX_DIRTY_WORKERS: u64 = 1_000_000;
 static NEXT_NAMESPACE_METADATA_TEMP: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+fn journal_item_id(item_id: ItemId) -> ([u8; openkache_protocol::ITEM_ID_BYTES], u8) {
+    let mut bytes = [0; openkache_protocol::ITEM_ID_BYTES];
+    bytes[..item_id.len()].copy_from_slice(item_id.as_bytes());
+    (bytes, item_id.len() as u8)
+}
+
 #[derive(Clone, Debug)]
 struct NamespaceName(Arc<OwnedRange>);
 
@@ -115,13 +121,12 @@ pub(crate) struct NamespaceRegistry {
 
 impl NamespaceRegistry {
     pub(crate) fn load(directory: &Path, existing_storage: bool) -> std::io::Result<Self> {
-        let metadata_path =
-            match super::super::storage_backend::namespace_persistence(directory) {
-                super::super::storage_backend::NamespacePersistence::Durable(path) => path,
-                super::super::storage_backend::NamespacePersistence::Ephemeral => {
-                    return Ok(Self::ephemeral(directory));
-                }
-            };
+        let metadata_path = match super::super::storage_backend::namespace_persistence(directory) {
+            super::super::storage_backend::NamespacePersistence::Durable(path) => path,
+            super::super::storage_backend::NamespacePersistence::Ephemeral => {
+                return Ok(Self::ephemeral(directory));
+            }
+        };
         let mut registry = Self {
             next_id: Some(1),
             by_id: HashMap::new(),
@@ -190,8 +195,7 @@ impl NamespaceRegistry {
         name: impl Into<OwnedRange>,
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
-    ) -> std::result::Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError>
-    {
+    ) -> std::result::Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError> {
         let name = name.into();
         if name.len() > namespace_metadata::NAME_MAX_BYTES {
             return Err(NamespaceError::InvalidRequest);
@@ -248,14 +252,13 @@ impl NamespaceRegistry {
         Ok(namespace_id)
     }
 
-    pub(crate) fn operation_lock(
-        &self,
-        namespace_id: u64,
-    ) -> Option<NamespaceOperationLock> {
-        self.by_id.get(&namespace_id).map(|entry| NamespaceOperationLock {
-            lock: Arc::clone(&entry.operation_lock),
-            active: Arc::clone(&entry.active),
-        })
+    pub(crate) fn operation_lock(&self, namespace_id: u64) -> Option<NamespaceOperationLock> {
+        self.by_id
+            .get(&namespace_id)
+            .map(|entry| NamespaceOperationLock {
+                lock: Arc::clone(&entry.operation_lock),
+                active: Arc::clone(&entry.active),
+            })
     }
 
     pub(crate) fn descriptor(&self, namespace_id: u64) -> Option<NamespaceDescriptor> {
@@ -350,9 +353,11 @@ impl NamespaceRegistry {
         if !reservation.inserted_item && !reservation.inserted_worker {
             return Ok(reservation);
         }
+        let (item_id_bytes, item_id_len) = journal_item_id(item_id);
         let event = JournalEvent::ReserveItem {
             namespace_id,
-            item_id: *item_id.as_bytes(),
+            item_id: item_id_bytes,
+            item_id_len,
             route: route.persisted(),
             inserted_item: reservation.inserted_item,
             inserted_worker: reservation.inserted_worker,
@@ -399,10 +404,12 @@ impl NamespaceRegistry {
                 entry.dirty_workers.remove(&route);
             }
         }
+        let (item_id_bytes, item_id_len) = journal_item_id(item_id);
         if self
             .append_event(JournalEvent::RollbackItem {
                 namespace_id,
-                item_id: *item_id.as_bytes(),
+                item_id: item_id_bytes,
+                item_id_len,
                 route: route.persisted(),
                 remove_item: reservation.inserted_item,
                 remove_worker: reservation.inserted_worker,
@@ -468,11 +475,13 @@ impl NamespaceRegistry {
                 .by_id
                 .get_mut(&namespace_id)
                 .is_some_and(|entry| entry.items.remove(&item_id));
+        let (item_id_bytes, item_id_len) = journal_item_id(item_id);
         if removed
             && self
                 .append_event(JournalEvent::MarkDelete {
                     namespace_id,
-                    item_id: *item_id.as_bytes(),
+                    item_id: item_id_bytes,
+                    item_id_len,
                 })
                 .is_err()
         {
@@ -540,10 +549,12 @@ impl NamespaceRegistry {
         if !entry.items.remove(&item_id) {
             return Ok(());
         }
+        let (item_id_bytes, item_id_len) = journal_item_id(item_id);
         if self
             .append_event(JournalEvent::PruneItem {
                 namespace_id,
-                item_id: *item_id.as_bytes(),
+                item_id: item_id_bytes,
+                item_id_len,
             })
             .is_err()
         {
@@ -559,6 +570,24 @@ impl NamespaceRegistry {
         if !self.persistent {
             return Ok(());
         }
+        // The legacy journal record is fixed-width and intentionally remains
+        // a compatibility reader for existing 32-byte memberships. Compact
+        // the exact variable-length snapshot for short IDs instead of
+        // padding them into a different identity.
+        let short_item = match event {
+            JournalEvent::ReserveItem { item_id_len, .. }
+            | JournalEvent::RollbackItem { item_id_len, .. }
+            | JournalEvent::MarkDelete { item_id_len, .. }
+            | JournalEvent::PruneItem { item_id_len, .. } => {
+                // `item_id_len` carries the original wire length; the fixed
+                // array is only a journal encoding buffer.
+                item_id_len < openkache_protocol::ITEM_ID_BYTES as u8
+            }
+            JournalEvent::ReserveWorker { .. } | JournalEvent::MarkWorkersClean { .. } => false,
+        };
+        if short_item {
+            return self.persist();
+        }
         self.journal
             .as_ref()
             .expect("persistent namespace registry has journal")
@@ -571,6 +600,7 @@ impl NamespaceRegistry {
                 JournalEvent::ReserveItem {
                     namespace_id,
                     item_id,
+                    item_id_len,
                     route,
                     inserted_item,
                     inserted_worker,
@@ -579,7 +609,9 @@ impl NamespaceRegistry {
                         continue;
                     };
                     if inserted_item {
-                        entry.items.insert(ItemId::new(item_id));
+                        let item_id = ItemId::from_slice(&item_id[..usize::from(item_id_len)])
+                            .expect("journal item ID length was validated during decode");
+                        entry.items.insert(item_id);
                     }
                     if inserted_worker {
                         entry
@@ -590,6 +622,7 @@ impl NamespaceRegistry {
                 JournalEvent::RollbackItem {
                     namespace_id,
                     item_id,
+                    item_id_len,
                     route,
                     remove_item,
                     remove_worker,
@@ -598,7 +631,9 @@ impl NamespaceRegistry {
                         continue;
                     };
                     if remove_item {
-                        entry.items.remove(&ItemId::new(item_id));
+                        let item_id = ItemId::from_slice(&item_id[..usize::from(item_id_len)])
+                            .expect("journal item ID length was validated during decode");
+                        entry.items.remove(&item_id);
                     }
                     if remove_worker {
                         entry
@@ -624,13 +659,17 @@ impl NamespaceRegistry {
                 JournalEvent::MarkDelete {
                     namespace_id,
                     item_id,
+                    item_id_len,
                 }
                 | JournalEvent::PruneItem {
                     namespace_id,
                     item_id,
+                    item_id_len,
                 } => {
                     if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-                        entry.items.remove(&ItemId::new(item_id));
+                        let item_id = ItemId::from_slice(&item_id[..usize::from(item_id_len)])
+                            .expect("journal item ID length was validated during decode");
+                        entry.items.remove(&item_id);
                     }
                 }
             }
@@ -658,24 +697,25 @@ impl NamespaceRegistry {
             bytes.extend_from_slice(&name_len.to_be_bytes());
             bytes.extend_from_slice(entry.name.as_ref());
             let policy = namespace_metadata::encode_policy(entry.descriptor.policy)?;
-            let policy_len = u8::try_from(policy.len()).map_err(|_| {
-                std::io::Error::new(ErrorKind::InvalidData, "policy is too long")
-            })?;
+            let policy_len = u8::try_from(policy.len())
+                .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "policy is too long"))?;
             bytes.push(policy_len);
             bytes.extend_from_slice(&policy);
             bytes.extend_from_slice(&(entry.items.len() as u64).to_be_bytes());
             let mut items = entry.items.iter().copied().collect::<Vec<_>>();
             items.sort_unstable();
             for item_id in items {
+                let item_id_len = u8::try_from(item_id.len()).map_err(|_| {
+                    std::io::Error::new(ErrorKind::InvalidData, "item ID is too long")
+                })?;
+                bytes.push(item_id_len);
                 bytes.extend_from_slice(item_id.as_bytes());
             }
             bytes.extend_from_slice(&(entry.dirty_workers.len() as u64).to_be_bytes());
             let mut dirty_workers = entry.dirty_workers.iter().copied().collect::<Vec<_>>();
             dirty_workers.sort_unstable();
             for route in dirty_workers {
-                bytes.extend_from_slice(
-                    &route.persisted().to_be_bytes(),
-                );
+                bytes.extend_from_slice(&route.persisted().to_be_bytes());
             }
         }
 
@@ -718,6 +758,7 @@ impl NamespaceRegistry {
         }
         let metadata_version = cursor.u32()?;
         if metadata_version != namespace_metadata::VERSION
+            && metadata_version != namespace_metadata::LEGACY_V3_VERSION
             && metadata_version != namespace_metadata::LEGACY_V2_VERSION
             && metadata_version != namespace_metadata::LEGACY_V1_VERSION
         {
@@ -751,35 +792,46 @@ impl NamespaceRegistry {
                 return Err(cursor.invalid("namespace metadata policy has trailing bytes"));
             }
             let item_count = cursor.u64()?;
+            let minimum_item_bytes = if metadata_version == namespace_metadata::VERSION {
+                1
+            } else {
+                openkache_protocol::ITEM_ID_BYTES
+            };
             if item_count > NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY
-                || item_count > (cursor.remaining() / openkache_protocol::ITEM_ID_BYTES) as u64
+                || item_count > (cursor.remaining() / minimum_item_bytes) as u64
             {
                 return Err(cursor.invalid("namespace metadata item list is invalid"));
             }
             let mut items = HashSet::with_capacity(item_count as usize);
             for _ in 0..item_count {
-                let item_bytes = cursor.take(openkache_protocol::ITEM_ID_BYTES)?;
-                let item_id =
-                    ItemId::new(item_bytes.try_into().expect("item ID width is fixed"));
+                let item_id = if metadata_version == namespace_metadata::VERSION {
+                    let item_len = usize::from(cursor.u8()?);
+                    let item_bytes = cursor.take(item_len)?;
+                    ItemId::from_slice(item_bytes)
+                        .map_err(|_| cursor.invalid("namespace metadata item ID is too long"))?
+                } else {
+                    let item_bytes = cursor.take(openkache_protocol::ITEM_ID_BYTES)?;
+                    ItemId::from_slice(item_bytes).expect("legacy metadata item ID width is fixed")
+                };
                 items.insert(item_id);
             }
             let mut dirty_workers = HashSet::new();
             if metadata_version >= namespace_metadata::LEGACY_V2_VERSION {
                 let dirty_worker_count = cursor.u64()?;
                 if dirty_worker_count > NAMESPACE_METADATA_MAX_DIRTY_WORKERS {
-                    return Err(
-                        cursor.invalid("namespace metadata dirty-worker list is invalid")
-                    );
+                    return Err(cursor.invalid("namespace metadata dirty-worker list is invalid"));
                 }
                 for _ in 0..dirty_worker_count {
                     let route = StorageRoute::from_persisted(cursor.u64()?);
                     if !dirty_workers.insert(route) {
-                        return Err(cursor
-                            .invalid("namespace metadata contains duplicate dirty workers"));
+                        return Err(
+                            cursor.invalid("namespace metadata contains duplicate dirty workers")
+                        );
                     }
                 }
             }
-            if self.by_id.contains_key(&namespace_id) || self.by_name.contains_key(name.as_slice()) {
+            if self.by_id.contains_key(&namespace_id) || self.by_name.contains_key(name.as_slice())
+            {
                 return Err(cursor.invalid("namespace metadata contains duplicate identity"));
             }
             let name = NamespaceName::new(OwnedRange::whole(name));

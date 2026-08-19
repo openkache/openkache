@@ -30,6 +30,7 @@ pub(crate) enum JournalEvent {
     ReserveItem {
         namespace_id: u64,
         item_id: [u8; ITEM_ID_BYTES],
+        item_id_len: u8,
         route: u64,
         inserted_item: bool,
         inserted_worker: bool,
@@ -37,6 +38,7 @@ pub(crate) enum JournalEvent {
     RollbackItem {
         namespace_id: u64,
         item_id: [u8; ITEM_ID_BYTES],
+        item_id_len: u8,
         route: u64,
         remove_item: bool,
         remove_worker: bool,
@@ -51,10 +53,12 @@ pub(crate) enum JournalEvent {
     MarkDelete {
         namespace_id: u64,
         item_id: [u8; ITEM_ID_BYTES],
+        item_id_len: u8,
     },
     PruneItem {
         namespace_id: u64,
         item_id: [u8; ITEM_ID_BYTES],
+        item_id_len: u8,
     },
 }
 
@@ -207,7 +211,7 @@ fn append_batch(
     pending: &[(JournalEvent, SyncSender<io::Result<()>>)],
 ) -> io::Result<()> {
     for (event, _) in pending {
-        let record = encode_event(*event);
+        let record = encode_event(*event)?;
         file.write_all(&record)?;
     }
     file.sync_all()
@@ -327,18 +331,20 @@ fn decode_events(bytes: &[u8]) -> io::Result<(Vec<JournalEvent>, usize)> {
     Ok((events, JOURNAL_HEADER_BYTES + complete_len))
 }
 
-fn encode_event(event: JournalEvent) -> [u8; JOURNAL_RECORD_BYTES] {
+fn encode_event(event: JournalEvent) -> io::Result<[u8; JOURNAL_RECORD_BYTES]> {
     let mut record = [0; JOURNAL_RECORD_BYTES];
-    let (tag, flags, namespace_id, item_id, route) = match event {
+    let (tag, flags, item_id_len, namespace_id, item_id, route) = match event {
         JournalEvent::ReserveItem {
             namespace_id,
             item_id,
+            item_id_len,
             route,
             inserted_item,
             inserted_worker,
         } => (
             0,
             u8::from(inserted_item) | (u8::from(inserted_worker) << 1),
+            item_id_len,
             namespace_id,
             item_id,
             route,
@@ -346,12 +352,14 @@ fn encode_event(event: JournalEvent) -> [u8; JOURNAL_RECORD_BYTES] {
         JournalEvent::RollbackItem {
             namespace_id,
             item_id,
+            item_id_len,
             route,
             remove_item,
             remove_worker,
         } => (
             1,
             u8::from(remove_item) | (u8::from(remove_worker) << 1),
+            item_id_len,
             namespace_id,
             item_id,
             route,
@@ -359,31 +367,40 @@ fn encode_event(event: JournalEvent) -> [u8; JOURNAL_RECORD_BYTES] {
         JournalEvent::ReserveWorker {
             namespace_id,
             route,
-        } => (2, 0, namespace_id, [0; ITEM_ID_BYTES], route),
+        } => (2, 0, 0, namespace_id, [0; ITEM_ID_BYTES], route),
         JournalEvent::MarkWorkersClean { namespace_id } => {
-            (3, 0, namespace_id, [0; ITEM_ID_BYTES], 0)
+            (3, 0, 0, namespace_id, [0; ITEM_ID_BYTES], 0)
         }
         JournalEvent::MarkDelete {
             namespace_id,
             item_id,
-        } => (4, 0, namespace_id, item_id, 0),
+            item_id_len,
+        } => (4, 0, item_id_len, namespace_id, item_id, 0),
         JournalEvent::PruneItem {
             namespace_id,
             item_id,
-        } => (5, 0, namespace_id, item_id, 0),
+            item_id_len,
+        } => (5, 0, item_id_len, namespace_id, item_id, 0),
     };
+    if item_id_len != 0 && usize::from(item_id_len) != ITEM_ID_BYTES {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "short item IDs must be persisted through metadata compaction",
+        ));
+    }
     record[0] = tag;
     record[1] = flags;
+    record[2] = item_id_len;
     record[4..12].copy_from_slice(&namespace_id.to_be_bytes());
     record[12..12 + ITEM_ID_BYTES].copy_from_slice(&item_id);
     record[44..52].copy_from_slice(&route.to_be_bytes());
     let checksum = hash(&record[..52]).to_be_bytes();
     record[52..56].copy_from_slice(&checksum);
-    record
+    Ok(record)
 }
 
 fn decode_event(record: &[u8]) -> io::Result<JournalEvent> {
-    if record.len() != JOURNAL_RECORD_BYTES || record[2..4] != [0, 0] {
+    if record.len() != JOURNAL_RECORD_BYTES || record[3] != 0 {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             "namespace journal record is malformed",
@@ -393,12 +410,26 @@ fn decode_event(record: &[u8]) -> io::Result<JournalEvent> {
     let item_id = record[12..12 + ITEM_ID_BYTES]
         .try_into()
         .expect("item ID width is fixed");
+    let raw_item_id_len = record[2];
+    let item_id_len = match raw_item_id_len {
+        // Existing version-1 records left both reserved bytes zero.  They
+        // necessarily represented the legacy fixed-width item identity.
+        0 => ITEM_ID_BYTES as u8,
+        length if usize::from(length) == ITEM_ID_BYTES => length,
+        _ => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "namespace journal short item ID must be compacted",
+            ));
+        }
+    };
     let route = u64::from_be_bytes(record[44..52].try_into().expect("u64 width is fixed"));
     let flags = record[1];
     match record[0] {
         0 => Ok(JournalEvent::ReserveItem {
             namespace_id,
             item_id,
+            item_id_len,
             route,
             inserted_item: flags & 1 != 0,
             inserted_worker: flags & 2 != 0,
@@ -406,24 +437,34 @@ fn decode_event(record: &[u8]) -> io::Result<JournalEvent> {
         1 => Ok(JournalEvent::RollbackItem {
             namespace_id,
             item_id,
+            item_id_len,
             route,
             remove_item: flags & 1 != 0,
             remove_worker: flags & 2 != 0,
         }),
-        2 if flags == 0 => Ok(JournalEvent::ReserveWorker {
-            namespace_id,
-            route,
-        }),
-        3 if flags == 0 && route == 0 && item_id == [0; ITEM_ID_BYTES] => {
+        2 if flags == 0 && raw_item_id_len == 0 && item_id == [0; ITEM_ID_BYTES] => {
+            Ok(JournalEvent::ReserveWorker {
+                namespace_id,
+                route,
+            })
+        }
+        3 if flags == 0
+            && raw_item_id_len == 0
+            && item_id_len == ITEM_ID_BYTES as u8
+            && route == 0
+            && item_id == [0; ITEM_ID_BYTES] =>
+        {
             Ok(JournalEvent::MarkWorkersClean { namespace_id })
         }
         4 if flags == 0 && route == 0 => Ok(JournalEvent::MarkDelete {
             namespace_id,
             item_id,
+            item_id_len,
         }),
         5 if flags == 0 && route == 0 => Ok(JournalEvent::PruneItem {
             namespace_id,
             item_id,
+            item_id_len,
         }),
         _ => Err(io::Error::new(
             ErrorKind::InvalidData,

@@ -35,9 +35,12 @@ pub use config::{
     ServerTrust, SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
+#[allow(deprecated)]
 pub use key::{
     CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
-    KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey, canonical_key_bytes,
+    KeyError, KeyFormat, KeySpace, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
+    MAX_KEY_INPUT_BYTES, PortableInteger, PortableKey, ResolvedKey, TypedInteger, TypedKey,
+    canonical_key_bytes,
 };
 pub use openkache_protocol::ITEM_ID_BYTES;
 #[cfg(feature = "quic-compio")]
@@ -1320,7 +1323,7 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Retrieves exact encoded bytes for a fixed-size item ID.
+            /// Retrieves exact encoded bytes for a `0..=32`-byte item ID.
             pub async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
                 self.0.get(item_id).await
             }
@@ -1357,12 +1360,12 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Deletes a fixed-size item ID.
+            /// Deletes a `0..=32`-byte item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
             }
 
-            /// Deletes a fixed-size item ID in an explicitly supplied namespace.
+            /// Deletes a `0..=32`-byte item ID in an explicitly supplied namespace.
             pub async fn delete_in_namespace(
                 &self,
                 namespace_id: u64,

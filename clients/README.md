@@ -64,7 +64,7 @@ complete the migration.
 
 | Area | Draft target | Current implementation | Status |
 |---|---|---|---|
-| Item ID | `0..=32` bytes | Fixed-width 32 bytes | Migration pending |
+| Item ID | `0..=32` bytes | Exact `0..=32` bytes in core/FFI and maintained adapters | Implemented |
 | Structured value selector `1` | `StructuredValue-CBOR-v1` | Legacy JSON container | Migration pending |
 | Maintained compression | Automatic; use a completed frame when it is at least one byte smaller | Legacy per-core/default settings | Migration pending |
 

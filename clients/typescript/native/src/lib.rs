@@ -350,7 +350,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Retrieves exact bytes for a fixed-size protocol item ID.
+    /// Retrieves exact bytes for a `0..=32`-byte protocol item ID.
     #[napi(js_name = "raw_get")]
     pub async fn raw_get(&self, item_id: Uint8Array) -> Result<Option<Uint8Array>> {
         let item_id = parse_item_id(item_id.as_ref())?;
@@ -387,7 +387,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Stores exact bytes for a fixed-size protocol item ID.
+    /// Stores exact bytes for a `0..=32`-byte protocol item ID.
     #[napi(js_name = "raw_set")]
     pub async fn raw_set(
         &self,
@@ -446,7 +446,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Deletes a fixed-size protocol item ID.
+    /// Deletes a `0..=32`-byte protocol item ID.
     #[napi(js_name = "raw_delete")]
     pub async fn raw_delete(&self, item_id: Uint8Array) -> Result<bool> {
         let item_id = parse_item_id(item_id.as_ref())?;
@@ -667,7 +667,10 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .as_deref()
         .map(parse_encryption)
         .transpose()?;
-    let key_spec = parse_key_spec(options.key_spec.as_deref())?;
+    // Validate the deprecated compatibility option, but do not apply a
+    // namespace-level key policy. Mapped operations infer `TypedKey` from
+    // each native input before crossing the core boundary.
+    let _key_spec = parse_key_spec(options.key_spec.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
     let mut builder = match data_protection_key {
@@ -678,8 +681,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     .compression(compression)
     .timeouts(timeouts)
     .retry_policy(retry)
-    .max_in_flight(max_in_flight)
-    .key_spec(key_spec);
+    .max_in_flight(max_in_flight);
     if let Some(encryption) = encryption {
         builder = builder.encryption(encryption);
     }
@@ -693,11 +695,12 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
 }
 
 fn parse_key_spec(value: Option<&str>) -> Result<KeySpec> {
-    match value.unwrap_or("text") {
-        "integer" => Ok(KeySpec::Integer),
-        "text" => Ok(KeySpec::Text),
-        "bytes" => Ok(KeySpec::Bytes),
-        other => Err(invalid_argument(format!(
+    match value {
+        None => Ok(KeySpec::Text),
+        Some("integer") => Ok(KeySpec::Integer),
+        Some("text") => Ok(KeySpec::Text),
+        Some("bytes") => Ok(KeySpec::Bytes),
+        Some(other) => Err(invalid_argument(format!(
             "key_spec must be integer, text, or bytes, got {other}"
         ))),
     }

@@ -6,10 +6,9 @@ core's C ABI.
 ## Purpose
 
 The package provides binary-safe cache operations over one authenticated QUIC
-connection owned by the shared core. It currently accepts the legacy exact
-32-byte item-ID API and plaintext values; the draft wire contract targets
-`0..=32`-byte Item IDs. Framing, TLS, retries, stream lanes, and protocol
-validation remain in `clients/core`.
+connection owned by the shared core. It accepts exact opaque `0..=32`-byte
+item IDs and plaintext values. Framing, TLS, retries, stream lanes, and
+protocol validation remain in `clients/core`.
 
 The [client status table](../README.md#sdk-status) describes this package's
 implementation and migration status.
@@ -72,8 +71,7 @@ var deleted = await client.DeleteAsync(itemId);
 `SetAsync` returns `NotStored` when a condition fails and `Created` or
 `Replaced` after a write. `GetAsync` returns `null` for a missing item ID.
 `DeleteAsync` reports whether the item ID existed. Every item-ID-taking operation
-currently requires exactly 32 bytes and sends them unchanged. The draft wire
-contract targets `0..=32`-byte Item IDs; this package has not migrated yet.
+accepts and sends exact opaque `0..=32`-byte IDs unchanged.
 
 ## Protocol and configuration
 

@@ -332,7 +332,7 @@ public:
             execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
     }
 
-    /// Retrieves exact bytes for a fixed-size protocol item ID.
+    /// Retrieves exact bytes for a `0..=32`-byte protocol item ID.
     std::optional<Bytes> get_raw(std::span<const Byte> item_id) const {
         return get_outcome(
             execute(
@@ -344,7 +344,7 @@ public:
             "raw GET");
     }
 
-    /// Stores exact bytes for a fixed-size protocol item ID without value protection.
+    /// Stores exact bytes for a `0..=32`-byte protocol item ID without value protection.
     Set_Outcome set_raw(
         std::span<const Byte> item_id,
         std::span<const Byte> value,
@@ -359,7 +359,7 @@ public:
             "raw SET");
     }
 
-    /// Deletes a fixed-size protocol item ID without application-key derivation.
+    /// Deletes a `0..=32`-byte protocol item ID without application-key derivation.
     bool remove_raw(std::span<const Byte> item_id) const {
         return delete_outcome(
             execute(
@@ -686,6 +686,12 @@ private:
         bool raw = false) const {
         if (client_ == nullptr) {
             throw Error("OpenKache client is closed");
+        }
+        if (raw && key.size() > OPENKACHE_SMITHY_ITEM_ID_BYTES) {
+            throw Error(
+                "item ID must contain at most "
+                + std::to_string(OPENKACHE_SMITHY_ITEM_ID_BYTES)
+                + " bytes");
         }
         const auto [set_flags, ttl_ms] = wire_options(options);
         const auto* key_data = key.empty() ? nullptr : key.data();

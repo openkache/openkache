@@ -9,8 +9,7 @@ Rust applications get high-level request builders while advanced callers can
 use the re-exported raw core types over the same connection.
 
 - `Client` accepts application keys and plaintext values.
-- `RawClient` currently accepts the legacy fixed-width item-ID API and opaque
-  values; the draft contract targets `0..=32`-byte Item IDs.
+- `RawClient` accepts exact opaque `0..=32`-byte Item IDs and values.
 - `LocalClient` and `LocalRawClient` provide equivalent Compio-local layers.
 - `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
 - `RawClient` and `LocalRawClient` implement the Smithy-generated
@@ -165,7 +164,9 @@ let result = client
     .await?;
 ```
 
-The raw layer bypasses key derivation and formatted-value processing.
+The raw layer bypasses key derivation and formatted-value processing. Mapped
+operations use `NamespaceHash` by default; select `KeyFormat::PublicKeyOrHash`
+explicitly when public preserve-or-hash identity is intended.
 
 For generated service integrations, use the raw client with the Smithy
 operation types. The generated interface follows protocol item-ID semantics;

@@ -29,8 +29,8 @@ pub(crate) use port::{completion, storage_port};
 pub(in crate::runtime) use request_admission::RequestAdmissionError;
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{
-    DOMAIN_V2_CONTEXT, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key, derive_scoped_storage_key,
-    derive_storage_key,
+    DOMAIN_V2_CONTEXT, ITEM_ID_STORAGE_SCOPE, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key,
+    derive_scoped_storage_key, derive_storage_key,
 };
 pub(crate) use storage_port::*;
 #[allow(unused_imports)]
@@ -453,6 +453,27 @@ impl ThreadedKvkache {
         identity: &[u8; crate::types::STORAGE_KEY_BYTES],
     ) -> StorageKey {
         storage_keys::derive_storage_key(&self.storage_domain_key, identity)
+    }
+
+    /// Derives a server-owned storage address for an opaque protocol Item ID.
+    ///
+    /// Legacy maximum-width IDs retain their historical storage derivation so
+    /// existing data remains addressable. Variable-length IDs use the scoped
+    /// length-delimited derivation and are never padded or reinterpreted as a
+    /// fixed-width identity.
+    pub fn storage_key_for_item_id(&self, item_id: openkache_protocol::ItemId) -> StorageKey {
+        if item_id.len() == openkache_protocol::ITEM_ID_BYTES {
+            let identity = item_id
+                .as_bytes()
+                .try_into()
+                .expect("maximum-width Item ID has the storage identity width");
+            return self.storage_key_for_identity(identity);
+        }
+        storage_keys::derive_scoped_storage_key(
+            &self.storage_domain_key,
+            storage_keys::ITEM_ID_STORAGE_SCOPE,
+            item_id.as_bytes(),
+        )
     }
 
     /// Sends one worker request using a reusable completion slot and bounded timeouts.

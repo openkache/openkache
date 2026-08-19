@@ -6,7 +6,7 @@ use std::fmt;
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
-use openkache_protocol::{ITEM_ID_BYTES, MAX_VALUE_BYTES};
+use openkache_protocol::MAX_VALUE_BYTES;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use zeroize::{Zeroize, Zeroizing};
@@ -40,11 +40,6 @@ pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 const VERSION_BYTES: &[u8] = VALUE_FORMAT_VERSION_BYTES;
 const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + VALUE_FORMAT_FORMAT_BYTE_BYTES;
 const NAMESPACE_ID_BYTES: usize = std::mem::size_of::<u64>();
-const AAD_BYTES: usize = VALUE_FORMAT_AAD_DOMAIN.len()
-    + NAMESPACE_ID_BYTES
-    + ITEM_ID_BYTES
-    + VERSION_BYTES.len()
-    + VALUE_FORMAT_FORMAT_BYTE_BYTES;
 const BINARY64_SIGNIFICAND_BITS: u32 = 53;
 
 /// Client-owned encoded bytes stored opaquely by the server.
@@ -1393,27 +1388,35 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(namespace_id: u64, item_id: ItemId, format: u8) -> [u8; AAD_BYTES] {
-    let mut aad = [0_u8; AAD_BYTES];
-    let item_id_offset = VALUE_FORMAT_AAD_DOMAIN.len();
-    let namespace_end = item_id_offset + NAMESPACE_ID_BYTES;
-    let version_offset = namespace_end + ITEM_ID_BYTES;
-    let version_end = version_offset + VERSION_BYTES.len();
-    aad[..item_id_offset].copy_from_slice(VALUE_FORMAT_AAD_DOMAIN);
-    aad[item_id_offset..namespace_end].copy_from_slice(&namespace_id.to_be_bytes());
-    aad[namespace_end..version_offset].copy_from_slice(item_id.as_bytes());
-    aad[version_offset..version_end].copy_from_slice(VERSION_BYTES);
-    aad[version_end..version_end + VALUE_FORMAT_FORMAT_BYTE_BYTES]
-        .copy_from_slice(std::slice::from_ref(&format));
+fn make_aad(namespace_id: u64, item_id: ItemId, format: u8) -> Vec<u8> {
+    let item_id = item_id.as_bytes();
+    let mut aad = Vec::with_capacity(
+        VALUE_FORMAT_AAD_DOMAIN.len()
+            + NAMESPACE_ID_BYTES
+            + 1
+            + item_id.len()
+            + VERSION_BYTES.len()
+            + VALUE_FORMAT_FORMAT_BYTE_BYTES,
+    );
+    aad.extend_from_slice(VALUE_FORMAT_AAD_DOMAIN);
+    aad.extend_from_slice(&namespace_id.to_be_bytes());
+    aad.push(item_id.len() as u8);
+    aad.extend_from_slice(item_id);
+    aad.extend_from_slice(VERSION_BYTES);
+    aad.extend_from_slice(std::slice::from_ref(&format));
     aad
 }
 
 fn item_id_material(
     value_root_key: &[u8; DATA_PROTECTION_KEY_BYTES],
     item_id: ItemId,
-) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]> {
-    let mut material = Zeroizing::new([0_u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]);
-    material[..DATA_PROTECTION_KEY_BYTES].copy_from_slice(value_root_key);
-    material[DATA_PROTECTION_KEY_BYTES..].copy_from_slice(item_id.as_bytes());
+) -> Zeroizing<Vec<u8>> {
+    let item_id = item_id.as_bytes();
+    let mut material = Zeroizing::new(Vec::with_capacity(
+        DATA_PROTECTION_KEY_BYTES + 1 + item_id.len(),
+    ));
+    material.extend_from_slice(value_root_key);
+    material.push(item_id.len() as u8);
+    material.extend_from_slice(item_id);
     material
 }
