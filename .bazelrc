@@ -6,9 +6,9 @@ startup --host_jvm_args=-Xms256m
 startup --host_jvm_args=-Xmx1024m
 startup --host_jvm_args=-XX:ActiveProcessorCount=2
 
-# Keep Bazel's install/repository/action caches outside a worktree. The `~`
-# form is expanded by Bazel, so equivalent checkouts share downloads and
-# action results without embedding a machine-specific path.
+# Keep Bazel's install and repository caches outside a worktree. The `~` form
+# is expanded by Bazel, so equivalent checkouts share downloads without
+# embedding a machine-specific path.
 startup --output_user_root=~/.cache/openkache/bazel/output-user-root
 common --repository_cache=~/.cache/openkache/bazel/repository-cache
 # Standalone builds must consume the checked-in module and Cargo rendering
@@ -46,22 +46,24 @@ run --experimental_total_worker_memory_limit_mb=2048
 build:local-remote --remote_executor=grpc://127.0.0.1:8980
 build:local-remote --remote_cache=grpc://127.0.0.1:8980
 build:local-remote --remote_instance_name=openkache
+build:local-remote --remote_accept_cached=true
 build:local-remote --remote_download_outputs=all
 build:local-remote --remote_local_fallback=false
 build:local-remote --remote_timeout=60s
 test:local-remote --remote_executor=grpc://127.0.0.1:8980
 test:local-remote --remote_cache=grpc://127.0.0.1:8980
 test:local-remote --remote_instance_name=openkache
+test:local-remote --remote_accept_cached=true
 test:local-remote --remote_download_outputs=all
 test:local-remote --remote_local_fallback=false
 test:local-remote --remote_timeout=60s
 run:local-remote --remote_executor=grpc://127.0.0.1:8980
 run:local-remote --remote_cache=grpc://127.0.0.1:8980
 run:local-remote --remote_instance_name=openkache
+run:local-remote --remote_accept_cached=true
 run:local-remote --remote_download_outputs=all
 run:local-remote --remote_local_fallback=false
 run:local-remote --remote_timeout=60s
 
-build --disk_cache=~/.cache/openkache/bazel/action-cache
-test --disk_cache=~/.cache/openkache/bazel/action-cache
-run --disk_cache=~/.cache/openkache/bazel/action-cache
+# Keep Bazel's client-local disk cache disabled. When the optional
+# local-remote profile is enabled, NativeLink is the persistent action cache.
