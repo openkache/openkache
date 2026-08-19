@@ -57,9 +57,9 @@ requires without duplicating variable-integer parsing.
 
 ## Core components
 
-- `model/openkache.smithy` is the canonical source for transport-visible
-  identifiers, statuses, limits, operation fields, codecs, and explicit compact
-  request plans.
+- `SPEC.md` is the source of truth during the documentation-first draft
+  migration. `model/openkache.smithy` still describes the transitional
+  implementation and becomes the generated-assignment source after migration.
 - `wire.ts` owns AST extraction and deterministic rendering of wire values,
   numeric request and response field modules, operation metadata, and shared
   request layouts.
@@ -83,9 +83,9 @@ requires without duplicating variable-integer parsing.
 
 ## Configuration
 
-Transport identifiers, status assignments, wire ceilings, operation fields,
-codec declarations, and compact request plans are compile-time definitions
-sourced from the wire Smithy model. Change those values in
-`model/openkache.smithy` and regenerate. API adapters own domain-to-field
-mapping, semantic validation beyond the wire contract, handler behavior, and
-result interpretation; they do not redefine request framing.
+The current crate compiles transport identifiers, statuses, limits, operation
+fields, codecs, and compact request plans from the Smithy model. During the
+draft migration, that output may lag `SPEC.md` and is not evidence of
+conformance. After migration, assignment changes belong in the model and must
+be regenerated. API adapters own domain mapping and result interpretation;
+they do not redefine framing.

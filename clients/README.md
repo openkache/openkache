@@ -17,7 +17,7 @@ Shared client topics are documented here:
 | Value-key schedule, AAD, and cryptographic protection | [Value security](VALUE_SECURITY.md) |
 | Public boundary fixtures for draft interoperability | [`fixtures/`](fixtures/) |
 | Cross-language value model, native mappings, and structured-value profiles | [Value project](value/SPEC.md) |
-| QUIC framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
+| QUIC/TLS-over-TCP framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
 | Language API, build, packaging, and runtime configuration | The implemented package's README |
 
 Package documentation links to these references instead of restating shared
@@ -27,8 +27,8 @@ formats or protocol behavior.
 
 | Package | Path | Implementation |
 |---|---|---|
-| Shared core | [`core/`](core/) | Protocol v1 raw/protected engine with canonical key conversion and the packed value envelope |
-| Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
+| Shared core | [`core/`](core/) | Transitional raw/protected engine; draft-contract migration pending |
+| Rust | [`rust/`](rust/) | Transitional end-user SDK; byte APIs use the current Raw path |
 | CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK with typed key conversion, Raw, and shared canonical-JSON operations; legacy metadata helpers remain package-local |
 | C# / .NET | [`dotnet/`](dotnet/) | Shared-core C ABI adapter for the raw Smithy API |
@@ -108,12 +108,12 @@ implemented.
 
 ## Generated client contract
 
-Every operation, result, state, limit, maintained default, and value-format
-identifier is generated from the two scoped Smithy models for each package's
-build output, keeping bindings aligned without hand-maintained constants. The
+After migration, operations, results, states, limits, maintained defaults, and
+format identifiers will be generated from two scoped Smithy models. The
+current generated output is transitional and may lag the draft documents. The
 wire model in
 [`../protocol/model/openkache.smithy`](../protocol/model/openkache.smithy)
-contains only values the server must understand; the client model in
+will contain only values the server must understand; the client model in
 [`model/openkache.smithy`](model/openkache.smithy) owns adapter defaults, API
 shapes, native ABI identifiers, and value-format metadata. The stable
 [`generate.ts`](generate.ts) entry point selects outputs and performs atomic

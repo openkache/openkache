@@ -1,8 +1,9 @@
 # OpenKache Maintained Client Implementation Guide — Version 1 Draft
 
-> **Status:** Draft; this guide describes the target implementation for the
-> OpenKache-maintained client SDKs. Implementations may temporarily lag while
-> the v1 documents and shared core are completed.
+> **Status:** Draft `draft-2026-08-19`; not released or finalized.
+>
+> This guide describes the target implementation for OpenKache-maintained
+> client SDKs. Implementations may temporarily lag during migration.
 
 This guide explains how the maintained language bindings share one
 language-independent client implementation. It does not redefine the
@@ -193,48 +194,79 @@ retry-safety information, and unknown-outcome distinction. Package
 documentation lists the concrete language types and any retained server status
 or diagnostic fields.
 
-The maintained retry boundary is:
+The maintained transport retry boundary is:
 
 | Situation | Read-only operation | Mutation |
 |---|---|---|
 | Local validation or configuration failure | Do not retry | Do not retry |
 | Failure known to occur before transmission | MAY retry within the configured budget | MAY retry within the configured budget |
 | Request transmitted but response not received | MAY retry if the operation is otherwise retry-safe | MUST surface an unknown outcome; do not automatically replay |
-| `Overloaded` response | MAY retry with bounded backoff | MAY retry only as a new application decision; never treat it as proof of idempotency |
+| `Overloaded` response | MAY retry with bounded backoff | MAY retry with bounded backoff; the server guarantees the operation did not begin |
 | Local cancellation | Complete cancellation according to adapter policy | MUST preserve unknown-outcome information if transmission may have occurred |
 
 Conditional mutations such as `SET IfAbsent` are not automatically replayed
 after an unknown outcome. A caller that chooses to issue a new request accepts
 that it is an independent operation.
 
+Server statuses have separate retry meaning:
+
+| Status | Maintained-client guidance |
+|---|---|
+| `Overloaded` | The operation did not begin. Retry with bounded backoff when the deadline permits. |
+| `InvalidRequest`, `TooLarge`, `PolicyConflict` | Do not retry unchanged. |
+| `Forbidden` | Retry only after credentials or authorization policy changes. |
+| `NoCapacity` | Retry only after capacity or eviction state changes. |
+| `Conflict` | Refresh namespace state before constructing a new request. |
+| `NamespaceNotFound` | Retry only after namespace or application state changes. |
+| `NamespaceNotEmpty` | Retry deletion only after the namespace becomes empty. |
+| `InternalError` | The server reports no externally visible effect; retry remains a caller or configured-client decision. |
+
 ## 5. Public API and native values
 
 ### 5.1 Operation families
 
-Maintained bindings expose two distinguishable operation families:
+Address and value representation are independent API axes:
 
-- **Formatted operations** accept a logical typed key and, where applicable, a
-  logical or formatted value. The core applies the selected key and value
-  profiles.
-- **Exact Item ID operations** accept the final protocol Item ID and opaque
-  value bytes. They bypass client key mapping and formatted-value processing.
+| Address | Value representation | Client behavior |
+|---|---|---|
+| Mapped key | Formatted v1 | Map the typed key; encode or decode the v1 envelope. |
+| Exact Item ID | Formatted v1 | Use the Item ID unchanged; encode or decode the v1 envelope. |
+| Mapped key | Raw | Map the typed key; preserve server value bytes. |
+| Exact Item ID | Raw | Use the Item ID and value bytes unchanged. |
+| Mapped or Exact | Caller-owned v0 | Resolve the address; validate only the leading canonical version `0` on write and otherwise pass the envelope through. |
 
-The key and value documents define the behavior of those inputs. This guide
-only requires that an adapter make the families unambiguous in its API and
-package documentation. A method name such as `raw` is insufficient unless the
-documentation states which family it represents.
+An adapter MAY use overloads, options, or distinct method names, but its
+documentation MUST identify both axes. `exact` means only “bypass key mapping”;
+`raw` means only “bypass value encoding and decoding.”
 
 ### 5.2 Native key conversion
 
 An adapter converts a supported native key into the explicit typed-key model
 defined by the key format. It MUST preserve the selected type and exact
 contents and MUST NOT infer a key type through reflection, stringification, or
-lossy numeric conversion.
+lossy numeric conversion. The type is inferred independently for each
+operation; a client or namespace does not impose one `KeyType` on all keys,
+and the server has no key-type policy to enforce.
 
 Bindings may expose different native types or only a subset of the common
 typed-key model. Unsupported inputs fail locally before request construction.
 Package documentation records supported native mappings and escape hatches to
 the language-independent typed-key or canonical-key representation.
+
+Dynamic bindings SHOULD dispatch directly from unambiguous native inputs:
+
+```text
+get("user:1")  -> Text("user:1")
+get(1)          -> Integer(1)
+get(b"\x01")    -> Bytes(01)
+```
+
+Static bindings SHOULD use overloads or an explicit `TypedKey` value rather
+than weakening the API to an unconstrained `Any`/`Object` parameter. An
+explicit typed-key escape hatch is useful for FFI and generic containers, but
+it must produce only `Integer`, `Text`, or `Bytes`. Composite keys remain an
+application concern in v1 and should be encoded explicitly as `Text` or
+`Bytes`.
 
 ### 5.3 Native value conversion
 
@@ -272,6 +304,10 @@ unsupported cross-language decode. A package MAY instead use one generic
 method with a typed input parameter when its language can express that
 contract without weakening type checking.
 
+A binding MAY offer JSON helpers as language API convenience. JSON has no v1
+payload selector: a helper serializes UTF-8 JSON and carries it as
+`OpaqueBytes`, with its JSON interpretation documented by that binding.
+
 ### 5.4 Runtime shape
 
 Bindings use the concurrency model expected by their language. A Rust future,
@@ -304,22 +340,26 @@ An adapter MUST keep identity configuration separate from value-protection
 configuration even when a language offers a convenience constructor. The key
 and value specifications define the actual fields and validity rules.
 
-The maintained identity default is the `Hash` mapping profile. When no value
-key is configured, formatted values use the `Unprotected` value-protection
-profile; that does not change the `Hash` Item ID mapping. The public
-`CanonicalKeyOrHash` mapping is an explicit benchmark/public-key choice and is
-never selected merely because the value is unprotected.
+The maintained identity default is `Hash`. When no value key is configured,
+formatted values use `Unprotected`; this does not change key mapping.
+`UnisolatedKeyOrHash` is an explicit choice for deployments that trust the
+server and do not need client-side key confidentiality, namespace binding, or
+root-key isolation. It is also useful for direct-key benchmarks. It remains
+independent of value protection and ignores any Item ID root key.
 
 ### 6.2 Pre-freeze TODOs
 
 The following configuration contracts remain deliberately open and MUST be
 resolved before v1 is finalized:
 
-- **Namespace profile metadata:** the key format currently leaves profile
-  discovery and mismatch handling to client policy. A future revision may
-  define an optional server-visible profile record or a client-side persisted
-  profile manifest; until then, clients must keep profile changes explicit and
-  treat them as identity migrations.
+- **Profile metadata:** the key format currently leaves profile discovery and
+  mismatch handling to client policy. A future revision may define an optional
+  client-local record or opaque server metadata; it MUST NOT turn `KeyType`
+  into a server-enforced namespace schema. Until then, clients must keep
+  profile changes explicit and treat them as identity migrations.
+- **Typed-language integers:** decide whether convenience APIs accept the full
+  mathematical `Integer` range, `i64`, or another bounded native range. This
+  does not change canonical key encoding.
 
 ### 6.3 Transport and server-authentication policy
 
@@ -333,10 +373,11 @@ response frame bytes. The maintained client may try its configured transport
 fallback order, but it MUST NOT invent a transport or lane identifier in a
 frame. TCP plaintext is not a conforming transport.
 
-The TLS 1.3 handshake MUST negotiate the approved post-quantum/traditional
-hybrid key agreement `X25519MLKEM768`. Classical-only X25519 fallback is not
-permitted. This is a key-agreement requirement; it does not require a
-post-quantum certificate signature.
+The TLS 1.3 handshake MUST negotiate an approved post-quantum/traditional
+hybrid key agreement. The current maintained profile requires
+`X25519MLKEM768`; classical-only X25519 fallback is not permitted. This is a
+key-agreement requirement, not a post-quantum certificate-signature
+requirement.
 
 Server certificate presentation is always part of the TLS handshake. Whether
 the client verifies the certificate chain and server identity is
@@ -385,14 +426,31 @@ has been produced, so frame overhead is included.
 All maintained bindings inherit this default from the shared core and
 generated client contract; a binding MUST NOT select a language-specific
 default. Bindings expose an explicit opt-out and MAY expose tuning controls for
-advanced callers. Exact Item ID operations do not apply formatted-value
-compression.
+advanced callers. Compression applies to Formatted v1 for either address type.
+Raw and caller-owned v0 values are never compressed by the client.
 
-### 6.5 Value-key rotation
+### 6.5 Protection policy
 
-The value format owns key IDs, key selection, protection algorithms, and
-envelope validation. Maintained clients implement only the operational
-read-old/write-new lifecycle around that format:
+Write and read policies are separate:
+
+- with no value keys, writes and reads allow only `Unprotected`;
+- with an active key ID, writes default to `AES-256-GCM-SIV`;
+- a nonempty keyring without an active ID is read-only for protected values;
+- a keyed client's default read allowlist accepts both authenticated profiles,
+  but not `Unprotected`; and
+- an explicit operation override may narrow the read allowlist or select
+  `Unprotected`, without mutating the client default.
+
+An authenticated write without an active key fails locally. A protected read
+selects only the key ID carried by the envelope and never probes another key or
+downgrades.
+
+### 6.6 Value-key rotation
+
+The value security profiles own key IDs, key selection, and protection
+algorithms; the value format owns envelope validation. Maintained clients
+implement only the operational read-old/write-new lifecycle around that
+format:
 
 1. Add the new immutable key-ID mapping to every reader.
 2. Change writers to the new active ID.
@@ -411,15 +469,17 @@ Bindings that use the native ABI treat it as the only boundary to the shared
 core. They MUST use generated constants and declarations rather than copying
 protocol, key-format, or value-format assignments into package source.
 
-Each adapter defines:
+Every native ABI operation documents:
 
-- native argument validation before crossing the ABI where practical;
-- ownership and lifetime of client, request, result, error, and buffer handles;
-- exact copy, borrow, retain, and release behavior;
-- runtime initialization and shutdown;
-- cancellation and callback or completion-thread behavior;
-- conversion between common and native error categories; and
-- package loading, linkage, and supported-platform failures.
+| Concern | Required contract |
+|---|---|
+| Input ownership | Whether each buffer is borrowed or copied, and for how long. |
+| Validation | Which checks occur in the adapter and which occur in the core. |
+| Failure | The common error category and whether an output handle exists. |
+| Output lifetime | Who owns each result, error, and buffer and which release function ends that ownership. |
+
+Adapters also define runtime initialization, shutdown, cancellation,
+completion-thread behavior, linkage, and supported-platform failures.
 
 The adapter must remain thin enough that a shared behavior fix can be made once
 in the core. Platform-specific scheduling or memory integration belongs in the

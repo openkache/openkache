@@ -41,7 +41,7 @@ adapter depends on this core directly.
 - The [value model](../value/SPEC.md) defines cross-language structured values,
   native mappings, and the initial codec profile.
 - The [value-format specification](../VALUE_FORMAT.md) defines the formatted
-  value envelope, compression, and protection algorithms.
+  value envelope and compression.
 - The [value security profiles](../VALUE_SECURITY.md) define the value-key
   schedule, AAD, and cryptographic constructions.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
@@ -54,8 +54,8 @@ for the v1 contract.
 
 ## What exists today
 
-The current implementation remains the compatibility reference while the
-draft documents are migrated into the generated core contract. Some current
+The current code describes only the transitional implementation; the draft
+documents are the target source of truth. Some current
 Rust and legacy adapter paths still use fixed-width Item IDs or a legacy value
 container. They MUST NOT be treated as evidence that the draft variable-length
 wire, key, or value profiles are already implemented.
@@ -119,10 +119,9 @@ this example describes the current Rust API surface until that migration is
 complete.
 
 `ValueCodec` composes the value model with the formatted-value envelope. The
-value model is the source of truth for structured-value semantics and the
-value-format specification is the source of truth for envelope bytes,
-compression, protection, and validation; neither the wire protocol nor the
-server parses the client-owned format.
+value model owns structured-value semantics, the value format owns envelope
+and compression bytes, and the value security profiles own protection. Neither
+the wire protocol nor the server parses these client-owned formats.
 
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:

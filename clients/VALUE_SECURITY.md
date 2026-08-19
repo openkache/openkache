@@ -1,8 +1,10 @@
 # OpenKache Value Security Profiles (Draft)
 
-> **Status:** Draft. This document owns the v1 value-key schedule, associated
-> data, cryptographic profiles, and security properties. Envelope grammar and
-> selector assignment remain in [`VALUE_FORMAT.md`](VALUE_FORMAT.md).
+> **Status:** Draft `draft-2026-08-19`; not released or finalized.
+>
+> This document owns the v1 value-key schedule, associated data, cryptographic
+> profiles, and security properties. Envelope grammar and selector assignment
+> remain in [`VALUE_FORMAT.md`](VALUE_FORMAT.md).
 
 ## Ownership boundary
 
@@ -18,10 +20,10 @@ configured active ID. A protected read selects exactly the ID present in the
 envelope; unknown and retired IDs fail without key probing or fallback.
 
 An all-zero value key is wire-valid, but it provides no secret protection.
-Implementations MUST NOT describe values protected only by it as confidential.
-Maintained clients MAY use it for an explicit compatibility/default profile.
-Secret rotation keys SHOULD be generated independently with a cryptographically
-secure random source.
+Maintained clients MUST NOT select it by default. They MAY accept it only
+through explicit compatibility configuration and MUST NOT describe the result
+as confidential. Secret keys SHOULD be generated independently with a
+cryptographically secure random source.
 
 For every protected envelope:
 
@@ -118,14 +120,11 @@ Changing namespace ID, Item ID length or bytes, selector, version, key ID, or
 authenticated payload MUST cause authentication failure. The value-key ID is
 public metadata and may reveal the key epoch.
 
-## Interoperability checklist
+## Interoperability vectors
 
-Before freeze, every vector should be checked independently by at least two
-implementations. In particular, negative vectors MUST cover:
-
-- `value_key_id` encoded as `vu128` in the KDF;
-- omitted or padded Item ID length;
-- changed namespace or Item ID bytes;
-- changed selector or envelope version;
-- unknown and zero key IDs;
-- altered ciphertext, tag, nonce, or synthetic IV.
+[`fixtures/value_format_v1.json`](fixtures/value_format_v1.json) contains
+complete AES-SIV-CMAC and AES-GCM-SIV vectors, including derived keys, AAD,
+nonce, and envelope bytes. It covers an empty Item ID, a three-byte Item ID,
+the multi-byte `vu128` encoding of key ID `128`, namespace substitution, and
+tag alteration. Before freeze, at least two independent implementations SHOULD
+reproduce every positive vector and reject every negative vector.

@@ -1,15 +1,13 @@
 # OpenKache Client Value Encoding Profile v1 (Draft)
 
-> **Status: Draft — pre-freeze**
+> **Status:** Draft `draft-2026-08-19`; not released or finalized.
 
 This document defines the client-side v1 value encoding before it is handed to
 the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
 
-The cryptographic key schedule, associated data, protection constructions, and
-security properties are summarized here for envelope interop and defined in
-the dedicated [Value Security Profiles](VALUE_SECURITY.md). That document is
-the source of truth for cryptographic details.
+Cryptographic behavior is defined only in
+[Value Security Profiles](VALUE_SECURITY.md).
 
 This is the target contract for the pre-freeze draft. Client implementations
 may temporarily lag while the draft is being completed, but an implementation
@@ -43,36 +41,24 @@ This profile does not define:
 - application registries for arbitrary payload formats; or
 - transport framing.
 
-The enclosing client profile supplies a value keyring and the exact namespace
-and Item ID. This profile defines value-key selection and derivation, the value
-envelope, its authenticated binding to the key ID, namespace, and exact Item
-ID, and the transforms applied to its payload. Item ID derivation uses an
-independent identity key defined by the client key contract.
+The enclosing client supplies the namespace, resolved Item ID, and value
+keyring. This document defines the envelope grammar and payload transforms.
+Item ID derivation and value protection are separate contracts.
 
 Structured values use the codec-neutral model and initial profile in
 [`value/SPEC.md`](value/SPEC.md). This envelope document does not redefine
 language-native numeric conversion, map equality, or lossless value views.
 
-Address selection and value representation are independent client concerns.
-The address is either a mapped typed key or an already resolved exact
-`0..=32`-byte Item ID. The value representation is either raw bytes, a
-caller-owned version-0 envelope, or this version-1 envelope. A server never
-interprets either representation.
+Addressing and value representation are independent:
 
-Maintained clients MAY expose only safe combinations in ergonomic APIs, but
-the shared core contract MUST permit an exact Item ID to carry a v1 envelope.
-The conceptual operation families are distinct:
+| Axis | Choices | Meaning |
+|---|---|---|
+| Address | Mapped, Exact | Map a typed key through `KEY_FORMAT.md`, or use a caller-owned Item ID. |
+| Value | Formatted v1, Raw, Caller-owned v0 | Build and interpret this envelope, preserve server value bytes, or pass through a version-0 envelope. |
 
-```text
-set(mapped_key, value)
-set_exact(item_id, raw_bytes)
-set_exact_formatted(item_id, structured_value)
-put_raw_v0_envelope(address, complete_bytes)
-```
-
-The exact Item ID API remains caller-owned and provides no isolation or key
-derivation. Its being suitable for benchmarks does not prevent the caller from
-selecting a formatted value representation when explicitly requested.
+Every address choice can be combined with every value choice. `Exact` bypasses
+only key mapping. `Raw` bypasses only value encoding and decoding. The server
+stores every choice as opaque bytes.
 
 ## 2. Processing model
 
@@ -85,13 +71,10 @@ source value
   -> ValueEnvelope
 ```
 
-`OpaqueBytes` treats the source as an exact byte string: before optional
-compression and protection, the payload bytes are identical to the supplied
-bytes. `StructuredValue-CBOR-v1` accepts one value-profile data item under the rules in
-[`value/SPEC.md`](value/SPEC.md). `Json` is an API convenience type, not a v1
-payload selector: it is serialized as canonical RFC 8785 UTF-8 and carried
-using `OpaqueBytes` (selector `0`). The payload format is selected by the
-caller; the encoding does not infer a format from the payload bytes.
+`OpaqueBytes` preserves the supplied payload before optional compression and
+protection. `StructuredValue-CBOR-v1` accepts one item defined by
+[`value/SPEC.md`](value/SPEC.md). The caller selects the payload format; the
+encoder does not infer it from the bytes.
 
 ## 3. Envelope grammar
 
@@ -138,29 +121,22 @@ encoding is at most nine bytes.
 `value_envelope_version = 0` is an opaque application-envelope escape hatch,
 not a second OpenKache value grammar. OpenKache does not define or interpret
 its body grammar, selectors, transform order, authentication inputs, or
-application limits. The maintained client exposes it only through an explicit
-`put_raw_v0_envelope` operation:
-
-```text
-put_raw_v0_envelope(address, complete_bytes)
-get_raw_bytes(address) -> complete_bytes
-```
+application limits. Maintained clients expose it only through an explicit
+caller-owned v0 representation.
 
 The client passes complete version-0 bytes through as caller-owned data. It
 MUST validate that the first canonical version field is exactly `0`, but MUST
 NOT parse or interpret the remaining body. It MUST NOT apply version-1
 transforms or rewrite the bytes. The outer protocol value-size limit still
-applies, but version-1
-expanded-payload, Zstandard, selector, keyring, and cryptographic validation
-do not. Validation and interpretation of version `0` belong to the
-application or to its separately configured profile.
+applies, but version-1 expanded-payload, Zstandard, selector, keyring, and
+cryptographic validation do not. The application owns all other version-0
+validation and interpretation.
 
 Versions other than `0` and `1` MUST be rejected. A structured-value decoder
-MUST reject version `0` with a raw-envelope-required error rather than
-returning a partially interpreted value. `get_raw_bytes` returns stored bytes
-without selecting a grammar. A decoder that is asked to interpret a value
-MUST dispatch version `0` to the caller-owned pass-through path or select the
-version-1 grammar before interpreting any version-body byte.
+MUST reject version `0` with a caller-owned-v0-required error rather than
+returning a partially interpreted value. A Raw read returns stored bytes
+without selecting a grammar. Any interpreting decoder MUST dispatch the
+version before reading a version-body byte.
 
 ## 4. Selector byte
 
@@ -182,54 +158,18 @@ NOT guess an unknown selector.
 
 ### 4.1 Protection profiles
 
-`protection_id` selects the complete cryptographic protection behavior. The
-name, nonce policy, authentication behavior, and repetition behavior are
-normative properties of the selected profile.
+`protection_id` selects one profile defined by `VALUE_SECURITY.md`.
 
-| ID | Protection profile | Behavior |
-|---:|---|---|
-| `0` | `Unprotected` | Store the transformed body directly; provide no confidentiality or authentication. |
-| `1` | `AES-256-GCM-SIV` ([RFC 8452](https://www.rfc-editor.org/rfc/rfc8452)) | Randomized authenticated encryption with a fresh 12-byte nonce per write. |
-| `2` | `AES-SIV-CMAC` ([RFC 5297](https://www.rfc-editor.org/rfc/rfc5297); two AES-256 keys) | Deterministic authenticated encryption with no random nonce. |
+| ID | Protection profile |
+|---:|---|
+| `0` | `Unprotected` |
+| `1` | `AES-256-GCM-SIV` |
+| `2` | `AES-SIV-CMAC` |
 
-Encoding and decoding use separate protection policies. The write profile
-selects the protection applied to a new value. Each formatted write MAY
-override the instance write default; an override MUST NOT mutate that default.
-The selected write profile MUST be represented by `protection_id`.
-
-With an empty value keyring, the default and only valid write profile is
-`Unprotected`. With a configured `active_value_key_id`, the default write
-profile is `AES-256-GCM-SIV`; the active ID MUST resolve to a keyring entry at
-configuration time. A nonempty read keyring MAY omit an active ID, but then an
-omitted write profile MUST fail instead of selecting `Unprotected`. Such a
-client can read protected values without being able to emit one accidentally.
-
-The client MAY explicitly select an authenticated profile where its connection
-API exposes that choice. Selecting one without an active ID and its associated
-key MUST fail; a binding MUST preserve that explicit selection so the shared
-core can reject it rather than silently downgrading to `Unprotected`.
-
-An explicit `Unprotected` connection or operation profile MAY be used while a
-value keyring is configured. Item ID derivation is independent, so enabling or
-disabling value protection MUST NOT change the Item ID. A protected write MUST
-use `active_value_key_id`; it MUST NOT select an inactive read key through a
-per-operation protection override.
-
-The read policy is an allowlist, not a second write default:
-
-- without any configured value keys, it contains only `Unprotected`;
-- with a nonempty value keyring, its default contains `AES-256-GCM-SIV` and
-  `AES-SIV-CMAC`, but not `Unprotected`;
-- a caller MAY explicitly narrow the allowlist or add `Unprotected`; and
-- an operation MAY require one exact protection ID for a stricter read without
-  mutating the instance allowlist.
-
-This separation permits values written under either authenticated profile to
-remain readable while a client changes its write default. Excluding
-`Unprotected` from the keyed default prevents an attacker or stale value from
-causing a silent downgrade. A decoder MUST reject a value whose
-`protection_id` is outside the effective read allowlist and MUST NOT silently
-downgrade or fall back.
+Profile behavior and key selection are defined in
+[VALUE_SECURITY.md](VALUE_SECURITY.md). Maintained-client write defaults,
+read allowlists, and per-operation overrides are defined in
+[CLIENT.md](CLIENT.md).
 
 ### 4.2 Compression profiles
 
@@ -367,7 +307,7 @@ A decoder MUST:
 1. Parse one canonical `value_envelope_version:vu128` from the complete
    envelope.
 2. Dispatch the version before parsing its version body. Version `0` returns
-   through the `get_raw_bytes` path and has no v1 body validation.
+   through the caller-owned v0 path and has no v1 body validation.
 3. Parse and validate the selector byte.
 4. Enforce the caller's expected protection policy.
 5. For a protected profile, parse one canonical nonzero value-key ID, look up
@@ -400,10 +340,18 @@ nonce or synthetic IV, ciphertext, authentication tag, and any Zstandard frame
 overhead. It equals the wire protocol's maximum `SET` value and response
 payload.
 
-`MAX_EXPANDED_PAYLOAD_BYTES` applies to the payload after decryption and
-decompression but before structured-value parsing. `MAX_ZSTD_WINDOW_BYTES` is
-the largest declared decoder window. All three limits are independent:
-satisfying one does not waive either of the others.
+`MAX_EXPANDED_PAYLOAD_BYTES` applies after decryption and decompression but
+before structured-value parsing. `MAX_ZSTD_WINDOW_BYTES` applies to the
+declared decoder window. A Zstandard decoder MUST independently enforce:
+
+```text
+declared_content_size <= MAX_EXPANDED_PAYLOAD_BYTES
+declared_window_size  <= MAX_ZSTD_WINDOW_BYTES
+produced_size         <= MAX_EXPANDED_PAYLOAD_BYTES
+produced_size         == declared_content_size
+```
+
+Satisfying one check does not waive another.
 
 Implementations MAY use lower local limits, but MUST check the complete
 envelope, declared Zstandard content size and window size, produced output, and
@@ -426,46 +374,10 @@ order, key-selection framing, authentication inputs, and limits.
 
 This profile uses `value_envelope_version = 1`. A reader MUST reject a version
 other than `0` or `1` rather than guessing its grammar. Version `0` is
-available only through the explicit `put_raw_v0_envelope` API for a complete
-application-defined envelope profile configured out of band; the maintained
-client passes it through without interpreting it.
+available only through the explicit caller-owned v0 representation for a
+complete application-defined envelope profile configured out of band; the
+maintained client passes it through without interpreting it.
 
 Future OpenKache versions are additive: a newer version may represent values or
-policies that this profile cannot. A client MAY choose the oldest supported
-OpenKache version that represents its selected value and policy. That version
-selection is independent of the payload bytes.
-
-## 11. Security properties
-
-Protected profiles provide confidentiality and ciphertext authentication for
-the supplied key and associated data. `Unprotected` provides neither.
-
-For a protected envelope, authentication covers the envelope version,
-selector, value-key ID, namespace ID, exact Item ID and its length, nonce when
-present, and the complete protected payload. It does not authenticate TTL,
-expiration behavior, eviction behavior, namespace policy or revision,
-existence, freshness, replay, ordering, or availability.
-
-The value-key ID is visible and leaks which configured key epoch wrote a
-protected envelope. Changing it to another configured ID changes both the
-derived protection key and AAD and therefore causes authentication failure.
-Changing it to an unknown ID causes rejection without key probing.
-
-This profile does not provide freshness or replay protection. An older valid
-envelope can be accepted again unless the enclosing client or server protocol
-adds a generation, CAS, expiry, or equivalent freshness mechanism.
-Applications that require freshness, version, or expiry integrity SHOULD place
-the required generation, timestamp, or policy data inside the protected payload
-and validate it after decryption.
-
-The value keyring defines the cryptographic portability domain. Reusing an
-identical key-ID mapping in another deployment permits a protected envelope to
-authenticate there when the namespace ID and Item ID are also preserved.
-Deployments requiring isolation must use independent value keys. Namespace
-names, accounts, client identities, and deployment identifiers are not
-cryptographic inputs in this profile.
-
-All protected profiles leak the encoded envelope length. Compression can add
-content-dependent length leakage; callers that cannot tolerate that side
-channel SHOULD disable compression or separate secret and attacker-influenced
-data.
+policies that this profile cannot. Version selection is independent of payload
+bytes.

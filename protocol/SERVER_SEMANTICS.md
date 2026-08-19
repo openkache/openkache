@@ -1,6 +1,6 @@
 # OpenKache Server Semantics (Draft)
 
-> **Status:** Draft. This document defines server behavior that is required
+> **Status:** Draft `draft-2026-08-19`. This document defines server behavior that is required
 > for a useful implementation but is not additional request/response framing.
 
 The stable wire grammar and public operation layouts remain in
@@ -66,6 +66,12 @@ linearization point.
 
 ## Operational contract
 
-The server implementation MUST expose its chosen identity-domain, clock, and
-restore policies to operators. Those policies are not client-owned key
-profiles and are not interpreted by the wire protocol.
+The server MUST expose enough operator metadata to distinguish:
+
+- the namespace identity-domain ID;
+- the clock-domain ID;
+- the restore policy; and
+- the namespace allocator epoch.
+
+These are operational identifiers, not stable frame fields. They do not expose
+or replace client-owned key profiles.

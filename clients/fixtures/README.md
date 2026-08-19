@@ -9,7 +9,7 @@ rejection behavior.
 - `value_format_v1.json` contains envelope and protection vector metadata.
 - `protocol_v1.json` contains frame boundary and malformed-input cases.
 
-Fixture fields are stable within the draft revision but may change before
-freeze. A fixture consumer MUST validate the declared `spec` and `revision`
-before using a vector. Future generated fixtures should preserve the same
-field names: `input`, `intermediate`, `output`, and `rejection_reason`.
+Fixture fields are stable only within the declared draft revision and may
+change before freeze. A consumer MUST validate `spec` and `spec_revision`.
+Every vector declares `kind`, `input`, `intermediate`, `output`, and `error`.
+Positive, negative, and boundary cases use the same schema.

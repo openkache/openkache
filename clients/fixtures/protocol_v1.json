@@ -1,8 +1,9 @@
 {
   "spec": "openkache/wire-protocol",
-  "revision": "draft-v1",
+  "spec_revision": "draft-2026-08-19",
   "vectors": [
     {
+      "kind": "positive",
       "name": "get_empty_item_id",
       "input": {
         "opcode_hex": "02",
@@ -10,17 +11,42 @@
         "namespace_id": 7,
         "item_id_hex": ""
       },
-      "output": {"frame_hex": "0200000000000000000700"}
+      "intermediate": {
+        "request_id_vu128_hex": "00",
+        "item_id_length_hex": "00"
+      },
+      "output": {
+        "frame_hex": "0200000000000000000700"
+      },
+      "error": null
     },
     {
+      "kind": "boundary",
       "name": "set_wire_size_exceeded",
-      "input": {"operation": "SET", "value_len": 67108865},
-      "rejection_reason": "wire ceiling exceeded; close lane without response"
+      "input": {
+        "operation": "SET",
+        "value_len": 67108865
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "wire_limit_exceeded",
+        "lane_action": "close_without_response"
+      }
     },
     {
+      "kind": "negative",
       "name": "invalid_expiration_selector",
-      "input": {"operation": "SET", "expiration_mode": 3},
-      "rejection_reason": "frame shape is undecidable; close lane without response"
+      "input": {
+        "operation": "SET",
+        "expiration_mode": 3
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "invalid_request_shape",
+        "lane_action": "close_without_response"
+      }
     }
   ]
 }

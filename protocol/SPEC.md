@@ -2,8 +2,8 @@
 
 ## Status
 
-This document is the draft design specification for OpenKache wire protocol
-version 1. Version 1 has not been released or finalized. The requirements
+This document is revision `draft-2026-08-19` of the draft OpenKache wire
+protocol version 1. Version 1 has not been released or finalized. The requirements
 below describe the current intended wire contract and may change before
 finalization. Within this draft, an implementation conforms only when its
 transport, framing, validation, operation behavior, and outcome rules satisfy
@@ -68,9 +68,7 @@ This document has four normative layers:
    eviction behavior. These are server behavior contracts carried by public
    frames, not additional frame fields.
 4. **Server semantics:** namespace identity-domain, TTL recovery, and eviction
-   behavior summarized here and detailed in [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
-5. **Experimental semantics:** optional `EXPERIMENTAL_*` operations. Public
-   v1 clients are not required to expose or implement them.
+   behavior detailed in [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
 
 The wire grammar is the compatibility boundary. A server implementation MAY
 organize the semantic layers differently, but MUST preserve the wire rules and
@@ -153,9 +151,11 @@ TLS authenticates the negotiated ALPN as part of the handshake transcript. The
 minimum-version rule protects a client from an authenticated endpoint that
 deliberately selects an older protocol.
 
-Every conforming transport MUST use TLS 1.3 and MUST negotiate the approved
-post-quantum/traditional hybrid key agreement `X25519MLKEM768`. Classical-only
-X25519 fallback is not permitted. This is a key-agreement requirement.
+Every conforming transport MUST use TLS 1.3 and an approved
+post-quantum/traditional hybrid key agreement. The v1 approved set currently
+contains `X25519MLKEM768`, which every v1 implementation MUST support.
+Classical-only X25519 fallback is not permitted. Future approved hybrid groups
+may extend this set without changing frame bytes.
 
 Protocol v1 does not require a post-quantum certificate signature. The server
 certificate signature remains deployment-configurable because certificate
@@ -498,11 +498,8 @@ MUST treat the request as malformed and terminate the connection without a
 response. Because an unassigned opcode has no defined body layout, the server
 MUST NOT scan for a possible next frame.
 
-Opcode `06` is not a stable v1 assignment. A server that exposes the current
-experimental operation MAY parse it according to
-[`EXPERIMENTAL.md`](EXPERIMENTAL.md); otherwise it treats `06` as an
-unassigned experimental opcode and closes the affected lane without a
-response. Its presence or absence does not affect stable v1 conformance.
+Opcode `06` is unassigned in stable v1. Experimental operations are defined
+outside stable conformance in [`EXPERIMENTAL.md`](EXPERIMENTAL.md).
 
 ### Opcodes
 
@@ -514,24 +511,16 @@ response. Its presence or absence does not affect stable v1 conformance.
 | `03` | `SET` | opcode + request ID + namespaceId (8 bytes) + packed(condition, expirationMode, evictionMode) + u8 itemId length + vu128 value length + if expirationMode=explicit_ttl: vu128(ttlMilliseconds) + itemId + value | empty | `raw_bytes` | — |
 | `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 itemId length + itemId | empty | `raw_bytes` | — |
 | `05` | `STATS` | opcode + request ID + namespaceId (8 bytes) | opaque payload | — | — |
-| `06` | experimental `EXPERIMENTAL_SYNC` | opcode + request ID + namespaceId (8 bytes) | empty | — | — |
 | `07` | `NAMESPACE_OPEN` | opcode + request ID + packed(createIfMissing) + u8 length + name + if createIfMissing=true: packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
 | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + request ID + namespaceId (8 bytes) + expectedRevision (8 bytes) + packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
 | `09` | `NAMESPACE_DELETE` | opcode + request ID + constant 0x00 + namespaceId (8 bytes) + expectedRevision (8 bytes) | empty | — | — |
 <!-- openkache:generated-protocol-operation-table:end -->
 
-The stable rows in this operation table are a generated view of the
-machine-readable protocol model. The `EXPERIMENTAL_SYNC` row is a
-non-conforming informational row and is defined by
-[`EXPERIMENTAL.md`](EXPERIMENTAL.md), not by the stable model. During this
-pre-freeze migration, the prose remains the target source of truth and the
-model may temporarily lag. After migration, the model becomes the source of
-truth for stable opcode assignments, field order, wire-width annotations, and
-generated client constants; this prose remains the source of truth for
-semantic explanations and rejection rules. A release or conformance check
-MUST fail when the generated stable table and finalized model differ.
-Hand-editing the generated table alone does not change the stable protocol
-contract.
+During this pre-freeze migration, this document is the source of truth and the
+machine-readable model may lag. After migration, the model will own stable
+assignments, field order, wire widths, and generated constants; this document
+will continue to own semantic and rejection rules. A release conformance check
+MUST fail when the finalized model and table differ.
 
 ### `SET` flags
 
@@ -613,7 +602,7 @@ account-local namespace or changes the namespace name or ID.
 These rules are protocol rules, not cloud-provider resource-name rules. The
 wire protocol does not require a narrower cloud-portable naming profile.
 
-`GET`, `SET`, `DELETE`, `STATS`, and `EXPERIMENTAL_SYNC` are namespace-scoped and carry a
+`GET`, `SET`, `DELETE`, and `STATS` are namespace-scoped and carry a
 `namespace_id`. `PING` is connection-scoped and carries none. `NAMESPACE_OPEN`
 resolves a name to a namespace descriptor and can create a missing named
 namespace. `NAMESPACE_UPDATE_POLICY` changes a namespace policy with an
@@ -814,7 +803,7 @@ or a hash algorithm. `GET`, `SET`, and `DELETE` carry `item_id_len:u8`
 followed by exactly `item_id_len` Item ID bytes.
 
 Servers MUST compare both the Item ID length and every Item ID byte.
-`PING`, `STATS`, and `EXPERIMENTAL_SYNC` carry no Item ID. The namespace and
+`PING` and `STATS` carry no Item ID. The namespace and
 Item ID pair is
 the cache identity; an Item ID is not a server-generated identifier.
 
@@ -930,13 +919,9 @@ format or member. Clients MUST NOT parse diagnostic fields as a stable
 programmatic interface. `namespace_id` scopes the request, checks that the
 namespace exists for an authorized request, and provides the authorization
 boundary. The payload remains subject to a server-selected diagnostic limit
-that MUST NOT exceed the 64 MiB response limit. If the diagnostic exceeds that
-limit, the server MUST either deterministically truncate it or return
-`InternalError`; it MUST NOT emit an oversized response.
-
-Experimental operation layouts and semantics are defined in
-[`EXPERIMENTAL.md`](EXPERIMENTAL.md), not in the stable operation semantics
-below.
+that MUST NOT exceed the 64 MiB response limit. If it cannot fit, the server
+MUST return `InternalError`; it MUST NOT truncate an undefined format or emit
+an oversized response.
 
 ### `NAMESPACE_OPEN`
 
@@ -1117,9 +1102,14 @@ namespace-management operations that address a missing namespace. These
 domain and common errors guarantee that the requested mutation was not
 applied.
 
-`EXPERIMENTAL_SYNC` uses `Ok`, `Forbidden`, `NamespaceNotFound`, and the
-common transport/error statuses only when the experimental interface enables
-it. Public clients MUST NOT depend on its status applicability.
+The protocol exposes effect guarantees, not an automatic retry policy:
+
+| Status | Effect guarantee |
+|---|---|
+| `Overloaded` | The operation did not begin. |
+| `InvalidRequest`, `PolicyConflict`, `Conflict` | No effect; the unchanged request remains invalid or conflicting. |
+| `NamespaceNotFound` | No effect; namespace or application state must change before the request can succeed. |
+| `InternalError` | No externally visible effect is known to have occurred. |
 
 A client receiving a response whose request ID does not identify one of its
 outstanding requests on that same lane, or whose status is neither an allowed
@@ -1245,20 +1235,17 @@ does not prescribe retry behavior.
 
 If transport or connection failure occurs before a response is received, the
 client must treat the outcome of an outstanding mutation as unknown.
-Experimental server maintenance operations use the same rule.
 Whether to issue a new request is an application decision. A new request on a
 new lane is independent even when it reuses the same request ID.
 
 ## Security and resource handling
 
-TLS 1.3 protects frames in transit on both conforming transports. The
-`X25519MLKEM768` hybrid key agreement is mandatory; classical-only X25519
-fallback is not allowed. Opaque values are not automatically confidential from
-the server or from storage; application-level value encryption remains a
-client concern. Certificate-chain/server-identity verification is a client
-deployment policy and, when disabled, does not provide active MITM protection.
-Optional mTLS may supply an authenticated client identity for privileged
-operations.
+TLS 1.3 protects frames in transit on both conforming transports.
+`X25519MLKEM768` is the current mandatory approved hybrid group;
+classical-only fallback is not allowed. Opaque values are not automatically
+confidential from the server or storage. Certificate-chain and server-identity
+verification is deployment policy; disabling it removes active MITM
+protection. Optional mTLS may authenticate clients for privileged operations.
 
 Receivers MUST parse lengths incrementally and enforce the 64 MiB ceiling before
 allocating or reading a complete `SET` value or response payload. Servers
@@ -1402,12 +1389,11 @@ For namespace ID `7`, an empty Item ID, and an empty value:
 This is an unconditional `SET` inheriting both namespace policies, with
 an empty Item ID, no TTL field, and `value_len = 0`.
 
-### `DELETE`, `STATS`, and experimental `EXPERIMENTAL_SYNC`
+### `DELETE` and `STATS`
 
 ```text
 04 00 00 00 00 00 00 00 00 07 03 11 22 33 # DELETE
 05 00 00 00 00 00 00 00 00 07             # STATS
-06 00 00 00 00 00 00 00 00 07             # experimental EXPERIMENTAL_SYNC
 ```
 
 ### Namespace management
@@ -1459,96 +1445,20 @@ opcode/status/layout drift is detected.
 
 A protocol v1 implementation is not complete unless it:
 
-- negotiates `openkache/1` for these frames;
-- supports both QUIC over TLS 1.3 and TLS-over-TCP over TLS 1.3 with identical
-  frame bytes;
-- requires the `X25519MLKEM768` hybrid key agreement and does not fall back to
-  classical-only X25519;
-- presents a TLS server certificate, while treating client-side identity
-  verification and mTLS as deployment policies;
-- supports the documented multi-version ALPN selection and minimum-version
-  rules when it supports more than one protocol version;
-- emits and accepts no frame-level version byte;
-- maps one client-initiated bidirectional QUIC stream or one TLS-over-TCP
-  connection to each lane and permits multiple outstanding requests on it;
-- decodes a canonical client-selected `request_id:vu128`, accepts zero and
-  every other unsigned 64-bit value, and echoes its exact bytes in the
-  response;
-- does not assign request IDs ordering, deduplication, replay, or idempotency
-  semantics, and treats uniqueness as a client-side choice;
-- executes complete requests on one lane in lane order while allowing
-  correlated responses in a different order;
-- emits each response as one contiguous frame and does not interleave response
-  bytes;
-- accepts a QUIC request-direction close only at a request-frame boundary and
-  completes responses for admitted requests before finishing its send
-  direction;
-- accepts a TLS-over-TCP request-direction half-close only through TLS
-  `close_notify`, treats TCP FIN without it as unclean, and keeps responses
-  available for admitted requests;
-- applies the directional `RESET_STREAM` and `STOP_SENDING` rules, with no
-  guaranteed responses and an `unknown` outcome for outstanding operations
-  after the response direction stops;
-- derives request layout from the opcode;
-- carries a positive server-assigned eight-byte `u64be` `namespace_id` on
-  every namespace-scoped request;
-- supports `NAMESPACE_OPEN`, `NAMESPACE_UPDATE_POLICY`, and
-  `NAMESPACE_DELETE` on the same protocol lanes;
-- sequences namespace-name management operations and allocates a new namespace
-  ID when a deleted name is recreated;
-- treats `name_len = 0` as a valid empty namespace name and validates all
-  UTF-8 names as specified;
-- uses a one-byte namespace name length and enforces the 255-byte ceiling;
-- starts namespace revisions at one and enforces
-  `expected_revision` on policy updates and deletion;
-- never reuses a previously assigned `namespace_id` for a different namespace
-  within its namespace identity domain, including after namespace deletion,
-  restart, recovery, or replica replacement;
-- encodes namespace policies and descriptors exactly as specified;
-- accepts only `IfEmpty` for the v1 namespace-delete flags;
-- includes the request ID in every request and response envelope;
-- includes `item_id_len` and exactly that many Item ID bytes in every `GET`,
-  `SET`, and `DELETE` request, accepting every length from `0` through `32`;
-- places the `SET` `item_id_len` and `value_len` before the optional TTL and
-  Item ID bytes;
-- includes `value_len` only in `SET`;
-- validates operation-specific flags for `SET`, `NAMESPACE_OPEN`, and
-  `NAMESPACE_DELETE`;
-- encodes `Any`/`IfAbsent`/`IfPresent`, `ExpirationMode`, and `EvictionMode` as
-  specified in the `SET` flags;
-- rejects non-canonical, truncated, wider-than-`u64`, and overflowing `vu128`;
-- compares Item IDs by length and complete byte sequence;
-- validates expiration-mode/TTL correspondence before reading a large
-  value;
-- computes TTL from the mutation linearization point using a monotonic clock
-  and reconstructs persisted deadlines without extending them on restart;
-- treats `now >= deadline` as expired;
-- resolves inherited namespace policy at `SET` linearization time;
-- enforces namespace override rules and returns `PolicyConflict` without a
-  mutation;
-- never evicts an item resolved as `EvictionProtected`;
-- returns `NoCapacity` rather than evicting a protected item when admission
-  cannot proceed;
-- keeps compression and application-encryption metadata out of frames;
-- preserves all value bytes without interpretation;
-- rejects invalid `SET` flag bits and unassigned status values;
-- enforces the 64 MiB wire ceiling before unbounded allocation or body reads;
-- terminates the connection without an error response for malformed framing,
-  unassigned opcodes, non-canonical integers, and truncated bodies;
-- returns `Overloaded` only as a correlated request-level rejection when the
-  request boundary can be preserved, and does not require a
-  `max_inflight_requests_per_lane` protocol limit;
-- returns `InternalError` only when a complete operation is known to have
-  failed without taking effect; an unknown mutation outcome terminates the
-  connection without an error response;
-- guarantees that a mutating error response means no mutation or barrier
-  completion;
-- discards the connection after framing or response-status meaning cannot be
-  determined;
-- treats mutation outcomes as unknown when transport fails before a response;
-- implements `EXPERIMENTAL_SYNC` only when the server exposes that
-  experimental benchmark/maintenance API, and does not treat it as a public
-  v1 operation.
+- negotiates `openkache/1` over QUIC and TLS-over-TCP with TLS 1.3, an approved
+  hybrid key agreement, and identical frame bytes;
+- implements the lane ordering, correlation, half-close, and cancellation
+  rules for its transport;
+- parses canonical `vu128`, operation layouts, flags, lengths, and assigned
+  statuses exactly as specified;
+- accepts every `0..=32`-byte Item ID and preserves values opaquely;
+- implements namespace identity, revision, policy, and operation semantics;
+- enforces wire limits before unbounded allocation or body reads;
+- returns a correlated error only for a complete request whose effect is known;
+- closes the lane for malformed or undecidable frames and preserves unknown
+  mutation outcomes; and
+- satisfies the operational requirements in
+  [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
 
 ## Reference
 
