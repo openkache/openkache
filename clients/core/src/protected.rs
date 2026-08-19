@@ -43,16 +43,12 @@ impl ProtectionSettings {
 
     fn finish(self) -> Result<Arc<DataProtection>> {
         match self.key {
-            Some(key) => if self.encryption == Encryption::Unprotected {
-                DataProtection::unprotected(self.key_spec, self.compression)
-            } else {
-                DataProtection::with_profile_and_key_spec(
-                    key,
-                    self.key_spec,
-                    self.compression,
-                    self.encryption,
-                )
-            }
+            Some(key) => DataProtection::with_profile_and_key_spec(
+                key,
+                self.key_spec,
+                self.compression,
+                self.encryption,
+            )
             .map(Arc::new),
             None => {
                 if self.encryption_explicit && self.encryption != Encryption::Unprotected {
@@ -140,7 +136,7 @@ macro_rules! protected_builder_methods {
             ///
             /// # Arguments
             ///
-            /// * `encryption` - Compact or Robust authenticated-encryption profile.
+            /// * `encryption` - Unprotected, Compact, or Robust value profile.
             ///
             /// # Returns
             ///

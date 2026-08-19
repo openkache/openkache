@@ -56,7 +56,10 @@ pub use request_engine::{
     RequestHandle, RequestKind, RequestMetadata, ResponseBytes, TransportConnection,
     TransportError, TransportKind, TransportLane,
 };
-pub use value::ItemValue;
+pub use value::{
+    ItemValue, MAX_EXPANDED_PAYLOAD_BYTES, MAX_VALUE_ENVELOPE_BYTES, MAX_ZSTD_WINDOW_BYTES,
+    ValueKeyring, ValueLimits,
+};
 
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
 compile_error!("enable at least one client QUIC backend feature");

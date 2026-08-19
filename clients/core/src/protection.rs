@@ -1,7 +1,7 @@
 //! Shared application-key hiding and value-protection composition.
 
-use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
 use crate::key::validate_canonical_key;
+use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
 use crate::{ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, Result};
 
 /// Reusable keyed transformation shared by language-specific client layers.
@@ -42,7 +42,8 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected(&key, compression)?;
+        let codec =
+            ValueCodec::protected(&key, compression)?.allow_read_profile(Encryption::Compact);
         Ok(Self {
             key,
             key_spec,
@@ -69,7 +70,7 @@ impl DataProtection {
     ///
     /// * `key` - Application-managed data protection key.
     /// * `compression` - Compression policy applied before encryption.
-    /// * `encryption` - Compact or Robust authenticated-encryption profile.
+    /// * `encryption` - Unprotected, Compact, or Robust profile.
     ///
     /// # Returns
     ///
@@ -77,7 +78,8 @@ impl DataProtection {
     ///
     /// # Errors
     ///
-    /// Returns an error for an unprotected profile or invalid compression settings.
+    /// Returns an error for an invalid compression setting or protected profile
+    /// configuration.
     pub fn with_profile(
         key: DataProtectionKey,
         compression: Compression,
@@ -99,7 +101,18 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
+        let codec = match encryption {
+            Encryption::Unprotected => ValueCodec::compressed(compression)?,
+            Encryption::Compact | Encryption::Robust => {
+                let alternate = match encryption {
+                    Encryption::Compact => Encryption::Robust,
+                    Encryption::Robust => Encryption::Compact,
+                    Encryption::Unprotected => unreachable!(),
+                };
+                ValueCodec::protected_with_profile(&key, compression, encryption)?
+                    .allow_read_profile(alternate)
+            }
+        };
         Ok(Self {
             key,
             key_spec,

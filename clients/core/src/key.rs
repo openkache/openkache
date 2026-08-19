@@ -490,10 +490,7 @@ impl<'a> Cursor<'a> {
                 return Err(KeyError::UnsupportedType);
             }
             let magnitude = self.read_borrowed_bytes(length)?;
-            if magnitude.is_empty()
-                || magnitude[0] == 0
-                || as_u64(magnitude).is_some()
-            {
+            if magnitude.is_empty() || magnitude[0] == 0 || as_u64(magnitude).is_some() {
                 return Err(KeyError::NonCanonical);
             }
             return Ok(KeySpec::Integer);
@@ -734,7 +731,6 @@ impl TryFrom<&[u8]> for ItemId {
 pub struct ClientRootKey {
     master_key: [u8; DATA_PROTECTION_KEY_BYTES],
     item_id_root: [u8; DATA_PROTECTION_KEY_BYTES],
-    value_root_key: [u8; DATA_PROTECTION_KEY_BYTES],
 }
 
 impl ClientRootKey {
@@ -742,12 +738,9 @@ impl ClientRootKey {
     pub fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
         let item_id_root =
             blake3::derive_key(crate::contract::VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT, &bytes);
-        let value_root_key =
-            blake3::derive_key(crate::contract::VALUE_FORMAT_VALUE_ROOT_CONTEXT, &bytes);
         Self {
             master_key: bytes,
             item_id_root,
-            value_root_key,
         }
     }
 
@@ -884,9 +877,7 @@ impl ClientRootKey {
         let mut hasher = blake3::Hasher::new_keyed(&self.item_id_root);
         hasher.update(&namespace_id.to_be_bytes());
         hasher.update(canonical_key.bytes());
-        Ok(ItemId::from_bytes(
-            *hasher.finalize().as_bytes(),
-        ))
+        Ok(ItemId::from_bytes(*hasher.finalize().as_bytes()))
     }
 
     /// Legacy byte-key convenience using namespace `1`.
@@ -899,8 +890,8 @@ impl ClientRootKey {
             .expect("legacy application key exceeds the v1 key limit")
     }
 
-    pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
-        Zeroizing::new(self.value_root_key)
+    pub(crate) fn master_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
+        Zeroizing::new(self.master_key)
     }
 }
 

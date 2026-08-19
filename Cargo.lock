@@ -2754,6 +2754,7 @@ dependencies = [
  "getrandom 0.3.4",
  "http",
  "openkache-protocol",
+ "openkache-value",
  "polyval 0.7.3",
  "quinn",
  "rustls",
