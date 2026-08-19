@@ -1,6 +1,6 @@
 # OpenKache Value Security Profiles (Draft)
 
-> **Status:** Draft `draft-2026-08-19`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.2`; not released or finalized.
 >
 > This document owns the v1 value-key schedule, associated data, cryptographic
 > profiles, and security properties. Envelope grammar and selector assignment
@@ -19,11 +19,8 @@ The enclosing client profile supplies a keyring mapping each positive unsigned
 configured active ID. A protected read selects exactly the ID present in the
 envelope; unknown and retired IDs fail without key probing or fallback.
 
-An all-zero value key is wire-valid, but it provides no secret protection.
-Maintained clients MUST NOT select it by default. They MAY accept it only
-through explicit compatibility configuration and MUST NOT describe the result
-as confidential. Secret keys SHOULD be generated independently with a
-cryptographically secure random source.
+An all-zero value key is invalid. Secret keys MUST be generated independently
+with a cryptographically secure random source.
 
 For every protected envelope:
 
@@ -96,8 +93,11 @@ policy, nonce, and envelope length are not AAD inputs.
 
 `AES-SIV-CMAC` uses 32 bytes for the MAC key and 32 bytes for the encryption
 key, for 64 bytes of total derived key material. GCM-SIV MUST use a fresh
-12-byte OS-random nonce for every write. SIV-CMAC is deterministic for equal
-key, AAD, and payload inputs.
+12-byte OS-random nonce for every write; nonce-generation failure rejects the
+write. One value key MUST NOT protect more than `2^32` AES-GCM-SIV writes.
+Implementations MUST also enforce the usage bounds in RFC 8452 and rotate the
+key before any bound is reached. SIV-CMAC is deterministic and therefore
+reveals equality for equal key, AAD, and payload inputs.
 
 The transform order is:
 
@@ -119,6 +119,10 @@ compression-dependent length leakage remain observable.
 Changing namespace ID, Item ID length or bytes, selector, version, key ID, or
 authenticated payload MUST cause authentication failure. The value-key ID is
 public metadata and may reveal the key epoch.
+
+Reading a protected value with an unknown or retired key ID fails with a
+distinct key-unavailable category; it MUST NOT be reported as authentication
+failure or trigger key probing.
 
 ## Interoperability vectors
 

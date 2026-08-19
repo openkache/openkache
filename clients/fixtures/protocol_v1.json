@@ -1,6 +1,6 @@
 {
   "spec": "openkache/wire-protocol",
-  "spec_revision": "draft-2026-08-19",
+  "spec_revision": "draft-2026-08-19.2",
   "vectors": [
     {
       "kind": "positive",
@@ -22,6 +22,24 @@
     },
     {
       "kind": "boundary",
+      "name": "get_maximum_item_id",
+      "input": {
+        "opcode_hex": "02",
+        "request_id": 128,
+        "namespace_id": 7,
+        "item_id_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "intermediate": {
+        "request_id_vu128_hex": "8002",
+        "item_id_length_hex": "20"
+      },
+      "output": {
+        "frame_hex": "028002000000000000000720000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
       "name": "set_wire_size_exceeded",
       "input": {
         "operation": "SET",
@@ -31,8 +49,24 @@
       "output": null,
       "error": {
         "category": "wire_limit_exceeded",
-        "lane_action": "close_without_response"
+        "connection_action": "close_without_response"
       }
+    },
+    {
+      "kind": "boundary",
+      "name": "set_server_limit_exceeded",
+      "input": {
+        "operation": "SET",
+        "request_id": 0,
+        "value_len": 1025,
+        "server_value_limit": 1024,
+        "complete_body_available": true
+      },
+      "intermediate": {},
+      "output": {
+        "response_frame_hex": "820000"
+      },
+      "error": null
     },
     {
       "kind": "negative",
@@ -45,7 +79,37 @@
       "output": null,
       "error": {
         "category": "invalid_request_shape",
-        "lane_action": "close_without_response"
+        "connection_action": "close_without_response"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "noncanonical_request_id",
+      "input": {
+        "frame_prefix_hex": "028100"
+      },
+      "intermediate": {
+        "decoded_request_id": 1,
+        "canonical_request_id_hex": "01"
+      },
+      "output": null,
+      "error": {
+        "category": "noncanonical_integer",
+        "connection_action": "close_without_response"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "experimental_stats_disabled",
+      "input": {
+        "frame_hex": "05000000000000000007",
+        "enable_experimental_api": false
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "unassigned_opcode",
+        "connection_action": "close_without_response"
       }
     }
   ]

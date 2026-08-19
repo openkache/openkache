@@ -1,6 +1,6 @@
 # OpenKache Client Key Contract — Version 1 Draft
 
-> **Status:** Draft `draft-2026-08-19`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.2`; not released or finalized.
 >
 > This document specifies client-owned key validation and Item ID mapping. It
 > is not a server-required key encoding, and it may change before finalization.
@@ -48,8 +48,8 @@ and the initial value codec profile are specified separately in
 [`value/SPEC.md`](value/SPEC.md).
 
 An **Item ID mapping profile** selects the algorithm that converts canonical
-key bytes into the final Item ID. The initial profiles are `Hash` and
-`UnisolatedKeyOrHash`. A mapping profile is client-local configuration,
+key bytes into the final Item ID. The initial profiles are `NamespaceHash` and
+`PublicKeyOrHash`. A mapping profile is client-local configuration,
 optionally scoped per namespace by the client, not a wire-visible field or a
 server-enforced namespace policy. A client that addresses more than one
 namespace MUST keep its selected profile stable for each namespace it
@@ -69,14 +69,14 @@ application key (typed input)
   -> typed key (TypedKey)
   -> canonical key encoding
   -> canonical key bytes (canonical_key_bytes)
-  -> Hash
-  -> ItemId
+  -> NamespaceHash
+  -> Item ID
 
 application key (typed input)
   -> typed key (TypedKey)
   -> canonical key encoding
   -> canonical key bytes (canonical_key_bytes)
-  -> UnisolatedKeyOrHash
+  -> PublicKeyOrHash
   -> Item ID (canonical bytes when 0..=32 bytes; public hash otherwise)
 
 exact Item ID
@@ -85,8 +85,8 @@ exact Item ID
 ```
 
 Both formatted profiles use the same typed key and canonical encoding.
-`Hash` always produces a root- and namespace-bound 32-byte Item ID.
-`UnisolatedKeyOrHash` exposes short canonical key bytes directly and uses an
+`NamespaceHash` always produces a root- and namespace-bound 32-byte Item ID.
+`PublicKeyOrHash` exposes short canonical key bytes directly and uses an
 unkeyed hash only when the encoding does not fit. It is intended for
 deployments that trust the server and do not require client-side key
 confidentiality or profile isolation. The selected mapping profile is part of
@@ -173,8 +173,8 @@ cross-language `Integer` contract. The maintained API still has an explicit
 pre-freeze TODO: choose between no additional native limit, an `i64` limit, or
 a different bounded representation for ergonomic typed-language overloads.
 
-The maintained-client default mapping profile is `Hash`.
-`UnisolatedKeyOrHash` MUST be selected explicitly. It is suitable for
+The maintained-client default mapping profile is `NamespaceHash`.
+`PublicKeyOrHash` MUST be selected explicitly. It is suitable for
 benchmarks and for deployments that fully trust the server and accept public,
 cross-client key identity. Value protection is independent: either mapping
 profile may carry protected or unprotected values.
@@ -290,31 +290,28 @@ Item ID mapping profiles are client-local choices. They have no wire or server
 field.
 Every profile MUST produce an Item ID accepted by the wire protocol.
 
-### 4.1 Hash profile (`Hash`)
+### 4.1 Namespace hash profile (`NamespaceHash`)
 
-Under `Hash`, the adapter infers one supported `TypedKey`, encodes it, and
+Under `NamespaceHash`, the adapter infers one supported `TypedKey`, encodes it, and
 derives a 32-byte Item ID. Equal typed keys in different namespaces produce
 different Item IDs.
 
 ```text
-profile_header = f8 01
-tag =
+item_id =
   BLAKE3-KEYED-HASH(
     key   = item_id_derivation_key[32],
-    input = profile_header[2] | namespace_id:u64be | canonical_key_bytes
-  )[0..30]
-item_id = profile_header[2] | tag[30]
+    input = "openkache/item-id/namespace-hash/v1"
+          | namespace_id:u64be
+          | canonical_key_bytes
+  )
 ```
 
-The header identifies this mapping revision and is authenticated by the keyed
-hash input. `f8` cannot begin a canonical key accepted by §3, so a `Hash` Item
-ID cannot collide with the preserved path below. Truncating BLAKE3 to 30 bytes
-retains 240-bit collision resistance. The server treats all 32 bytes as
-opaque.
+The domain string identifies the mapping revision. The full 32-byte BLAKE3
+output is the Item ID. The server treats it as opaque.
 
-### 4.2 Unisolated preserve-or-hash profile (`UnisolatedKeyOrHash`)
+### 4.2 Public preserve-or-hash profile (`PublicKeyOrHash`)
 
-`UnisolatedKeyOrHash` accepts any supported typed application key and encodes it
+`PublicKeyOrHash` accepts any supported typed application key and encodes it
 exactly as specified in §3:
 
 - Canonical key bytes whose encoded length is `1..=32` become the Item ID
@@ -333,16 +330,17 @@ uses the hash fallback. Basic CBOR integers occupy at most nine bytes and are
 preserved. Larger integers may use a hash fallback when their tagged canonical
 encoding exceeds 32 bytes.
 
-The fallback uses a distinct header and a 30-byte unkeyed BLAKE3 tag:
+The fallback uses a domain-separated unkeyed BLAKE3 hash:
 
 ```text
-profile_header = f8 02
-tag = BLAKE3-HASH(profile_header[2] | canonical_key_bytes)[0..30]
-hash_fallback_item_id = profile_header[2] | tag[30]
+hash_fallback_item_id =
+  BLAKE3-HASH(
+    "openkache/item-id/public-key-or-hash/v1"
+    | canonical_key_bytes
+  )
 ```
 
-The header is included in the hash input and cannot begin an accepted canonical
-key. It is not added to preserved Item IDs. Neither path uses `namespace_id`,
+Neither path uses `namespace_id`,
 `item_id_root_key`, or `item_id_derivation_key`. Consequently, equal typed
 keys produce equal Item IDs across namespaces and client configurations under
 this profile; the wire-level `(namespace_id, item_id)` pair still identifies a
@@ -352,12 +350,13 @@ This profile provides no client-side key confidentiality, namespace binding,
 or root-key isolation. It is useful when the server is fully trusted, when
 cross-client public identity is desired, or when avoiding hashing for short
 keys matters. Applications requiring those omitted guarantees MUST use
-`Hash`.
+`NamespaceHash`.
 
-The headers prevent accidental collisions between the two formatted hashed
-paths. The Exact Item ID API can still intentionally supply any byte sequence,
-including either header. Future mapping revisions MUST use a new header and
-MUST NOT reinterpret existing Item IDs.
+The distinct domain strings separate the two hash inputs. There is no
+profile marker in the 32-byte output: a `PublicKeyOrHash` preserved encoding
+can intentionally or accidentally equal a hash-profile output, and the server
+does not distinguish those cases. Future revisions MUST use new domain strings
+and MUST NOT reinterpret existing Item IDs.
 
 ### 4.3 Exact Item ID API
 
@@ -373,25 +372,26 @@ collision avoidance, and isolation.
 
 ### 5.1 Namespace binding
 
-`namespace_id` is a positive, server-assigned identity. Clients MUST NOT
-synthesize or recycle it. `Hash` binds it after the profile header:
+`namespace_id` is a positive, provisioned identity. `NamespaceHash` binds it
+after the domain string:
 
 ```text
-Hash profile:
-  f8 01 | namespace_id:u64be | canonical_key_bytes
+NamespaceHash input:
+  "openkache/item-id/namespace-hash/v1"
+  | namespace_id:u64be
+  | canonical_key_bytes
 ```
 
-Including the namespace makes equal typed keys produce different `Hash` Item
-IDs in different namespaces. Consequently, a client MUST resolve the namespace
-ID before deriving a `Hash` Item ID.
+Including the namespace makes equal typed keys produce different
+`NamespaceHash` Item IDs in different namespaces.
 
-`UnisolatedKeyOrHash` deliberately omits the namespace from both paths. The
+`PublicKeyOrHash` deliberately omits the namespace from both paths. The
 server already scopes item identity by namespace, so the same public Item ID in
 two namespaces addresses two distinct items.
 
 ### 5.2 Item ID root key and derivation visibility
 
-For `Hash`, `item_id_root_key` is an application-selected key of exactly 32
+For `NamespaceHash`, `item_id_root_key` is an application-selected key of exactly 32
 bytes. It MAY be generated randomly or supplied directly. No text-to-key
 conversion is defined.
 
@@ -400,7 +400,7 @@ Item IDs remain publicly derivable in this default profile. Supplying a root
 key selects a root-bound derivation profile; changing the root changes Item
 IDs and requires migration or repopulation.
 
-For `Hash`, the Item ID root key is an identity setting, not a value-protection
+For `NamespaceHash`, the Item ID root key is an identity setting, not a value-protection
 key. It MUST remain stable for the lifetime of addressable data.
 Value-protection keys rotate independently and are selected from the value
 envelope as defined by the [Client Value Format](VALUE_FORMAT.md). A value-key
@@ -420,35 +420,25 @@ The all-zero root is valid for the default derivation profile. It MUST NOT be
 used as a substitute for an explicitly configured secret when a deployment
 requires non-public Item IDs.
 
-`UnisolatedKeyOrHash` ignores `item_id_root_key` and the resulting
+`PublicKeyOrHash` ignores `item_id_root_key` and the resulting
 `item_id_derivation_key`. Changing either has no effect on its Item IDs.
 
-Maintained clients SHOULD persist a non-secret, client-local profile record
-keyed by namespace identity. It SHOULD contain the mapping-profile name and
-revision, canonicalization revision, namespace ID, and a fingerprint of the
-root-key configuration. Native key-type inference is per input and is never a
-namespace configuration. A future client MAY use opaque server metadata for
-profile discovery, but the v1 wire protocol does not require the server to
-interpret or validate it. Until that design is finalized, a client MUST NOT
-silently change these settings for an existing namespace.
+Profile persistence and mismatch detection remain a pre-freeze TODO. A future
+client may keep local metadata or opaque server metadata, but the server must
+not interpret a key profile. Until then, clients must not silently change
+identity settings for existing data.
 
-### 5.3 Hash algorithm and profile compatibility
+### 5.3 Mapping algorithm and profile compatibility
 
-`Hash` uses BLAKE3 keyed hashing with a 32-byte derived key.
-`UnisolatedKeyOrHash` uses standard unkeyed BLAKE3 only for canonical
-encodings longer than 32 bytes. The assigned hashed-path headers are:
+`NamespaceHash` uses BLAKE3 keyed hashing with a 32-byte derived key.
+`PublicKeyOrHash` uses standard unkeyed BLAKE3 only for canonical encodings
+longer than 32 bytes. Each hashed path uses its exact domain string from §4.
 
-| Header | Profile path |
-|---:|---|
-| `f8 01` | `Hash` |
-| `f8 02` | `UnisolatedKeyOrHash` hash fallback |
-
-The header identifies the mapping path and revision, not the root-key epoch.
 A profile that changes identity, namespace input, hash context, derivation
-material, or input framing MUST use a new header and MUST NOT reinterpret
-existing Item IDs. There is no in-band root-key mismatch detector or rotation
-protocol: the wrong root normally appears as a miss. Changing
-`item_id_root_key` is an identity migration, not a value-key rotation.
+material, or input framing MUST use a new domain string and MUST NOT
+reinterpret existing Item IDs. There is no in-band root-key mismatch detector:
+the wrong root normally appears as a miss. Changing `item_id_root_key` is an
+identity migration, not a value-key rotation.
 
 ## 6. Limits and validation
 
@@ -471,7 +461,7 @@ integers are unbounded, limited to `i64`, or subject to another ergonomic
 bound; any such limit is separate from canonical encoding.
 
 Every client path MUST enforce the wire protocol's `0..=32` Item ID limit.
-Empty logical keys and empty Exact Item IDs are valid. `UnisolatedKeyOrHash`
+Empty logical keys and empty Exact Item IDs are valid. `PublicKeyOrHash`
 represents an empty `Text` or `Bytes` key by its nonempty one-byte CBOR encoding.
 
 ## 7. Conformance vectors
@@ -490,15 +480,16 @@ item_id_derivation_key =
   92 22 5d c5 82 e1 06 a0 f0 29 f9 e6 3b 91 7b 4b
 ```
 
-`Hash` vectors use header `f8 01`. `UnisolatedKeyOrHash` fallback vectors use
-header `f8 02`; they ignore the namespace and Item ID root parameters above.
+`NamespaceHash` vectors use the namespace-hash domain string.
+`PublicKeyOrHash` fallback vectors use the public domain string and ignore the
+namespace and Item ID root parameters above.
 
 These vectors are normative fixtures, not hand-maintained implementation
 examples. A generator MUST:
 
 1. construct the typed key and canonical key bytes using the rules in §§2–3;
 2. derive the root key with BLAKE3 `DERIVE_KEY` using the exact context string;
-3. compute the profile-header input byte-for-byte; and
+3. compute the domain-separated input byte-for-byte; and
 4. compare the resulting Item ID with this document.
 
 The machine-readable subset in
@@ -506,19 +497,19 @@ The machine-readable subset in
 these tables. Before freeze, the complete set SHOULD be generated and checked
 by at least two independent implementations.
 
-### 7.1 Hash Item IDs
+### 7.1 NamespaceHash Item IDs
 
 | Vector | Canonical key bytes | `item_id` |
 |---|---|---|
-| `Text("abc")` | `63 61 62 63` | `f8 01 b7 7c be 5f 62 bf b4 0c 38 a0 b7 d2 f3 5e 85 b0 e2 b2 27 ef 70 14 a1 f2 b9 a4 47 68 71 71` |
-| `Bytes([00,ff])` | `42 00 ff` | `f8 01 76 47 72 4a 35 af aa 05 28 d2 16 5d 39 0d 99 9a 70 45 82 9f af 52 bb 17 77 dd 3a 99 2c 0c` |
-| `Integer(1)` | `01` | `f8 01 10 2d 2c bf 0e 5d 25 4b 18 05 0a 98 3c 6f 8e 58 a5 97 57 3e f8 9e 61 e4 f2 d6 56 0c a3 cc` |
-| `Integer(-1)` | `20` | `f8 01 bc e2 98 b0 5e c1 45 19 7e 1b cd d9 2d 38 be 1c 29 36 e9 3c 69 6d 3e 58 f0 32 f5 11 0d 68` |
-| `Text("")` | `60` | `f8 01 3c a2 db dd 41 ec 46 b6 56 f7 8f 11 6c db 1e 9b c1 72 96 e0 a2 d0 a0 c2 77 9d 7c 32 fa a8` |
-| `Bytes([])` | `40` | `f8 01 ec e0 6c e6 b6 77 36 b6 5a 39 9a a3 15 ec 59 60 05 e9 e0 3a c2 62 33 a3 71 9d 28 4c 8f ce` |
-| `Text("abc")`, namespace `2` | `63 61 62 63` | `f8 01 86 f9 ef 86 57 f1 a8 1e 59 c6 99 5f 00 79 e4 54 f6 7c 89 89 f4 da 70 59 b6 8e 4e b5 cb 41` |
+| `Text("abc")` | `63 61 62 63` | `c0 ba 3f dd 18 76 04 64 59 a2 58 a7 1f 39 68 d5 d4 5a ff c9 57 d1 44 22 e1 d2 f5 34 79 53 6e 53` |
+| `Bytes([00,ff])` | `42 00 ff` | `42 da fe 0f 70 fa 71 5c f0 bf a7 86 d4 5b ca 94 c8 39 21 07 aa dd 69 10 83 6d 37 05 ef 51 e3 e1` |
+| `Integer(1)` | `01` | `12 59 ba c3 1d 03 e5 cc b2 1b 4e fc a5 eb c2 c2 5d 04 7c bc 85 63 0d 74 5d a8 75 20 a0 c0 22 d6` |
+| `Integer(-1)` | `20` | `9c 75 9f cb 96 09 33 9e 5f 1f 74 ab ae 13 3d de d5 a2 3c 1d 55 29 e0 27 8c 00 b8 09 7a 95 14 dc` |
+| `Text("")` | `60` | `84 65 0c 6d 68 0d a8 87 5c c9 0c 2f ba e3 62 48 ff bd 34 ac 33 88 b4 01 64 3c 31 18 63 91 96 e2` |
+| `Bytes([])` | `40` | `a8 7e 7a a5 78 1c da 45 c4 a9 eb 1b aa 98 4e ba 0c 78 98 b7 ae a4 59 f4 bd 8f bb ec c3 a3 e0 f7` |
+| `Text("abc")`, namespace `2` | `63 61 62 63` | `1b a7 0c ae 30 66 fb b7 bc e8 d7 f4 75 c6 ea 84 ca 27 6e e2 d1 cb 4c 3d 2a f9 bf 85 25 6b c9 58` |
 
-### 7.2 UnisolatedKeyOrHash boundary vectors
+### 7.2 PublicKeyOrHash boundary vectors
 
 The first four vectors follow the canonical preservation path. The final
 vector is a 31-byte logical byte string whose 33-byte canonical encoding uses
@@ -530,7 +521,7 @@ the public hash fallback.
 | `Text("abc")` | `63 61 62 63` | `63 61 62 63` |
 | `Bytes([])` | `40` | `40` |
 | `Bytes([00,01,...,1d])` | `58 1e 00 01 02 ... 1d` | `58 1e 00 01 02 ... 1d` |
-| `Bytes([00,01,...,1e])` | `58 1f 00 01 02 ... 1e` | `f8 02 8e af 52 3b b3 19 cf a4 62 12 ea 4b cc 89 79 12 45 67 3e f3 0f 93 eb b7 49 cc 48 e0 da 99` |
+| `Bytes([00,01,...,1e])` | `58 1f 00 01 02 ... 1e` | `93 71 1b 6b 8d 8a 89 30 39 bc 33 6e 29 99 51 05 d8 3c ae 35 cc 3f 4e 08 5d 51 8c 54 12 7f 67 21` |
 
 ### 7.3 Item ID root separation
 
@@ -546,8 +537,8 @@ item_id_derivation_key =
   d1 b7 dd 5c 75 43 f8 cc 07 cb 9b 18 ad 0e 2b cd
 
 item_id =
-  f8 01 68 85 41 d0 df 74 d4 61 57 8b c2 4f 51 88
-  fb ca 01 00 02 29 c3 07 cb 8d 3a ee 91 d1 7c f1
+  28 e6 6d 25 3b 2a 93 e5 db d3 68 d4 21 04 6e 12
+  10 c7 76 14 6f d5 ec 21 9f 4e 00 88 f9 8c 24 0f
 ```
 
 ### 7.4 Rejection cases

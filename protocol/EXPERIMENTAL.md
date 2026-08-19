@@ -1,12 +1,33 @@
 # OpenKache Experimental Protocol Operations (Draft)
 
-> **Status:** Experimental revision `draft-2026-08-19`. These operations are not part of the stable v1
+> **Status:** Experimental revision `draft-2026-08-19.2`. These operations are not part of the stable v1
 > conformance surface. Their names, layouts, status behavior, and semantics
 > may change or disappear without a protocol-version change.
 
-This document defines optional operations for benchmark, internal, and other
-non-production tooling. A production client MUST NOT depend on an
-`EXPERIMENTAL_*` operation.
+This document defines optional diagnostic and maintenance operations. A server
+recognizes them only when its `enable_experimental_api` deployment setting is
+enabled. Otherwise their opcodes are unassigned and therefore malformed under
+the stable protocol. An unaware server closes the connection without a
+response.
+
+Experimental layouts are not a compatibility surface. Clients MUST enable
+their use explicitly and MUST match the server's documented experimental
+revision.
+
+## `STATS`
+
+Opcode `05` currently carries:
+
+```text
+05 | request_id:vu128 | namespace_id:u64be
+```
+
+An authorized success returns `Ok` with an implementation-defined diagnostic
+payload. Unauthorized requests may return `Forbidden`. An authorized request
+for a missing namespace returns `NamespaceNotFound`.
+
+The payload is operator-facing and not a stable programmatic schema. It MUST
+fit the response payload limit.
 
 ## `EXPERIMENTAL_SYNC`
 
@@ -23,8 +44,8 @@ covered; later mutations are not required to be included.
 
 A successful response is sent only after all covered pending writes have been
 sent to disk. A later read MUST be able to use durable storage state instead
-of relying on a pending-write memory buffer. This is a benchmark and
-maintenance visibility barrier, not a public durability-level negotiation API.
+of relying on a pending-write memory buffer. This is a maintenance visibility
+barrier, not a public durability-level negotiation API.
 
 An implementation MAY perform authorization before namespace lookup. An
 unauthorized request may therefore receive `Forbidden` without revealing
@@ -38,9 +59,6 @@ The current response behavior is:
 | Authorized barrier completed | `Ok` with an empty payload |
 | Unauthorized | `Forbidden` with an optional diagnostic |
 | Authorized namespace missing | `NamespaceNotFound` |
-| Barrier failure or transport failure | lane close; outcome unknown |
+| Barrier failure or transport failure | connection close; outcome unknown |
 
-The operation is not a server capability requirement. A server that does not
-expose it MAY treat opcode `06` as an unassigned experimental operation and
-close the lane without a response. Such behavior does not make the server
-non-conforming to stable protocol v1.
+Neither operation is a stable server capability requirement.

@@ -1,6 +1,6 @@
 {
   "spec": "openkache/client-key-format",
-  "spec_revision": "draft-2026-08-19",
+  "spec_revision": "draft-2026-08-19.2",
   "vectors": [
     {
       "kind": "positive",
@@ -8,18 +8,17 @@
       "input": {
         "type": "Text",
         "value_utf8": "abc",
-        "profile": "Hash",
+        "profile": "NamespaceHash",
         "namespace_id": 1,
         "item_id_root_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
       },
       "intermediate": {
         "canonical_key_bytes_hex": "63616263",
-        "profile_header_hex": "f801",
         "item_id_derivation_key_hex": "ef086a3f6e663edf4108982d512a4a1b92225dc582e106a0f029f9e63b917b4b",
-        "hash_input_hex": "f801000000000000000163616263"
+        "hash_input_hex": "6f70656e6b616368652f6974656d2d69642f6e616d6573706163652d686173682f7631000000000000000163616263"
       },
       "output": {
-        "item_id_hex": "f801b77cbe5f62bfb40c38a0b7d2f35e85b0e2b227ef7014a1f2b9a447687171"
+        "item_id_hex": "c0ba3fdd1876046459a258a71f3968d5d45affc957d14422e1d2f53479536e53"
       },
       "error": null
     },
@@ -29,7 +28,7 @@
       "input": {
         "type": "Integer",
         "value": "1",
-        "profile": "UnisolatedKeyOrHash"
+        "profile": "PublicKeyOrHash"
       },
       "intermediate": {
         "canonical_key_bytes_hex": "01",
@@ -42,22 +41,66 @@
     },
     {
       "kind": "boundary",
-      "name": "unisolated_hash_fallback_31_bytes",
+      "name": "public_preserved_30_bytes",
+      "input": {
+        "type": "Bytes",
+        "value_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d",
+        "profile": "PublicKeyOrHash"
+      },
+      "intermediate": {
+        "canonical_key_bytes_hex": "581e000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d",
+        "mapping_path": "preserved"
+      },
+      "output": {
+        "item_id_hex": "581e000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "public_hash_fallback_31_bytes",
       "input": {
         "type": "Bytes",
         "value_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e",
-        "profile": "UnisolatedKeyOrHash"
+        "profile": "PublicKeyOrHash"
       },
       "intermediate": {
         "canonical_key_bytes_hex": "581f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e",
-        "profile_header_hex": "f802",
         "mapping_path": "hash_fallback",
-        "hash_input_hex": "f802581f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
+        "hash_input_hex": "6f70656e6b616368652f6974656d2d69642f7075626c69632d6b65792d6f722d686173682f7631581f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
       },
       "output": {
-        "item_id_hex": "f8028eaf523bb319cfa46212ea4bcc89791245673ef30f93ebb749cc48e0da99"
+        "item_id_hex": "93711b6b8d8a893039bc336e29995105d83cae35cc3f4e085d518c54127f6721"
       },
       "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "integer_positive_bignum",
+      "input": {
+        "type": "Integer",
+        "value": "18446744073709551616"
+      },
+      "intermediate": {
+        "canonical_key_bytes_hex": "c249010000000000000000"
+      },
+      "output": {
+        "canonical_key_bytes_hex": "c249010000000000000000"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "nonpreferred_bignum_rejected",
+      "input": {
+        "canonical_key_bytes_hex": "c24101"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "noncanonical_key",
+        "reason": "Integer(1) must use basic CBOR integer encoding"
+      }
     },
     {
       "kind": "negative",

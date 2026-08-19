@@ -1,6 +1,6 @@
 # OpenKache Maintained Client Implementation Guide — Version 1 Draft
 
-> **Status:** Draft `draft-2026-08-19`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.2`; not released or finalized.
 >
 > This guide describes the target implementation for OpenKache-maintained
 > client SDKs. Implementations may temporarily lag during migration.
@@ -78,6 +78,11 @@ bindings:
 - value-key selection and cryptographic protection through the value security
   profiles; and
 - common configuration validation and stable error categories.
+
+The target core uses one connection/request engine. Mapped versus Exact
+addressing and formatted versus Raw versus caller-owned-v0 values are
+operation choices, not separate transport clients. Bindings may add convenience
+facades without coupling the two axes.
 
 A language adapter owns only the language-facing boundary:
 
@@ -216,9 +221,7 @@ Server statuses have separate retry meaning:
 | `InvalidRequest`, `TooLarge`, `PolicyConflict` | Do not retry unchanged. |
 | `Forbidden` | Retry only after credentials or authorization policy changes. |
 | `NoCapacity` | Retry only after capacity or eviction state changes. |
-| `Conflict` | Refresh namespace state before constructing a new request. |
-| `NamespaceNotFound` | Retry only after namespace or application state changes. |
-| `NamespaceNotEmpty` | Retry deletion only after the namespace becomes empty. |
+| `NamespaceNotFound` | Retry only after namespace provisioning or application state changes. |
 | `InternalError` | The server reports no externally visible effect; retry remains a caller or configured-client decision. |
 
 ## 5. Public API and native values
@@ -238,6 +241,12 @@ Address and value representation are independent API axes:
 An adapter MAY use overloads, options, or distinct method names, but its
 documentation MUST identify both axes. `exact` means only “bypass key mapping”;
 `raw` means only “bypass value encoding and decoding.”
+
+| Value mode | Client ownership |
+|---|---|
+| Formatted v1 | Encode, validate, and decode the OpenKache envelope. |
+| Raw | Send and return stored bytes unchanged. |
+| Caller-owned v0 | Check only canonical leading version `0`; otherwise pass through unchanged. |
 
 ### 5.2 Native key conversion
 
@@ -340,12 +349,20 @@ An adapter MUST keep identity configuration separate from value-protection
 configuration even when a language offers a convenience constructor. The key
 and value specifications define the actual fields and validity rules.
 
-The maintained identity default is `Hash`. When no value key is configured,
+The maintained identity default is `NamespaceHash`. When no value key is configured,
 formatted values use `Unprotected`; this does not change key mapping.
-`UnisolatedKeyOrHash` is an explicit choice for deployments that trust the
+`PublicKeyOrHash` is an explicit choice for deployments that trust the
 server and do not need client-side key confidentiality, namespace binding, or
 root-key isolation. It is also useful for direct-key benchmarks. It remains
 independent of value protection and ignores any Item ID root key.
+
+The defaults are explicit rather than implicitly secure:
+
+| Configuration | Key privacy from server | Value privacy from server | Active MITM protection |
+|---|---|---|---|
+| Default roots, no value key, verification off | No | No | No |
+| Verified TLS only | No | No | Yes |
+| Secret Item ID root and protected value | Yes | Yes | Only with server verification |
 
 ### 6.2 Pre-freeze TODOs
 
@@ -360,6 +377,9 @@ resolved before v1 is finalized:
 - **Typed-language integers:** decide whether convenience APIs accept the full
   mathematical `Integer` range, `i64`, or another bounded native range. This
   does not change canonical key encoding.
+- **Namespace identity:** stable v1 consumes provisioned namespace IDs.
+  `identity_domain_id` and lifecycle/discovery remain in the
+  [namespace WIP draft](../protocol/NAMESPACE.md).
 
 ### 6.3 Transport and server-authentication policy
 
@@ -378,6 +398,11 @@ hybrid key agreement. The current maintained profile requires
 `X25519MLKEM768`; classical-only X25519 fallback is not permitted. This is a
 key-agreement requirement, not a post-quantum certificate-signature
 requirement.
+
+The approved-group registry currently contains `X25519MLKEM768`. Maintained
+clients implement both transports and may use configured fallback. A
+third-party implementation may conform to one transport profile without
+implementing the other.
 
 Server certificate presentation is always part of the TLS handshake. Whether
 the client verifies the certificate chain and server identity is

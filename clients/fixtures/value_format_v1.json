@@ -1,6 +1,6 @@
 {
   "spec": "openkache/client-value-format",
-  "spec_revision": "draft-2026-08-19",
+  "spec_revision": "draft-2026-08-19.2",
   "vectors": [
     {
       "kind": "positive",
@@ -63,6 +63,48 @@
         "envelope_hex": "01018002000102030405060708090a0b7fd8f14f0fc6273ec0bcf077168001ca1364cd72"
       },
       "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "caller_owned_v0_passthrough",
+      "input": {
+        "representation": "caller_owned_v0",
+        "envelope_hex": "006170706c69636174696f6e"
+      },
+      "intermediate": {
+        "version_hex": "00"
+      },
+      "output": {
+        "envelope_hex": "006170706c69636174696f6e"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "selector_reserved_bits",
+      "input": {
+        "envelope_hex": "01c0"
+      },
+      "intermediate": {
+        "selector_hex": "c0"
+      },
+      "output": null,
+      "error": {
+        "category": "unsupported_selector"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "all_zero_value_key",
+      "input": {
+        "value_key_id": 1,
+        "value_key_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "invalid_value_key"
+      }
     },
     {
       "kind": "negative",

@@ -1,28 +1,17 @@
 # OpenKache Server Semantics (Draft)
 
-> **Status:** Draft `draft-2026-08-19`. This document defines server behavior that is required
+> **Status:** Draft `draft-2026-08-19.2`. This document defines server behavior that is required
 > for a useful implementation but is not additional request/response framing.
 
-The stable wire grammar and public operation layouts remain in
-[`SPEC.md`](SPEC.md). This document owns namespace identity-domain handling,
-expiration recovery, and eviction behavior that require server or operator
-state.
+The stable wire grammar remains in [`SPEC.md`](SPEC.md). This document owns
+expiration recovery and eviction behavior that requires server state.
+Namespace lifecycle is a separate [WIP draft](NAMESPACE.md).
 
 ## Namespace identity domain
 
-`namespace_id` is stable only within one deployment identity domain. A server
-MUST NOT reuse an ID for a different namespace after deletion, restart,
-recovery, or replica replacement within that domain. Durable allocator state
-and snapshots MUST preserve this rule.
-
-An operator restoring an independent snapshot fork MUST establish a new
-identity domain rather than silently merging allocator history. The restore
-procedure MUST document whether namespace IDs, namespace revisions, and item
-identity are preserved or intentionally remapped.
-
-Recreating a deleted namespace name creates a new namespace identity. A client
-MUST NOT assume that the old ID or old client-side key profile addresses the
-new namespace.
+Stable v1 consumes provisioned namespace IDs but does not define their
+lifecycle. `identity_domain_id`, restore behavior, and client-visible identity
+discovery remain TODOs in [`NAMESPACE.md`](NAMESPACE.md).
 
 ## TTL persistence and recovery
 
@@ -64,14 +53,15 @@ returns `NoCapacity` and makes no mutation. Namespace policy changes affect
 future writes; existing items retain the policy resolved at their own `SET`
 linearization point.
 
-## Operational contract
+## Operational metadata
 
-The server MUST expose enough operator metadata to distinguish:
+The future administration interface should expose:
 
 - the namespace identity-domain ID;
 - the clock-domain ID;
 - the restore policy; and
 - the namespace allocator epoch.
 
-These are operational identifiers, not stable frame fields. They do not expose
-or replace client-owned key profiles.
+This is a pre-freeze requirement, not yet a conforming API: the administration
+surface and field encodings remain undefined. These identifiers must not
+expose or replace client-owned key profiles.

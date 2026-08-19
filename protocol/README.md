@@ -6,7 +6,7 @@ and servers using the still-unpublished, evolving protocol-v1 draft profile.
 ## Purpose
 
 The crate owns transport identifiers and limits, canonical `vu128` helpers,
-item-ID bytes, opaque framing, reusable value/layout codecs, and the generated
+Item ID bytes, opaque framing, reusable value/layout codecs, and the generated
 numeric operation contract. Each modeled operation declares its request and
 response fields and an explicit compact request plan. Generation turns that
 model into operation metadata and the shared request layout consumed by
@@ -19,9 +19,10 @@ handlers, client methods, or API-family routing.
 The [wire protocol specification](SPEC.md) defines transport negotiation, frame
 bytes, stable operation semantics, limits, malformed input handling, and
 ambiguous operation outcomes. [Server semantics](SERVER_SEMANTICS.md) defines
-identity-domain, TTL recovery, and eviction obligations. [Experimental
-operations](EXPERIMENTAL.md) defines optional benchmark and internal
-operations. This README covers crate usage and implementation structure.
+TTL recovery and eviction obligations. [Namespace lifecycle](NAMESPACE.md) is
+a WIP draft outside v1. [Experimental operations](EXPERIMENTAL.md) defines the
+optional diagnostic and maintenance API. This README covers crate usage and
+implementation structure.
 
 ## Commands
 
@@ -46,7 +47,7 @@ Encode or decode an opaque response through the shared frame type:
 ```rust
 use openkache_protocol::{Response, Status};
 
-let response_bytes = [Status::Ok as u8, 0x04, b'P', b'O', b'N', b'G'];
+let response_bytes = [Status::Ok as u8, 0x00, 0x04, b'P', b'O', b'N', b'G'];
 let response = Response::decode(&response_bytes)?;
 assert_eq!(response.status, Status::Ok);
 ```

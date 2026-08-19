@@ -2,7 +2,7 @@
 
 ## Status
 
-This document is revision `draft-2026-08-19` of the draft OpenKache wire
+This document is revision `draft-2026-08-19.2` of the draft OpenKache wire
 protocol version 1. Version 1 has not been released or finalized. The requirements
 below describe the current intended wire contract and may change before
 finalization. Within this draft, an implementation conforms only when its
@@ -30,17 +30,17 @@ Version 1 specifies:
 - canonical unsigned `vu128` integers;
 - response frame layout;
 - opcode, flag, and status assignments;
-- namespace lifecycle, name, policy, and revision contracts;
+- the use of provisioned namespace identities;
 - item ID, value, expiration, eviction, and payload constraints;
 - request-ID correlation, lane ordering, and out-of-order responses;
 - malformed-frame handling and admission rejection;
 - mutation error outcomes.
 
-`EXPERIMENTAL_SYNC` is an experimental operation used by benchmark, internal,
-and other non-production tooling. It is not part of the public v1 operation
-conformance surface. Experimental operations are version-independent and may
-change or disappear without a protocol-version change. Its current contract
-is documented separately in [`EXPERIMENTAL.md`](EXPERIMENTAL.md).
+`STATS` and `EXPERIMENTAL_SYNC` are experimental operations. They are not part
+of the stable v1 operation conformance surface. A server MAY enable them with
+an `enable_experimental_api` deployment setting. Their current contracts are
+documented separately in [`EXPERIMENTAL.md`](EXPERIMENTAL.md). An implementation
+that does not enable the setting treats their opcodes as unassigned.
 
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
@@ -62,13 +62,12 @@ This document has four normative layers:
 
 1. **Wire grammar:** transport-independent frame bytes, `vu128`, field order,
    limits, and status assignments.
-2. **Public operation semantics:** `PING`, `GET`, `SET`, `DELETE`, `STATS`, and
-   namespace management.
-3. **Namespace semantics:** namespace identity, policy, revisions, TTL, and
-   eviction behavior. These are server behavior contracts carried by public
-   frames, not additional frame fields.
-4. **Server semantics:** namespace identity-domain, TTL recovery, and eviction
-   behavior detailed in [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
+2. **Stable operation semantics:** `PING`, `GET`, `SET`, and `DELETE`.
+3. **Item semantics:** provisioned namespace identity, TTL, and eviction
+   behavior carried by stable data frames.
+4. **Server semantics:** TTL recovery and eviction behavior detailed in
+   [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md). Namespace lifecycle remains a
+   WIP draft feature.
 
 The wire grammar is the compatibility boundary. A server implementation MAY
 organize the semantic layers differently, but MUST preserve the wire rules and
@@ -97,10 +96,10 @@ public operation behavior when claiming v1 conformance.
 - **Namespace**: A named server-wide collection of Item IDs with default
   expiration and eviction policies. A namespace is not nested under an
   account.
-- **Namespace ID**: The server-assigned positive 64-bit identity of a
-  namespace used in wire frames.
-- **Namespace revision**: The positive 64-bit version of a namespace's
-  policy, used for optimistic concurrency on policy updates and deletion.
+- **Namespace ID**: A provisioned positive 64-bit namespace identity used in
+  wire frames.
+- **Namespace identity**: A provisioned positive 64-bit namespace ID. Lifecycle
+  and revision rules are outside stable v1.
 - **Value**: An uninterpreted sequence of bytes stored for an item ID.
 - **Payload**: The uninterpreted response body. Its operation-specific meaning
   is defined by this document.
@@ -129,6 +128,10 @@ transport ID, lane ID, or transport-specific multiplexing header. TCP
 segments, TLS records, socket reads, and socket writes have no frame-boundary
 meaning. TCP plaintext is not a conforming v1 transport.
 
+OpenKache servers and maintained clients MUST support both profiles. A
+third-party implementation MAY implement one profile and claim conformance to
+that profile, but MUST identify which profile it supports.
+
 Both bindings use the same 11-byte ASCII ALPN identifier:
 
 ```text
@@ -152,10 +155,14 @@ minimum-version rule protects a client from an authenticated endpoint that
 deliberately selects an older protocol.
 
 Every conforming transport MUST use TLS 1.3 and an approved
-post-quantum/traditional hybrid key agreement. The v1 approved set currently
-contains `X25519MLKEM768`, which every v1 implementation MUST support.
-Classical-only X25519 fallback is not permitted. Future approved hybrid groups
-may extend this set without changing frame bytes.
+post-quantum/traditional hybrid key agreement. The approved-group registry for
+this revision contains `X25519MLKEM768`, which every v1 transport
+implementation MUST support. Classical-only fallback is not permitted.
+Additional groups may be registered only when they provide at least the
+classical and post-quantum security strength of the mandatory group. A peer
+with no mutually supported approved group MUST fail the handshake. Every
+registry revision MUST be published with the protocol revision so deployments
+can pin it; registry changes do not change frame bytes.
 
 Protocol v1 does not require a post-quantum certificate signature. The server
 certificate signature remains deployment-configurable because certificate
@@ -243,9 +250,7 @@ The following rules apply:
 8. After a response, the lane MAY continue carrying requests while both
    directions remain open.
 9. A client MAY use multiple lanes concurrently. Requests on different lanes
-   have no client-visible relative ordering guarantee. Namespace policy update
-   and deletion define only their operation-specific atomic race rules; they do
-   not create a general cross-lane response or execution order.
+   have no client-visible relative ordering guarantee.
 10. A lane request direction may be closed only by the transport-specific
     half-close rules below. After a valid request-direction close, the server
     MUST admit no further requests and MUST complete responses for requests
@@ -255,9 +260,9 @@ The following rules apply:
 
 Only client-initiated bidirectional QUIC streams carry protocol frames.
 Server-initiated unidirectional streams have no protocol meaning and MUST be
-consumed and discarded by the client without parsing protocol frames. The
-server MUST NOT initiate a bidirectional protocol stream; a client that
-receives one MUST reset it without parsing protocol frames.
+rejected with `STOP_SENDING` without consuming their body. The server MUST NOT
+initiate a bidirectional protocol stream; a client that receives one MUST reset
+it without parsing protocol frames.
 
 QUIC stream read and write boundaries have no protocol meaning. A frame MAY be
 split across any number of reads or writes, and one read MAY contain bytes from
@@ -297,7 +302,7 @@ truncated/malformed frame. Bytes received after request-direction
 
 TCP FIN/EOF without TLS `close_notify` is an unclean transport failure even
 when it happens to coincide with a frame boundary. TCP RST, a TLS error alert,
-and any other unclean TLS close terminate the lane. Outstanding mutations
+and any other unclean TLS close terminate the TLS connection. Outstanding mutations
 without responses have an `unknown` outcome.
 
 The TLS-over-TCP lane state transitions are:
@@ -318,14 +323,14 @@ retry or deduplicate an earlier request.
 
 If a receiver detects malformed framing, it MUST stop processing the affected
 connection. On QUIC it closes the connection with application error code
-`0x01` (`MALFORMED_FRAME`). On TLS-over-TCP it closes the TLS/TCP lane without
-an error response. The receiver MUST NOT scan for a possible next frame. A
+`0x01` (`MALFORMED_FRAME`). On TLS-over-TCP it closes the TLS/TCP connection
+without an error response. The receiver MUST NOT scan for a possible next frame. A
 complete frame whose fields are well-delimited but fail operation validation
 is not malformed framing; it MAY receive the applicable error response.
 
 `0x01` (`MALFORMED_FRAME`) is the QUIC application error code for a
 connection-fatal framing or response-meaning failure. TLS-over-TCP reports the
-same condition by closing the lane because it has no QUIC application error
+same condition by closing the connection because it has no QUIC application error
 code.
 
 The request ID is a correlation token only. It is not a nonce, ordering value,
@@ -403,7 +408,6 @@ the canonical encoding.
 | Field | Limit |
 |---|---:|
 | Namespace ID | exactly 8 bytes; numeric value `1..=2^64 - 1` |
-| Namespace name | `0..=255` UTF-8 bytes; zero is a valid empty name |
 | Item ID | `0..=32` bytes |
 | Request ID | canonical `vu128`; `0..=2^64 - 1`; at most 9 bytes |
 | `SET` request value | `0..=67,108,864` bytes |
@@ -419,12 +423,10 @@ applying a mutation.
 The largest valid `SET` request is 67,108,929 bytes: an opcode, a nine-byte
 maximum `request_id`, an eight-byte `namespace_id`, one flags byte, one
 `item_id_len` byte, a four-byte canonical `value_len` for 64 MiB, a nine-byte
-maximum TTL, a 32-byte Item ID, and a 64 MiB value. The largest valid
-`NAMESPACE_OPEN` request is 277 bytes: an opcode, a nine-byte maximum
-`request_id`, two flag/length bytes, a 255-byte name, and a ten-byte maximum
-namespace policy. The conservative `MAX_REQUEST_FRAME_BYTES` receive bound is
-67,108,934 bytes; it reserves the maximum nine bytes for `request_id`, TTL,
-and `value_len` while delimiting a frame.
+maximum TTL, a 32-byte Item ID, and a 64 MiB value. The conservative
+`MAX_REQUEST_FRAME_BYTES` receive bound is 67,108,934 bytes; it reserves the
+maximum nine bytes for `request_id`, TTL, and `value_len` while delimiting a
+frame.
 
 The largest valid response is 67,108,878 bytes: a status byte, a nine-byte
 maximum `request_id`, the four-byte canonical `payload_len` for 64 MiB, and a
@@ -448,9 +450,7 @@ fixed-width `status` first, followed by the variable-width request ID.
 ```text
 request = opcode:u8 | request_id:vu128 | operation_fields
 
-operation_fields =
-    ping | get | set | delete | stats |
-          namespace_open | namespace_update_policy | namespace_delete
+operation_fields = ping | get | set | delete
 
 ping                     = (empty)
 get                      = namespace_id:u64be |
@@ -461,13 +461,6 @@ set                      = namespace_id:u64be | set_flags:u8 |
                            value:value_len
 delete                   = namespace_id:u64be |
                            item_id_len:u8 | item_id:item_id_len
-stats                    = namespace_id:u64be
-namespace_open           = open_flags:u8 | name_len:u8 |
-                           name:name_len | [namespace_policy]
-namespace_update_policy  = namespace_id:u64be |
-                           expected_revision:u64be | namespace_policy
-namespace_delete         = delete_flags:u8 | namespace_id:u64be |
-                           expected_revision:u64be
 ```
 
 `request_id` is a canonical `vu128` field with a maximum encoded width of
@@ -486,34 +479,29 @@ after reading only the bounded request metadata.
 `namespace_id` is present in every namespace-scoped request and is always
 encoded before the operation-specific fields. Operations that carry an Item ID
 encode its `item_id_len` and then exactly that many Item ID bytes.
-Namespace-management requests use the fixed-width `name_len:u8` and
-`expected_revision:u64be` fields defined below.
 
 `u64be` means one fixed eight-byte unsigned integer in network byte order
 (most-significant byte first). It is not a `vu128` field and has no alternate
 or shorter encoding.
 
-Every other opcode is unassigned. A server receiving an unassigned opcode
-MUST treat the request as malformed and terminate the connection without a
-response. Because an unassigned opcode has no defined body layout, the server
-MUST NOT scan for a possible next frame.
+Opcodes `05` and `06` are not stable v1 operations. A server with
+`enable_experimental_api` may recognize their current experimental layouts.
+Otherwise they are unassigned and malformed. See
+[`EXPERIMENTAL.md`](EXPERIMENTAL.md).
 
-Opcode `06` is unassigned in stable v1. Experimental operations are defined
-outside stable conformance in [`EXPERIMENTAL.md`](EXPERIMENTAL.md).
+Every opcode not assigned above or enabled by that experimental setting is
+unassigned. A server receiving one MUST terminate the connection without a
+response and MUST NOT scan for a possible next frame.
 
 ### Opcodes
 
 <!-- openkache:generated-protocol-operation-table:start -->
-| Opcode | Name | Request layout | Response payload | Request codecs | Response codecs |
-|---|---|---|---|---|---|
-| `01` | `PING` | opcode + request ID | opaque payload | — | — |
-| `02` | `GET` | opcode + request ID + namespaceId (8 bytes) + u8 itemId length + itemId | opaque payload | `raw_bytes` | — |
-| `03` | `SET` | opcode + request ID + namespaceId (8 bytes) + packed(condition, expirationMode, evictionMode) + u8 itemId length + vu128 value length + if expirationMode=explicit_ttl: vu128(ttlMilliseconds) + itemId + value | empty | `raw_bytes` | — |
-| `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 itemId length + itemId | empty | `raw_bytes` | — |
-| `05` | `STATS` | opcode + request ID + namespaceId (8 bytes) | opaque payload | — | — |
-| `07` | `NAMESPACE_OPEN` | opcode + request ID + packed(createIfMissing) + u8 length + name + if createIfMissing=true: packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + request ID + namespaceId (8 bytes) + expectedRevision (8 bytes) + packed(policy.defaultExpiration, policy.expirationOverride, policy.defaultEviction, policy.evictionOverride) + if policy.defaultExpiration=fixed_ttl: vu128(policy.defaultTtlMilliseconds) | opaque payload | — | — |
-| `09` | `NAMESPACE_DELETE` | opcode + request ID + constant 0x00 + namespaceId (8 bytes) + expectedRevision (8 bytes) | empty | — | — |
+| Opcode | Name | Request layout | Response payload |
+|---|---|---|---|
+| `01` | `PING` | opcode + request ID | `PONG` |
+| `02` | `GET` | opcode + request ID + namespace ID + Item ID | opaque value or empty |
+| `03` | `SET` | opcode + request ID + namespace ID + flags + lengths + optional TTL + Item ID + value | empty |
+| `04` | `DELETE` | opcode + request ID + namespace ID + Item ID | empty |
 <!-- openkache:generated-protocol-operation-table:end -->
 
 During this pre-freeze migration, this document is the source of truth and the
@@ -525,10 +513,7 @@ MUST fail when the finalized model and table differ.
 ### `SET` flags
 
 `SET` carries one flags byte containing three independent two-bit selections.
-`NAMESPACE_OPEN` and `NAMESPACE_DELETE` also carry operation-specific flags;
-their layouts are defined in [Namespace management flags and
-revisions](#namespace-management-flags-and-revisions). Other request layouts
-have no flags byte.
+Other stable request layouts have no flags byte.
 
 | Bits | Mask | Values |
 |---:|---:|---|
@@ -544,8 +529,8 @@ described in [Namespace policy](#namespace-policy).
 
 An expiration-mode value selects whether the following `ttl_ms` field is
 present. Therefore an invalid expiration-mode value makes the request shape
-undecidable and is a malformed request: the receiver MUST close the affected
-lane without a response. Invalid condition, eviction, or upper flag bits do
+undecidable and is a malformed request: the receiver MUST close the connection
+without a response. Invalid condition, eviction, or upper flag bits do
 not change the request shape; once the complete frame is delimited, they MAY
 receive `InvalidRequest`.
 
@@ -555,229 +540,31 @@ not accept it based on a local extension.
 
 ### Namespace
 
-The wire protocol addresses a namespace by its server-wide name. Namespace
-management uses the same request/response protocol as data operations; it does
-not require a separate control-plane transport.
-
 `namespace_id` is a fixed eight-byte `u64be` in the numeric range
-`1..=2^64 - 1`. The server assigns it; it is an opaque, stable identity within
-the server's **namespace identity domain**. The domain is deployment state,
-not a wire field. Within one domain, a server MUST NOT reuse an ID for a
-different namespace after deletion, restart, recovery, or replica replacement.
-Durable allocator state and snapshots MUST preserve that rule. An operator that
-restores an independent fork or snapshot as a new deployment MUST establish a
-new identity domain rather than merging its allocator history invisibly.
-`0` is invalid and MUST be rejected. The ID is carried per request rather
-than bound to a lane, so a lane may be reused for different namespaces.
-Clients do not allocate namespace IDs; they treat the server-returned ID as
-opaque and MUST NOT synthesize or recycle one.
+`1..=2^64 - 1`. It identifies a namespace provisioned outside the stable v1
+data protocol. Zero is invalid. `GET`, `SET`, and `DELETE` carry the ID per
+request, so one lane may address multiple namespaces. An item is identified by
+the pair `(namespace_id, item_id)`.
 
-The wire protocol has no default namespace concept. A namespace ID of zero is
-never a selector.
-
-The `NAMESPACE_OPEN` name field has a one-byte length:
-
-```text
-name_len:u8 | name:name_len
-```
-
-`name_len = 0` is the valid empty namespace name and carries no name bytes.
-It may be used with either value of `CreateIfMissing`.
-
-For any namespace name, `name_len` MUST be `0..=255` and `name` MUST be valid
-UTF-8. The length is the UTF-8 byte count, not the number of Unicode scalar
-values. Names are compared by their exact UTF-8 bytes, are case-sensitive,
-and are not case-folded or Unicode-normalized. The wire protocol imposes no
-path, shell, or cloud-provider naming profile. The empty name is an ordinary
-namespace name. Namespace names are unique within one server.
-
-Namespace ownership and authorization are deployment concerns, not namespace
-identity rules. A deployment MAY designate an administrative owner and MAY
-grant other authenticated accounts access through an ACL, but those identities
-and grants are not fields in a v1 frame. For every account authorized to use a
-namespace, the same name resolves to the same server-wide namespace ID and the
-same `(namespace_id, item_id)` data. Sharing access never creates an
-account-local namespace or changes the namespace name or ID.
-
-These rules are protocol rules, not cloud-provider resource-name rules. The
-wire protocol does not require a narrower cloud-portable naming profile.
-
-`GET`, `SET`, `DELETE`, and `STATS` are namespace-scoped and carry a
-`namespace_id`. `PING` is connection-scoped and carries none. `NAMESPACE_OPEN`
-resolves a name to a namespace descriptor and can create a missing named
-namespace. `NAMESPACE_UPDATE_POLICY` changes a namespace policy with an
-optimistic-concurrency check. `NAMESPACE_DELETE` removes a named namespace
-identity with an optimistic-concurrency check. Any namespace, including the
-empty-name namespace, may be deleted once its deletion barrier confirms that
-it contains no live items.
-Recreating a deleted name, if allowed by the deployment, creates a new
-namespace identity and therefore receives a new `namespace_id`.
-
-`NAMESPACE_OPEN`, `NAMESPACE_UPDATE_POLICY`, and `NAMESPACE_DELETE` for one
-namespace name are serialized for name resolution and lifecycle changes.
-`NAMESPACE_OPEN` resolves or creates the name atomically. Requests that address
-a namespace ID are ordered only by the lane rules and by the atomic
-operation-specific condition they use; v1 does not require one global
-cross-lane order for ordinary data operations.
-
-An item is identified by the pair `(namespace_id, item_id)`. The same Item ID
-bytes and length in two namespaces denote two independent items.
-
-### Namespace management flags and revisions
-
-`NAMESPACE_OPEN` has this flag layout:
-
-| Bit | Mask | Meaning |
-|---:|---:|---|
-| 0 | `01` | `CreateIfMissing` |
-| 1–7 | `FE` | Invalid in v1; MUST be zero |
-
-When `CreateIfMissing` is clear, the request contains no
-`namespace_policy` and only resolves an existing namespace. When it is set,
-the request MUST contain one `namespace_policy`. If the named namespace
-already exists, the supplied policy is validated but MUST NOT overwrite the
-existing policy. A newly created namespace starts at revision `1`.
-
-`NAMESPACE_DELETE` has this flag layout:
-
-| Bits | Mask | Values |
-|---:|---:|---|
-| 0–1 | `03` | `00` = `IfEmpty`; `01`–`11` = invalid in v1 |
-| 2–7 | `FC` | Invalid in v1; MUST be zero |
-
-Version 1 accepts only the `IfEmpty` wire value. `IfEmpty` means that no live
-items remain at the delete linearization point. The server MUST serialize the
-delete with namespace lifecycle operations, check the revision and live-item
-count atomically, and either remove the namespace identity or return
-`NamespaceNotEmpty` without changing it. Requests that address the deleted
-namespace ID after a successful deletion receive `NamespaceNotFound`.
-`NAMESPACE_OPEN` without `CreateIfMissing` does the same, while
-`NAMESPACE_OPEN` with `CreateIfMissing` may atomically create a new namespace
-identity for the name.
-
-A data mutation concurrent with deletion linearizes either before or after the
-delete check. If it linearizes before, its live item participates in the
-`IfEmpty` result. If deletion succeeds first, the mutation returns
-`NamespaceNotFound` and makes no change. This atomic race rule does not require
-draining all lanes or assigning every namespace operation one global sequence.
-Namespace IDs are never reused within the persistent deployment lifetime.
-
-`revision` and `expected_revision` are fixed eight-byte `u64be` values, not
-`vu128` fields. A namespace revision is positive, starts at `1`, and increases
-by exactly one for every successful policy update. `NAMESPACE_UPDATE_POLICY`
-and `NAMESPACE_DELETE` require a non-zero `expected_revision` equal to the
-current revision. A mismatch returns `Conflict` and makes no change. Revision
-values MUST NOT wrap; an update that would overflow the revision range fails
-without changing the policy.
-
-`NAMESPACE_OPEN` returns `Ok` with the existing namespace descriptor, or
-`Created` with the newly created descriptor. A missing namespace without
-`CreateIfMissing` returns `NamespaceNotFound`. `NAMESPACE_UPDATE_POLICY`
-returns `Ok` with the descriptor containing the incremented revision.
-`NAMESPACE_DELETE` returns `Deleted` with an empty payload on success.
+Stable v1 does not define namespace creation, lookup by name, policy update, or
+deletion. The previous lifecycle proposal remains as a WIP draft in
+[`NAMESPACE.md`](NAMESPACE.md) and is not an implementation requirement.
+How a client discovers a provisioned namespace ID is deployment-specific.
 
 ### Namespace policy
 
 A namespace has a default expiration policy, a default eviction policy, and an
 independent rule for whether each default may be overridden by an item request.
+The namespace is provisioned with either `NoExpiry` or a positive `FixedTtl`,
+and with either `Evictable` or `EvictionProtected`. Neither default may be
+`Inherit`. The provisioning interface is outside stable v1.
 
-```rust
-enum ExpirationMode {
-    Inherit,       // use the namespace default
-    NoExpiry,      // no TTL-based expiration
-    ExplicitTtl,   // SET carries ttl_ms
-}
-
-enum EvictionMode {
-    Inherit,            // use the namespace default
-    Evictable,          // eligible for the namespace eviction algorithm
-    EvictionProtected,  // never selected for capacity eviction
-}
-
-enum OverridePolicy {
-    Allowed,
-    Disallowed,
-}
-
-enum ExpirationDefault {
-    NoExpiry,
-    FixedTtl { ttl_ms: u64 },
-}
-
-enum EvictionDefault {
-    Evictable,
-    EvictionProtected,
-}
-
-enum Condition {
-    Any,
-    IfAbsent,
-    IfPresent,
-}
-
-struct SetOptions {
-    condition: Condition,
-    expiration_mode: ExpirationMode,
-    ttl_ms: Option<u64>, // required iff expiration_mode == ExplicitTtl
-    eviction_mode: EvictionMode,
-}
-
-struct NamespacePolicy {
-    default_expiration: ExpirationDefault,
-    expiration_override: OverridePolicy,
-    default_eviction: EvictionDefault,
-    eviction_override: OverridePolicy,
-}
-```
-
-The wire encoding of `NamespacePolicy` is:
-
-```text
-namespace_policy = policy_flags:u8 | [default_ttl_ms:vu128]
-```
-
-The `policy_flags` byte has this layout:
-
-| Bits | Mask | Values |
-|---:|---:|---|
-| 0–1 | `03` | `00` = `NoExpiry`; `01` = `FixedTtl`; `10`–`11` = invalid in v1 |
-| 2 | `04` | `0` = expiration `Disallowed`; `1` = expiration `Allowed` |
-| 3 | `08` | `0` = default `Evictable`; `1` = default `EvictionProtected` |
-| 4 | `10` | `0` = eviction `Disallowed`; `1` = eviction `Allowed` |
-| 5–7 | `E0` | Invalid in v1; MUST be zero |
-
-`default_ttl_ms` is present exactly when the default expiration bits select
-`FixedTtl`. It is a canonical positive `vu128` count of milliseconds and MUST
-be absent for `NoExpiry`. A receiver MUST reject a policy with an invalid bit,
-an invalid default value, an unexpected TTL field, or a zero TTL.
-
-Namespace descriptors returned by `NAMESPACE_OPEN` and
-`NAMESPACE_UPDATE_POLICY` have this payload layout:
-
-```text
-namespace_descriptor = namespace_id:u64be |
-                       revision:u64be |
-                       namespace_policy
-```
-
-`ExpirationDefault` is either `NoExpiry` or a positive fixed TTL. Its fixed
-TTL is encoded in the namespace configuration, not in a request. `EvictionDefault`
-is either `Evictable` or `EvictionProtected`; neither namespace default may be
-`Inherit`.
-
-`SET` carries the item-level `ExpirationMode` and `EvictionMode` selections
-in its flags. `Inherit` resolves to the namespace default. An explicit item
-selection is accepted only when the corresponding namespace
-`OverridePolicy` is `Allowed`; otherwise the server returns `PolicyConflict`
-and makes no mutation. A successful `SET` resolves both policies at its
-mutation linearization point and stores the resolved item metadata. Later
-namespace policy changes do not retroactively change existing items.
-
-Namespace policy changes are future-write-only. In particular, changing an
-override from `Allowed` to `Disallowed` does not rewrite or invalidate existing
-items that were stored with an explicit policy. It only rejects future `SET`
-requests that select that explicit override. An inherited policy is resolved
-against the namespace policy current at the `SET` linearization point.
+`SET` carries the item-level `ExpirationMode` and `EvictionMode` selections in
+its flags. `Inherit` resolves to the provisioned namespace default. An explicit
+item selection is accepted only when that override is allowed by the
+provisioned policy; otherwise the server returns `PolicyConflict` and makes no
+mutation. A successful `SET` resolves both policies at its
+mutation linearization point and stores the resolved item metadata.
 
 On the wire, `ttl_ms` MUST be present exactly when
 `expiration_mode == ExplicitTtl` and MUST be positive. It MUST be absent for
@@ -803,9 +590,8 @@ or a hash algorithm. `GET`, `SET`, and `DELETE` carry `item_id_len:u8`
 followed by exactly `item_id_len` Item ID bytes.
 
 Servers MUST compare both the Item ID length and every Item ID byte.
-`PING` and `STATS` carry no Item ID. The namespace and
-Item ID pair is
-the cache identity; an Item ID is not a server-generated identifier.
+`PING` carries no Item ID. The namespace and Item ID pair is the cache
+identity; an Item ID is not a server-generated identifier.
 
 The mapping from an application key to an Item ID is client-owned and is
 specified in the [Client Key Format](../clients/KEY_FORMAT.md). It does not add
@@ -855,9 +641,8 @@ its TTL is not applied.
 
 Persistence, clock, snapshot, and recovery requirements are defined in
 [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md). Physical deletion remains an
-implementation detail; logical presence, conditional checks, and
-`NAMESPACE_DELETE` live-item counting MUST follow the deadline rule even when
-cleanup is deferred.
+implementation detail; logical presence and conditional checks follow the
+deadline rule even when cleanup is deferred.
 
 ## Operation semantics
 
@@ -906,88 +691,6 @@ item_id:item_id_len`.
 - Missing, expired, already deleted, or evicted: `NotFound` with an empty
   payload.
 
-### `STATS`
-
-`STATS` has the request layout `05 | request_id:vu128 | namespace_id:u64be`.
-
-- Authorized success: `Ok` with an implementation-defined diagnostic payload.
-- Unauthorized: `Forbidden` with an optional diagnostic payload.
-
-The diagnostic payload is opaque to the protocol and is intended for
-operators. A server MAY use UTF-8 JSON, but v1 does not require a particular
-format or member. Clients MUST NOT parse diagnostic fields as a stable
-programmatic interface. `namespace_id` scopes the request, checks that the
-namespace exists for an authorized request, and provides the authorization
-boundary. The payload remains subject to a server-selected diagnostic limit
-that MUST NOT exceed the 64 MiB response limit. If it cannot fit, the server
-MUST return `InternalError`; it MUST NOT truncate an undefined format or emit
-an oversized response.
-
-### `NAMESPACE_OPEN`
-
-`NAMESPACE_OPEN` has the request layout:
-
-```text
-07 | request_id:vu128 | open_flags:u8 | name_len:u8 |
-name:name_len | [namespace_policy]
-```
-
-`name_len = 0` resolves the empty-name namespace. A non-empty name resolves the
-matching server-wide namespace. With `CreateIfMissing` set, an absent name
-(including the empty name) is created using the supplied policy.
-Existing names are never overwritten by `CreateIfMissing`.
-
-- Existing namespace: `Ok` with a `namespace_descriptor` payload.
-- Newly created namespace: `Created` with a `namespace_descriptor` payload.
-- Missing name without `CreateIfMissing`: `NamespaceNotFound` with an empty
-  payload.
-
-The returned descriptor contains the server-assigned ID, current revision, and
-effective namespace policy. The response does not repeat the name because the
-client already supplied it.
-
-### `NAMESPACE_UPDATE_POLICY`
-
-`NAMESPACE_UPDATE_POLICY` has the request layout:
-
-```text
-08 | request_id:vu128 | namespace_id:u64be | expected_revision:u64be |
-namespace_policy
-```
-
-The server checks namespace existence and `expected_revision`, then atomically
-replaces the namespace policy and increments the revision. Authorization is
-deployment-specific because v1 has no owner or account field. A successful
-response is `Ok` with the updated `namespace_descriptor` payload. A revision
-mismatch returns `Conflict` and makes no policy change.
-
-`NAMESPACE_UPDATE_POLICY` is serialized with other lifecycle changes for the
-same namespace name. The existence check, `expected_revision` check, policy
-replacement, and revision increment are one atomic action at the policy
-update's linearization point. A concurrent `SET` resolves inherited policy at
-its own mutation linearization point; it is not required to participate in a
-global cross-lane namespace sequence.
-
-Policy changes apply only to future `SET` operations. Existing items retain the
-expiration deadline and resolved eviction policy that were stored when they
-were written.
-
-### `NAMESPACE_DELETE`
-
-`NAMESPACE_DELETE` has the request layout:
-
-```text
-09 | request_id:vu128 | delete_flags:u8 | namespace_id:u64be |
-expected_revision:u64be
-```
-
-The only valid v1 `delete_flags` value is `00` (`IfEmpty`). The server applies
-the namespace deletion barrier defined above, checks the revision and live-item
-count, and removes the namespace identity only when the namespace is empty.
-Authorization is deployment-specific because v1 has no owner or account field.
-A successful deletion returns `Deleted` with an empty payload. There is no
-special default-namespace exception in v1.
-
 ## Response frames
 
 Every response has this layout:
@@ -1024,22 +727,20 @@ payload/status mismatch is malformed and requires connection close with
 |---:|---|---|
 | `00` | `Ok` | Operation succeeded and may carry a payload |
 | `01` | `NotFound` | The requested live item does not exist |
-| `02` | `Created` | `SET` created a logical item or `NAMESPACE_OPEN` created a namespace |
+| `02` | `Created` | `SET` created a logical item |
 | `03` | `Replaced` | `SET` replaced a live item |
-| `04` | `Deleted` | `DELETE` removed a live item or `NAMESPACE_DELETE` removed a namespace |
+| `04` | `Deleted` | `DELETE` removed a live item |
 | `05` | `NotStored` | A conditional `SET` made no change |
 | `80` | `InvalidRequest` | A complete, well-delimited request has invalid namespace ID, flags, lengths, TTL, or semantics |
-| `82` | `TooLarge` | A declared or actual item exceeds a wire or server limit |
+| `82` | `TooLarge` | A validly bounded item exceeds a server-local limit |
 | `83` | `Overloaded` | The server temporarily lacks admission capacity |
 | `85` | `Forbidden` | The authenticated identity is not authorized |
 | `86` | `InternalError` | The server could not complete the operation |
 | `87` | `NoCapacity` | The write cannot be admitted without evicting protected items |
-| `88` | `PolicyConflict` | The request selects an item policy disallowed by the namespace |
-| `89` | `Conflict` | `expected_revision` does not match the current namespace revision |
-| `8A` | `NamespaceNotFound` | The requested namespace does not exist |
-| `8B` | `NamespaceNotEmpty` | `IfEmpty` deletion found one or more live items at its barrier |
+| `88` | `PolicyConflict` | The request selects an item policy disallowed by the provisioned namespace |
+| `8A` | `NamespaceNotFound` | The provisioned namespace does not exist |
 
-Statuses `06` through `7F`, `81`, `84`, and `8C` through `FF` are unassigned. A
+Statuses `06` through `7F`, `81`, `84`, `89`, `8B` through `FF` are unassigned. A
 client MUST treat an unassigned status as a malformed response and close the
 connection.
 
@@ -1061,11 +762,9 @@ complete rejected body before sending the response, and the lane MAY continue
 afterward. If it cannot preserve the next frame boundary, it MUST close the
 connection without sending an error response.
 
-For a mutating operation (`SET`, `DELETE`, namespace creation, policy update,
-or namespace deletion), an error response MUST guarantee that the mutation did
-not take effect. If the server cannot establish that guarantee, it MUST close
-the connection without an error response, leaving the operation outcome
-unknown.
+For `SET` or `DELETE`, an error response MUST guarantee that the mutation did
+not take effect. Otherwise the server MUST close the connection without an
+error response, leaving the operation outcome unknown.
 
 ## Response contract by request
 
@@ -1077,29 +776,21 @@ For a valid request, the following are the domain success and result statuses:
 | `GET` | `Ok`, `NotFound` | Hit: exact value; miss: empty |
 | `SET` | `Created`, `Replaced`, `NotStored` | Always empty |
 | `DELETE` | `Deleted`, `NotFound` | Always empty |
-| `STATS` | `Ok` | Opaque diagnostic |
-| `NAMESPACE_OPEN` | `Ok`, `Created` | Namespace descriptor |
-| `NAMESPACE_UPDATE_POLICY` | `Ok` | Updated namespace descriptor |
-| `NAMESPACE_DELETE` | `Deleted` | Always empty |
 
 Common error statuses MAY be returned only when their stated condition applies:
 
 | Status | Applicable requests |
 |---|---|
 | `InvalidRequest` | Any complete, well-delimited request with invalid semantics |
-| `TooLarge` | `SET` whose value exceeds a wire or server limit |
+| `TooLarge` | `SET` whose wire-valid value exceeds a server-local limit |
 | `Overloaded` | Any request rejected before its operation begins |
 | `Forbidden` | Any request rejected by deployment authorization |
 | `InternalError` | Any request known to have failed without taking effect |
 | `NoCapacity` | `SET` that cannot be admitted without evicting protected items |
 | `PolicyConflict` | `SET` that selects a disallowed item-policy override |
-| `Conflict` | `NAMESPACE_UPDATE_POLICY` and `NAMESPACE_DELETE` revision mismatch |
-| `NamespaceNotFound` | Any public request addressing a missing namespace |
-| `NamespaceNotEmpty` | `NAMESPACE_DELETE` whose deletion barrier finds live items |
+| `NamespaceNotFound` | `GET`, `SET`, or `DELETE` addressing a missing namespace |
 
-`NamespaceNotFound` includes `GET`, `SET`, `DELETE`, and `STATS`, as well as
-namespace-management operations that address a missing namespace. These
-domain and common errors guarantee that the requested mutation was not
+These domain and common errors guarantee that the requested mutation was not
 applied.
 
 The protocol exposes effect guarantees, not an automatic retry policy:
@@ -1107,7 +798,7 @@ The protocol exposes effect guarantees, not an automatic retry policy:
 | Status | Effect guarantee |
 |---|---|
 | `Overloaded` | The operation did not begin. |
-| `InvalidRequest`, `PolicyConflict`, `Conflict` | No effect; the unchanged request remains invalid or conflicting. |
+| `InvalidRequest`, `PolicyConflict` | No effect; the unchanged request remains invalid or conflicting. |
 | `NamespaceNotFound` | No effect; namespace or application state must change before the request can succeed. |
 | `InternalError` | No externally visible effect is known to have occurred. |
 
@@ -1125,16 +816,14 @@ A conforming receiver MUST validate, in order where practical:
 3. the presence and fixed eight-byte encoding of a namespace ID for
    namespace-scoped requests;
 4. the numeric namespace ID range;
-5. fixed-width namespace flags, name length, and revision fields;
-6. the presence of `item_id_len` and the `0..=32` Item ID length limit;
-7. complete and canonical `vu128` fields;
-8. the presence and value of operation flags;
-9. field-specific length and UTF-8 limits;
-10. the operation-specific layout;
-11. TTL presence, canonical encoding, and positive value;
-12. namespace-policy encoding and item-policy override rules;
-13. exactly `item_id_len` Item ID bytes when present;
-14. the exact remaining `SET` value length.
+5. the presence of `item_id_len` and the `0..=32` Item ID length limit;
+6. complete and canonical `vu128` fields;
+7. the presence and value of operation flags;
+8. the operation-specific layout;
+9. TTL presence, canonical encoding, and positive value;
+10. item-policy override rules;
+11. exactly `item_id_len` Item ID bytes when present;
+12. the exact remaining `SET` value length.
 
 For a request, a receiver parses the following prefix before reading a `SET`
 value body:
@@ -1150,29 +839,15 @@ value_len
 item_id:item_id_len
 ```
 
-For namespace-management requests, the bounded prefix is:
-
-```text
-NAMESPACE_OPEN:
-    opcode | request_id | open_flags | name_len | name | [namespace_policy]
-NAMESPACE_UPDATE_POLICY:
-    opcode | request_id | namespace_id | expected_revision | namespace_policy
-NAMESPACE_DELETE:
-    opcode | request_id | delete_flags | namespace_id | expected_revision
-```
-
 The first prefix is the `SET` prefix; `GET` and `DELETE` use
 `opcode | request_id | namespace_id | item_id_len | item_id:item_id_len` and
-have no value body.
-The brackets indicate fields selected by the `SET` expiration policy or by
-`NAMESPACE_OPEN` with `CreateIfMissing`. The namespace ID and revision occupy
-eight bytes whenever present. `name_len = 0` is a valid empty name; every name
-must satisfy the UTF-8 and name rules above.
+have no value body. Brackets indicate the field selected by the `SET`
+expiration policy.
 
 A receiver MUST enforce the 64 MiB wire ceiling and any smaller server limit
 before allocating or reading the value body. A `value_len` greater than the
 64 MiB wire ceiling is outside the v1 frame contract and MUST terminate the
-affected lane without a response; the receiver MUST NOT wait for or discard
+connection without a response; the receiver MUST NOT wait for or discard
 the declared unbounded body. A value within the wire ceiling but above a
 server-local operational limit MAY receive `TooLarge` when the receiver can
 consume exactly that bounded body and preserve the next frame boundary.
@@ -1199,7 +874,7 @@ operation and all declared lengths. For `SET`, the parser MUST validate
 reading the value body. A declared size above the wire ceiling is terminal
 without a response. A declared size above a server-local limit MAY enter
 `TooLarge` only when the parser can consume exactly the bounded body and
-preserve the next frame boundary; otherwise it MUST terminate the lane as
+preserve the next frame boundary; otherwise it MUST terminate the connection as
 malformed/truncated according to the transport rules. A body that ends before
 the declared length is always malformed. The parser MUST never search for an
 opcode inside a declared body.
@@ -1389,49 +1064,11 @@ For namespace ID `7`, an empty Item ID, and an empty value:
 This is an unconditional `SET` inheriting both namespace policies, with
 an empty Item ID, no TTL field, and `value_len = 0`.
 
-### `DELETE` and `STATS`
+### `DELETE`
 
 ```text
-04 00 00 00 00 00 00 00 00 07 03 11 22 33 # DELETE
-05 00 00 00 00 00 00 00 00 07             # STATS
+04 00 00 00 00 00 00 00 00 07 03 11 22 33
 ```
-
-### Namespace management
-
-Resolve the empty-name namespace:
-
-```text
-07 00 00 00
-```
-
-This is `NAMESPACE_OPEN` with request ID `0`, `open_flags = 00`, and
-`name_len = 00`. It has no name or policy bytes; the empty name is the
-namespace being resolved.
-
-Create or open the named namespace `cache`:
-
-```text
-07 00 01 05 63 61 63 68 65 [namespace_policy]
-```
-
-`00` is request ID 0, `01` sets `CreateIfMissing`, and `05` is the UTF-8 byte
-length of `cache`. The policy bytes are required when the create flag is set,
-even if the namespace already exists; an existing policy is not overwritten.
-
-Update a namespace policy:
-
-```text
-08 00 [namespace_id:u64be] [expected_revision:u64be] [namespace_policy]
-```
-
-Delete an empty namespace at an expected revision:
-
-```text
-09 00 00 [namespace_id:u64be] [expected_revision:u64be]
-```
-
-The first `00` is request ID 0 and the second `00` is the only valid v1
-`delete_flags` value.
 
 The hexadecimal examples above are normative boundary fixtures. A protocol
 implementation SHOULD verify them with an independent frame encoder/decoder
@@ -1445,17 +1082,17 @@ opcode/status/layout drift is detected.
 
 A protocol v1 implementation is not complete unless it:
 
-- negotiates `openkache/1` over QUIC and TLS-over-TCP with TLS 1.3, an approved
-  hybrid key agreement, and identical frame bytes;
+- implements at least one transport profile using `openkache/1`, TLS 1.3, an
+  approved hybrid key agreement, and the common frame bytes;
 - implements the lane ordering, correlation, half-close, and cancellation
   rules for its transport;
 - parses canonical `vu128`, operation layouts, flags, lengths, and assigned
   statuses exactly as specified;
 - accepts every `0..=32`-byte Item ID and preserves values opaquely;
-- implements namespace identity, revision, policy, and operation semantics;
+- implements provisioned namespace identity and item-policy semantics;
 - enforces wire limits before unbounded allocation or body reads;
 - returns a correlated error only for a complete request whose effect is known;
-- closes the lane for malformed or undecidable frames and preserves unknown
+- closes the connection for malformed or undecidable frames and preserves unknown
   mutation outcomes; and
 - satisfies the operational requirements in
   [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).

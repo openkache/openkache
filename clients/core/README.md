@@ -16,10 +16,8 @@ provide every target capability described below.
 
 The main API layers are:
 
-- `RawClient` and `LocalRawClient`, which accept exact protocol item IDs and
-  raw values;
-- `ProtectedClient` and `LocalProtectedClient`, which accept application keys
-  and plaintext values;
+- raw and protected convenience clients for the current implementation;
+- the target independent address/value operations described by `CLIENT.md`;
 - `ValueCodec`, which owns value serialization, optional Zstandard compression,
   and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
@@ -65,8 +63,8 @@ wire, key, or value profiles are already implemented.
 The target core will expose independent address and value representation
 families: mapped or exact Item IDs combined with raw bytes, caller-owned v0
 envelopes, or the v1 value envelope. It will support `0..=32`-byte Item IDs,
-the key mapping profiles, and the shared lane/request engine described by the
-linked specifications. A migration
+the `NamespaceHash` and `PublicKeyOrHash` profiles, and the shared lane/request
+engine described by the linked specifications. A migration
 may change constructors and generated ABI declarations; the public C ABI is
 versioned rather than an unqualified promise that every transitional symbol
 will remain unchanged.

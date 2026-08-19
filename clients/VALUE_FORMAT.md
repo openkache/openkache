@@ -1,6 +1,6 @@
 # OpenKache Client Value Encoding Profile v1 (Draft)
 
-> **Status:** Draft `draft-2026-08-19`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.2`; not released or finalized.
 
 This document defines the client-side v1 value encoding before it is handed to
 the server. The server stores the resulting bytes opaquely and does not
@@ -21,7 +21,9 @@ documented deviations belong in each binding's documentation.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
-[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
+[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) when they appear in
+uppercase.
 
 ## 1. Scope and goals
 
@@ -352,6 +354,11 @@ produced_size         == declared_content_size
 ```
 
 Satisfying one check does not waive another.
+
+The two 64 MiB limits are independent: a value is valid only when both its
+expanded payload and complete envelope satisfy their limits. Protection and
+envelope metadata consume part of the envelope limit, so the maximum logical
+payload can be smaller than 64 MiB.
 
 Implementations MAY use lower local limits, but MUST check the complete
 envelope, declared Zstandard content size and window size, produced output, and
