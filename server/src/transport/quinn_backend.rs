@@ -12,7 +12,7 @@ impl Endpoint {
         material: Arc<ServerTlsConfig>,
         max_concurrent_streams: usize,
     ) -> Result<Self, TransportError> {
-        let tls = tls_config(&material)
+        let tls = strict_server_config(&material)
             .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
         let crypto = compio_quic::crypto::rustls::QuicServerConfig::try_from(tls)
             .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;

@@ -1,9 +1,12 @@
 use boring::pkey::PKey;
-use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode};
+use boring::ssl::{
+    SslContextBuilder, SslMethod, SslOptions, SslSessionCacheMode, SslVerifyMode,
+};
 use boring::x509::X509;
 use boring::x509::store::X509StoreBuilder;
 
 use super::{NAME, ServerTlsConfig, TransportError};
+use crate::transport::tls::ALPN;
 
 const MAX_DATAGRAM_BYTES: usize = 65_535;
 const MAX_BUFFERED_REQUEST_BYTES: usize = crate::protocol::max_request_frame_bytes() + 1;
@@ -33,6 +36,17 @@ pub(super) fn config(
     }
     tls.set_private_key(&private_key)
         .map_err(|error| TransportError::backend(NAME, "TLS private key", error))?;
+    // A resumed TLS 1.3 PSK handshake has no fresh key-exchange group to
+    // validate. Disable tickets and the server session cache so every QUIC
+    // handshake performs the mandatory hybrid exchange.
+    tls.set_options(SslOptions::NO_TICKET);
+    tls.set_session_cache_mode(SslSessionCacheMode::OFF);
+    // BoringSSL exposes the standardized hybrid group under the same
+    // canonical name used by Rustls.  Supplying a singleton list makes a
+    // classical-only fallback impossible; old BoringSSL builds fail closed
+    // here and are reported as non-conforming by the transport boundary.
+    tls.set_curves_list("X25519MLKEM768")
+        .map_err(|error| TransportError::backend(NAME, "PQ key exchange", error))?;
     if !material.client_ca.is_empty() {
         let mut roots = X509StoreBuilder::new()
             .map_err(|error| TransportError::backend(NAME, "client CA store", error))?;
@@ -55,7 +69,7 @@ pub(super) fn config(
     let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls)
         .map_err(|error| TransportError::backend(NAME, "configuration", error))?;
     config
-        .set_application_protos(&[openkache_protocol::ALPN])
+        .set_application_protos(&[ALPN])
         .map_err(|error| TransportError::backend(NAME, "ALPN", error))?;
     config.set_max_idle_timeout(30_000);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_BYTES);

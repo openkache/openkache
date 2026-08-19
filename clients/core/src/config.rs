@@ -10,6 +10,23 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use crate::protocol::{EvictionMode, ExpirationMode, SetCondition, SetWireOptions};
 use crate::{Error, Result};
 
+/// The sole key-exchange group accepted by the OpenKache transport profile.
+pub(crate) const PQ_GROUP: rustls::NamedGroup = rustls::NamedGroup::X25519MLKEM768;
+
+/// Builds the provider used by every client backend.
+///
+/// Rustls' normal provider keeps classical groups available for compatibility.
+/// The OpenKache profile intentionally narrows the list to the approved hybrid
+/// group so no backend can silently fall back to classical-only TLS.
+pub(crate) fn strict_pq_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider
+        .kx_groups
+        .retain(|group| group.name() == PQ_GROUP);
+    debug_assert_eq!(provider.kx_groups.len(), 1);
+    provider.into()
+}
+
 /// Network destination and TLS identity of one OpenKache server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Endpoint {
