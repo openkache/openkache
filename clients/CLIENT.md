@@ -39,6 +39,7 @@ restated here:
 | QUIC negotiation, frames, operations, statuses, limits, and protocol outcomes | [Wire Protocol](../protocol/SPEC.md) |
 | Typed keys, canonical key bytes, mapping profiles, and Item ID derivation | [Client Key Format](KEY_FORMAT.md) |
 | Payload formats, compression framing, protection, key selection, KDF, AAD, and value limits | [Client Value Format](VALUE_FORMAT.md) |
+| Cross-language logical values, native mappings, representations, and the initial structured-value codec profile | [Client Value Model](value/SPEC.md) |
 | Rust core APIs, features, commands, and source layout | [Client core README](core/README.md) |
 | Native API names, package configuration, and platform requirements | Each language package's README |
 
@@ -213,15 +214,32 @@ the language-independent typed-key or canonical-key representation.
 
 ### 5.3 Native value conversion
 
-Opaque byte operations preserve exact bytes. Logical CBOR operations use a
-portable value representation and convert to native values where that
-conversion is lossless and unsurprising.
+Opaque byte operations preserve exact bytes. Logical structured-value
+operations use the portable value model in [`value/SPEC.md`](value/SPEC.md)
+and convert to native values where that conversion is lossless and
+unsurprising.
 
 An adapter MUST NOT stringify, coerce, reorder with semantic loss, or silently
-drop a value or map key that its native container cannot represent. It may
-return a generic CBOR value or key/value-entry collection instead. Each package
-documents integer, floating-point, byte-string, map-key, and unsupported native
-type behavior while the draft CBOR policy is finalized.
+drop a value or map key that its native container cannot represent. It follows
+the value model's representation options: a lossless view may combine native
+values with wrappers, a strict native view returns a conversion error, and an
+encoded view returns the structured payload bytes. Each package documents the
+language-specific wrapper and option syntax.
+
+Maintained bindings SHOULD expose one `get` operation with a representation
+option equivalent to:
+
+```text
+get(key, representation="lossless")
+get(key, representation="native")
+get(key, representation="encoded")
+```
+
+The default for dynamic bindings SHOULD be `lossless`. A lossless wrapper
+supports ordinary lookup, indexing, iteration, and entry access, but is not
+required to pass every native reflection or serialization check. An adapter
+MUST report ambiguous native lookups rather than silently selecting or merging
+an entry.
 
 ### 5.4 Runtime shape
 

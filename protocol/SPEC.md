@@ -10,7 +10,8 @@ transport, framing, validation, operation behavior, and outcome rules satisfy
 this document.
 
 Client-owned formatted values are specified separately by the
-[OpenKache value format](../clients/VALUE_FORMAT.md).
+[OpenKache value model](../clients/value/SPEC.md) and its
+[value envelope](../clients/VALUE_FORMAT.md).
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -36,8 +37,9 @@ Version 1 specifies:
 
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
-and belong to the [client key](../clients/KEY_FORMAT.md) and
-[value-format](../clients/VALUE_FORMAT.md) specifications. The shared
+and belong to the [client key](../clients/KEY_FORMAT.md), [value
+model](../clients/value/SPEC.md), and [value-format](../clients/VALUE_FORMAT.md)
+specifications. The shared
 implementation choices used by OpenKache-maintained language bindings are
 described by the [Client Implementation Guide](../clients/CLIENT.md); they are
 not additional wire requirements for third-party clients. The physical storage

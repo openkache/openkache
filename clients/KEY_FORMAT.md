@@ -42,6 +42,11 @@ Item ID. It uses the following terms:
   `canonical_key_bytes` is the API and ABI identifier for these bytes.
 - **Item ID:** The final opaque identifier carried by the protocol.
 
+Deterministic CBOR in this document is limited to the client key-to-Item-ID
+contract. It does not define structured value serialization; value semantics
+and the initial value codec profile are specified separately in
+[`value/SPEC.md`](value/SPEC.md).
+
 `KeyType` selects the one typed-key variant accepted by a typed-key operation.
 An adapter MAY select it globally at connection time or per operation. It is
 not a wire-protocol namespace.

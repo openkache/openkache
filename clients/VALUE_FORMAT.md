@@ -44,6 +44,10 @@ envelope, its authenticated binding to the key ID, namespace, and exact Item
 ID, and the transforms applied to its payload. Item ID derivation uses an
 independent identity key defined by the client key contract.
 
+Structured values use the codec-neutral model and initial profile in
+[`value/SPEC.md`](value/SPEC.md). This envelope document does not redefine
+language-native numeric conversion, map equality, or lossless value views.
+
 An exact Item ID API is a separate client operation: it accepts an already
 resolved `0..=32`-byte Item ID and an opaque value, and does not apply this
 value envelope. Formatted-key APIs use this profile after the client has
@@ -62,11 +66,11 @@ source value
 
 `OpaqueBytes` treats the source as an exact byte string: before optional
 compression and protection, the payload bytes are identical to the supplied
-bytes. `CBOR` accepts one CBOR data item under the rules in §5. `Json` is an
-API convenience type, not a v1 payload selector: it is serialized as canonical
-RFC 8785 UTF-8 and carried using `OpaqueBytes` (selector `0`). The payload
-format is selected by the caller; the encoding does not infer a format from the
-payload bytes.
+bytes. `StructuredValue` accepts one value-profile data item under the rules in
+[`value/SPEC.md`](value/SPEC.md). `Json` is an API convenience type, not a v1
+payload selector: it is serialized as canonical RFC 8785 UTF-8 and carried
+using `OpaqueBytes` (selector `0`). The payload format is selected by the
+caller; the encoding does not infer a format from the payload bytes.
 
 ## 3. Envelope grammar
 
@@ -199,12 +203,13 @@ downgrade or fall back.
 | ID | Payload format |
 |---:|---|
 | `0` | `OpaqueBytes` |
-| `1` | `CBOR` |
+| `1` | `StructuredValue` (initial profile: [`value/SPEC.md`](value/SPEC.md)) |
 
 Only the payload format IDs listed above are supported by this profile. Any
 other payload format ID MUST be rejected. This profile has no in-band
-application-format registry. Applications that need a format other than CBOR
-MUST encode it as `OpaqueBytes` and agree on its interpretation out of band.
+application-format registry. Applications that need another format MUST select
+a supported profile or encode it as `OpaqueBytes` and agree on its
+interpretation out of band.
 
 ## 5. Payload formats
 
@@ -239,69 +244,12 @@ The selected payload is empty, so the envelope has no body bytes after the
 selector. The enclosing protocol frame supplies the envelope length; the
 envelope does not contain a separate payload-length field.
 
-### 5.2 CBOR
+### 5.2 StructuredValue
 
-The CBOR payload MUST contain exactly one complete CBOR data item. The decoder
-MUST consume the entire payload. A CBOR sequence, a second item, or any other
-trailing bytes MUST be rejected.
-
-Only definite-length encodings are accepted. Indefinite-length arrays and
-maps, and chunked indefinite-length byte strings and text strings, MUST be
-rejected.
-
-Integer values MAY use any valid CBOR integer encoding. Preferred serialization
-is not required. A decoder MUST NOT reject a valid integer solely because it is
-not preferred; malformed encodings and invalid additional-information values
-remain invalid.
-
-Map order has no semantic meaning. Encoders MAY emit entries in any order, and
-decoders MUST accept any order. A map MUST NOT contain duplicate keys as
-determined by the decoded key values. A decoder that cannot determine key
-uniqueness MUST reject the map.
-
-CBOR text strings MUST contain well-formed UTF-8. Other character encodings
-MUST be represented as CBOR byte strings, with their interpretation defined by
-the application.
-
-CBOR tags are not supported by this profile. Tagged items MUST be rejected.
-The core acceptance implementation additionally limits nesting depth to 128
-levels and rejects compound or floating-point map keys when it cannot
-determine semantic key uniqueness. These are bounded-parser requirements for
-the v1 acceptance profile, not alternate payload semantics.
-
-#### 5.2.1 Draft map-key policy
-
-This subsection is intentionally provisional while the client value model is
-being implemented. It records the broad v1 starting point; a later draft MAY
-tighten the equivalence algorithm or the adapter representation without
-changing the value-envelope grammar.
-
-An untagged CBOR data item MAY be used as a map key, including an array or a
-map. Tagged items remain rejected by the no-tags rule above. The value profile
-does not require deterministic encoding of the complete payload, and it does
-not require encoders to sort maps or re-encode an otherwise valid value.
-
-For duplicate detection, key equality is based on the decoded CBOR data model,
-not on the source bytes. The provisional rules are:
-
-- integer encodings that decode to the same mathematical integer are equal;
-- text and byte strings compare by exact contents and remain distinct types;
-- arrays compare in order, element by element;
-- maps compare without regard to entry order, after their own duplicate-key
-  checks; and
-- booleans, null, and other supported simple values compare by value.
-
-Floating-point key equality, NaN handling, and the portable representation of
-compound keys remain open design questions. A decoder MUST reject a map when it
-cannot establish key uniqueness under the equality rules it implements. An
-adapter MUST NOT stringify, coerce, or silently drop a key that its native map
-type cannot represent; it MAY expose such a map as a generic key/value-entry
-collection instead.
-
-These rules preserve the wire data model without making deterministic CBOR the
-value-format goal. The implementation phase will evaluate whether key-only
-canonicalization, a more precise floating-point rule, or a restricted adapter
-subset is needed before this profile is finalized.
+The structured payload MUST conform to the initial codec profile in
+[`value/SPEC.md`](value/SPEC.md). That specification defines the complete
+CBOR item boundary, allowed encodings, numeric behavior, map-key equality, and
+duplicate-key rejection.
 
 ## 6. Compression
 
@@ -700,7 +648,8 @@ A decoder MUST:
 7. Check minimum protected-body sizes before slicing.
 8. Authenticate and decrypt before decompression or payload parsing.
 9. Validate and bounded-decompress one Zstandard frame when selected.
-10. Decode exactly one CBOR item or return the exact `OpaqueBytes` payload.
+10. Decode exactly one structured-value item using the selected profile, or
+    return the exact `OpaqueBytes` payload.
 
 Unknown versions, selector values, value-key IDs, compression profiles, payload
 formats, malformed payloads, and disallowed trailing bytes MUST be rejected.
@@ -722,9 +671,9 @@ overhead. It equals the wire protocol's maximum `SET` value and response
 payload.
 
 `MAX_EXPANDED_PAYLOAD_BYTES` applies to the payload after decryption and
-decompression but before CBOR parsing. `MAX_ZSTD_WINDOW_BYTES` is the largest
-declared decoder window. All three limits are independent: satisfying one does
-not waive either of the others.
+decompression but before structured-value parsing. `MAX_ZSTD_WINDOW_BYTES` is
+the largest declared decoder window. All three limits are independent:
+satisfying one does not waive either of the others.
 
 Implementations MAY use lower local limits, but MUST check the complete
 envelope, declared Zstandard content size and window size, produced output, and
@@ -734,10 +683,9 @@ frame, trailing bytes, a declared or produced size above its limit, or a
 produced size different from the declared content size.
 
 Malformed `vu128` encodings, truncated headers, zero or unknown protected
-value-key IDs, nonzero selector zero bits, unsupported selector values, invalid
-UTF-8 text strings, duplicate CBOR map keys, tagged or indefinite-length CBOR
-items, invalid Zstandard frames, authentication failures, and payloads
-exceeding limits MUST be rejected.
+value-key IDs, nonzero selector zero bits, unsupported selector values,
+structured-value violations, invalid Zstandard frames, authentication
+failures, and payloads exceeding limits MUST be rejected.
 
 ## 10. Versioning and extension
 

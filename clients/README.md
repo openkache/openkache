@@ -14,6 +14,7 @@ Shared client topics are documented here:
 | Maintained binding architecture, request engine, native conversion, and local policies | [Client implementation guide](CLIENT.md) |
 | Formatted key input, compact public mapping, and protected Item ID derivation | [Key format](KEY_FORMAT.md) |
 | Formatted value bytes, compression, and application-level protection | [Value format](VALUE_FORMAT.md) |
+| Cross-language value model, native mappings, and structured-value profiles | [Value project](value/SPEC.md) |
 | QUIC framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
 | Language API, build, packaging, and runtime configuration | The implemented package's README |
 
@@ -41,14 +42,16 @@ formats or protocol behavior.
 Java, Kotlin, and Dart currently contain registry metadata and reserved source
 layouts only. They do not connect to OpenKache or expose cache operations yet.
 
-The [key](KEY_FORMAT.md) and [value](VALUE_FORMAT.md) documents define the
-language-independent pre-freeze v1 formats. The [client implementation
-guide](CLIENT.md) describes how OpenKache-maintained bindings share one core
-without making their API shape or local policy a requirement for third-party
-clients. The value envelope is the target of a separate value-codec migration;
-the server remains opaque to all client-owned formats. TypeScript's legacy
-metadata envelope remains a package-level compatibility detail; use its
-`set_json` / `get_json` or Exact Item ID methods for cross-language values.
+The [key](KEY_FORMAT.md), [value model](value/SPEC.md), and [value
+envelope](VALUE_FORMAT.md) documents define the language-independent
+pre-freeze v1 client contracts. The [client implementation guide](CLIENT.md)
+describes how OpenKache-maintained bindings share one core without making
+their API shape or local policy a requirement for third-party clients. The
+value envelope carries the selected value profile opaquely; the server does
+not interpret it. TypeScript's legacy metadata envelope remains a
+package-level compatibility detail; use its `set_json` / `get_json` or Exact
+Item ID methods for cross-language values until the structured-value
+implementation is complete.
 
 ## Binding architecture
 

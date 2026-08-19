@@ -34,8 +34,10 @@ adapter depends on this core directly.
   between this core and maintained language adapters.
 - The [key-format specification](../KEY_FORMAT.md) defines typed keys and Item
   ID mapping.
-- The [value-format specification](../VALUE_FORMAT.md) defines formatted value
-  bytes and algorithms.
+- The [value model](../value/SPEC.md) defines cross-language structured values,
+  native mappings, and the initial codec profile.
+- The [value-format specification](../VALUE_FORMAT.md) defines the formatted
+  value envelope, compression, and protection algorithms.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
   operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
@@ -87,9 +89,11 @@ and copies a dynamic buffer. Neither hashes the supplied bytes. The key-format
 specification defines the target Exact Item ID and formatted-key behavior; this
 README describes only the current Rust API surface.
 
-`ValueCodec` owns the formatted-value implementation. The value-format
-specification is the source of truth for its target bytes and validation;
-neither the wire protocol nor the server parses that format.
+`ValueCodec` composes the value model with the formatted-value envelope. The
+value model is the source of truth for structured-value semantics and the
+value-format specification is the source of truth for envelope bytes,
+compression, protection, and validation; neither the wire protocol nor the
+server parses the client-owned format.
 
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
@@ -131,8 +135,8 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
-- `src/value.rs` owns canonical serialization, compression, and authenticated
-  encryption.
+- `src/value.rs` owns the current value-model adapter, compression, and
+  authenticated encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
