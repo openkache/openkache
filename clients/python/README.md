@@ -12,6 +12,11 @@ is the source of the generated operation types, client constants, and native ABI
 implements those exact item-ID operations. `Client` adds protected
 application-key operations and JSON values.
 
+> **Current implementation:** This package currently exposes the legacy
+> canonical-JSON and fixed-width Item ID APIs. The draft key, value, and
+> variable Item ID contracts linked from the client index are migration
+> targets, not claims of current conformance.
+
 ## Commands
 
 Run from `clients/python`:
@@ -108,9 +113,10 @@ result = await client.raw.get(
 - `data_protection_key` is optional. When supplied it is an
   application-managed 32-byte secret shared by clients that must address the
   same protected entries. When omitted, values are unprotected.
-- `key_spec` selects `KeySpec.TEXT` (the default), `KeySpec.BYTES`, or
-  `KeySpec.INTEGER`. Use the same spec and logical key type in every language
-  client that must share entries.
+- The current `key_spec`/`KeySpec` names select the target `key_type`:
+  `TEXT`, `BYTES`, or `INTEGER`. They do not select an Item ID mapping profile.
+  Use the same key type and mapping profile in every language client that must
+  share entries. A future API may expose the target name `key_type` directly.
 - `server_name` defaults to the hostname from `address` and is used for TLS
   verification after DNS resolution.
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private

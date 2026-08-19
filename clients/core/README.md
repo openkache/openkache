@@ -1,44 +1,59 @@
 # OpenKache client core
 
 `openkache-client-core` is the reusable Rust engine behind OpenKache language
-bindings.
+bindings. This README documents the current transitional crate. The
+[target design](TARGET.md) describes the pre-freeze destination.
 
 ## Purpose
 
-The core handles connection lifecycle, TLS, retries, stream concurrency,
-protocol operations, application-key protection, compression, encryption, and
-formatted-value processing. Language adapters convert native types and
-delegate to this crate.
+The core centralizes connection lifecycle, protocol operations, key mapping,
+value processing, and the native ABI used by maintained bindings. Language
+adapters convert native types and delegate shared behavior to this crate.
 
 The main API layers are:
 
-- `RawClient` and `LocalRawClient`, which accept exact protocol item IDs and
-  opaque values;
-- `ProtectedClient` and `LocalProtectedClient`, which accept application keys
-  and plaintext values;
+- raw and protected convenience clients for the current implementation;
+- the shared address/value operations described by `CLIENT.md`;
 - `ValueCodec`, which owns value serialization, optional Zstandard compression,
   and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
-- the optional `ffi` feature, which exports the stable C ABI used by C, C++,
-  Python, ctypes, and other synchronous native adapters.
+- the optional `ffi` feature, which exports the versioned public C ABI used by
+  C, C++, Python, ctypes, and other synchronous native adapters.
 
 The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
 adapter depends on this core directly.
 
 ## Related documentation
 
-- The [client index](../README.md) covers binding architecture and
-  implementation status.
-- The [value-format specification](../VALUE_FORMAT.md) defines formatted value
-  bytes and algorithms.
+- The [client index](../README.md) covers package inventory and implementation
+  status.
+- The [client implementation guide](../CLIENT.md) defines the shared boundary
+  between this core and maintained language adapters.
+- The [key-format specification](../KEY_FORMAT.md) defines typed keys and Item
+  ID mapping.
+- The [value model](../value/SPEC.md) defines cross-language structured values,
+  native mappings, and the initial codec profile.
+- The [value-format specification](../VALUE_FORMAT.md) defines the formatted
+  value envelope and compression.
+- The [value security profiles](../VALUE_SECURITY.md) define the value-key
+  schedule, AAD, and cryptographic constructions.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
   operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
+- The [target design](TARGET.md) summarizes the post-migration core contract.
 
 This README intentionally does not specify protected-value bytes. Consult the
 client index for implemented-format status and the value-format specification
 for the v1 contract.
+
+## What exists today
+
+The current code describes only the transitional implementation; the draft
+documents are the target source of truth. Some current
+Rust and legacy adapter paths still use fixed-width Item IDs or a legacy value
+container. They MUST NOT be treated as evidence that the draft variable-length
+wire, key, or value profiles are already implemented.
 
 ## Commands
 
@@ -53,16 +68,12 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. Protected FFI operations accept exactly one canonical
-v1 key item (the CBOR major type is the explicit `Integer`, `Text`, or `Bytes`
-discriminator), not raw application bytes. It requires the platform's io_uring driver and exports
+`LocalProtectedClient`. It requires the platform's io_uring driver and exports
 `openkache_client_*` symbols from the native library crate outputs. The ABI
-supports protected application-key calls, exact-item-ID calls, mutual TLS,
-PEM/DER or system trust, compression, both value-encryption profiles, retries,
-reconnect, state snapshots, and bounded request lanes. CMake, Go, and Python
-package builds regenerate the scoped Smithy-derived client contract as needed.
-Reusable ABI
-declarations are in `include/openkache/client_abi.h` (with the
+exposes the shared-core operations and lifecycle required by native adapters.
+CMake, Go, and Python package builds regenerate the scoped Smithy-derived
+client contract as needed. Reusable ABI declarations are in
+`include/openkache/client_abi.h` (with the
 `include/openkache_client.h` compatibility include); the generated Smithy
 contract header is supplied by each package build.
 
@@ -80,33 +91,17 @@ let outcome = client
     .await?;
 ```
 
-`ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes. The pre-freeze
-v1 contract calls the root secret `client_root_key` and binds the selected
-namespace into both Item ID derivation and value AAD. The Rust API retains
-`DataProtectionKey` as a source-compatible alias; it is not a separate wire
-concept.
+`ItemId::from_bytes` preserves the current fixed-array API. `ItemId::from_slice`
+validates and copies a dynamic input according to the current implementation.
+Neither hashes the supplied bytes. The key-format specification defines the
+target empty, short, and 32-byte Exact Item IDs and formatted-key behavior;
+this example describes the current Rust API surface until that migration is
+complete.
 
-`ValueCodec` stores its current metadata inside the opaque value. The packed
-codec layout shown in the pre-freeze value-format specification is the target
-of a separate value-codec migration:
-
-```text
-value_envelope_version:vu128 | flags:u8 | body
-
-flags bits 0..1 = encryption identifier
-flags bits 2..3 = compression identifier
-flags bits 4..5 = codec identifier
-flags bits 6..7 = reserved (zero in v1)
-
-body = protect(compress(selected codec payload))
-AES-256-SIV-CMAC body = synthetic_iv[16] | ciphertext
-AES-256-GCM-SIV body = nonce[12] | ciphertext | tag[16]
-```
-
-For protected profiles, the packed flags and body are authenticated with the
-exact item ID and container header. Neither the wire protocol nor the server
-parses this format.
+`ValueCodec` composes the value model with the formatted-value envelope. The
+value model owns structured-value semantics, the value format owns envelope
+and compression bytes, and the value security profiles own protection. Neither
+the wire protocol nor the server parses these client-owned formats.
 
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
@@ -118,6 +113,7 @@ let key = ClientRootKey::from_base64(&configured_base64_secret)?;
 let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```
+
 ## Configuration
 
 `RawClient::connect("host:port")` and `ProtectedClient::connect` use system
@@ -125,13 +121,18 @@ trust and derive the TLS server name from the host. Builders accept a
 pre-resolved endpoint, explicit trust roots, mutual TLS identity, deadlines,
 retry attempts, compression policy, and `max_in_flight`.
 
+Target transport and security settings are documented in
+[`TARGET.md`](TARGET.md); they are not claims about the transitional builder
+surface.
+
 `Endpoint` requires a positive port. A pre-resolved socket address also
 requires an explicit certificate server name because the network destination
 does not provide one.
 
 ## Core components
 
-- `src/lib.rs` provides raw lifecycle, retries, operations, and stable errors.
+- `src/lib.rs` provides raw lifecycle, retries, operations, and versioned
+  errors.
 - `src/operation_request.rs` maps client domain values to generated numeric
   request fields, selects the generated compact layout, and delegates framing
   to the shared protocol encoder.
@@ -141,14 +142,14 @@ does not provide one.
   transport attempt.
 - `src/protocol.rs` owns client-domain protocol values and semantic response
   projection without redefining request framing.
-- `src/transport.rs` manages reusable stream lanes and backend-neutral
+- `src/transport.rs` manages reusable transport lanes and backend-neutral
   deadlines and writes the ordered segments exposed by `OwnedRequestFrame`.
 - `src/config.rs` provides public transport and TLS configuration wrappers.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
-- `src/value.rs` owns canonical serialization, compression, and authenticated
-  encryption.
+- `src/value.rs` owns the current value-model adapter, compression, and
+  authenticated encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,

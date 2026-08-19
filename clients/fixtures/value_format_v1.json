@@ -1,0 +1,157 @@
+{
+  "$schema": "./schema.json",
+  "spec": "openkache/client-value-format",
+  "spec_revision": "draft-2026-08-19.4",
+  "vectors": [
+    {
+      "kind": "positive",
+      "name": "empty_unprotected_opaque",
+      "input": {
+        "version": 1,
+        "protection": "Unprotected",
+        "compression": "Uncompressed",
+        "payload_format": "OpaqueBytes",
+        "payload_hex": ""
+      },
+      "intermediate": {
+        "selector_hex": "00"
+      },
+      "output": {
+        "envelope_hex": "0100"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "aes_siv_cmac_empty_item_id",
+      "input": {
+        "value_key_id": 1,
+        "value_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "namespace_id": 1,
+        "item_id_hex": "",
+        "payload_hex": "68656c6c6f"
+      },
+      "intermediate": {
+        "selector_hex": "02",
+        "value_key_id_vu128_hex": "01",
+        "aad_hex": "6f70656e6b616368652f76616c75652d666f726d61742f6161642f7631000000000000000100010201",
+        "derived_key_hex": "142985a0bce144ca517b291fe99b85e7a096ce46c8648da94bcd6ddbb0206bfa2a744ba3e8bfaf945ce939487ebfe87f7c88863ea2af659fb0bb0bc689ff9f5b",
+        "nonce_hex": ""
+      },
+      "output": {
+        "envelope_hex": "0102017ec87b4e063215899f433ce6817e9c09943444c270"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "aes_gcm_siv_three_byte_item_id_key_128",
+      "input": {
+        "value_key_id": 128,
+        "value_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "namespace_id": 2,
+        "item_id_hex": "112233",
+        "payload_hex": "00010203"
+      },
+      "intermediate": {
+        "selector_hex": "01",
+        "value_key_id_vu128_hex": "8002",
+        "aad_hex": "6f70656e6b616368652f76616c75652d666f726d61742f6161642f763100000000000000020311223301018002",
+        "derived_key_hex": "6c156446d3c19ce6f184c1f185a65f320f55c5751c8dadf3ef22e7cda6f9dc56",
+        "nonce_hex": "000102030405060708090a0b"
+      },
+      "output": {
+        "envelope_hex": "01018002000102030405060708090a0b7fd8f14f0fc6273ec0bcf077168001ca1364cd72"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "caller_owned_v0_passthrough",
+      "input": {
+        "representation": "caller_owned_v0",
+        "envelope_hex": "006170706c69636174696f6e"
+      },
+      "intermediate": {
+        "version_hex": "00"
+      },
+      "output": {
+        "envelope_hex": "006170706c69636174696f6e"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "selector_reserved_bits",
+      "input": {
+        "envelope_hex": "01c0"
+      },
+      "intermediate": {
+        "selector_hex": "c0"
+      },
+      "output": null,
+      "error": {
+        "category": "unsupported_selector"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "all_zero_value_key",
+      "input": {
+        "value_key_id": 1,
+        "value_key_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "invalid_value_key"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "value_key_id_rebound",
+      "input": {
+        "value_key_id": 1,
+        "existing_value_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "replacement_value_key_hex": "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "value_key_id_rebound"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "aes_gcm_siv_namespace_changed",
+      "input": {
+        "namespace_id": 3,
+        "item_id_hex": "112233",
+        "envelope_hex": "01018002000102030405060708090a0b7fd8f14f0fc6273ec0bcf077168001ca1364cd72"
+      },
+      "intermediate": {
+        "base_vector": "aes_gcm_siv_three_byte_item_id_key_128"
+      },
+      "output": null,
+      "error": {
+        "category": "authentication_failed"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "aes_gcm_siv_tag_altered",
+      "input": {
+        "namespace_id": 2,
+        "item_id_hex": "112233",
+        "envelope_hex": "01018002000102030405060708090a0b7fd8f14f0fc6273ec0bcf077168001ca1364cd73"
+      },
+      "intermediate": {
+        "base_vector": "aes_gcm_siv_three_byte_item_id_key_128"
+      },
+      "output": null,
+      "error": {
+        "category": "authentication_failed"
+      }
+    }
+  ]
+}

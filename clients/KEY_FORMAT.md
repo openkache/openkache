@@ -1,13 +1,20 @@
 # OpenKache Client Key Contract — Version 1 Draft
 
-> **Status:** Draft; this contract has not been released or finalized.
+> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 >
 > This document specifies client-owned key validation and Item ID mapping. It
 > is not a server-required key encoding, and it may change before finalization.
 
-For item identity, the wire protocol carries only an opaque Item ID of exactly
-32 bytes. An application MAY invoke the Exact Item ID API to supply that
-identifier directly. That API is separate from the portable-key mapping
+This is the target contract for the pre-freeze draft. Client implementations
+may temporarily lag while the draft is being completed, but an implementation
+MUST NOT claim conformance until it follows this complete mapping contract.
+
+The shared implementation used by OpenKache-maintained language bindings is
+described by the [Client Implementation Guide](CLIENT.md).
+
+For item identity, the wire protocol carries only an opaque Item ID of
+`0..=32` bytes. An application MAY invoke the Exact Item ID API to supply that
+identifier directly. That API is separate from the key-mapping profiles
 specified below.
 
 All lengths in this document are measured in bytes. A byte is exactly 8 bits;
@@ -26,53 +33,81 @@ Item ID. It uses the following terms:
 
 - **Application key:** The key value supplied by the application before client
   conversion.
-- **Portable key:** A language-neutral key value of type `Integer`, `Text`, or
-  `Bytes`. `PortableKey` is the Rust API type that represents it.
-- **Canonical key encoding:** The deterministic encoding rule for a portable
-  key. This contract uses deterministic CBOR.
+- **Typed key:** A language-neutral key value of type `Integer`, `Text`, or
+  `Bytes`. `TypedKey` is the API type that represents it.
+- **Canonical key encoding:** The deterministic encoding rule for a typed key.
+  This contract uses deterministic CBOR.
 - **Canonical key bytes:** The byte sequence produced by the canonical key
   encoding. It is exactly one complete canonical CBOR item.
   `canonical_key_bytes` is the API and ABI identifier for these bytes.
 - **Item ID:** The final opaque identifier carried by the protocol.
 
-`KeySpec` selects the one portable-key variant accepted by a client-side
-configuration. It is not a wire-protocol namespace.
+Deterministic CBOR in this document is limited to the client key-to-Item-ID
+contract. It does not define structured value serialization; value semantics
+and the initial value codec profile are specified separately in
+[`value/SPEC.md`](value/SPEC.md).
 
-The specification defines two distinct client-side conversion paths:
+An **Item ID mapping profile** selects the algorithm that converts canonical
+key bytes into the final Item ID. The initial profiles are `NamespaceHash` and
+`PublicKeyOrHash`. A mapping profile is client-local configuration, not a
+wire-visible field or a server-enforced namespace policy. A client may select a
+profile per operation, so one namespace may contain Item IDs produced by
+different profiles. The same logical item remains addressable only when later
+operations select the same profile and identity settings.
+
+`KeyType` is the language-neutral name of the inferred `TypedKey` variant:
+`Integer`, `Text`, or `Bytes`. A language adapter MUST infer this variant from
+each native input when the input has an unambiguous mapping. It MUST reject
+inputs that cannot be represented by one of these variants rather than
+stringifying or coercing them. `KeyType` is not a namespace setting, schema,
+or wire-protocol field.
+
+The specification defines three distinct client-side conversion paths:
 
 ```text
-application key (native input)
-  -> portable key (PortableKey)
+application key (typed input)
+  -> typed key (TypedKey)
   -> canonical key encoding
   -> canonical key bytes (canonical_key_bytes)
-  -> namespace-bound keyed hash
-  -> ItemId
+  -> NamespaceHash
+  -> Item ID
 
-exact 32-byte Item ID
+application key (typed input)
+  -> typed key (TypedKey)
+  -> canonical key encoding
+  -> canonical key bytes (canonical_key_bytes)
+  -> PublicKeyOrHash
+  -> Item ID (canonical bytes when 0..=32 bytes; public hash otherwise)
+
+exact Item ID
   -> Exact Item ID API
   -> wire
 ```
 
-These paths are not interchangeable. `PortableKey::Bytes` is CBOR-encoded
-before hashing. The Exact Item ID API performs no key encoding or hashing and
-accepts only a final 32-byte wire identity.
+Both formatted profiles use the same typed key and canonical encoding.
+`NamespaceHash` always produces a root- and namespace-bound 32-byte Item ID.
+`PublicKeyOrHash` exposes short canonical key bytes directly and uses an
+unkeyed hash only when the encoding does not fit. It is intended for
+applications that trust the server and do not require client-side key
+confidentiality or profile isolation. The selected mapping profile is part of
+item identity.
 
-## 2. Portable key
+## 2. Typed key
 
-### 2.1 Portable-key variants (`PortableKey`)
+### 2.1 Typed-key variants (`TypedKey`)
 
-`PortableKey` is the Rust API type for a portable key defined by this contract.
-Its variants are `Integer`, `Text`, and `Bytes`:
+`TypedKey` is the API type for a typed key defined by this contract. Its
+variants are `Integer`, `Text`, and `Bytes`:
 
 ```text
-PortableKey = Integer | Text | Bytes
+TypedKey = Integer | Text | Bytes
 ```
 
 `Text` is a length-delimited sequence of valid UTF-8 bytes. It is not
 NUL-terminated; an embedded U+0000 is ordinary text content. `Bytes` is an
 exact sequence of bytes, including empty and NUL-containing values.
-`Integer` is an exact mathematical value. Native integer width and signedness
-are not part of key identity.
+`Integer` is a signed 64-bit value. Bindings MUST reject values outside
+`-2^63..=2^63-1`.
 
 For example, `Text("abc")` contains exactly the three UTF-8 bytes `61 62 63`;
 it does not contain a trailing `00`. Its canonical key bytes are
@@ -80,78 +115,119 @@ it does not contain a trailing `00`. Its canonical key bytes are
 explicit length.
 
 Objects, arrays, maps, booleans, nulls, decimal values, and custom objects are
-not valid portable keys. JSON, reflection, stringification, and implicit
-coercion MUST NOT be used.
+not valid typed keys. JSON, reflection, stringification, and implicit coercion
+MUST NOT be used.
 
-The portable key `Bytes` is CBOR-encoded and then included in the keyed-hash
-input. It is not the `OpaqueBytes` value format or an Item ID.
+Both formatted mapping profiles encode `Bytes` as a CBOR byte string. It is not
+the `OpaqueBytes` value format and does not mean an Exact Item ID.
 
-### 2.2 Portable-key type selection
+The selected mapping profile and `KeyType` MAY vary between operations,
+including within one namespace. The canonicalization algorithm remains fixed
+by this specification. The server does not know which profile or native key
+type produced an Item ID; selecting different identity inputs may appear as a
+miss or collision.
 
-Every formatted keyspace MUST declare exactly one `KeySpec`:
+There is deliberately no namespace-level key-type policy in v1. A namespace
+does not declare an allowed key type, and the server does not reject an item
+because its client used `Integer`, `Text`, or `Bytes`. This keeps ordinary
+cache namespaces free-form: applications may use a string key for one item
+and a byte or integer key for another. Applications that need a schema or a
+single key convention enforce it in their own client wrapper.
 
-```text
-KeySpec::Integer
-KeySpec::Text
-KeySpec::Bytes
-```
+### 2.2 Native type inference
 
-Every portable key MUST match the configured `KeySpec`. A type mismatch MUST be
-rejected before encoding or hashing. `KeySpec` adds no wire field and has no
-fixed-width integer variants.
+The language adapter MUST infer exactly one `KeyType` from the native input
+before canonical encoding:
 
-### 2.3 Language binding requirements
+| Native input category | Inferred `KeyType` |
+|---|---|
+| Signed 64-bit integer value | `Integer` |
+| Valid UTF-8 text/string | `Text` |
+| Explicit byte sequence (`Bytes`, `byte[]`, `Buffer`, or equivalent) | `Bytes` |
 
-| Binding | `Text` | `Bytes` | `Integer` | Floating-point |
-|---|---|---|---|---|
-| JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §3.2; otherwise reject |
-| Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
-| Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
-| C | caller supplies a canonical Text item | caller supplies a canonical Bytes item | caller supplies a canonical integer item | binary float types rejected |
-| C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the convenience API | `float`, `double` rejected |
-| Go | not exposed by the convenience API | `[]byte` → `Bytes` | not exposed by the convenience API | `float32`, `float64` rejected |
-| Java / Kotlin | package scaffold | package scaffold | package scaffold | package scaffold |
-| C# / .NET | exact Item ID API only | exact Item ID API only | exact Item ID API only | exact Item ID API only |
-| Swift | `String` → `Text` | `Data` → `Bytes` | not exposed by the convenience API | `Float`, `Double` rejected |
-| Dart | package scaffold | package scaffold | package scaffold | package scaffold |
+The inference is language-specific only at the boundary; the resulting
+`TypedKey` and canonical bytes are language-independent. An adapter MUST
+reject a value when it cannot determine one of these categories without
+coercion. Examples include floating-point values, booleans, null, arrays,
+objects, maps, and custom objects.
 
-All text bindings MUST reject strings that cannot encode to valid UTF-8,
-including unpaired surrogates. Text and byte inputs are length-delimited;
-neither representation is NUL-terminated. In particular, C bindings MUST pass
-an explicit buffer length and MUST NOT use a NUL-terminated C string as the key
-representation.
+JavaScript `number` follows §3.2: a finite safe integer infers `Integer`, and
+all other numbers are rejected. JavaScript `bigint` infers `Integer` only when
+it fits signed `i64`.
+Python `bool` MUST be rejected before Python's integer-subclass behavior is
+considered; Python `int` infers `Integer`, `str` infers `Text`, and an
+explicit bytes-like value infers `Bytes`.
 
-The shared C ABI `openkache_client_execute` uses `canonical_key_bytes` as its
-canonical-key operation input. Its `application_key` buffer MUST contain
-exactly one complete canonical CBOR key item; that ABI does not infer whether
-arbitrary bytes represent `Text`, `Bytes`, or an integer. Language adapters
-MUST canonicalize native values before passing them through a canonical-key
-operation. Exact Item ID operations remain separate and accept only 32 opaque
-Item ID bytes.
+An adapter MAY expose an explicit typed constructor for FFI or generic
+containers, but that constructor must produce the same three `TypedKey`
+variants and must not introduce a fourth key type. Both mapping profiles accept
+all three variants.
+
+The normative `Integer` value is exactly signed `i64`. Python integers and
+JavaScript `bigint` values outside that range MUST be rejected. A binding MAY
+offer a narrower convenience API, but it MUST NOT accept values that another
+conforming binding cannot represent.
+
+The maintained-client default mapping profile is `NamespaceHash`.
+`PublicKeyOrHash` MUST be selected explicitly. It is suitable for
+benchmarks and for applications that fully trust the server and accept public,
+cross-client key identity. Value protection is independent: either mapping
+profile may carry protected or unprotected values.
+
+### 2.3 Binding projection requirements
+
+A language binding MAY expose any subset of `Integer`, `Text`, and `Bytes`, but
+it MUST document the supported native types and map them to the language-neutral
+variants above without implicit stringification or cross-type coercion.
+Binding-specific type names and current capability inventories belong in the
+binding documentation, not this format contract.
+
+Every text projection MUST reject input that cannot encode to valid UTF-8,
+including unpaired surrogates. Text and byte-string inputs are length-delimited;
+neither representation is NUL-terminated. Foreign-function interfaces MUST
+carry an explicit buffer length and discriminator rather than inferring a type
+or boundary from the byte contents.
+
+Floating-point inputs are not typed keys. A binding MUST reject them except for
+the JavaScript safe-integer normalization defined in §3.2. An ABI that
+transports an integer as text MUST use canonical signed decimal ASCII:
+optional leading `-`, one or more digits, no leading zeroes unless the value is
+exactly `0`, and no `-0`. Whitespace, a leading `+`, non-ASCII digits, and
+other numeric spellings MUST be rejected. The value MUST fit signed `i64`. The
+decimal text is only a transport representation; key identity remains the
+integer encoded under §3.1.
+
+An interface that accepts `canonical_key_bytes` MUST validate exactly one
+complete canonical CBOR key item. An interface that accepts a logical typed key
+MUST infer or receive an explicit discriminator and perform canonical encoding
+itself.
+Exact Item ID operations remain separate and accept opaque Item IDs directly.
 
 ## 3. Canonical key encoding
 
 ### 3.1 Deterministic CBOR
 
 ```text
-canonical_key_bytes = deterministic_cbor(portable key)
+canonical_key_bytes = deterministic_cbor(typed key)
 ```
 
 The canonical key encoding follows deterministic CBOR
 [RFC 8949 §4.2](https://www.rfc-editor.org/rfc/rfc8949#section-4.2):
 
-- Integer encoding uses RFC 8949 preferred serialization, including standard
-  bignum tags `2` and `3` when the basic integer types cannot represent the
-  value.
+- The accepted subset contains only major types 0/1 integers, major type 2 byte
+  strings, and major type 3 text strings.
+- Indefinite-length items, tags, sequences, and trailing bytes are invalid.
+- Integer encoding uses RFC 8949 preferred serialization for signed `i64`.
+  A decoder MUST reject major-type values outside the signed `i64` range.
+  CBOR bignum tags are not part of v1.
 - `Text` is exact valid UTF-8. `Bytes` is an exact CBOR byte string.
 - Canonical key bytes are exactly one complete CBOR item. Sequences, trailing
   bytes, unknown tags, and non-canonical encodings MUST be rejected.
 - There is no floating-point wire type. Accepted JavaScript `number` values
   encode as `Integer`.
 
-Decoders MUST validate exactly one complete preferred deterministic-CBOR item
-and reject every non-canonical representation. They MAY validate borrowed bytes
-in one pass and need not reconstruct or re-encode the key.
+Decoders MUST reconstruct the typed key, re-encode it, and compare the result
+with the received bytes before accepting them.
 
 ### 3.2 JavaScript number normalization
 
@@ -173,6 +249,7 @@ function normalizeJavaScriptNumber(x) {
 ```text
 JavaScript number 1, JavaScript 1n -> Integer(1)
 JavaScript number 1.5, -0, NaN, Infinity, unsafe number -> rejected
+JavaScript bigint outside signed i64 -> rejected
 ```
 
 ### 3.3 Canonical key bytes: examples
@@ -182,6 +259,8 @@ Text("abc")     -> 63 61 62 63
 Bytes([00,ff])  -> 42 00 ff
 Integer(1)      -> 01
 Integer(-1)     -> 20
+Integer(i64::MAX) -> 1b 7f ff ff ff ff ff ff ff
+Integer(i64::MIN) -> 3b 7f ff ff ff ff ff ff ff
 Text("")        -> 60
 Bytes([])       -> 40
 ```
@@ -195,94 +274,173 @@ fa 3f 80 00 00                // binary32 Float(1.0)
 f4                            // boolean
 f6                            // null
 60 00                         // trailing bytes
+Integer(9223372036854775808)  // outside signed i64
 ```
 
-## 4. Item ID mapping
+## 4. Item ID mapping profiles
 
-Item ID mapping is client-owned. It adds no wire or server field and always
-produces exactly 32 bytes.
+Item ID mapping profiles are client-local choices. They have no wire or server
+field.
+Every profile MUST produce an Item ID accepted by the wire protocol.
 
-### 4.1 Portable-key derivation
+### 4.1 Namespace hash profile (`NamespaceHash`)
 
-The client accepts an application key that matches the configured `KeySpec`,
-encodes it as a portable key, and derives a 32-byte Item ID from its canonical
-key bytes. The namespace is bound into the hash input; equal portable keys in
-different namespaces therefore produce different Item IDs.
-
-No application-key length selects a different mapping. Empty, 31-byte,
-32-byte, and 33-byte `Bytes` keys are all canonicalized and hashed by the same
-rule.
+Under `NamespaceHash`, the adapter infers one supported `TypedKey`, encodes it, and
+derives a 32-byte Item ID. Equal typed keys in different namespaces produce
+different Item IDs.
 
 ```text
 item_id =
   BLAKE3-KEYED-HASH(
     key   = item_id_derivation_key[32],
-    input = namespace_id:u64be | canonical_key_bytes
+    input = "openkache/item-id/namespace-hash/v1"
+          | namespace_id:u64be
+          | canonical_key_bytes
   )
 ```
 
-### 4.2 Exact Item ID API
+The domain string identifies the mapping revision. The full 32-byte BLAKE3
+output is the Item ID. The server treats it as opaque.
 
-The Exact Item ID API accepts the final opaque 32-byte Item ID directly. It
-performs no portable-key conversion, canonical encoding, hashing, or namespace
-derivation. Inputs of every other length are rejected.
+### 4.2 Public preserve-or-hash profile (`PublicKeyOrHash`)
 
-This API is appropriate when an application already owns a protocol identity.
+`PublicKeyOrHash` accepts any supported typed application key and encodes it
+exactly as specified in §3:
+
+- Canonical key bytes whose encoded length is `1..=32` become the Item ID
+  byte-for-byte.
+- Canonical key bytes longer than 32 bytes use the public hash-fallback path
+  and become a 32-byte Item ID.
+
+A valid typed key always has a nonempty canonical encoding, including
+`Text("")` as `60` and `Bytes([])` as `40`. This formatted profile therefore
+does not produce an empty Item ID.
+
+The length decision applies to the complete canonical CBOR encoding, not the
+logical payload alone. A `Text` or `Bytes` payload of 30 bytes encodes to
+exactly 32 bytes and is preserved; a 31-byte payload encodes to 33 bytes and
+uses the hash fallback. Signed `i64` values occupy at most nine bytes and are
+preserved.
+
+The fallback uses a domain-separated unkeyed BLAKE3 hash:
+
+```text
+hash_fallback_item_id =
+  BLAKE3-HASH(
+    "openkache/item-id/public-key-or-hash/v1"
+    | canonical_key_bytes
+  )
+```
+
+Neither path uses `namespace_id`,
+`item_id_root_key`, or `item_id_derivation_key`. Consequently, equal typed
+keys produce equal Item IDs across namespaces and client configurations under
+this profile; the wire-level `(namespace_id, item_id)` pair still identifies a
+distinct server item.
+
+This profile provides no client-side key confidentiality, namespace binding,
+or root-key isolation. It is useful when the server is fully trusted, when
+cross-client public identity is desired, or when avoiding hashing for short
+keys matters. Applications requiring those omitted guarantees MUST use
+`NamespaceHash`.
+
+The distinct domain strings separate the two hash inputs. There is no
+profile marker in the 32-byte output: a `PublicKeyOrHash` preserved encoding
+can intentionally or accidentally equal a hash-profile output, and the server
+does not distinguish those cases. Future revisions MUST use new domain strings
+and MUST NOT reinterpret existing Item IDs.
+
+This profile does not provide collision resistance between its preserve and
+hash branches, or between mapping profiles, against a caller that can choose
+keys. That is not a server security boundary: the same caller may use the Exact
+Item ID API to select any wire-valid Item ID. An application that exposes only
+mapped keys to less-trusted callers must enforce its own key namespace and
+profile boundary or use `NamespaceHash` exclusively.
+
+### 4.3 Exact Item ID API
+
+The Exact Item ID API accepts the final opaque `0..=32`-byte Item ID directly.
+It performs no typed-key conversion, canonical encoding, hashing, or namespace
+derivation. It still enforces the protocol Item ID length limit.
+
+This API is appropriate when an application already owns a wire identity. It
+is a dangerous escape hatch: the caller, not the client profile, owns identity,
+collision avoidance, and isolation.
+
+The wire accepts an empty Exact Item ID. Maintained high-level APIs reject it
+by default and require an explicit opt-in; low-level wire-operation APIs
+preserve the full wire range.
 
 ## 5. Derivation parameters
 
 ### 5.1 Namespace binding
 
-`namespace_id` is a positive, server-assigned identity. Clients MUST NOT
-synthesize or recycle it. Portable-key derivation binds it as the first eight
-bytes of the keyed-hash input:
+`namespace_id` is a positive, server-assigned identity. `NamespaceHash` binds it
+after the domain string:
 
 ```text
-Portable-key derivation:
-  namespace_id:u64be | canonical_key_bytes
+NamespaceHash input:
+  "openkache/item-id/namespace-hash/v1"
+  | namespace_id:u64be
+  | canonical_key_bytes
 ```
 
-Including the namespace prevents equal keys in different namespaces from
-colliding. Consequently, the client MUST resolve the namespace ID before
-deriving an Item ID. Omitting the namespace would make cross-namespace IDs
-stable and simpler to precompute, but would weaken domain separation and make
-accidental cross-namespace reuse easier.
+Including the namespace makes equal typed keys produce different
+`NamespaceHash` Item IDs in different namespaces.
 
-### 5.2 Root key and derivation visibility
+`PublicKeyOrHash` deliberately omits the namespace from both paths. The
+server already scopes item identity by namespace, so the same public Item ID in
+two namespaces addresses two distinct items.
 
-`client_root_key` is an application-selected key of exactly 32 bytes. It MAY
-be generated randomly or supplied directly. No text-to-key conversion is
-defined.
+### 5.2 Item ID root key and derivation visibility
+
+For `NamespaceHash`, `item_id_root_key` is an application-selected key of exactly 32
+bytes. It MAY be generated randomly or supplied directly. No text-to-key
+conversion is defined.
 
 If it is omitted, the default derivation key is derived from 32 zero bytes.
-Item IDs remain publicly derivable in this default configuration. Supplying a
-root key selects root-bound derivation; changing the root changes Item IDs and
-requires migration or repopulation.
+Item IDs remain publicly derivable in this default profile. Supplying a root
+key selects a root-bound derivation profile; changing the root changes Item
+IDs and requires migration or repopulation.
 
-The root key's use for Item ID derivation is independent from value handling.
-Whether values are enveloped, compressed, or encrypted is defined in the
-[Client Value Format](VALUE_FORMAT.md), not here. A client MAY use root-bound
-Item ID derivation with a value profile that does not encrypt payloads, subject
-to the value-format contract.
+For `NamespaceHash`, the Item ID root key is an identity setting, not a value-protection
+key. It MUST remain stable for the lifetime of addressable data.
+Value-protection keys rotate independently and are selected from the value
+envelope as defined by the [Client Value Format](VALUE_FORMAT.md). A value-key
+rotation MUST NOT change Item ID derivation. A client MAY use root-bound Item
+IDs with unprotected values, or publicly derivable Item IDs with protected
+values.
 
 ```text
 item_id_derivation_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache item ID derivation root v1",
-    material = client_root_key[32]
+    material = item_id_root_key[32]
   )
 ```
 
-The all-zero root is valid for default derivation. It MUST NOT be used as a
-substitute for an explicitly configured secret when a deployment requires
-non-public Item IDs.
+The all-zero root is valid for the default derivation profile. It MUST NOT be
+used as a substitute for an explicitly configured secret when an application
+requires non-public Item IDs.
 
-### 5.3 Hash algorithm compatibility
+`PublicKeyOrHash` ignores `item_id_root_key` and the resulting
+`item_id_derivation_key`. Changing either has no effect on its Item IDs.
 
-The derivation algorithm is BLAKE3 keyed hashing with a 32-byte derived key.
-The Item ID has no separate version field. Changing key identity, namespace
-input, hash context, or derivation material changes Item IDs and requires
-migration or repopulation. There is no key-rotation protocol.
+Profile persistence and mismatch detection remain intentionally unspecified in
+v1. APIs MUST make per-operation profile selection explicit when it differs
+from the client default; a mismatch may still appear as a miss.
+
+### 5.3 Mapping algorithm and profile compatibility
+
+`NamespaceHash` uses BLAKE3 keyed hashing with a 32-byte derived key.
+`PublicKeyOrHash` uses standard unkeyed BLAKE3 only for canonical encodings
+longer than 32 bytes. Each hashed path uses its exact domain string from §4.
+
+A profile that changes identity, namespace input, hash context, derivation
+material, or input framing MUST use a new domain string and MUST NOT
+reinterpret existing Item IDs. There is no in-band root-key mismatch detector:
+the wrong root normally appears as a miss. Changing `item_id_root_key` is an
+identity migration, not a value-key rotation.
 
 ## 6. Limits and validation
 
@@ -292,28 +450,19 @@ Every conforming SDK MUST enforce:
 MAX_CANONICAL_KEY_BYTES = 1,048,576  // 1 MiB
 ```
 
-`MAX_CANONICAL_KEY_BYTES` limits the complete preferred deterministic-CBOR key,
-including its CBOR header or bignum tag. A `Text` or `Bytes` application key
-can therefore contain at most 1,048,571 payload bytes because its canonical
-encoding uses a five-byte length header at that size. An integer's complete
-canonical basic-integer or bignum encoding is subject to the same limit.
-Bindings MUST reject an oversized encoded key before hashing and MAY reject an
-application input earlier when its minimum possible canonical encoding would
-exceed the limit.
+This limit applies to the complete canonical CBOR item, including its type,
+tag, and length bytes. It therefore measures the bytes actually validated and
+hashed uniformly across all key types. An adapter SHOULD reject obviously
+oversized native inputs before allocating an encoding and MUST verify the
+final encoded length. A canonical-key ABI MUST reject an oversized input
+buffer before decoding it.
 
-| `Bytes` or `Text` payload length | Canonical length | Result |
-|---:|---:|---|
-| 1,048,571 | 1,048,576 | accepted |
-| 1,048,572 | 1,048,577 | rejected |
+Bindings MAY use a lower documented local resource limit. The signed `i64`
+range is part of the cross-language v1 contract, not a local limit.
 
-For an input supplied through the canonical key ABI, the binding MUST decode and
-validate the complete canonical item and apply `MAX_CANONICAL_KEY_BYTES` to the
-encoded buffer. Validation MAY borrow the input and MUST NOT require a second
-key-sized allocation. Derivation MAY stream validated borrowed bytes directly
-into the keyed hash and SHOULD avoid a key-sized copy.
-
-Every path that produces or accepts an Item ID MUST use exactly 32 bytes. Empty
-application keys are valid; empty Item IDs are not.
+Every client path MUST enforce the wire protocol's `0..=32` Item ID limit.
+Empty logical keys and empty Exact Item IDs are valid. `PublicKeyOrHash`
+represents an empty `Text` or `Bytes` key by its nonempty one-byte CBOR encoding.
 
 ## 7. Conformance vectors
 
@@ -322,7 +471,7 @@ noted:
 
 ```text
 namespace_id = 1
-client_root_key =
+item_id_root_key =
   00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
   10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
 
@@ -331,36 +480,55 @@ item_id_derivation_key =
   92 22 5d c5 82 e1 06 a0 f0 29 f9 e6 3b 91 7b 4b
 ```
 
-### 7.1 Derived Item IDs
+`NamespaceHash` vectors use the namespace-hash domain string.
+`PublicKeyOrHash` fallback vectors use the public domain string and ignore the
+namespace and Item ID root parameters above.
+
+These vectors are normative fixtures, not hand-maintained implementation
+examples. A generator MUST:
+
+1. construct the typed key and canonical key bytes using the rules in §§2–3;
+2. derive the root key with BLAKE3 `DERIVE_KEY` using the exact context string;
+3. compute the domain-separated input byte-for-byte; and
+4. compare the resulting Item ID with this document.
+
+The machine-readable subset in
+[`fixtures/key_format_v1.json`](fixtures/key_format_v1.json) MUST agree with
+these tables. Before freeze, the complete set SHOULD be generated and checked
+by at least two independent implementations.
+
+### 7.1 NamespaceHash Item IDs
 
 | Vector | Canonical key bytes | `item_id` |
 |---|---|---|
-| `Text("abc")` | `63 61 62 63` | `42 7b da c9 1f 3b 4a 91 e6 84 4e df 91 5f de 24 6a 8c 5f fd c6 53 8a b2 73 d9 b3 8a c7 6e d3 b5` |
-| `Bytes([00,ff])` | `42 00 ff` | `37 8f 5b c4 75 ef 94 54 49 58 3a e5 a5 34 16 45 35 28 1a 63 44 63 6b 63 ec 88 70 57 6e 0e 7e 41` |
-| `Integer(1)` | `01` | `cf 3c 3f db 98 f7 ce 3f 81 a7 04 a3 9b 88 2d e2 a0 58 37 d3 d1 c0 56 81 84 38 23 74 11 88 54 7c` |
-| `Integer(-1)` | `20` | `63 3b 3c a8 10 66 f7 25 0c 6a f1 1f 14 62 d3 a1 48 4f 12 16 a0 6f 1e f5 65 46 78 65 c3 28 81 d6` |
-| `Text("")` | `60` | `4a 09 7c c0 5f b5 4d 3b e2 1a f5 83 dc b4 b3 d9 e8 d7 6f f6 f6 5b 14 78 5f dd f7 56 d1 aa 13 bc` |
-| `Bytes([])` | `40` | `6a 45 bd 6f 9f a7 94 a0 08 9b ed 46 b1 ee f3 af 0f 69 12 ec 08 b5 0a 02 c0 f4 f3 9f be c0 5e cc` |
-| `Text("abc")`, namespace `2` | `63 61 62 63` | `8d be e5 54 99 ed f7 43 4c f2 b9 02 42 e7 d3 60 94 05 d2 08 06 a7 e5 27 5b ce 83 b7 94 f8 50 35` |
+| `Text("abc")` | `63 61 62 63` | `c0 ba 3f dd 18 76 04 64 59 a2 58 a7 1f 39 68 d5 d4 5a ff c9 57 d1 44 22 e1 d2 f5 34 79 53 6e 53` |
+| `Bytes([00,ff])` | `42 00 ff` | `42 da fe 0f 70 fa 71 5c f0 bf a7 86 d4 5b ca 94 c8 39 21 07 aa dd 69 10 83 6d 37 05 ef 51 e3 e1` |
+| `Integer(1)` | `01` | `12 59 ba c3 1d 03 e5 cc b2 1b 4e fc a5 eb c2 c2 5d 04 7c bc 85 63 0d 74 5d a8 75 20 a0 c0 22 d6` |
+| `Integer(-1)` | `20` | `9c 75 9f cb 96 09 33 9e 5f 1f 74 ab ae 13 3d de d5 a2 3c 1d 55 29 e0 27 8c 00 b8 09 7a 95 14 dc` |
+| `Text("")` | `60` | `84 65 0c 6d 68 0d a8 87 5c c9 0c 2f ba e3 62 48 ff bd 34 ac 33 88 b4 01 64 3c 31 18 63 91 96 e2` |
+| `Bytes([])` | `40` | `a8 7e 7a a5 78 1c da 45 c4 a9 eb 1b aa 98 4e ba 0c 78 98 b7 ae a4 59 f4 bd 8f bb ec c3 a3 e0 f7` |
+| `Text("abc")`, namespace `2` | `63 61 62 63` | `1b a7 0c ae 30 66 fb b7 bc e8 d7 f4 75 c6 ea 84 ca 27 6e e2 d1 cb 4c 3d 2a f9 bf 85 25 6b c9 58` |
 
-### 7.2 Exact Item ID boundary vectors
+### 7.2 PublicKeyOrHash boundary vectors
 
-The Exact Item ID API preserves one exact 32-byte input and rejects every other
-length.
+The first four vectors follow the canonical preservation path. The final
+vector is a 31-byte logical byte string whose 33-byte canonical encoding uses
+the public hash fallback.
 
-| Input | Result |
-|---|---|
-| empty input | rejected |
-| 31-byte input `00 01 02 ... 1e` | rejected |
-| 32-byte input `00 01 02 ... 1f` | same 32 bytes |
-| 33-byte input `00 01 02 ... 20` | rejected |
+| Typed key | Canonical key bytes | `item_id` |
+|---|---|---|
+| `Integer(1)` | `01` | `01` |
+| `Text("abc")` | `63 61 62 63` | `63 61 62 63` |
+| `Bytes([])` | `40` | `40` |
+| `Bytes([00,01,...,1d])` | `58 1e 00 01 02 ... 1d` | `58 1e 00 01 02 ... 1d` |
+| `Bytes([00,01,...,1e])` | `58 1f 00 01 02 ... 1e` | `93 71 1b 6b 8d 8a 89 30 39 bc 33 6e 29 99 51 05 d8 3c ae 35 cc 3f 4e 08 5d 51 8c 54 12 7f 67 21` |
 
-### 7.3 Root separation
+### 7.3 Item ID root separation
 
 For `namespace_id = 1` and `Text("abc")`:
 
 ```text
-client_root_key =
+item_id_root_key =
   ff fe fd fc fb fa f9 f8 f7 f6 f5 f4 f3 f2 f1 f0
   ef ee ed ec eb ea e9 e8 e7 e6 e5 e4 e3 e2 e1 e0
 
@@ -369,15 +537,16 @@ item_id_derivation_key =
   d1 b7 dd 5c 75 43 f8 cc 07 cb 9b 18 ad 0e 2b cd
 
 item_id =
-  cc f7 df e4 e2 d9 f4 65 4d 00 44 e4 eb 2c 9b 5b
-  fc 52 2a 8d 33 0e 7b 4e 9e 30 9a 7d b5 cf b4 80
+  28 e6 6d 25 3b 2a 93 e5 db d3 68 d4 21 04 6e 12
+  10 c7 76 14 6f d5 ec 21 9f 4e 00 88 f9 8c 24 0f
 ```
 
 ### 7.4 Rejection cases
 
 Clients MUST reject:
 
-- a portable key whose `KeySpec` does not match the formatted keyspace;
+- a native input that cannot be inferred as exactly one of `Integer`, `Text`,
+  or `Bytes`;
 - a non-canonical CBOR key, including trailing bytes or an unsupported type;
 - canonical key bytes larger than `MAX_CANONICAL_KEY_BYTES`;
-- an Item ID that is not exactly 32 bytes.
+- an Item ID longer than 32 bytes.

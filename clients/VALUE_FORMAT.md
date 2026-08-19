@@ -1,14 +1,29 @@
 # OpenKache Client Value Encoding Profile v1 (Draft)
 
-> **Status: Draft — pre-freeze**
+> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 
-This document defines the client-side encoding of a value before it is handed
-to the server. The server stores the resulting bytes opaquely and does not
+This document defines the client-side v1 value encoding before it is handed to
+the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
+
+Cryptographic behavior is defined only in
+[Value Security Profiles](VALUE_SECURITY.md).
+
+This is the target contract for the pre-freeze draft. Client implementations
+may temporarily lag while the draft is being completed, but an implementation
+MUST NOT claim conformance to this profile until it implements the complete
+grammar, key schedule, and validation rules.
+
+The shared implementation and local policies used by OpenKache-maintained
+language bindings are described by the
+[Client Implementation Guide](CLIENT.md). Binding-specific method names and
+documented deviations belong in each binding's documentation.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
-[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
+[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) when they appear in
+uppercase.
 
 ## 1. Scope and goals
 
@@ -22,15 +37,30 @@ This profile is designed to provide:
 
 This profile does not define:
 
-- key conversion, key derivation, or identity binding;
+- application-key conversion or Item ID derivation;
 - server freshness or CAS;
 - language-native type conversion;
 - application registries for arbitrary payload formats; or
 - transport framing.
 
-The enclosing client profile supplies key material and any external associated
-data. This document defines the value envelope and the transforms applied to
-its payload.
+The enclosing client supplies the namespace, resolved Item ID, and value
+keyring. This document defines the envelope grammar and payload transforms.
+Item ID derivation and value protection are separate contracts.
+
+Structured values use the codec-neutral model and initial profile in
+[`value/SPEC.md`](value/SPEC.md). This envelope document does not redefine
+language-native numeric conversion, map equality, or lossless value views.
+
+Addressing and value representation are independent:
+
+| Axis | Choices | Meaning |
+|---|---|---|
+| Address | Mapped, Exact | Map a typed key through `KEY_FORMAT.md`, or use a caller-owned Item ID. |
+| Value | Formatted v1, Raw, Caller-owned v0 | Build and interpret this envelope, preserve server value bytes, or pass through a version-0 envelope. |
+
+Every address choice can be combined with every value choice. `Exact` bypasses
+only key mapping. `Raw` bypasses only value encoding and decoding. The server
+stores every choice as opaque bytes.
 
 ## 2. Processing model
 
@@ -43,17 +73,16 @@ source value
   -> ValueEnvelope
 ```
 
-`OpaqueBytes` treats the source as an exact byte string: before optional
-compression and protection, the payload bytes are identical to the supplied
-bytes. `CBOR` accepts one CBOR data item under the rules in §5. The payload
-format is selected by the caller; the encoding does not infer a format from the
-payload bytes.
+`OpaqueBytes` preserves the supplied payload before optional compression and
+protection. `StructuredValue-CBOR-v1` accepts one item defined by
+[`value/SPEC.md`](value/SPEC.md). The caller selects the payload format; the
+encoder does not infer it from the bytes.
 
 ## 3. Envelope grammar
 
 ```text
 ValueEnvelope = value_envelope_version:vu128 | version_body
-version_body  = selector_byte:u8 | envelope_body
+version_body  = selector_byte:u8 | selected_body
 ```
 
 The profile uses `value_envelope_version = 1`:
@@ -62,7 +91,11 @@ The profile uses `value_envelope_version = 1`:
 value_envelope_v1 =
     value_envelope_version:vu128(1)
   | selector_byte:u8
-  | envelope_body
+  | selected_body
+
+selected_body =
+    transformed_body                                      # Unprotected
+  | value_key_id:vu128 | protected_body                   # protected
 ```
 
 The `|` operator denotes byte concatenation. The `value_envelope_version`
@@ -78,14 +111,34 @@ profile has no magic prefix and no body-length field. An encoder MUST emit one
 complete envelope; a decoder MUST consume the complete supplied envelope and
 reject truncation, overflow, overlong `vu128` encodings, and trailing bytes.
 
-`value_envelope_version = 0` is an application-defined envelope profile.
-OpenKache does not define or interpret its body grammar, selectors, transform
-order, authentication inputs, or limits. Communicating parties MAY use it only
-when they configure the complete profile out of band. A reader without the
-matching profile MUST reject it and MUST NOT parse it using this profile.
+The `protection_id` in `selector_byte` selects the `selected_body` grammar.
+`Unprotected` has no `value_key_id`; all bytes after the selector are its
+transformed body. Every protected body begins with one canonical
+`value_key_id:vu128` in the numeric range `1..=2^64 - 1`, followed by the
+selected protection profile's body. Zero is invalid for a protected envelope
+and MUST be rejected.
+The key ID is public selection metadata, not secret key material. Its canonical
+encoding is at most nine bytes.
 
-Unsupported versions MUST be rejected. A decoder MUST select the version
-grammar before interpreting any version-body byte.
+`value_envelope_version = 0` is an opaque application-envelope escape hatch,
+not a second OpenKache value grammar. OpenKache does not define or interpret
+its body grammar, selectors, transform order, authentication inputs, or
+application limits. Maintained clients expose it only through an explicit
+caller-owned v0 representation.
+
+The client passes complete version-0 bytes through as caller-owned data. It
+MUST validate that the first canonical version field is exactly `0`, but MUST
+NOT parse or interpret the remaining body. It MUST NOT apply version-1
+transforms or rewrite the bytes. The outer protocol value-size limit still
+applies, but version-1 expanded-payload, Zstandard, selector, keyring, and
+cryptographic validation do not. The application owns all other version-0
+validation and interpretation.
+
+Versions other than `0` and `1` MUST be rejected. A structured-value decoder
+MUST reject version `0` with a caller-owned-v0-required error rather than
+returning a partially interpreted value. A Raw read returns stored bytes
+without selecting a grammar. Any interpreting decoder MUST dispatch the
+version before reading a version-body byte.
 
 ## 4. Selector byte
 
@@ -107,28 +160,18 @@ NOT guess an unknown selector.
 
 ### 4.1 Protection profiles
 
-`protection_id` selects the complete cryptographic protection behavior. The
-name, nonce policy, authentication behavior, and repetition behavior are
-normative properties of the selected profile.
+`protection_id` selects one profile defined by `VALUE_SECURITY.md`.
 
-| ID | Protection profile | Behavior |
-|---:|---|---|
-| `0` | `Unprotected` | Store the transformed body directly; provide no confidentiality or authentication. |
-| `1` | `AES-256-GCM-SIV` ([RFC 8452](https://www.rfc-editor.org/rfc/rfc8452)) | Randomized authenticated encryption with a fresh 12-byte nonce per write. |
-| `2` | `AES-256-SIV-CMAC` ([RFC 5297](https://www.rfc-editor.org/rfc/rfc5297)) | Deterministic authenticated encryption with no random nonce. |
+| ID | Protection profile |
+|---:|---|
+| `0` | `Unprotected` |
+| `1` | `AES-256-GCM-SIV` |
+| `2` | `AES-SIV-CMAC` |
 
-The client MUST have an instance-wide default protection profile. Each
-formatted operation MAY specify a protection-profile override. If no override
-is supplied, the operation uses the instance default; an override MUST NOT
-mutate that default. The selected operation profile MUST be represented by
-`protection_id`.
-
-Without a configured protection key, the default and only valid profile is
-`Unprotected`. With a configured key, the default profile is
-`AES-256-GCM-SIV`; the client MAY explicitly select any supported profile.
-Selecting an authenticated protection profile without its required key MUST
-fail. A decoder MUST reject a value whose protection ID is disallowed by the
-caller's configured profile and MUST NOT silently downgrade or fall back.
+Profile behavior and key selection are defined in
+[VALUE_SECURITY.md](VALUE_SECURITY.md). Maintained-client write defaults,
+read allowlists, and per-operation overrides are defined in
+[CLIENT.md](CLIENT.md).
 
 ### 4.2 Compression profiles
 
@@ -142,12 +185,16 @@ caller's configured profile and MUST NOT silently downgrade or fall back.
 | ID | Payload format |
 |---:|---|
 | `0` | `OpaqueBytes` |
-| `1` | `CBOR` |
+| `1` | `StructuredValue-CBOR-v1` (initial profile: [`value/SPEC.md`](value/SPEC.md)) |
 
 Only the payload format IDs listed above are supported by this profile. Any
-other payload format ID MUST be rejected. This profile has no in-band
-application-format registry. Applications that need a format other than CBOR
-MUST encode it as `OpaqueBytes` and agree on its interpretation out of band.
+other payload format ID MUST be rejected. Payload format ID `1` is specifically
+the CBOR v1 profile; it is not a generic alias for every future structured
+codec. A future OpenKache-defined structured codec MUST use a new payload
+format ID or a new envelope version and MUST NOT reinterpret ID `1`. This
+profile has no in-band application-format registry. Applications that need
+another format MUST select a supported profile or encode it as `OpaqueBytes`
+and agree on its interpretation out of band.
 
 ## 5. Payload formats
 
@@ -182,31 +229,12 @@ The selected payload is empty, so the envelope has no body bytes after the
 selector. The enclosing protocol frame supplies the envelope length; the
 envelope does not contain a separate payload-length field.
 
-### 5.2 CBOR
+### 5.2 StructuredValue-CBOR-v1
 
-The CBOR payload MUST contain exactly one complete CBOR data item. The decoder
-MUST consume the entire payload. A CBOR sequence, a second item, or any other
-trailing bytes MUST be rejected.
-
-Only definite-length encodings are accepted. Indefinite-length arrays and
-maps, and chunked indefinite-length byte strings and text strings, MUST be
-rejected.
-
-Integer values MAY use any valid CBOR integer encoding. Preferred serialization
-is not required. A decoder MUST NOT reject a valid integer solely because it is
-not preferred; malformed encodings and invalid additional-information values
-remain invalid.
-
-Map order has no semantic meaning. Encoders MAY emit entries in any order, and
-decoders MUST accept any order. A map MUST NOT contain duplicate keys as
-determined by the decoded key values. A decoder that cannot determine key
-uniqueness MUST reject the map.
-
-CBOR text strings MUST contain well-formed UTF-8. Other character encodings
-MUST be represented as CBOR byte strings, with their interpretation defined by
-the application.
-
-CBOR tags are not supported by this profile. Tagged items MUST be rejected.
+The structured payload MUST conform to the initial codec profile in
+[`value/SPEC.md`](value/SPEC.md). That specification defines the complete
+CBOR item boundary, allowed encodings, numeric behavior, map-key equality, and
+duplicate-key rejection.
 
 ## 6. Compression
 
@@ -215,13 +243,19 @@ Compression profile `1` is one standard Zstandard (Zstd) frame under
 
 Encoders MUST use a declared content size, no external dictionary, no
 skippable frame, and no trailing bytes. Decoders MUST reject missing content
-sizes, multiple frames, dictionary requirements, oversized windows, trailing
-bytes, and decompressed output above the payload limit.
+sizes, multiple frames, dictionary requirements, trailing bytes, and any frame
+whose declared content size, declared window size, or produced output exceeds
+the corresponding limit in §9. For a single-segment frame, the frame content
+size is also its window size and is subject to both limits. These checks MUST
+reject an excessive declared size or window before allocating the output
+buffer or beginning decompression. The decoder MUST bound produced output
+during decompression and verify the exact produced size and frame boundary
+afterward.
 
-The initial SDK policy is Zstd level 1, no compression below 1,024 payload
-bytes, and no compression unless it saves at least 64 bytes. An encoder MAY
-select compression profile `0` when compression is not beneficial. It MUST NOT
-label an uncompressed body as Zstandard.
+Whether and when an encoder chooses Zstandard is client policy defined by the
+[Client Implementation Guide](CLIENT.md#64-compression-policy) for maintained
+bindings, not an envelope validity rule. An encoder MUST accurately identify
+the emitted body as either `Uncompressed` or `Zstandard`.
 
 When secret data is compressed together with attacker-influenced data,
 compression SHOULD be disabled or the components SHOULD be stored separately.
@@ -230,68 +264,25 @@ cryptographic protection does not hide that length.
 
 ## 7. Cryptographic protection
 
-The enclosing client profile supplies the key material and external associated
-data. This document does not define key derivation or identity binding.
+The selector and envelope grammar in this document select one of the
+protection profiles defined in [VALUE_SECURITY.md](VALUE_SECURITY.md).
+That document is the sole normative source for value-key selection, KDF
+inputs, AAD, cryptographic constructions, protection overhead, and security
+properties. This document intentionally keeps no duplicate key schedule or
+cryptographic test vectors.
 
-For a protected envelope, the authenticated data MUST include the exact
-encoded `value_envelope_version` bytes and the exact `selector_byte`, in
-addition to
-any external associated data supplied by the enclosing client profile.
-
-The transform order is:
+For implementation and interoperability work, use the security document and
+the public [client fixtures](fixtures/README.md). The transform order remains:
 
 ```text
 envelope_body = Protect(Compress(payload_bytes))
 ```
 
-Protection MUST authenticate before any decompression or payload parsing. An
-authentication failure MUST use one generic error. Unauthenticated plaintext
-MUST be zeroized before that error is returned.
-
-### 7.1 AES-256-GCM-SIV
-
-```text
-gcm_siv_body = nonce[12] | ciphertext | tag[16]
-```
-
-The encoder MUST obtain a fresh 12-byte nonce from the operating-system
-cryptographic random source for every write, including repeated writes. It MUST
-fail if randomness fails and MUST NOT substitute a timestamp, payload, or
-process-local counter. The protection overhead is 28 bytes; the nonce is
-public.
-
-### 7.2 AES-256-SIV-CMAC
-
-RFC 5297 SIV uses independent 32-byte authentication and encryption keys:
-
-```text
-siv_key_material =
-    authentication_key[32]
-  | encryption_key[32]
-
-siv_body = synthetic_iv[16] | ciphertext
-```
-
-Pass the complete associated data as one RFC 5297 associated-data component.
-Do not split it into multiple S2V components or add a nonce component. The
-protection overhead is 16 bytes. Repeated identical writes with the same key,
-associated data, and payload produce identical protected bodies.
-
-### 7.3 Unprotected
-
-The transformed body is stored directly. This profile provides no
-confidentiality or authentication; parser bounds and compression validation
-remain mandatory.
-
-### 7.4 Size comparison
-
-| Protection profile | Envelope header | Protection overhead |
-|---|---:|---:|
-| `Unprotected` | 2 bytes | 0 bytes |
-| `AES-256-GCM-SIV` | 2 bytes | 28 bytes |
-| `AES-256-SIV-CMAC` | 2 bytes | 16 bytes |
-
-Compression adds its own frame overhead and may enlarge small values.
+Authentication MUST complete before decompression or structured-value parsing.
+An authentication failure MUST NOT return partially decrypted or decompressed
+bytes. `Unprotected` is wire-valid but provides neither confidentiality nor
+authentication. Compression-dependent length leakage remains observable for
+protected values.
 
 ## 8. Encoding and decoding
 
@@ -301,73 +292,104 @@ An encoder MUST:
 2. Enforce the expanded payload limit.
 3. Compress the payload only when the selected policy permits.
 4. Encode the value-envelope version and selector byte.
-5. Construct authenticated data from the exact header bytes and external
-   associated data.
-6. Apply the selected protection profile.
-7. Enforce the complete envelope limit before returning the bytes.
+5. For a protected profile, resolve and encode the active nonzero value-key ID,
+   select its exact key, and derive the item-specific protection key or keys.
+6. Construct the profile-defined AAD, including the exact version, selector,
+   and key-ID bytes and the namespace and Item ID fields.
+7. Apply the selected protection profile.
+8. Enforce the complete envelope limit before returning the bytes.
 
 For this profile, the encoder MUST NOT emit a magic prefix, body length,
-unsupported selector, non-canonical `vu128`, or a transform inconsistent with
-the selector byte.
+unsupported selector, zero or non-canonical protected value-key ID, or a
+transform inconsistent with the selector byte. It MUST NOT emit a value-key ID
+for `Unprotected`.
 
 A decoder MUST:
 
 1. Parse one canonical `value_envelope_version:vu128` from the complete
    envelope.
-2. Dispatch the version before parsing its version body.
+2. Dispatch the version before parsing its version body. Version `0` returns
+   through the caller-owned v0 path and has no v1 body validation.
 3. Parse and validate the selector byte.
 4. Enforce the caller's expected protection policy.
-5. Construct the authenticated data from the selected profile's rules.
-6. Check minimum protected-body sizes before slicing.
-7. Authenticate and decrypt before decompression or payload parsing.
-8. Validate and bounded-decompress one Zstandard frame when selected.
-9. Decode exactly one CBOR data item or return the exact `OpaqueBytes` payload.
+5. For a protected profile, parse one canonical nonzero value-key ID, look up
+   exactly that key, and derive the item-specific protection key or keys.
+6. Construct the authenticated data from the selected profile's rules.
+7. Check minimum protected-body sizes before slicing.
+8. Authenticate and decrypt before decompression or payload parsing.
+9. Validate and bounded-decompress one Zstandard frame when selected.
+10. Decode exactly one structured-value item using the selected profile, or
+    return the exact `OpaqueBytes` payload.
 
-Unknown versions, selector values, compression profiles, payload formats,
-malformed payloads, and disallowed trailing bytes MUST be rejected. The
-decoder MUST NOT silently downgrade, fall back, or reinterpret an unknown
-value as another payload format.
+Unknown versions other than caller-owned version `0`, selector values,
+value-key IDs, compression profiles, payload formats, malformed payloads, and
+disallowed trailing bytes MUST be rejected. The decoder MUST NOT probe other
+keys, silently downgrade, fall back, or reinterpret an unknown value as
+another payload format. Version `0` is returned through the caller-owned
+pass-through path without parsing.
 
 ## 9. Limits and rejection rules
 
-- Complete `ValueEnvelope`: at most 64 MiB.
-- Expanded payload: at most 64 MiB.
+```text
+MAX_VALUE_ENVELOPE_BYTES = 67,108,864  // 64 MiB
+MAX_EXPANDED_PAYLOAD_BYTES = 67,108,864
+MAX_ZSTD_WINDOW_BYTES = 67,108,864
+```
 
-Implementations MAY use lower limits, but MUST check declared sizes, Zstd
-windows, decompressed output, and all arithmetic before allocation.
+These are per-value limits. Implementations SHOULD also configure an aggregate
+in-flight byte budget for concurrent encode/decode operations; that operational
+budget is not part of the wire format. OpenKache-maintained clients require
+that budget as specified in [`CLIENT.md`](CLIENT.md#67-resource-budget).
 
-Malformed `vu128` encodings, truncated headers, nonzero selector zero bits,
-unsupported selector values, invalid UTF-8 text strings, duplicate CBOR map
-keys, tagged or indefinite-length CBOR items, invalid Zstandard frames,
-authentication failures, and payloads exceeding limits MUST be rejected.
+`MAX_VALUE_ENVELOPE_BYTES` applies to the complete byte string stored and
+returned opaquely by the server, including version, selector, value-key ID,
+nonce or synthetic IV, ciphertext, authentication tag, and any Zstandard frame
+overhead. It equals the wire protocol's maximum `SET` value and response
+payload.
+
+`MAX_EXPANDED_PAYLOAD_BYTES` applies after decryption and decompression but
+before structured-value parsing. `MAX_ZSTD_WINDOW_BYTES` applies to the
+declared decoder window. A Zstandard decoder MUST independently enforce:
+
+```text
+declared_content_size <= MAX_EXPANDED_PAYLOAD_BYTES
+declared_window_size  <= MAX_ZSTD_WINDOW_BYTES
+produced_size         <= MAX_EXPANDED_PAYLOAD_BYTES
+produced_size         == declared_content_size
+```
+
+Satisfying one check does not waive another.
+
+The two 64 MiB limits are independent: a value is valid only when both its
+expanded payload and complete envelope satisfy their limits. Protection and
+envelope metadata consume part of the envelope limit, so the maximum logical
+payload can be smaller than 64 MiB.
+
+Implementations MAY use lower local limits, but MUST check the complete
+envelope, declared Zstandard content size and window size, produced output, and
+all arithmetic before allocation. A decoder MUST reject a frame with no
+declared content size, more than one frame, any dictionary ID, a skippable
+frame, trailing bytes, a declared or produced size above its limit, or a
+produced size different from the declared content size.
+
+Malformed `vu128` encodings, truncated headers, zero or unknown protected
+value-key IDs, nonzero selector zero bits, unsupported selector values,
+structured-value violations, invalid Zstandard frames, authentication
+failures, and payloads exceeding limits MUST be rejected.
 
 ## 10. Versioning and extension
 
 `value_envelope_version` selects a complete envelope grammar. It is not a
 version of the selector byte or envelope body. A future OpenKache-defined
 version MAY change selector layout and assignments, body framing, transform
-order, authentication inputs, and limits.
+order, key-selection framing, authentication inputs, and limits.
 
 This profile uses `value_envelope_version = 1`. A reader MUST reject a version
-it does not support rather than guessing its grammar. Version `0` is available
-only for a complete application-defined envelope profile configured out of
-band.
+other than `0` or `1` rather than guessing its grammar. Version `0` is
+available only through the explicit caller-owned v0 representation for a
+complete application-defined envelope profile configured out of band; the
+maintained client passes it through without interpreting it.
 
 Future OpenKache versions are additive: a newer version may represent values or
-policies that this profile cannot. A client MAY choose the oldest supported
-OpenKache version that represents its selected value and policy. That version
-selection is independent of the payload bytes.
-
-## 11. Security properties
-
-Protected profiles provide confidentiality and ciphertext authentication for
-the supplied key and associated data. `Unprotected` provides neither.
-
-This profile does not provide freshness or replay protection. An older valid
-envelope can be accepted again unless the enclosing client or server protocol
-adds a generation, CAS, expiry, or equivalent freshness mechanism.
-
-All protected profiles leak the encoded envelope length. Compression can add
-content-dependent length leakage; callers that cannot tolerate that side
-channel SHOULD disable compression or separate secret and attacker-influenced
-data.
+policies that this profile cannot. Version selection is independent of payload
+bytes.

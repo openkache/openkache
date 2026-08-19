@@ -1,0 +1,188 @@
+{
+  "$schema": "./schema.json",
+  "spec": "openkache/wire-protocol",
+  "spec_revision": "draft-2026-08-19.4",
+  "vectors": [
+    {
+      "kind": "positive",
+      "name": "get_empty_item_id",
+      "input": {
+        "opcode_hex": "02",
+        "request_id": 0,
+        "namespace_id": 7,
+        "item_id_hex": ""
+      },
+      "intermediate": {
+        "request_id_vu128_hex": "00",
+        "item_id_length_hex": "00"
+      },
+      "output": {
+        "frame_hex": "0200000000000000000700"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "get_maximum_item_id",
+      "input": {
+        "opcode_hex": "02",
+        "request_id": 128,
+        "namespace_id": 7,
+        "item_id_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "intermediate": {
+        "request_id_vu128_hex": "8002",
+        "item_id_length_hex": "20"
+      },
+      "output": {
+        "frame_hex": "028002000000000000000720000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "get_item_id_length_33",
+      "input": {
+        "opcode_hex": "02",
+        "request_id": 0,
+        "namespace_id": 7,
+        "item_id_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "intermediate": {
+        "item_id_length_hex": "21",
+        "frame_boundary_known": true
+      },
+      "output": {
+        "response_frame_hex": "800000"
+      },
+      "error": {
+        "category": "invalid_request",
+        "connection_action": "respond"
+      }
+    },
+    {
+      "kind": "boundary",
+      "name": "set_wire_size_exceeded",
+      "input": {
+        "operation": "SET",
+        "value_len": 67108865
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "wire_limit_exceeded",
+        "connection_action": "close_without_response"
+      }
+    },
+    {
+      "kind": "boundary",
+      "name": "set_server_limit_exceeded",
+      "input": {
+        "operation": "SET",
+        "request_id": 0,
+        "value_len": 1025,
+        "server_value_limit": 1024,
+        "complete_body_available": true
+      },
+      "intermediate": {},
+      "output": {
+        "response_frame_hex": "820000"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "cross_lane_if_absent_same_item",
+      "input": {
+        "operations": [
+          {
+            "lane": "A",
+            "operation": "SET",
+            "condition": "IfAbsent",
+            "namespace_id": 7,
+            "item_id_hex": "11"
+          },
+          {
+            "lane": "B",
+            "operation": "SET",
+            "condition": "IfAbsent",
+            "namespace_id": 7,
+            "item_id_hex": "11"
+          }
+        ],
+        "invocation": "concurrent",
+        "initial_state": "absent"
+      },
+      "intermediate": {
+        "required_semantics": "linearizable_per_item"
+      },
+      "output": {
+        "allowed_status_sequences": [
+          ["Created", "NotStored"],
+          ["NotStored", "Created"]
+        ]
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "internal_error_has_no_mutation_effect",
+      "input": {
+        "operation": "SET",
+        "server_result": "InternalError"
+      },
+      "intermediate": {
+        "outcome_known": true
+      },
+      "output": {
+        "status": "InternalError",
+        "mutation_effect": "none"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "invalid_expiration_selector",
+      "input": {
+        "operation": "SET",
+        "expiration_mode": 3
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "invalid_request_shape",
+        "connection_action": "close_without_response"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "noncanonical_request_id",
+      "input": {
+        "frame_prefix_hex": "028100"
+      },
+      "intermediate": {
+        "decoded_request_id": 1,
+        "canonical_request_id_hex": "01"
+      },
+      "output": null,
+      "error": {
+        "category": "noncanonical_integer",
+        "connection_action": "close_without_response"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "experimental_stats_disabled",
+      "input": {
+        "frame_hex": "05000000000000000007",
+        "enable_experimental_api": false
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "unassigned_opcode",
+        "connection_action": "close_without_response"
+      }
+    }
+  ]
+}

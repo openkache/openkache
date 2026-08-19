@@ -5,6 +5,11 @@ Deno. A packaged Node-API adapter delegates network, retries, value protection,
 and canonical JSON behavior to `openkache-client-core`; applications need no
 helper process or runtime npm dependencies.
 
+> **Current implementation:** This package currently exposes the legacy
+> canonical-JSON and fixed-width Item ID APIs. The draft key, value, and
+> variable Item ID contracts linked below are migration targets, not claims of
+> current conformance.
+
 ## Purpose
 
 The package converts JavaScript values and configuration into shared-core
@@ -92,11 +97,13 @@ Canonical JSON accepts only null, booleans, finite numbers, strings, dense
 arrays, and regular objects with string keys. Cycles, sparse arrays, binary
 objects, `undefined`, `bigint`, and non-finite numbers are rejected.
 
-Keys follow the configured `key_spec` (`text` by default): text keys are exact
-UTF-8 strings, byte keys are exact `Uint8Array` values, and integer keys are
-safe integer-valued `number` or `bigint` values. Empty and NUL-containing keys
-are valid; floating-point, unsupported native types, and unpaired surrogates
-are rejected.
+Keys follow the configured current `key_spec` (`text` by default), which
+selects the target `key_type`, not an Item ID mapping profile: text keys are
+exact UTF-8 strings, byte keys are exact `Uint8Array` values, and integer keys
+are safe integer-valued `number` or `bigint` values. Empty and NUL-containing
+keys are valid; floating-point, unsupported native types, and unpaired
+surrogates are rejected. A future API may expose the target name `key_type`
+directly.
 
 Use `{ condition: "if_absent" }` to create without overwriting or
 `{ condition: "if_present" }` to update only an existing item. Use `set_raw`
@@ -156,7 +163,9 @@ connection. `connection_state()` reports `connected`, `reconnecting`,
 `disconnected`, `closed`, or `unknown`; `reconnect()` replaces a failed connection without
 replaying an operation. Call and await `close()` when finished. The
 `client.raw()` view implements the Smithy-generated `Smithy_OpenKache_Api`
-contract for exact 32-byte item IDs and opaque protocol values.
+contract for the current fixed-width item-ID API and opaque protocol values.
+The draft key contract targets `0..=32`-byte Item IDs and is not implemented
+by this package yet.
 
 Protocol limits and operation outcomes follow the
 [wire protocol specification](../../protocol/SPEC.md); retry policy remains
