@@ -32,6 +32,11 @@ filegroup(
 )
 
 filegroup(
+    name = "client_value_sources",
+    srcs = ["//clients/value:source_tree"],
+)
+
+filegroup(
     name = "client_rust_sources",
     srcs = ["//clients/rust:source_tree"],
 )
@@ -70,6 +75,7 @@ filegroup(
     srcs = [
         ":client_cli_sources",
         ":client_core_sources",
+        ":client_value_sources",
         ":client_rust_sources",
     ],
 )
@@ -147,6 +153,8 @@ filegroup(
         "//clients/cli:runtime_sources",
         "//clients/core:README.md",
         "//clients/core:runtime_sources",
+        "//clients/value:README.md",
+        "//clients/value:runtime_sources",
         "//clients/rust:README.md",
         "//clients/rust:runtime_sources",
     ],
