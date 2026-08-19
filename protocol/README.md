@@ -17,15 +17,9 @@ fields and interpreting semantic results. The protocol crate does not generate
 handlers, client methods, or API-family routing.
 
 The [wire protocol specification](SPEC.md) defines the normative v1 contract.
-Use the focused entry points for reading:
-
-- [Wire format](WIRE_FORMAT.md)
-- [Operations](OPERATIONS.md)
-- [Transport profiles](TRANSPORTS.md)
-- [Conformance checklist](CONFORMANCE.md)
-- [Server semantics](SERVER_SEMANTICS.md)
-- [Namespace lifecycle](NAMESPACE.md), a WIP draft outside v1
-- [Experimental operations](EXPERIMENTAL.md)
+Related documents cover [server semantics](SERVER_SEMANTICS.md),
+[namespace lifecycle](NAMESPACE.md) as a WIP outside v1, and
+[experimental operations](EXPERIMENTAL.md).
 
 ## Commands
 

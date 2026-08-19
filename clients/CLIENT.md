@@ -1,6 +1,6 @@
 # OpenKache Maintained Client Implementation Guide — Version 1 Draft
 
-> **Status:** Draft `draft-2026-08-19.3`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 >
 > This guide describes the target implementation for OpenKache-maintained
 > client SDKs. Implementations may temporarily lag during migration.
@@ -222,7 +222,7 @@ Server statuses have separate retry meaning:
 | `InvalidRequest`, `TooLarge`, `PolicyConflict` | Do not retry unchanged. |
 | `Forbidden` | Retry only after credentials or authorization policy changes. |
 | `NoCapacity` | Retry only after capacity or eviction state changes. |
-| `NamespaceNotFound` | Retry only after namespace provisioning or application state changes. |
+| `NamespaceNotFound` | Retry only after server namespace state or application state changes. |
 | `InternalError` | The server reports no externally visible effect; retry remains a caller or configured-client decision. |
 
 ## 5. Public API and native values
@@ -244,8 +244,8 @@ documentation MUST identify both axes. `exact` means only “bypass key mapping�
 `raw` means only “bypass value encoding and decoding.”
 
 Maintained high-level Exact APIs reject an empty Item ID unless the caller
-explicitly enables it. Raw protocol APIs accept the complete `0..=32` wire
-range.
+explicitly enables it. Low-level wire-operation APIs accept the complete
+`0..=32` wire range.
 
 | Value mode | Client ownership |
 |---|---|
@@ -361,11 +361,15 @@ server and do not need client-side key confidentiality, namespace binding, or
 root-key isolation. It is also useful for direct-key benchmarks. It remains
 independent of value protection and ignores any Item ID root key.
 
-The defaults are explicit rather than implicitly secure:
+Server certificate and identity verification is enabled by default using
+system trust or configured trust roots. Disabling it requires an explicit
+insecure option and never occurs as transport or version fallback.
+
+The security properties of representative configurations are:
 
 | Configuration | Key privacy from server | Value privacy from server | Active MITM protection |
 |---|---|---|---|
-| Default roots, no value key, verification off | No | No | No |
+| Public Item ID root, no value key, verification off | No | No | No |
 | Verified TLS only | No | No | Yes |
 | Secret Item ID root and protected value | Yes | Yes | Only with server verification |
 
@@ -379,7 +383,7 @@ The following design points remain outside the stable v1 data contract:
   into a server-enforced namespace schema. Until then, clients expose an
   explicit per-operation profile override when mixing profiles.
 - **Namespace lifecycle:** stable v1 consumes server-assigned namespace IDs.
-  Lifecycle and discovery remain in the
+  The assignment and lifecycle interface remains in the
   [namespace WIP draft](../protocol/NAMESPACE.md).
 
 ### 6.3 Transport and server-authentication policy
@@ -407,7 +411,8 @@ implementing the other.
 
 Server certificate presentation is always part of the TLS handshake. Whether
 the client verifies the certificate chain and server identity is
-client-configurable. Disabling verification still provides passive
+client-configurable and enabled by default. Disabling verification requires an
+explicit insecure option. It still provides passive
 eavesdropping protection and encryption, but it does not provide active
 MITM protection; such a connection MUST NOT be treated as an authenticated
 server endpoint. Requiring a user-supplied certificate file is not a
@@ -428,32 +433,26 @@ OpenKache-maintained clients. The maintained default policy is:
 ```text
 compression_mode = Automatic
 zstd_level = 1
-minimum_input_bytes = 1,024
-minimum_savings_bytes = 0
 ```
 
-For a formatted payload of at least 1,024 bytes, the shared value codec
-attempts one Zstandard level-1 compression. It emits the Zstandard form only
-when the completed frame is smaller than the original payload:
+The shared value codec attempts one Zstandard level-1 compression and emits the
+Zstandard form only when the completed frame is smaller than the original
+payload:
 
 ```text
-payload_length >= 1,024
-and zstd_frame_length < payload_length
+zstd_frame_length < payload_length
 ```
 
 Otherwise it emits the uncompressed form. This is a maintained-client policy,
 not a value-format validity or interoperability requirement. Third-party
 clients may use another selection policy while emitting valid value envelopes.
 
-`minimum_savings_bytes = 0` means that a completed Zstandard frame is used when
-it is even one byte smaller. The comparison is made after the complete frame
-has been produced, so frame overhead is included.
-
 All maintained bindings inherit this default from the shared core and
 generated client contract; a binding MUST NOT select a language-specific
-default. Bindings expose an explicit opt-out and MAY expose tuning controls for
-advanced callers. Compression applies to Formatted v1 for either address type.
-Raw and caller-owned v0 values are never compressed by the client.
+default. Bindings expose an explicit opt-out. V1 Automatic has no input-size or
+minimum-savings threshold. Compression applies to Formatted v1 for either
+address type. Raw and caller-owned v0 values are never compressed by the
+client.
 
 ### 6.5 Protection policy
 
@@ -492,6 +491,19 @@ Maintained clients do not automatically rewrite a value merely because it was
 read under an inactive key. Such a rewrite is an ordinary mutation and can
 race with another writer without a generation, compare-and-set, or equivalent
 application contract.
+
+A positive value-key ID is immutable. Once it identifies key material, it is
+never rebound or reused, including after retirement.
+
+### 6.7 Resource budget
+
+The shared core MUST enforce one aggregate in-flight byte budget across network
+bodies, decrypted bodies, decompressed payloads, and encode/decode work. It
+acquires budget before reading or allocating a bounded body and releases it
+when the owning operation completes. When budget is unavailable, the core
+applies backpressure or returns a distinct local resource-limit error; it does
+not start unbounded work. Adapters expose the configured limit without
+maintaining a separate language-specific budget.
 
 ## 7. Adapter and FFI responsibilities
 

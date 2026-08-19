@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenKache draft interoperability fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec", "spec_revision", "vectors"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "spec": {
+      "type": "string",
+      "minLength": 1
+    },
+    "spec_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "name",
+          "input",
+          "intermediate",
+          "output",
+          "error"
+        ],
+        "properties": {
+          "kind": {
+            "enum": ["positive", "negative", "boundary"]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "input": {
+            "type": "object"
+          },
+          "intermediate": {
+            "type": "object"
+          },
+          "output": {},
+          "error": {}
+        }
+      }
+    }
+  }
+}

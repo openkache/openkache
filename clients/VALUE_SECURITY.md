@@ -1,6 +1,6 @@
 # OpenKache Value Security Profiles (Draft)
 
-> **Status:** Draft `draft-2026-08-19.3`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 >
 > This document owns the v1 value-key schedule, associated data, cryptographic
 > profiles, and security properties. Envelope grammar and selector assignment
@@ -18,6 +18,8 @@ The enclosing client profile supplies a keyring mapping each positive unsigned
 64-bit `value_key_id` to one 32-byte value key. A protected write uses the
 configured active ID. A protected read selects exactly the ID present in the
 envelope; unknown and retired IDs fail without key probing or fallback.
+Once an ID identifies key material, it MUST NOT be rebound to different key
+material. Retired IDs are never reused.
 
 An all-zero value key is invalid. Secret keys MUST be generated independently
 with a cryptographically secure random source.
@@ -94,15 +96,14 @@ policy, nonce, and envelope length are not AAD inputs.
 `AES-SIV-CMAC` uses 32 bytes for the MAC key and 32 bytes for the encryption
 key, for 64 bytes of total derived key material. GCM-SIV MUST use a fresh
 12-byte OS-random nonce for every write; nonce-generation failure rejects the
-write. One value key MUST NOT protect more than `2^32` AES-GCM-SIV writes.
-Implementations MUST also enforce the usage bounds in RFC 8452 and rotate the
-key before any bound is reached. SIV-CMAC is deterministic and therefore
-reveals equality for equal key, AAD, and payload inputs.
-
-Key management for GCM-SIV MUST enforce the usage bound across all writers that
-share a value-key ID, for example with bounded write quotas or early rotation.
-A writer MUST fail closed when it cannot establish that its write remains
-within the assigned quota.
+write. Because `gcm_siv_key` is derived from the value-key ID, namespace ID,
+and Item ID, RFC 8452 usage bounds apply independently to each derived item
+key, not to the root value key across all items. With random nonces and this
+profile's 64 MiB value ceiling, the security analysis assumes fewer than
+`2^32` writes per derived item key. This is an operational security bound, not
+an envelope-validity rule or a client-wide counter. Applications approaching
+that bound for one item rotate to a new value-key ID. SIV-CMAC is deterministic
+and therefore reveals equality for equal key, AAD, and payload inputs.
 
 The transform order is:
 

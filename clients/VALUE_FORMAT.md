@@ -1,6 +1,6 @@
 # OpenKache Client Value Encoding Profile v1 (Draft)
 
-> **Status:** Draft `draft-2026-08-19.3`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 
 This document defines the client-side v1 value encoding before it is handed to
 the server. The server stores the resulting bytes opaquely and does not
@@ -338,7 +338,8 @@ MAX_ZSTD_WINDOW_BYTES = 67,108,864
 
 These are per-value limits. Implementations SHOULD also configure an aggregate
 in-flight byte budget for concurrent encode/decode operations; that operational
-budget is not part of the wire format.
+budget is not part of the wire format. OpenKache-maintained clients require
+that budget as specified in [`CLIENT.md`](CLIENT.md#67-resource-budget).
 
 `MAX_VALUE_ENVELOPE_BYTES` applies to the complete byte string stored and
 returned opaquely by the server, including version, selector, value-key ID,

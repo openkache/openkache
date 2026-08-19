@@ -1,17 +1,17 @@
 # OpenKache Server Semantics (Draft)
 
-> **Status:** Draft `draft-2026-08-19.3`. This document defines server behavior that is required
-> for a useful implementation but is not additional request/response framing.
+> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 
-The stable wire grammar remains in [`SPEC.md`](SPEC.md). This document owns
-expiration recovery and eviction behavior that requires server state.
-Namespace lifecycle is a separate [WIP draft](NAMESPACE.md).
+The stable wire grammar remains in [`SPEC.md`](SPEC.md). Runtime expiration and
+eviction rules apply to every server. Recovery rules apply only to the
+Persistent TTL conformance profile. Namespace lifecycle is a separate
+[WIP draft](NAMESPACE.md).
 
 ## Namespace identity
 
-Stable v1 consumes server-assigned namespace IDs. The server owns allocation and
-discovery; clients use the ID supplied to them. Namespace policy is immutable
-for the lifetime of a namespace.
+Stable v1 consumes server-assigned namespace IDs. Clients use the ID supplied
+through an interface outside stable v1. Namespace policy is immutable for the
+lifetime of a namespace.
 
 ## TTL persistence and recovery
 
@@ -26,24 +26,25 @@ expired when `now >= deadline`. Expired items are logically absent for `GET`,
 `DELETE`, conditional `SET`, and namespace live-item counting even if physical
 cleanup is deferred.
 
-Persistence MUST retain enough information to reconstruct the deadline without
-extending the item on restart. The recommended representation is an absolute
-server-clock expiration timestamp plus a reconstructed monotonic runtime
-deadline. A server MUST document its clock source, rollback/forward behavior,
-VM suspend behavior, and restore behavior.
+The Persistent TTL conformance profile MUST retain either an absolute
+expiration timestamp or a remaining duration paired with a trustworthy
+reference timestamp. The server reconstructs a monotonic runtime deadline
+without extending the item and MUST document its clock source,
+rollback/forward behavior, VM suspend behavior, and restore behavior.
 
 Snapshot or replica restore MUST choose one explicit policy:
 
 1. preserve the original server clock domain and deadline;
-2. recompute from a documented remaining-duration representation; or
-3. expire items whose deadline cannot be trusted.
+2. subtract trustworthy elapsed time from a stored remaining duration; or
+3. expire items when elapsed time or the original deadline cannot be trusted.
 
-It MUST NOT silently extend TTLs because a snapshot was restored.
+A stored remaining duration MUST NOT restart from its snapshot-time value.
+Restart or restore MUST NOT silently extend a TTL.
 
 ## Eviction
 
 The namespace eviction algorithm is implementation-defined (for example, LRU
-or LFU), but it may select only items whose resolved eviction mode is
+or LFU), but it MUST select only items whose resolved eviction mode is
 `Evictable`. `EvictionProtected` items remain protected from capacity eviction,
 but may still expire, be explicitly deleted, or be replaced.
 

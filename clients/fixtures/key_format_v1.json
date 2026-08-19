@@ -1,6 +1,7 @@
 {
+  "$schema": "./schema.json",
   "spec": "openkache/client-key-format",
-  "spec_revision": "draft-2026-08-19.3",
+  "spec_revision": "draft-2026-08-19.4",
   "vectors": [
     {
       "kind": "positive",
@@ -24,7 +25,7 @@
     },
     {
       "kind": "positive",
-      "name": "unisolated_preserved_integer",
+      "name": "public_preserved_integer",
       "input": {
         "type": "Integer",
         "value": "1",

@@ -1,6 +1,7 @@
 {
+  "$schema": "./schema.json",
   "spec": "openkache/wire-protocol",
-  "spec_revision": "draft-2026-08-19.3",
+  "spec_revision": "draft-2026-08-19.4",
   "vectors": [
     {
       "kind": "positive",
@@ -39,6 +40,27 @@
       "error": null
     },
     {
+      "kind": "negative",
+      "name": "get_item_id_length_33",
+      "input": {
+        "opcode_hex": "02",
+        "request_id": 0,
+        "namespace_id": 7,
+        "item_id_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "intermediate": {
+        "item_id_length_hex": "21",
+        "frame_boundary_known": true
+      },
+      "output": {
+        "response_frame_hex": "800000"
+      },
+      "error": {
+        "category": "invalid_request",
+        "connection_action": "respond"
+      }
+    },
+    {
       "kind": "boundary",
       "name": "set_wire_size_exceeded",
       "input": {
@@ -65,6 +87,56 @@
       "intermediate": {},
       "output": {
         "response_frame_hex": "820000"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "cross_lane_if_absent_same_item",
+      "input": {
+        "operations": [
+          {
+            "lane": "A",
+            "operation": "SET",
+            "condition": "IfAbsent",
+            "namespace_id": 7,
+            "item_id_hex": "11"
+          },
+          {
+            "lane": "B",
+            "operation": "SET",
+            "condition": "IfAbsent",
+            "namespace_id": 7,
+            "item_id_hex": "11"
+          }
+        ],
+        "invocation": "concurrent",
+        "initial_state": "absent"
+      },
+      "intermediate": {
+        "required_semantics": "linearizable_per_item"
+      },
+      "output": {
+        "allowed_status_sequences": [
+          ["Created", "NotStored"],
+          ["NotStored", "Created"]
+        ]
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "internal_error_has_no_mutation_effect",
+      "input": {
+        "operation": "SET",
+        "server_result": "InternalError"
+      },
+      "intermediate": {
+        "outcome_known": true
+      },
+      "output": {
+        "status": "InternalError",
+        "mutation_effect": "none"
       },
       "error": null
     },

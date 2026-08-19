@@ -2,7 +2,7 @@
 
 ## Status
 
-This document is revision `draft-2026-08-19.3` of the draft OpenKache wire
+This document is revision `draft-2026-08-19.4` of the draft OpenKache wire
 protocol version 1. Version 1 has not been released or finalized. The requirements
 below describe the current intended wire contract and may change before
 finalization. Within this draft, an implementation conforms only when its
@@ -30,7 +30,7 @@ Version 1 specifies:
 - canonical unsigned `vu128` integers;
 - response frame layout;
 - opcode, flag, and status assignments;
-- the use of provisioned namespace identities;
+- the use of server-assigned namespace identities;
 - item ID, value, expiration, eviction, and payload constraints;
 - request-ID correlation, lane ordering, and out-of-order responses;
 - malformed-frame handling and admission rejection;
@@ -52,7 +52,7 @@ described by the [Client Implementation Guide](../clients/CLIENT.md); they are
 not additional wire requirements for third-party clients. The physical storage
 layout and the namespace eviction algorithm are outside this wire protocol.
 Item expiration and eviction eligibility are part of the `SET` contract below.
-Namespace lifecycle and discovery are outside stable v1. Server recovery,
+Namespace assignment and lifecycle are outside stable v1. Server recovery,
 clock, and eviction obligations are summarized below and detailed in
 [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
 
@@ -61,7 +61,7 @@ This document has four normative layers:
 1. **Wire grammar:** transport-independent frame bytes, `vu128`, field order,
    limits, and status assignments.
 2. **Stable operation semantics:** `PING`, `GET`, `SET`, and `DELETE`.
-3. **Item semantics:** provisioned namespace identity, TTL, and eviction
+3. **Item semantics:** server-assigned namespace identity, TTL, and eviction
    behavior carried by stable data frames.
 4. **Server semantics:** TTL recovery and eviction behavior detailed in
    [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md). Namespace lifecycle remains a
@@ -71,10 +71,9 @@ The wire grammar is the compatibility boundary. A server implementation MAY
 organize the semantic layers differently, but MUST preserve the wire rules and
 public operation behavior when claiming v1 conformance.
 
-For a shorter reading path, start with [WIRE_FORMAT.md](WIRE_FORMAT.md),
-[OPERATIONS.md](OPERATIONS.md), and [TRANSPORTS.md](TRANSPORTS.md). Those files
-are navigation guides to the normative sections below; this document remains
-the single normative source during the draft.
+This document is the single normative source for wire grammar and stable
+operation semantics during the draft. `SERVER_SEMANTICS.md` owns only the
+runtime and optional persistence obligations referenced here.
 
 ## Terminology
 
@@ -96,12 +95,11 @@ the single normative source during the draft.
 - **Item ID**: An opaque identifier of `0..=32` bytes used for cache equality.
 - **Account**: A server-defined authenticated identity. Version 1 does not
   make an account the owner or scope of a namespace.
-- **Namespace**: A named server-wide collection of Item IDs with default
-  expiration and eviction policies. A namespace is not nested under an
-  account.
-- **Namespace ID**: A provisioned positive 64-bit namespace identity used in
+- **Namespace**: A server-wide collection of Item IDs with default expiration
+  and eviction policies. A namespace is not nested under an account.
+- **Namespace ID**: A server-assigned positive 64-bit namespace identity used in
   wire frames.
-- **Namespace identity**: A provisioned positive 64-bit namespace ID. Lifecycle
+- **Namespace identity**: A server-assigned positive 64-bit namespace ID. Lifecycle
   and revision rules are outside stable v1.
 - **Value**: An uninterpreted sequence of bytes stored for an item ID.
 - **Payload**: The uninterpreted response body. Its operation-specific meaning
@@ -254,7 +252,8 @@ The following rules apply:
 8. After a response, the lane MAY continue carrying requests while both
    directions remain open.
 9. A client MAY use multiple lanes concurrently. Requests on different lanes
-   have no client-visible relative ordering guarantee.
+   have no lane-order relationship. Stable item operations remain linearizable
+   across all lanes and connections as described below.
 10. A lane request direction may be closed only by the transport-specific
     half-close rules below. After a valid request-direction close, the server
     MUST admit no further requests and MUST complete responses for requests
@@ -329,8 +328,10 @@ If a receiver detects malformed framing, it MUST stop processing the affected
 connection. On QUIC it closes the connection with application error code
 `0x01` (`MALFORMED_FRAME`). On TLS-over-TCP it closes the TLS/TCP connection
 without an error response. The receiver MUST NOT scan for a possible next frame. A
-complete frame whose fields are well-delimited but fail operation validation
-is not malformed framing; it MAY receive the applicable error response.
+A complete request frame whose fields are well-delimited but fail operation
+validation is not malformed framing; it MUST receive the applicable error
+response once the server has consumed the frame and can preserve the next
+boundary.
 
 `0x01` (`MALFORMED_FRAME`) is the QUIC application error code for a
 connection-fatal framing or response-meaning failure. TLS-over-TCP reports the
@@ -535,7 +536,7 @@ An expiration-mode value selects whether the following `ttl_ms` field is
 present. Therefore an invalid expiration-mode value makes the request shape
 undecidable and is a malformed request: the receiver MUST close the connection
 without a response. Invalid condition, eviction, or upper flag bits do
-not change the request shape; once the complete frame is delimited, they MAY
+not change the request shape; once the complete frame is delimited, they MUST
 receive `InvalidRequest`.
 
 Invalid v1 values have no forward-compatible meaning. Assigning meaning to
@@ -545,7 +546,7 @@ not accept it based on a local extension.
 ### Namespace
 
 `namespace_id` is a fixed eight-byte `u64be` in the numeric range
-`1..=2^64 - 1`. It identifies a namespace provisioned outside the stable v1
+`1..=2^64 - 1`. It identifies a namespace assigned by the server outside the stable v1
 data protocol. Zero is invalid. `GET`, `SET`, and `DELETE` carry the ID per
 request, so one lane may address multiple namespaces. An item is identified by
 the pair `(namespace_id, item_id)`.
@@ -553,20 +554,20 @@ the pair `(namespace_id, item_id)`.
 Stable v1 does not define namespace creation, lookup by name, policy update, or
 deletion. The previous lifecycle proposal remains as a WIP draft in
 [`NAMESPACE.md`](NAMESPACE.md) and is not an implementation requirement.
-How a client discovers a provisioned namespace ID is outside stable v1.
+How a client receives a server-assigned namespace ID is outside stable v1.
 
 ### Namespace policy
 
 A namespace has a default expiration policy, a default eviction policy, and an
 independent rule for whether each default may be overridden by an item request.
-The namespace is provisioned with either `NoExpiry` or a positive `FixedTtl`,
+The server assigns either `NoExpiry` or a positive `FixedTtl`,
 and with either `Evictable` or `EvictionProtected`. Neither default may be
-`Inherit`. The provisioning interface is outside stable v1.
+`Inherit`. The assignment interface is outside stable v1.
 
 `SET` carries the item-level `ExpirationMode` and `EvictionMode` selections in
-its flags. `Inherit` resolves to the provisioned namespace default. An explicit
+its flags. `Inherit` resolves to the server-assigned namespace default. An explicit
 item selection is accepted only when that override is allowed by the
-provisioned policy; otherwise the server returns `PolicyConflict` and makes no
+server-assigned policy; otherwise the server returns `PolicyConflict` and makes no
 mutation. A successful `SET` resolves both policies at its
 mutation linearization point and stores the resolved item metadata.
 
@@ -657,6 +658,19 @@ The examples below use request ID `0`, whose canonical encoding is the single
 byte `00`. Every response includes that same request ID between the status and
 payload length.
 
+Every stable item operation has one linearization point between admission and
+response. Operations addressing the same `(namespace_id, item_id)` MUST be
+linearizable across all lanes and connections:
+
+- if one operation completes before another is invoked, the later operation
+  observes the earlier operation;
+- concurrent operations may linearize in either order;
+- lane order constrains that order for operations received on the same lane;
+  and
+- condition evaluation and mutation occur at the same linearization point.
+
+No total order is required between operations on different items.
+
 ### `PING`
 
 `PING` has the request layout `01 | request_id:vu128`.
@@ -685,8 +699,8 @@ value_len | [ttl_ms] | item_id | value`.
 
 `Any` is unconditional. `IfAbsent` succeeds only when the item is logically
 absent. `IfPresent` succeeds only when the item is logically present. Condition
-evaluation and the mutation MUST be atomic with respect to that namespace and
-Item ID.
+evaluation and the mutation MUST be atomic at the operation's linearization
+point.
 
 ### `DELETE`
 
@@ -744,8 +758,8 @@ payload/status mismatch is malformed and requires connection close with
 | `85` | `Forbidden` | The authenticated identity is not authorized |
 | `86` | `InternalError` | The server could not complete the operation |
 | `87` | `NoCapacity` | The write cannot be admitted without evicting protected items |
-| `88` | `PolicyConflict` | The request selects an item policy disallowed by the provisioned namespace |
-| `8A` | `NamespaceNotFound` | The provisioned namespace does not exist |
+| `88` | `PolicyConflict` | The request selects an item policy disallowed by the server-assigned namespace policy |
+| `8A` | `NamespaceNotFound` | The server-assigned namespace does not exist |
 
 Statuses `06` through `7F`, `81`, `84`, `89`, `8B` through `FF` are unassigned.
 A client MUST treat an unassigned status as a malformed response and close the
@@ -798,8 +812,13 @@ Common error statuses MAY be returned only when their stated condition applies:
 | `PolicyConflict` | `SET` that selects a disallowed item-policy override |
 | `NamespaceNotFound` | `GET`, `SET`, or `DELETE` addressing a missing namespace |
 
-These domain and common errors guarantee that the requested mutation was not
-applied.
+The effect guarantees are:
+
+| Result | Mutation effect |
+|---|---|
+| `Created`, `Replaced`, `Deleted` | The mutation took effect. |
+| `NotStored`, `NotFound` | The requested mutation did not take effect. |
+| Any error response | The requested mutation did not take effect. |
 
 The protocol exposes effect guarantees, not an automatic retry policy:
 
@@ -808,7 +827,7 @@ The protocol exposes effect guarantees, not an automatic retry policy:
 | `Overloaded` | The operation did not begin. |
 | `InvalidRequest`, `PolicyConflict` | No effect; the unchanged request remains invalid or conflicting. |
 | `NamespaceNotFound` | No effect; namespace or application state must change before the request can succeed. |
-| `InternalError` | No externally visible effect is known to have occurred. |
+| `InternalError` | The server definitively determined that no externally visible effect occurred. |
 
 A client receiving a response whose request ID does not identify one of its
 outstanding requests on that same lane, or whose status is neither an allowed
@@ -857,8 +876,9 @@ before allocating or reading the value body. A `value_len` greater than the
 64 MiB wire ceiling is outside the v1 frame contract and MUST terminate the
 connection without a response; the receiver MUST NOT wait for or discard
 the declared unbounded body. A value within the wire ceiling but above a
-server-local operational limit MAY receive `TooLarge` when the receiver can
-consume exactly that bounded body and preserve the next frame boundary.
+server-local operational limit MUST receive `TooLarge` when the receiver can
+consume exactly that bounded body and preserve the next frame boundary. If it
+cannot preserve the boundary, it MUST close the connection without a response.
 
 ### Incremental parser state machine
 
@@ -901,8 +921,11 @@ TLS `close_notify` during an incomplete frame is malformed; TCP EOF without
 Malformed framing, an unassigned opcode, a non-canonical integer, or a
 truncated body is terminal for the connection: the receiver MUST close the
 connection without sending an error response. A semantic validation failure in
-a complete, well-delimited request MAY instead receive `InvalidRequest` or the
-applicable domain error. If a complete operation cannot finish and its outcome
+a complete, well-delimited request MUST receive `InvalidRequest` or the
+applicable domain error once the receiver has consumed the bounded frame and
+can preserve the next frame boundary. If it cannot preserve that boundary, it
+MUST close the connection without a response. If a complete operation cannot
+finish and its outcome
 is known to be unsuccessful, the server MAY return `InternalError`. If a
 mutation outcome becomes unknown because the server cannot determine whether
 the operation took effect, the server MUST terminate the connection without an
@@ -943,6 +966,26 @@ behavior.
 Canonical integer enforcement is security-relevant: it prevents multiple wire
 representations of one logical frame and simplifies bounded incremental
 parsing.
+
+## Conformance profiles
+
+A conformance claim identifies the implementation role, transport profile, and
+optional operational profiles:
+
+- **Client**: emits valid requests, validates responses, correlates lane-local
+  request IDs, and preserves unknown mutation outcomes.
+- **Server**: implements stable operation semantics, cross-lane item
+  linearizability, namespace policy, runtime TTL behavior, and bounded
+  admission.
+- **QUIC transport** or **TLS-over-TCP transport**: implements the selected
+  transport binding. At least one is required; maintained OpenKache clients and
+  servers implement both.
+- **Persistent TTL**: persists, restarts, snapshots, or restores expiring
+  items according to [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md). A server
+  that does not persist expiring items does not claim this profile.
+
+Client key mapping and formatted-value profiles are separate client
+conformance claims and do not change wire conformance.
 
 ## Version evolution
 
@@ -1017,7 +1060,7 @@ invalid:
 02 00 00 00 00 00 00 00 00 07 21 [AA × 33]
 ```
 
-Because its frame boundary is known, the server MAY return `InvalidRequest`
+Because its frame boundary is known, the server MUST return `InvalidRequest`
 with the same request ID:
 
 ```text
@@ -1088,22 +1131,27 @@ opcode/status/layout drift is detected.
 
 ## Implementation conformance checklist
 
-A protocol v1 implementation is not complete unless it:
+Every protocol v1 implementation:
 
-- implements at least one transport profile using `openkache/1`, TLS 1.3, an
-  approved hybrid key agreement, and the common frame bytes;
-- implements the lane ordering, correlation, half-close, and cancellation
-  rules for its transport;
-- parses canonical `vu128`, operation layouts, flags, lengths, and assigned
-  statuses exactly as specified;
+- identifies its role and supported transport profile;
+- uses `openkache/1`, TLS 1.3, an approved hybrid key agreement, and the common
+  frame bytes;
+- implements the lane, half-close, cancellation, canonical `vu128`, assignment,
+  layout, and limit rules for its role; and
+- closes the connection for malformed or undecidable frames.
+
+A client additionally validates response meaning and correlation and preserves
+unknown mutation outcomes. A server additionally:
+
 - accepts every `0..=32`-byte Item ID and preserves values opaquely;
-- implements provisioned namespace identity and item-policy semantics;
-- enforces wire limits before unbounded allocation or body reads;
-- returns a correlated error only for a complete request whose effect is known;
-- closes the connection for malformed or undecidable frames and preserves unknown
-  mutation outcomes; and
-- satisfies the operational requirements in
-  [`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
+- implements stable operation semantics, cross-lane item linearizability,
+  server-assigned namespace policy, runtime TTL, and eviction eligibility;
+- bounds aggregate in-flight frame bytes; and
+- returns a correlated error only for a complete request whose mutation is
+  known not to have taken effect.
+
+A server claiming Persistent TTL also satisfies the recovery requirements in
+[`SERVER_SEMANTICS.md`](SERVER_SEMANTICS.md).
 
 ## Reference
 

@@ -1,6 +1,6 @@
 # OpenKache Client Key Contract — Version 1 Draft
 
-> **Status:** Draft `draft-2026-08-19.3`; not released or finalized.
+> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 >
 > This document specifies client-owned key validation and Item ID mapping. It
 > is not a server-required key encoding, and it may change before finalization.
@@ -350,6 +350,13 @@ can intentionally or accidentally equal a hash-profile output, and the server
 does not distinguish those cases. Future revisions MUST use new domain strings
 and MUST NOT reinterpret existing Item IDs.
 
+This profile does not provide collision resistance between its preserve and
+hash branches, or between mapping profiles, against a caller that can choose
+keys. That is not a server security boundary: the same caller may use the Exact
+Item ID API to select any wire-valid Item ID. An application that exposes only
+mapped keys to less-trusted callers must enforce its own key namespace and
+profile boundary or use `NamespaceHash` exclusively.
+
 ### 4.3 Exact Item ID API
 
 The Exact Item ID API accepts the final opaque `0..=32`-byte Item ID directly.
@@ -361,14 +368,14 @@ is a dangerous escape hatch: the caller, not the client profile, owns identity,
 collision avoidance, and isolation.
 
 The wire accepts an empty Exact Item ID. Maintained high-level APIs reject it
-by default and require an explicit opt-in; low-level Raw APIs preserve the full
-wire range.
+by default and require an explicit opt-in; low-level wire-operation APIs
+preserve the full wire range.
 
 ## 5. Derivation parameters
 
 ### 5.1 Namespace binding
 
-`namespace_id` is a positive, provisioned identity. `NamespaceHash` binds it
+`namespace_id` is a positive, server-assigned identity. `NamespaceHash` binds it
 after the domain string:
 
 ```text

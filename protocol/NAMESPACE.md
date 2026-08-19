@@ -3,14 +3,13 @@
 > **Status:** Work in progress. This feature is not part of stable protocol v1,
 > has no assigned stable opcodes, and is not an implementation requirement.
 
-Stable v1 data operations carry a provisioned `namespace_id`. This document
+Stable v1 data operations carry a server-assigned `namespace_id`. This document
 preserves the proposed lifecycle design for later revision.
 
 ## Open questions
 
-- Define namespace discovery and profile-mismatch handling without making
-  client-owned key profiles visible to the server.
-- Assign wire operations only after those identity rules are settled.
+- Define the server interface that returns a namespace ID and immutable policy.
+- Assign wire operations only after lifecycle and authorization rules settle.
 
 ## Proposed identity rules
 

@@ -1,6 +1,6 @@
 # OpenKache Experimental Protocol Operations (Draft)
 
-> **Status:** Experimental revision `draft-2026-08-19.3`. These operations are not part of the stable v1
+> **Status:** Experimental revision `draft-2026-08-19.4`. These operations are not part of the stable v1
 > conformance surface. Their names, layouts, status behavior, and semantics
 > may change or disappear without a protocol-version change.
 
