@@ -9,9 +9,7 @@
 
 use std::io::{self, ErrorKind};
 
-use crate::protocol::{
-    EvictionDefault, ExpirationDefault, NamespacePolicy, OverridePolicy,
-};
+use crate::protocol::{EvictionDefault, ExpirationDefault, NamespacePolicy, OverridePolicy};
 
 pub(crate) const MAGIC: &[u8; 8] = b"OKNSPACE";
 pub(crate) const VERSION: u32 = 4;
@@ -101,7 +99,10 @@ fn decode_policy_v3(input: &[u8]) -> io::Result<Option<(NamespacePolicy, usize)>
         }
         (ExpirationDefault::FixedTtl { ttl_ms }, 1 + encoded_len)
     };
-    Ok(Some((policy_from_flags(flags, default_expiration, false), used)))
+    Ok(Some((
+        policy_from_flags(flags, default_expiration, false),
+        used,
+    )))
 }
 
 fn decode_legacy_policy(input: &[u8]) -> io::Result<Option<(NamespacePolicy, usize)>> {
@@ -123,14 +124,14 @@ fn decode_legacy_policy(input: &[u8]) -> io::Result<Option<(NamespacePolicy, usi
             if ttl_ms == 0 {
                 return Err(invalid("fixed namespace TTL must be positive"));
             }
-            (
-                ExpirationDefault::FixedTtl { ttl_ms },
-                1 + encoded_len,
-            )
+            (ExpirationDefault::FixedTtl { ttl_ms }, 1 + encoded_len)
         }
         _ => return Err(invalid("namespace metadata expiration mode is reserved")),
     };
-    Ok(Some((policy_from_flags(flags, default_expiration, true), used)))
+    Ok(Some((
+        policy_from_flags(flags, default_expiration, true),
+        used,
+    )))
 }
 
 fn policy_from_flags(

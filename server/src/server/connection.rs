@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::{wire_request_layout, Opcode};
+use crate::protocol::{Opcode, wire_request_layout};
 
 #[derive(Clone)]
 pub(super) struct NetworkWorkerLimits {

@@ -475,17 +475,15 @@ impl NamespaceRegistry {
                 .by_id
                 .get_mut(&namespace_id)
                 .is_some_and(|entry| entry.items.remove(&item_id));
-        if removed
-            && {
-                let (item_id_bytes, item_id_len) = journal_item_id(item_id);
-                self.append_event(JournalEvent::MarkDelete {
-                    namespace_id,
-                    item_id: item_id_bytes,
-                    item_id_len,
-                })
-                .is_err()
-            }
-        {
+        if removed && {
+            let (item_id_bytes, item_id_len) = journal_item_id(item_id);
+            self.append_event(JournalEvent::MarkDelete {
+                namespace_id,
+                item_id: item_id_bytes,
+                item_id_len,
+            })
+            .is_err()
+        } {
             // Keeping the item in memory is conservative when persistence
             // fails; the caller closes the lane because the mutation outcome
             // can no longer be represented reliably.
