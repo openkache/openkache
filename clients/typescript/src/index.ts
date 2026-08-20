@@ -5,8 +5,12 @@ import {
 } from "./native-binding.js"
 import {
   assert_json_value,
+  decode_structured_value,
+  encode_structured_value,
+  to_native,
   Value_Codec_Registry,
   type Json_Value,
+  type Structured_Value,
   type Value_Codec,
   type Value_Envelope,
 } from "./value-codec.js"
@@ -15,8 +19,29 @@ export type {
   Encoded_Value,
   Json_Object,
   Json_Value,
+  Structured_Value,
+  Structured_Value_Error_Kind,
+  Value_Limits,
   Value_Codec,
   Value_Envelope,
+} from "./value-codec.js"
+export {
+  Array_Value,
+  ByteString_Value,
+  Float_Value,
+  Integer_Value,
+  Map_Value,
+  Structured_Value_Error,
+  TextString_Value,
+  UNDEFINED_VALUE,
+  Undefined_Value,
+  decode_native_value,
+  decode_structured_value,
+  encode_structured_value,
+  model_equal,
+  to_native,
+  to_plain_object,
+  to_value,
 } from "./value-codec.js"
 export * from "./generated_local/smithy-api.js"
 export * from "./generated_local/smithy-value-format.js"
@@ -193,6 +218,9 @@ export interface Set_Options {
   readonly ttl_ms?: number
 }
 
+/** Structured-value projection requested by a read operation. */
+export type Value_Representation = "lossless" | "native"
+
 /**
  * Structured statistics returned by an administrator-authorized server.
  */
@@ -213,11 +241,16 @@ export type Connection_State =
   | typeof SMITHY_FFI_CONNECTION_STATE_CLOSED_NAME
   | typeof SMITHY_FFI_CONNECTION_STATE_UNKNOWN_NAME
 
+export type OpenKache_Error_Kind =
+  | "openkache_error"
+  | "unknown_mutation"
+  | "cancelled"
+
 /**
  * Error returned by client validation, value codecs, native transport, or server failures.
  */
 export class OpenKache_Error extends Error {
-  readonly kind = "openkache_error" as const
+  readonly kind: OpenKache_Error_Kind
 
   /**
    * Creates a stable client error.
@@ -225,9 +258,30 @@ export class OpenKache_Error extends Error {
    * @param message - Human-readable failure description.
    * @param cause - Optional underlying failure.
    */
-  constructor(message: string, cause?: unknown) {
+  constructor(
+    message: string,
+    cause?: unknown,
+    kind: OpenKache_Error_Kind = "openkache_error",
+  ) {
     super(message, cause === undefined ? undefined : { cause })
     this.name = "OpenKache_Error"
+    this.kind = kind
+  }
+}
+
+/** A mutation may have reached the server but its outcome is unknown. */
+export class OpenKache_Unknown_Mutation_Error extends OpenKache_Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause, "unknown_mutation")
+    this.name = "OpenKache_Unknown_Mutation_Error"
+  }
+}
+
+/** The native boundary cancelled an operation before a definitive result. */
+export class OpenKache_Cancelled_Error extends OpenKache_Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause, "cancelled")
+    this.name = "OpenKache_Cancelled_Error"
   }
 }
 
@@ -427,6 +481,89 @@ export class OpenKache_Client {
         envelope.encoding,
         envelope.type_name,
         envelope.payload,
+        options.condition,
+        options.expiration_mode,
+        options.eviction_mode,
+        options.ttl_ms,
+      )
+      return parse_set_outcome(outcome)
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Retrieves one StructuredValue-CBOR-v1 payload.
+   *
+   * The default lossless representation retains integer/float distinctions,
+   * undefined, scalar map-key identity, and map order.  Native projection
+   * returns bigint/number/Uint8Array/Map and rejects values that cannot be
+   * represented without loss.
+   */
+  async get_structured(
+    key: Client_Key,
+    representation?: "lossless",
+  ): Promise<Structured_Value | undefined>
+  async get_structured(
+    key: Client_Key,
+    representation: "native",
+  ): Promise<unknown | undefined>
+  async get_structured(
+    key: Client_Key,
+    representation: Value_Representation = "lossless",
+  ): Promise<unknown | undefined> {
+    this.#assert_open()
+    if (representation !== "lossless" && representation !== "native") {
+      throw new OpenKache_Error(
+        "representation must be lossless or native",
+      )
+    }
+    let payload: Uint8Array | null
+    try {
+      payload = await this.#native_client.get_structured(
+        owned_key_bytes(key, this.#key_spec),
+      )
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+    if (payload === null) return undefined
+    try {
+      const value = decode_structured_value(payload)
+      return representation === "native" ? to_native(value) : value
+    } catch (error) {
+      throw new OpenKache_Error(
+        `structured value decoding failed: ${error_message(error)}`,
+        error,
+      )
+    }
+  }
+
+  /**
+   * Encodes and stores one StructuredValue-CBOR-v1 payload.
+   *
+   * This method never routes through legacy JSON or Raw operations; the
+   * generated native adapter owns the structured selector directly.
+   */
+  async set_structured(
+    key: Client_Key,
+    value: unknown,
+    options: Set_Options = {},
+  ): Promise<Set_Outcome> {
+    this.#assert_open()
+    validate_set_options(options)
+    let payload: Uint8Array
+    try {
+      payload = encode_structured_value(value)
+    } catch (error) {
+      throw new OpenKache_Error(
+        `structured value encoding failed: ${error_message(error)}`,
+        error,
+      )
+    }
+    try {
+      const outcome = await this.#native_client.set_structured(
+        owned_key_bytes(key, this.#key_spec),
+        payload,
         options.condition,
         options.expiration_mode,
         options.eviction_mode,
@@ -981,6 +1118,11 @@ function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
     return encode_cbor_integer(BigInt(key))
   }
   if (typeof key === "bigint") {
+    if (key < -(1n << 63n) || key > (1n << 63n) - 1n) {
+      throw new OpenKache_Error(
+        "integer keys must fit the signed 64-bit range",
+      )
+    }
     return encode_cbor_integer(key)
   }
   throw new OpenKache_Error(
@@ -1398,9 +1540,27 @@ function parse_connection_state(value: string): Connection_State {
 function as_openkache_error(error: unknown): OpenKache_Error {
   return error instanceof OpenKache_Error
     ? error
-    : new OpenKache_Error(error_message(error), error)
+    : native_category_error(error)
 }
 
 function error_message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function native_category_error(error: unknown): OpenKache_Error {
+  const message = error_message(error)
+  const categories: readonly [string, (message: string, cause: unknown) => OpenKache_Error][] = [
+    [
+      "openkache:error:unknown_mutation:",
+      (detail, cause) => new OpenKache_Unknown_Mutation_Error(detail, cause),
+    ],
+    [
+      "openkache:error:cancelled:",
+      (detail, cause) => new OpenKache_Cancelled_Error(detail, cause),
+    ],
+  ]
+  for (const [prefix, create] of categories) {
+    if (message.startsWith(prefix)) return create(message.slice(prefix.length), error)
+  }
+  return new OpenKache_Error(message, error)
 }

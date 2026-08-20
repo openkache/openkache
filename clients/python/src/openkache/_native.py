@@ -26,14 +26,20 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET,
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
+    SMITHY_FFI_RESULT_CANCELLED,
     SMITHY_FFI_RESULT_CONNECTED,
     SMITHY_FFI_RESULT_ERROR,
+    SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_SET_CONDITION_ANY,
 )
 
 
 class NativeError(RuntimeError):
     """Failure reported by the Rust client-core ABI."""
+
+    def __init__(self, message: str, *, result_kind: int | None = None) -> None:
+        super().__init__(message)
+        self.result_kind = result_kind
 
 
 _U8 = ctypes.c_uint8
@@ -161,6 +167,28 @@ class _NativeApi:
                 _U8_POINTER,
                 ctypes.c_size_t,
                 ctypes.c_uint32,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.get_structured = self._function(
+            "openkache_client_get_structured",
+            (
+                _CLIENT_POINTER,
+                _U8_POINTER,
+                ctypes.c_size_t,
+            ),
+            _RESULT_POINTER,
+        )
+        self.set_structured = self._function(
+            "openkache_client_set_structured",
+            (
+                _CLIENT_POINTER,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
                 _U8,
                 ctypes.c_uint64,
             ),
@@ -318,7 +346,16 @@ class _NativeApi:
             self.result_free(result)
         if kind == SMITHY_FFI_RESULT_ERROR:
             message = payload.decode("utf-8", errors="replace")
-            raise NativeError(message or "native client operation failed")
+            raise NativeError(
+                message or "native client operation failed",
+                result_kind=kind,
+            )
+        if kind in (SMITHY_FFI_RESULT_UNKNOWN_MUTATION, SMITHY_FFI_RESULT_CANCELLED):
+            message = payload.decode("utf-8", errors="replace")
+            raise NativeError(
+                message or "native client operation failed",
+                result_kind=kind,
+            )
         return kind, payload, client
 
 
@@ -410,6 +447,58 @@ class NativeClient:
             condition=condition,
             ttl_ms=ttl_ms,
         )
+
+    def get_structured(self, *, key: bytes) -> tuple[int, bytes]:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = self._api.get_structured(handle, key_pointer, len(key))
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            del key_buffer
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def set_structured(
+        self,
+        *,
+        key: bytes,
+        value: bytes,
+        set_flags: int = 0,
+        ttl_ms: int = 0,
+    ) -> tuple[int, bytes]:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = self._api.set_structured(
+                handle,
+                key_pointer,
+                len(key),
+                value_pointer,
+                len(value),
+                set_flags,
+                ttl_ms,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            del key_buffer, value_buffer
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
 
     def execute_raw(
         self,

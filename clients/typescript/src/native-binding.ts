@@ -52,9 +52,20 @@ interface Native_Value_Envelope {
 export interface Native_Client {
   ping(): Promise<void>
   get(key: Uint8Array): Promise<Uint8Array | null>
+  /** Returns one canonical StructuredValue-CBOR-v1 payload, or null when absent. */
+  get_structured(key: Uint8Array): Promise<Uint8Array | null>
   get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
   get_json(key: Uint8Array): Promise<string | null>
   set(
+    key: Uint8Array,
+    value: Uint8Array,
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
+    ttl_ms?: number,
+  ): Promise<Smithy_Set_Outcome>
+  /** Stores one StructuredValue-CBOR-v1 payload without JSON reinterpretation. */
+  set_structured(
     key: Uint8Array,
     value: Uint8Array,
     condition?: Smithy_Set_Condition,

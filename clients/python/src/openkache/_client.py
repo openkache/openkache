@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 from os import PathLike
 from pathlib import Path
-from typing import Any, Final, Iterable, Sequence
+from typing import Any, Final, Iterable, Literal, NoReturn, Sequence
 
 from ._generated import (
     SmithyDeleteInput,
@@ -57,11 +57,13 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
     SMITHY_FFI_RESULT_CREATED,
+    SMITHY_FFI_RESULT_CANCELLED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
     SMITHY_FFI_RESULT_NOT_FOUND,
     SMITHY_FFI_RESULT_NOT_STORED,
     SMITHY_FFI_RESULT_REPLACED,
+    SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_RESULT_OK,
     SMITHY_FFI_RESULT_VALUE,
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
@@ -115,9 +117,17 @@ from ._generated.smithy_contract import (
     SMITHY_VALUE_ENCRYPTION_ROBUST,
 )
 from ._native import NativeClient as _NativeClient, NativeError
+from ._value import (
+    StructuredValueError,
+    decode_native,
+    decode_value,
+    encode_value,
+)
 
 
 _UINT64_MAX: Final = (1 << 64) - 1
+_I64_MIN: Final = -(1 << 63)
+_I64_MAX: Final = (1 << 63) - 1
 _SIZE_T_MAX: Final = (sys.maxsize << 1) | 1
 _MAX_CANONICAL_KEY_BYTES: Final = 1_048_576
 _BINARY64_SIGNIFICAND_BITS: Final = 53
@@ -127,9 +137,23 @@ _BINARY64_MAX_INTEGER_BITS: Final = 1024
 class OpenKacheError(RuntimeError):
     """Base error raised by the Python client."""
 
+    kind = "error"
+
 
 class OpenKacheValueError(OpenKacheError, ValueError):
     """Invalid key, value, option, or value-format input."""
+
+
+class OpenKacheUnknownMutationError(OpenKacheError):
+    """A mutation may have reached the server but its outcome is unknown."""
+
+    kind = "unknown_mutation"
+
+
+class OpenKacheCancelledError(OpenKacheError):
+    """The native boundary cancelled the operation before a definitive result."""
+
+    kind = "cancelled"
 
 
 class ConnectionState(StrEnum):
@@ -389,6 +413,7 @@ class ServerStats:
 
 SetCondition = SmithySetCondition
 SetOutcome = SmithySetOutcome
+ValueRepresentation = Literal["lossless", "native"]
 
 
 class OpenKacheClient:
@@ -439,7 +464,9 @@ class OpenKacheClient:
                 native_path=native_path,
             )
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
-        except (NativeError, OSError) as error:
+        except NativeError as error:
+            _raise_native_error(error)
+        except OSError as error:
             raise OpenKacheError(str(error)) from error
         return cls(native, selected_key_spec)
 
@@ -480,6 +507,93 @@ class OpenKacheClient:
         self._assert_open()
         payload = _json_bytes(value)
         return await self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
+
+    async def get_structured(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        representation: ValueRepresentation = "lossless",
+    ) -> Any | None:
+        """Gets one StructuredValue-CBOR-v1 value without JSON fallback.
+
+        ``lossless`` returns the generic model wrappers from ``openkache._value``.
+        ``native`` projects to Python ``int``/``float``/``bytes``/``list``/``dict``
+        and raises a conversion error for undefined values or colliding keys.
+        Older native artifacts fail explicitly because they do not expose the
+        structured selector.
+        """
+
+        self._assert_open()
+        if representation not in ("lossless", "native"):
+            raise OpenKacheValueError("representation must be 'lossless' or 'native'")
+        operation = getattr(self._native, "get_structured", None)
+        if not callable(operation):
+            raise OpenKacheError(
+                "structured-value ABI is unavailable in the loaded native adapter"
+            )
+        try:
+            payload = await asyncio.to_thread(
+                operation,
+                key=_key_bytes(key, self._key_spec),
+            )
+        except NativeError as error:
+            _raise_native_error(error)
+        if payload is None:
+            return None
+        if isinstance(payload, tuple):
+            kind, payload = payload
+            if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+                return None
+            if kind != SMITHY_FFI_RESULT_VALUE:
+                raise OpenKacheError(
+                    f"GET_STRUCTURED returned unexpected native result {kind}"
+                )
+        try:
+            return decode_native(payload) if representation == "native" else decode_value(payload)
+        except StructuredValueError as error:
+            raise OpenKacheValueError(
+                f"structured value decoding failed: {error}"
+            ) from error
+
+    async def set_structured(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        value: Any,
+        options: SetOptions | None = None,
+    ) -> SmithySetOutcome:
+        """Stores one StructuredValue-CBOR-v1 value without JSON fallback."""
+
+        self._assert_open()
+        operation = getattr(self._native, "set_structured", None)
+        if not callable(operation):
+            raise OpenKacheError(
+                "structured-value ABI is unavailable in the loaded native adapter"
+            )
+        try:
+            payload = encode_value(value)
+        except StructuredValueError as error:
+            raise OpenKacheValueError(
+                f"structured value encoding failed: {error}"
+            ) from error
+        selected = options or SetOptions()
+        try:
+            result = await asyncio.to_thread(
+                operation,
+                key=_key_bytes(key, self._key_spec),
+                value=payload,
+                set_flags=selected._wire_flags,
+                ttl_ms=selected.ttl_ms or 0,
+            )
+        except NativeError as error:
+            _raise_native_error(error)
+        kind = result[0] if isinstance(result, tuple) else result
+        if isinstance(kind, str):
+            try:
+                return SmithySetOutcome(kind)
+            except ValueError as error:
+                raise OpenKacheError(
+                    f"SET_STRUCTURED returned unknown outcome {kind!r}"
+                ) from error
+        return _set_outcome(int(kind))
 
     async def get_raw(
         self, key: str | int | bytes | bytearray | memoryview
@@ -593,7 +707,7 @@ class OpenKacheClient:
                 ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
 
     async def _value_operation(
         self,
@@ -633,7 +747,7 @@ class OpenKacheClient:
                 ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
 
     async def _execute_scoped(
         self,
@@ -661,7 +775,7 @@ class OpenKacheClient:
                 ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
 
     async def _set_operation(
         self,
@@ -772,7 +886,7 @@ class RawClient(SmithyOpenKacheApi):
                 ttl_ms=ttl_ms,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         if kind not in (SMITHY_FFI_RESULT_OK, SMITHY_FFI_RESULT_CREATED):
             raise OpenKacheError(f"NAMESPACE_OPEN returned unexpected native result {kind}")
         try:
@@ -781,7 +895,7 @@ class RawClient(SmithyOpenKacheApi):
                 payload,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         return SmithyNamespaceOpenOutput(
             descriptor=_namespace_descriptor(decoded),
             created=kind == SMITHY_FFI_RESULT_CREATED,
@@ -800,7 +914,7 @@ class RawClient(SmithyOpenKacheApi):
                 ttl_ms=ttl_ms,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(
                 f"NAMESPACE_UPDATE_POLICY returned unexpected native result {kind}"
@@ -811,7 +925,7 @@ class RawClient(SmithyOpenKacheApi):
                 payload,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         return SmithyNamespaceUpdatePolicyOutput(
             descriptor=_namespace_descriptor(decoded)
         )
@@ -826,7 +940,7 @@ class RawClient(SmithyOpenKacheApi):
                 expected_revision=input.expected_revision,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         return SmithyNamespaceDeleteOutput()
 
     async def close(self) -> None:
@@ -834,6 +948,16 @@ class RawClient(SmithyOpenKacheApi):
 
 
 Client = OpenKacheClient
+
+
+def _raise_native_error(error: NativeError) -> NoReturn:
+    """Project the generated native result category into Python exceptions."""
+
+    if error.result_kind == SMITHY_FFI_RESULT_UNKNOWN_MUTATION:
+        raise OpenKacheUnknownMutationError(str(error)) from error
+    if error.result_kind == SMITHY_FFI_RESULT_CANCELLED:
+        raise OpenKacheCancelledError(str(error)) from error
+    raise OpenKacheError(str(error)) from error
 
 
 def _connection_settings(
@@ -1014,6 +1138,10 @@ def _key_bytes(
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError(
             "key must be an integer for the integer key spec"
+        )
+    if not _I64_MIN <= value <= _I64_MAX:
+        raise OpenKacheValueError(
+            "integer keys must fit the signed 64-bit range"
         )
     return _canonical_cbor_integer(value)
 
@@ -1327,7 +1455,9 @@ __all__ = [
     "CompressionOptions",
     "ConnectionState",
     "OpenKacheClient",
+    "OpenKacheCancelledError",
     "OpenKacheError",
+    "OpenKacheUnknownMutationError",
     "OpenKacheValueError",
     "RawClient",
     "ServerStats",

@@ -73,6 +73,8 @@ typedef enum openkache_client_result_kind {
     OPENKACHE_CLIENT_RESULT_NOT_DELETED = OPENKACHE_SMITHY_FFI_RESULT_NOT_DELETED,
     OPENKACHE_CLIENT_RESULT_CONNECTED = OPENKACHE_SMITHY_FFI_RESULT_CONNECTED,
     OPENKACHE_CLIENT_RESULT_NOT_STORED = OPENKACHE_SMITHY_FFI_RESULT_NOT_STORED,
+    OPENKACHE_CLIENT_RESULT_UNKNOWN_MUTATION = OPENKACHE_SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
+    OPENKACHE_CLIENT_RESULT_CANCELLED = OPENKACHE_SMITHY_FFI_RESULT_CANCELLED,
 } openkache_client_result_kind_t;
 
 typedef enum openkache_client_operation {
@@ -89,6 +91,8 @@ typedef enum openkache_client_operation {
     /* Language-adapter operations; these are not wire opcodes. */
     OPENKACHE_CLIENT_OPERATION_GET_JSON = OPENKACHE_SMITHY_FFI_OPERATION_GET_JSON,
     OPENKACHE_CLIENT_OPERATION_SET_JSON = OPENKACHE_SMITHY_FFI_OPERATION_SET_JSON,
+    OPENKACHE_CLIENT_OPERATION_GET_STRUCTURED = OPENKACHE_SMITHY_FFI_OPERATION_GET_STRUCTURED,
+    OPENKACHE_CLIENT_OPERATION_SET_STRUCTURED = OPENKACHE_SMITHY_FFI_OPERATION_SET_STRUCTURED,
 } openkache_client_operation_t;
 
 /*
@@ -228,6 +232,26 @@ openkache_client_result_t *openkache_client_execute(
     size_t value_length,
     uint32_t set_condition,
     uint8_t ttl_enabled,
+    uint64_t ttl_ms
+);
+
+/*
+ * StructuredValue-CBOR-v1 selectors. These calls return and accept canonical
+ * StructuredValue-CBOR-v1 bytes and never reinterpret values as JSON or Raw.
+ */
+openkache_client_result_t *openkache_client_get_structured(
+    const openkache_client_t *client,
+    const uint8_t *canonical_key,
+    size_t canonical_key_length
+);
+
+openkache_client_result_t *openkache_client_set_structured(
+    const openkache_client_t *client,
+    const uint8_t *canonical_key,
+    size_t canonical_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
     uint64_t ttl_ms
 );
 

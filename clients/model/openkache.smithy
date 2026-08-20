@@ -440,6 +440,12 @@ enum FfiOperation {
     @ffiValue(value: 17)
     SET_JSON = "set_json"
 
+    @ffiValue(value: 18)
+    GET_STRUCTURED = "get_structured"
+
+    @ffiValue(value: 19)
+    SET_STRUCTURED = "set_structured"
+
     @ffiValue(value: 4294967041)
     RECONNECT = "reconnect"
 }
@@ -474,6 +480,12 @@ enum FfiResultKind {
 
     @ffiValue(value: 9)
     NOT_STORED = "not_stored"
+
+    @ffiValue(value: 10)
+    UNKNOWN_MUTATION = "unknown_mutation"
+
+    @ffiValue(value: 11)
+    CANCELLED = "cancelled"
 }
 
 enum FfiSetCondition {
