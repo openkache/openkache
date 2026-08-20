@@ -63,6 +63,7 @@ From `clients/core`:
 cargo build
 cargo check --no-default-features --features quic-compio
 cargo check --no-default-features --features quic-quinn
+cargo check --no-default-features --features tls-tcp
 cargo check --no-default-features --features ffi
 cargo fmt --check
 ```
@@ -139,9 +140,12 @@ Callers reserve an ID and one aggregate request/response byte permit with
 resulting opaque frame. `RequestHandle` dispatches a response by echoed request
 ID, validates the operation's generated status set, retains exact
 request/response bytes, and distinguishes local rejection, transport failure,
-and unknown mutation outcomes. Transport adapters implement `TransportLane`
-and may advertise QUIC or TLS-over-TCP through `TransportConnection`; the
-engine does not decode server values or impose a value representation.
+and unknown mutation outcomes. Transport adapters implement `TransportLane`;
+`QuinnTransportConnection` provides bounded multiplexed QUIC lanes and
+`TlsTcpTransport` provides one ordered TLS-over-TCP lane. Both enforce TLS 1.3,
+ALPN `openkache/1`, and the singleton `X25519MLKEM768` hybrid key exchange;
+neither adapter exposes plaintext or classical fallback. The engine does not
+decode server values or impose a value representation.
 
 Existing convenience clients remain source-compatible during this migration.
 New adapters should use the engine boundary rather than assuming one request

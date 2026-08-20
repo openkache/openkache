@@ -98,7 +98,6 @@ impl super::Connection for Connection {
                     SendStream(send),
                     ReceiveStream {
                         stream: receive,
-                        lookahead: None,
                     },
                 )
             })
@@ -108,8 +107,6 @@ impl super::Connection for Connection {
 
 pub(crate) struct ReceiveStream {
     stream: comnoq::RecvStream,
-    /// Byte retained by the non-consuming trailing-byte probe.
-    lookahead: Option<u8>,
 }
 
 impl super::RequestByteStream for ReceiveStream {
@@ -122,14 +119,7 @@ impl super::RequestByteStream for ReceiveStream {
         use compio::buf::{IntoInner, IoBuf};
         use compio::io::AsyncReadExt;
 
-        let mut capacity = capacity.max(1);
-        if let Some(byte) = self.lookahead.take() {
-            frame.push(byte);
-            capacity = capacity.saturating_sub(1);
-        }
-        if capacity == 0 {
-            return Ok(frame);
-        }
+        let capacity = capacity.max(1);
         frame
             .try_reserve(capacity)
             .map_err(|error| TransportError::backend(backend, "request buffer reserve", error))?;
@@ -141,20 +131,6 @@ impl super::RequestByteStream for ReceiveStream {
             result.map_err(|error| TransportError::backend(backend, "stream read", error))?;
         debug_assert!(read <= capacity);
         Ok(frame.into_inner())
-    }
-
-    async fn has_readable_byte(&mut self, backend: &'static str) -> Result<bool, TransportError> {
-        use compio::io::AsyncRead;
-
-        let compio::BufResult(result, byte) = self.stream.read([0_u8; 1]).await;
-        result
-            .map(|read| {
-                if read != 0 {
-                    self.lookahead = Some(byte[0]);
-                }
-                read != 0
-            })
-            .map_err(|error| TransportError::backend(backend, "stream read", error))
     }
 }
 

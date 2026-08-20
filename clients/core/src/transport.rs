@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use crossfire::{MAsyncRx, MAsyncTx};
 use futures_util::{FutureExt, pin_mut, select};
+#[cfg(any(feature = "quic-quinn", feature = "tls-tcp"))]
+use openkache_protocol::MAX_RESPONSE_FRAME_BYTES;
 use openkache_protocol::{Response, ResponseHeaderBytes, ResponseParts};
 
 use crate::request::RequestAttempt;
@@ -20,6 +22,87 @@ use crate::{Backend, Error, Operation, Result};
 mod compio;
 #[cfg(feature = "quic-quinn")]
 mod quinn;
+#[cfg(feature = "tls-tcp")]
+mod tcp;
+
+#[cfg(feature = "quic-quinn")]
+pub use quinn::{Lane as QuinnTransportLane, Transport as QuinnTransportConnection};
+#[cfg(feature = "tls-tcp")]
+pub use tcp::{TcpLane, TcpTransport, TlsTcpLane, TlsTcpTransport};
+
+/// Returns the complete response length once the opaque response header is
+/// available.
+///
+/// Transport adapters share this small framing boundary. They retain the
+/// complete bytes, but never inspect an operation body or value codec.
+#[cfg(any(feature = "quic-quinn", feature = "tls-tcp"))]
+pub(crate) fn response_frame_len(
+    prefix: &[u8],
+    maximum: usize,
+) -> std::result::Result<Option<usize>, String> {
+    let header = Response::decode_header(prefix).map_err(|error| error.to_string())?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
+    let frame_len = header.frame_len().map_err(|error| error.to_string())?;
+    let maximum = maximum.min(MAX_RESPONSE_FRAME_BYTES);
+    if frame_len > maximum {
+        return Err(format!(
+            "response frame is {frame_len} bytes, maximum is {maximum}"
+        ));
+    }
+    Ok(Some(frame_len))
+}
+
+/// Applies the one client-side security profile shared by QUIC and TCP.
+///
+/// The public transport bindings accept a caller-owned Rustls configuration,
+/// but they must not let a permissive configuration silently downgrade the
+/// wire profile.  Restricting the offered ALPN and key-exchange list before
+/// constructing the backend configuration makes plaintext and classical-only
+/// fallbacks impossible.  Session resumption is disabled because a resumed
+/// TLS 1.3 handshake does not expose a fresh key-exchange group to validate.
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
+pub(crate) fn enforce_client_profile(tls: &mut rustls::ClientConfig) -> crate::Result<()> {
+    if tls.alpn_protocols.len() != 1 || tls.alpn_protocols[0].as_slice() != openkache_protocol::ALPN
+    {
+        return Err(crate::Error::configuration(
+            "tls.alpn_protocols",
+            "must offer only openkache/1",
+        ));
+    }
+    let groups = &tls.crypto_provider().kx_groups;
+    if groups.len() != 1 || groups[0].name() != crate::config::PQ_GROUP {
+        return Err(crate::Error::configuration(
+            "tls.kx_groups",
+            "must offer only X25519MLKEM768",
+        ));
+    }
+    tls.check_selected_alpn = true;
+    tls.enable_early_data = false;
+    tls.resumption = rustls::client::Resumption::disabled();
+    Ok(())
+}
+
+/// Validates a complete opaque response frame without decoding its payload.
+///
+/// The request engine remains responsible for correlation and operation
+/// status validation.  This helper only confirms that the bytes consumed by a
+/// lane still describe the same bounded frame advertised by its header.
+#[cfg(any(feature = "quic-quinn", feature = "tls-tcp"))]
+pub(crate) fn validate_response_frame(
+    frame: &[u8],
+    expected: usize,
+) -> std::result::Result<(), String> {
+    if Response::decode_header(frame)
+        .map_err(|error| error.to_string())?
+        .and_then(|header| header.frame_len().ok())
+        != Some(expected)
+    {
+        return Err("response frame length is malformed".into());
+    }
+    Ok(())
+}
 
 pub(crate) trait ClientConnection: Sized {
     type Lane<'a>: ClientLane

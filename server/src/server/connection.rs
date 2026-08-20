@@ -244,12 +244,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         {
             Ok(Ok(frame)) => frame,
             Ok(Err(rejection)) => {
+                let request_id = rejection.request_id();
                 network_shard.record_request(
                     operation_contract::telemetry_operation(rejection.opcode()),
                     rejection.status(),
                     rejection.elapsed(),
                 );
-                let request_id = rejection.request_id();
                 if !write_response(
                     &mut send,
                     rejection.into_response(),

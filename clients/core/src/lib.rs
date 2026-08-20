@@ -1,4 +1,4 @@
-//! Low-level QUIC client core for the OpenKache binary protocol.
+//! Low-level transport-neutral client core for the OpenKache binary protocol.
 
 /// Client-only defaults, ABI discriminators, and value-format constants generated from
 /// `clients/model/openkache.smithy`.
@@ -60,13 +60,17 @@ pub use request_engine::{
     TransportError, TransportKind, TransportLane,
 };
 pub use transport::RequestBudget;
+#[cfg(feature = "quic-quinn")]
+pub use transport::{QuinnTransportConnection, QuinnTransportLane};
+#[cfg(feature = "tls-tcp")]
+pub use transport::{TcpLane, TcpTransport, TlsTcpLane, TlsTcpTransport};
 pub use value::{
     ItemValue, MAX_EXPANDED_PAYLOAD_BYTES, MAX_VALUE_ENVELOPE_BYTES, MAX_ZSTD_WINDOW_BYTES,
     ValueKeyring, ValueLimits,
 };
 
-#[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
-compile_error!("enable at least one client QUIC backend feature");
+#[cfg(not(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp")))]
+compile_error!("enable at least one client transport backend feature");
 
 /// Client-owned identifier for an asynchronous runtime and QUIC backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

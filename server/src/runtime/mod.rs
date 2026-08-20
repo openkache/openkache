@@ -29,13 +29,13 @@ pub(crate) use port::{completion, storage_port};
 pub(in crate::runtime) use request_admission::RequestAdmissionError;
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{
-    DOMAIN_V2_CONTEXT, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key, derive_scoped_storage_key,
-    derive_storage_key,
+    DOMAIN_V2_CONTEXT, ITEM_ID_STORAGE_SCOPE, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key,
+    derive_scoped_storage_key, derive_storage_key,
 };
 pub(crate) use storage_port::*;
+pub use submission::{PendingStorageSubmission, StorageSubmission, SubmittedStorageValue};
 #[allow(unused_imports)]
 pub(crate) use worker::*;
-pub use submission::{PendingStorageSubmission, StorageSubmission, SubmittedStorageValue};
 
 use self::completion::CompletionSlab;
 
@@ -215,8 +215,7 @@ impl ThreadedKvkache {
             .ok_or_else(|| {
                 KvError::InvalidConfig("storage completion capacity exceeds usize".into())
             })?;
-        let stable_owner_pool_capacity =
-            config.storage.stable_read_owner_capacity_per_thread()?;
+        let stable_owner_pool_capacity = config.storage.stable_read_owner_capacity_per_thread()?;
         let stable_owner_pool_metadata_bytes = StorageReadOwnerPool::allocation_bytes(
             stable_owner_pool_capacity,
         )
@@ -628,14 +627,8 @@ impl ThreadedKvkache {
         value: StoredItemValue,
         options: StorageWriteOptions,
     ) -> Result<SetOutcome> {
-        self.set_storage_key_with_requester(
-            storage_key,
-            value,
-            options,
-            Operation::unknown(),
-            None,
-        )
-        .await
+        self.set_storage_key_with_requester(storage_key, value, options, Operation::unknown(), None)
+            .await
     }
 
     pub async fn delete(&self, storage_key: StorageKey) -> Result<bool> {
@@ -656,12 +649,9 @@ impl ThreadedKvkache {
         let mut stats = Vec::with_capacity(self.workers.len());
         for thread_id in 0..self.workers.len() {
             match self
-                .request(
-                    thread_id,
-                    operation,
-                    requester,
-                    |response| WorkerRequest::Control(WorkerControlRequest::Stats { response }),
-                )
+                .request(thread_id, operation, requester, |response| {
+                    WorkerRequest::Control(WorkerControlRequest::Stats { response })
+                })
                 .await?
             {
                 WorkerResponse::Control(WorkerControlResponse::Stats(worker_stats)) => {
@@ -689,12 +679,9 @@ impl ThreadedKvkache {
     ) -> Result<()> {
         for thread_id in 0..self.workers.len() {
             match self
-                .request(
-                    thread_id,
-                    operation,
-                    requester,
-                    |response| WorkerRequest::Control(WorkerControlRequest::Sync { response }),
-                )
+                .request(thread_id, operation, requester, |response| {
+                    WorkerRequest::Control(WorkerControlRequest::Sync { response })
+                })
                 .await?
             {
                 WorkerResponse::Control(WorkerControlResponse::Synced) => {}
@@ -723,17 +710,12 @@ impl ThreadedKvkache {
     ) -> Result<()> {
         for &worker in workers {
             if worker >= self.workers.len() {
-                return Err(KvError::Worker(format!(
-                    "unknown storage worker {worker}"
-                )));
+                return Err(KvError::Worker(format!("unknown storage worker {worker}")));
             }
             match self
-                .request(
-                    worker,
-                    operation,
-                    requester,
-                    |response| WorkerRequest::Control(WorkerControlRequest::Sync { response }),
-                )
+                .request(worker, operation, requester, |response| {
+                    WorkerRequest::Control(WorkerControlRequest::Sync { response })
+                })
                 .await?
             {
                 WorkerResponse::Control(WorkerControlResponse::Synced) => {}

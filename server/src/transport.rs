@@ -399,11 +399,6 @@ trait RequestByteStream {
         capacity: usize,
         backend: &'static str,
     ) -> impl Future<Output = Result<Vec<u8>, TransportError>>;
-
-    fn has_readable_byte(
-        &mut self,
-        backend: &'static str,
-    ) -> impl Future<Output = Result<bool, TransportError>>;
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
@@ -484,16 +479,10 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         drop(permit);
         return Ok(Err(rejection));
     }
-    // Probe the backend's already-readable bytes once. The backends retain
-    // any byte observed by this non-consuming probe, so a pipelined second
-    // request remains available to the next read instead of being dropped.
-    // The zero-duration timeout is non-blocking: when no byte is buffered the
-    // receive future is cancelled and the lane remains reusable.
-    let _ = match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await
-    {
-        Err(_) => false,
-        Ok(result) => result.map_err(StreamReadError::Transport)?,
-    };
+    // Any bytes beyond this frame remain buffered by the transport and are
+    // consumed by the next iteration. Version 1 explicitly permits multiple
+    // complete requests on one lane, so a coalesced/pipelined frame must not
+    // retire the lane after this response.
     Ok(Ok(RequestFrame::new(body, permit, header.request_id())))
 }
 
