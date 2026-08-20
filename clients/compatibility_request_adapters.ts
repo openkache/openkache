@@ -5,7 +5,8 @@ import {
   type Wire_Operation_Field_Layout,
   type Wire_Operation_Contract,
 } from "../protocol/wire"
-import { derive_wire_compatibility_route } from "../protocol/compatibility_v1"
+
+const SCOPE_EXTENSION = "openkache.protocol#operationContract.scope"
 
 /**
  * Protocol-v1 request routes retained for the handwritten client convenience
@@ -54,6 +55,36 @@ const COMPACT_REQUEST_ADAPTERS: Readonly<
   namespace_open: { route: "namespace_open" },
   namespace_update_policy: { route: "namespace_update_policy" },
   namespace_delete: { route: "namespace_delete" },
+}
+
+/**
+ * Resolves the protocol-v1 convenience route from the canonical operation
+ * scope and semantic field roles. The current Smithy model deliberately
+ * exposes only generic request framing; route names remain a client adapter
+ * concern and are never serialized into the wire contract.
+ */
+function derive_wire_compatibility_route(
+  contract: Wire_Operation_Contract,
+): Compact_Request_Adapter_Route | undefined {
+  const scope = contract.extensions?.[SCOPE_EXTENSION]
+  const roles = new Set((contract.request_plan ?? []).map((field) => field.role))
+  switch (scope) {
+    case "item":
+      return roles.has("value") ? "set" : "item"
+    case "namespace":
+      return "namespace"
+    case "namespace_management":
+      if (roles.has("name") || roles.has("create_if_missing")) {
+        return "namespace_open"
+      }
+      if (roles.has("policy") || roles.has("default_expiration")) {
+        return "namespace_update_policy"
+      }
+      if (roles.has("expected_revision")) return "namespace_delete"
+      return undefined
+    default:
+      return undefined
+  }
 }
 
 /**

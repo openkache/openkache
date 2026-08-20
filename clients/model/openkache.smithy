@@ -91,6 +91,7 @@ enum FfiNativeType {
     VOID = "void"
     CLIENT_POINTER = "client_pointer"
     RESULT_POINTER = "result_pointer"
+    REQUEST_POINTER = "request_pointer"
     U8_POINTER = "u8_pointer"
     STRUCT_POINTER = "struct_pointer"
     SIZE = "size"
@@ -98,6 +99,22 @@ enum FfiNativeType {
     INT32 = "int32"
     UINT32 = "uint32"
     UINT64 = "uint64"
+}
+
+/// Ownership of memory crossing the native ABI boundary.
+enum FfiNativeOwnership {
+    NONE = "none"
+    BORROWED = "borrowed"
+    COPIED = "copied"
+    OWNED = "owned"
+}
+
+/// Lifetime during which a borrowed native pointer remains valid.
+enum FfiNativeLifetime {
+    CALL = "call"
+    REQUEST = "request"
+    RESULT = "result"
+    CLIENT = "client"
 }
 
 structure FfiNativeParameter {
@@ -113,6 +130,13 @@ structure FfiNativeParameter {
 
     /// Required for STRUCT_POINTER parameters.
     structureName: String
+
+    /// Pointer ownership at the ABI boundary. Omitted legacy declarations
+    /// default to borrowed for inputs and owned for returned handles.
+    ownership: FfiNativeOwnership
+
+    /// Lifetime required for borrowed pointers.
+    lifetime: FfiNativeLifetime
 }
 
 list FfiNativeParameters {
@@ -125,6 +149,12 @@ structure FfiNativeFunction {
 
     @required
     returnType: FfiNativeType
+
+    /// Ownership transferred by the function's return value.
+    returnOwnership: FfiNativeOwnership
+
+    /// Lifetime of a borrowed return value.
+    returnLifetime: FfiNativeLifetime
 
     /// Optional extension symbols may be absent from older native libraries.
     optional: Boolean
@@ -149,6 +179,12 @@ structure FfiNativeField {
 
     /// Required for STRUCT_POINTER fields.
     structureName: String
+
+    /// Ownership of pointer fields in an ABI structure.
+    ownership: FfiNativeOwnership
+
+    /// Lifetime required for borrowed pointer fields.
+    lifetime: FfiNativeLifetime
 }
 
 list FfiNativeFields {
@@ -281,7 +317,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 5,
+    abiVersion: 6,
     nativeFunctions: [
         {
             name: "openkache_client_abi_version",
@@ -345,6 +381,111 @@ structure valueEnvelope {
                     type: "struct_pointer",
                     structureName: "FfiConnectOptions",
                     mutable: false
+                }
+            ]
+        },
+        {
+            name: "openkache_client_execute_async",
+            returnType: "request_pointer",
+            returnOwnership: "owned",
+            returnLifetime: "request",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "keySpec", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setCondition", type: "uint32", mutable: false },
+                { name: "ttlEnabled", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_with_options_async",
+            returnType: "request_pointer",
+            returnOwnership: "owned",
+            returnLifetime: "request",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "keySpec", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_raw_async",
+            returnType: "request_pointer",
+            returnOwnership: "owned",
+            returnLifetime: "request",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "itemId", type: "u8_pointer", mutable: false },
+                { name: "itemIdLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setCondition", type: "uint32", mutable: false },
+                { name: "ttlEnabled", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_request_poll",
+            returnType: "uint32",
+            parameters: [
+                {
+                    name: "request",
+                    type: "request_pointer",
+                    mutable: false,
+                    ownership: "borrowed",
+                    lifetime: "request"
+                }
+            ]
+        },
+        {
+            name: "openkache_client_request_wait",
+            returnType: "result_pointer",
+            parameters: [
+                {
+                    name: "request",
+                    type: "request_pointer",
+                    mutable: true,
+                    ownership: "borrowed",
+                    lifetime: "request"
+                },
+                { name: "timeoutMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_request_cancel",
+            returnType: "uint32",
+            parameters: [
+                {
+                    name: "request",
+                    type: "request_pointer",
+                    mutable: false,
+                    ownership: "borrowed",
+                    lifetime: "request"
+                }
+            ]
+        },
+        {
+            name: "openkache_client_request_free",
+            returnType: "void",
+            parameters: [
+                {
+                    name: "request",
+                    type: "request_pointer",
+                    mutable: true,
+                    ownership: "owned",
+                    lifetime: "request"
                 }
             ]
         },
@@ -549,8 +690,17 @@ structure valueEnvelope {
             ]
         },
         {
+            name: "openkache_client_result_error_category",
+            returnType: "uint32",
+            parameters: [
+                { name: "result", type: "result_pointer", mutable: false }
+            ]
+        },
+        {
             name: "openkache_client_result_data",
             returnType: "u8_pointer",
+            returnOwnership: "borrowed",
+            returnLifetime: "result",
             parameters: [
                 { name: "result", type: "result_pointer", mutable: false }
             ]
@@ -565,6 +715,8 @@ structure valueEnvelope {
         {
             name: "openkache_client_result_take_client",
             returnType: "client_pointer",
+            returnOwnership: "owned",
+            returnLifetime: "client",
             parameters: [
                 { name: "result", type: "result_pointer", mutable: true }
             ]
@@ -623,7 +775,9 @@ structure valueEnvelope {
 )
 @valueFormat(
     version: 1,
-    maxVu128Bytes: 17,
+    // VU128 is currently used for unsigned 64-bit protocol lengths and
+    // versions.  A canonical u64 varuint is at most nine bytes.
+    maxVu128Bytes: 9,
     formatByteBytes: 1,
     formatCompressionMask: 15,
     formatEncryptionShift: 4,
@@ -786,6 +940,15 @@ enum FfiResultKind {
     /// remain explicit projections instead of being inferred from framing.
     @ffiValue(value: 10)
     RAW = "raw"
+
+    @ffiValue(value: 11)
+    CANCELED = "canceled"
+
+    @ffiValue(value: 12)
+    UNKNOWN_MUTATION = "unknown_mutation"
+
+    @ffiValue(value: 13)
+    RESOURCE_EXHAUSTED = "resource_exhausted"
 }
 
 enum FfiSetCondition {
@@ -857,4 +1020,109 @@ enum FfiNamespaceOverridePolicy {
 
     @ffiValue(value: 1)
     ALLOWED = "allowed"
+}
+
+/// Wire/value ownership mode; raw and caller-owned APIs preserve exact bytes.
+enum FfiValueMode {
+    @ffiValue(value: 0)
+    FORMATTED_V1 = "formatted_v1"
+
+    @ffiValue(value: 1)
+    RAW = "raw"
+
+    @ffiValue(value: 2)
+    CALLER_OWNED_V0 = "caller_owned_v0"
+}
+
+/// Language-level structured-value projection requested by a binding.
+enum FfiValueRepresentation {
+    @ffiValue(value: 0)
+    LOSSLESS = "lossless"
+
+    @ffiValue(value: 1)
+    NATIVE = "native"
+}
+
+enum FfiStatusCategory {
+    @ffiValue(value: 0)
+    SUCCESS = "success"
+
+    @ffiValue(value: 1)
+    NOT_FOUND = "not_found"
+
+    @ffiValue(value: 2)
+    MUTATION = "mutation"
+
+    @ffiValue(value: 3)
+    ERROR = "error"
+
+    @ffiValue(value: 4)
+    CANCELED = "canceled"
+
+    @ffiValue(value: 5)
+    UNKNOWN_MUTATION = "unknown_mutation"
+
+    @ffiValue(value: 6)
+    RESOURCE_EXHAUSTED = "resource_exhausted"
+}
+
+enum FfiErrorCategory {
+    @ffiValue(value: 0)
+    NONE = "none"
+
+    @ffiValue(value: 1)
+    INVALID_INPUT = "invalid_input"
+
+    @ffiValue(value: 2)
+    CONFIGURATION = "configuration"
+
+    @ffiValue(value: 3)
+    TIMEOUT = "timeout"
+
+    @ffiValue(value: 4)
+    TRANSPORT = "transport"
+
+    @ffiValue(value: 5)
+    SERVER = "server"
+
+    @ffiValue(value: 6)
+    PROTOCOL = "protocol"
+
+    @ffiValue(value: 7)
+    VALUE = "value"
+
+    @ffiValue(value: 8)
+    KEY = "key"
+
+    @ffiValue(value: 9)
+    CANCELED = "canceled"
+
+    @ffiValue(value: 10)
+    UNKNOWN_MUTATION = "unknown_mutation"
+
+    @ffiValue(value: 11)
+    RESOURCE_EXHAUSTED = "resource_exhausted"
+
+    @ffiValue(value: 12)
+    CLOSED = "closed"
+
+    @ffiValue(value: 13)
+    INTERNAL = "internal"
+}
+
+enum FfiRequestState {
+    @ffiValue(value: 0)
+    PENDING = "pending"
+
+    @ffiValue(value: 1)
+    READY = "ready"
+
+    @ffiValue(value: 2)
+    CANCELED = "canceled"
+
+    @ffiValue(value: 3)
+    CONSUMED = "consumed"
+
+    @ffiValue(value: 4)
+    FREED = "freed"
 }

@@ -110,6 +110,7 @@ export interface Ffi_Contract {
   readonly connection_states: readonly Ffi_Entry[]
   readonly native_abi_functions: readonly Native_Abi_Function[]
   readonly native_abi_structures: readonly Native_Abi_Structure[]
+  readonly error_categories: readonly Ffi_Entry[]
   readonly namespace_default_evictions: readonly Ffi_Entry[]
   readonly namespace_default_expirations: readonly Ffi_Entry[]
   readonly namespace_descriptor_decode_statuses: readonly Ffi_Entry[]
@@ -119,6 +120,10 @@ export interface Ffi_Contract {
   readonly operations: readonly Ffi_Entry[]
   readonly key_specs: readonly Ffi_Entry[]
   readonly result_kinds: readonly Ffi_Entry[]
+  readonly request_states: readonly Ffi_Entry[]
+  readonly status_categories: readonly Ffi_Entry[]
+  readonly value_representations: readonly Ffi_Entry[]
+  readonly value_modes: readonly Ffi_Entry[]
   readonly set_conditions: readonly Ffi_Entry[]
 }
 
@@ -159,6 +164,7 @@ export interface Client_Contract extends Wire_Contract {
 export type Native_Abi_Type =
   | "client_pointer"
   | "result_pointer"
+  | "request_pointer"
   | "u8_pointer"
   | "struct_pointer"
   | "size"
@@ -173,12 +179,19 @@ export interface Native_Abi_Parameter {
   readonly type: Exclude<Native_Abi_Type, "void">
   readonly mutable: boolean
   readonly structure_name?: string
+  readonly ownership: Native_Abi_Ownership
+  readonly lifetime: "call" | "request" | "result" | "client"
 }
+
+export type Native_Abi_Ownership = "none" | "borrowed" | "copied" | "owned"
+export type Native_Abi_Lifetime = "call" | "request" | "result" | "client"
 
 export interface Native_Abi_Function {
   readonly name: string
   readonly optional: boolean
   readonly return_type: Native_Abi_Type
+  readonly return_ownership: Native_Abi_Ownership
+  readonly return_lifetime: Native_Abi_Lifetime
   readonly parameters: readonly Native_Abi_Parameter[]
 }
 
@@ -203,6 +216,14 @@ const LEGACY_UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
 const FFI_ENUMS = {
   operations: { name: "FfiOperation", kind: "FFI operation" },
   result_kinds: { name: "FfiResultKind", kind: "FFI result" },
+  status_categories: { name: "FfiStatusCategory", kind: "FFI status category" },
+  error_categories: { name: "FfiErrorCategory", kind: "FFI error category" },
+  request_states: { name: "FfiRequestState", kind: "FFI request state" },
+  value_representations: {
+    name: "FfiValueRepresentation",
+    kind: "FFI value representation",
+  },
+  value_modes: { name: "FfiValueMode", kind: "FFI value mode" },
   connection_states: { name: "FfiConnectionState", kind: "FFI connection state" },
   set_conditions: { name: "FfiSetCondition", kind: "FFI SET condition" },
   key_specs: { name: "FfiKeySpec", kind: "FFI key spec" },
@@ -948,6 +969,7 @@ function namespace_descriptor_contract(
 const NATIVE_ABI_TYPES: readonly Native_Abi_Type[] = [
   "client_pointer",
   "result_pointer",
+  "request_pointer",
   "u8_pointer",
   "struct_pointer",
   "size",
@@ -987,11 +1009,47 @@ function native_abi_parameter(
       `${location}.structureName is required only for struct_pointer parameters`,
     )
   }
+  const pointer_type =
+    type === "client_pointer" ||
+    type === "result_pointer" ||
+    type === "request_pointer" ||
+    type === "u8_pointer" ||
+    type === "struct_pointer"
+  // Function parameters are always inputs to the ABI boundary, including
+  // opaque handle pointers. Returned handles are owned by the caller and are
+  // represented by the function return type; they are never parameter-owned.
+  const ownership_value = optional_string_member(parameter, "ownership", location) ??
+    (pointer_type ? "borrowed" : "none")
+  if (!["none", "borrowed", "copied", "owned"].includes(ownership_value)) {
+    throw new Error(
+      `${location}.ownership must be borrowed, copied, or owned`,
+    )
+  }
+  if (pointer_type ? ownership_value === "none" : ownership_value !== "none") {
+    throw new Error(
+      `${location}.ownership must be none for scalars and a transfer mode for pointers`,
+    )
+  }
+  const lifetime_value = optional_string_member(parameter, "lifetime", location) ??
+    (type === "client_pointer"
+      ? "client"
+      : type === "request_pointer"
+      ? "request"
+      : type === "result_pointer"
+      ? "result"
+      : "call")
+  if (!["call", "request", "result", "client"].includes(lifetime_value)) {
+    throw new Error(
+      `${location}.lifetime must be call, request, result, or client`,
+    )
+  }
   return {
     name: string_member(parameter, "name", location),
     type,
     mutable: boolean_member(parameter, "mutable", location),
     ...(structure_name === undefined ? {} : { structure_name }),
+    ownership: ownership_value as Native_Abi_Parameter["ownership"],
+    lifetime: lifetime_value as Native_Abi_Parameter["lifetime"],
   }
 }
 
@@ -1015,10 +1073,39 @@ function native_abi_functions(value: Json_Object): readonly Native_Abi_Function[
         `${FFI_CONTRACT_TRAIT_ID}.nativeFunctions[${index}]`,
       )
       const location = `${FFI_CONTRACT_TRAIT_ID}.nativeFunctions[${index}]`
+      const return_type = native_abi_type(function_value, "returnType", location)
+      const return_pointer = return_type.includes("pointer")
+      const return_ownership = optional_string_member(
+        function_value,
+        "returnOwnership",
+        location,
+      ) ?? (return_pointer ? "owned" : "none")
+      if (!["none", "borrowed", "copied", "owned"].includes(return_ownership)) {
+        throw new Error(
+          `${location}.returnOwnership must be borrowed, copied, or owned`,
+        )
+      }
+      if (return_pointer ? return_ownership === "none" : return_ownership !== "none") {
+        throw new Error(
+          `${location}.returnOwnership must be none for scalars and a transfer mode for pointers`,
+        )
+      }
+      const return_lifetime = optional_string_member(
+        function_value,
+        "returnLifetime",
+        location,
+      ) ?? (return_pointer ? "result" : "call")
+      if (!["call", "request", "result", "client"].includes(return_lifetime)) {
+        throw new Error(
+          `${location}.returnLifetime must be call, request, result, or client`,
+        )
+      }
       return {
         name: string_member(function_value, "name", location),
         optional: optional_boolean_member(function_value, "optional", location),
-        return_type: native_abi_type(function_value, "returnType", location),
+        return_type,
+        return_ownership: return_ownership as Native_Abi_Ownership,
+        return_lifetime: return_lifetime as Native_Abi_Lifetime,
         parameters: native_abi_parameters(function_value, "parameters", location),
       }
     })
@@ -1133,6 +1220,12 @@ function ffi_contract(
       FFI_ENUMS.connection_states.name,
       FFI_ENUMS.connection_states.kind,
     ),
+    error_categories: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.error_categories.name,
+      FFI_ENUMS.error_categories.kind,
+    ),
     native_abi_functions: native_functions,
     native_abi_structures: native_structures,
     namespace_default_evictions: ffi_enum_entries(
@@ -1178,6 +1271,30 @@ function ffi_contract(
       namespace,
       FFI_ENUMS.result_kinds.name,
       FFI_ENUMS.result_kinds.kind,
+    ),
+    request_states: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.request_states.name,
+      FFI_ENUMS.request_states.kind,
+    ),
+    status_categories: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.status_categories.name,
+      FFI_ENUMS.status_categories.kind,
+    ),
+    value_representations: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.value_representations.name,
+      FFI_ENUMS.value_representations.kind,
+    ),
+    value_modes: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.value_modes.name,
+      FFI_ENUMS.value_modes.kind,
     ),
     set_conditions: ffi_enum_entries(
       shapes,
@@ -1300,8 +1417,8 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       contract,
       "maxVu128Bytes",
       VALUE_FORMAT_TRAIT_ID,
-      17,
-      17,
+      9,
+      9,
     ),
   } satisfies Value_Format_Contract
 

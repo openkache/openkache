@@ -216,8 +216,6 @@ pub use openkache_protocol::operation::{
     WIRE_CODEC_DESCRIPTORS,
     WIRE_CODEC_NAMES,
 };
-pub use openkache_protocol::compat_v1::OperationFieldDirection;
-
 /// Generated replay policy owned by the client adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationRetryMode {
@@ -254,8 +252,8 @@ pub const fn operation_wire_spec(
 /// Returns the client-only projection for one operation.
 pub const fn operation_client_projection(
     opcode: openkache_protocol::Opcode,
-) -> OperationClientProjection {
-    OPERATION_CLIENT_PROJECTIONS[opcode.index()]
+) -> Option<OperationClientProjection> {
+    Some(OPERATION_CLIENT_PROJECTIONS[opcode.index()])
 }
 
 /// Resolves a canonical generated codec identifier.
@@ -414,6 +412,41 @@ pub const FFI_OPERATION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatt
 pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_status_categories = ffi.status_categories
+    .map(
+      (entry) =>
+        `/// Native FFI status-category identifier for ${entry.name}.
+pub const FFI_STATUS_CATEGORY_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_error_categories = ffi.error_categories
+    .map(
+      (entry) =>
+        `/// Native FFI error-category identifier for ${entry.name}.
+pub const FFI_ERROR_CATEGORY_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_request_states = ffi.request_states
+    .map(
+      (entry) =>
+        `/// Native FFI request-state identifier for ${entry.name}.
+pub const FFI_REQUEST_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_value_representations = ffi.value_representations
+    .map(
+      (entry) =>
+        `/// Native FFI value-representation identifier for ${entry.name}.
+pub const FFI_VALUE_REPRESENTATION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_value_modes = ffi.value_modes
+    .map(
+      (entry) =>
+        `/// Native FFI value-mode identifier for ${entry.name}.
+pub const FFI_VALUE_MODE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_connection_states = ffi.connection_states
     .map(
       (entry) =>
@@ -530,6 +563,11 @@ pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.mi
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
 ${ffi_operations}
 ${ffi_result_kinds}
+${ffi_status_categories}
+${ffi_error_categories}
+${ffi_request_states}
+${ffi_value_representations}
+${ffi_value_modes}
 ${ffi_connection_states}
 ${ffi_set_conditions}
 ${ffi_key_specs}
@@ -559,6 +597,41 @@ ${rust_ffi_enum(
   "Native FFI result-kind identifiers shared by every language adapter.",
   "Native FFI result-kind",
   ffi.result_kinds,
+)}
+
+${rust_ffi_enum(
+  "FfiStatusCategory",
+  "Native FFI completion-status categories shared by every language adapter.",
+  "Native FFI status category",
+  ffi.status_categories,
+)}
+
+${rust_ffi_enum(
+  "FfiErrorCategory",
+  "Native FFI structured error categories shared by every language adapter.",
+  "Native FFI error category",
+  ffi.error_categories,
+)}
+
+${rust_ffi_enum(
+  "FfiRequestState",
+  "Native FFI asynchronous request lifecycle states shared by every language adapter.",
+  "Native FFI request state",
+  ffi.request_states,
+)}
+
+${rust_ffi_enum(
+  "FfiValueRepresentation",
+  "Native FFI value-representation options shared by every language adapter.",
+  "Native FFI value representation",
+  ffi.value_representations,
+)}
+
+${rust_ffi_enum(
+  "FfiValueMode",
+  "Native FFI value-mode options shared by every language adapter.",
+  "Native FFI value mode",
+  ffi.value_modes,
 )}
 
 ${rust_ffi_enum(
@@ -733,6 +806,36 @@ function c_contract_client_compatibility(contract: Client_Contract): string {
         `    OPENKACHE_CLIENT_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()},`,
     )
     .join("\n")
+  const status_category_entries = contract.ffi.status_categories
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_STATUS_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_STATUS_CATEGORY_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
+  const error_category_entries = contract.ffi.error_categories
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_ERROR_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_ERROR_CATEGORY_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
+  const request_state_entries = contract.ffi.request_states
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_REQUEST_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_REQUEST_STATE_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
+  const value_representation_entries = contract.ffi.value_representations
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_VALUE_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_VALUE_REPRESENTATION_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
+  const value_mode_entries = contract.ffi.value_modes
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_VALUE_MODE_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_VALUE_MODE_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
   return `/* Source-compatible aliases generated from the Smithy FFI contract. */
 #define OPENKACHE_CLIENT_ABI_VERSION OPENKACHE_SMITHY_FFI_ABI_VERSION
 #define OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES \\
@@ -770,6 +873,26 @@ typedef enum openkache_client_set_condition {
 ${set_condition_entries}
 } openkache_client_set_condition_t;
 
+typedef enum openkache_client_status_category {
+${status_category_entries}
+} openkache_client_status_category_t;
+
+typedef enum openkache_client_error_category {
+${error_category_entries}
+} openkache_client_error_category_t;
+
+typedef enum openkache_client_request_state {
+${request_state_entries}
+} openkache_client_request_state_t;
+
+typedef enum openkache_client_value_representation {
+${value_representation_entries}
+} openkache_client_value_representation_t;
+
+typedef enum openkache_client_value_mode {
+${value_mode_entries}
+} openkache_client_value_mode_t;
+
 typedef enum openkache_client_encryption {
     OPENKACHE_CLIENT_ENCRYPTION_NONE = OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE,
     OPENKACHE_CLIENT_ENCRYPTION_COMPACT = OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT,
@@ -798,6 +921,26 @@ export function render_c_contract(contract: Client_Contract): string {
     ...ffi.result_kinds.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.status_categories.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_STATUS_CATEGORY_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.error_categories.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_ERROR_CATEGORY_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.request_states.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_REQUEST_STATE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.value_representations.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_VALUE_REPRESENTATION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.value_modes.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_VALUE_MODE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
     ),
     ...ffi.connection_states.map(
       (entry) =>
@@ -876,6 +1019,7 @@ typedef openkache_smithy_namespace_descriptor_t
 
 typedef struct openkache_client openkache_client_t;
 typedef struct openkache_client_result openkache_client_result_t;
+typedef struct openkache_client_request openkache_client_request_t;
 
 ${native_structures}
 

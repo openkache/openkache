@@ -50,6 +50,8 @@ export type {
   Namespace_Descriptor_Layout,
   Native_Abi_Function,
   Native_Abi_Parameter,
+  Native_Abi_Ownership,
+  Native_Abi_Lifetime,
   Native_Abi_Structure,
   Native_Abi_Type,
   Value_Envelope_Contract,

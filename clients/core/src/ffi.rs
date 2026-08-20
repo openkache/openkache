@@ -9,11 +9,9 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-
-use openkache_value::{Value as StructuredValue, decode, encode};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::FfiNamespaceDescriptor;
@@ -30,14 +28,17 @@ pub use crate::contract::{
     FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES, FFI_NAMESPACE_OVERRIDE_ALLOWED,
     FFI_NAMESPACE_OVERRIDE_DISALLOWED,
 };
-pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
+pub use crate::contract::{
+    FfiErrorCategory, FfiKeySpec, FfiOperation, FfiRequestState, FfiResultKind, FfiSetCondition,
+    FfiStatusCategory, FfiValueMode, FfiValueRepresentation,
+};
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
+    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpace, KeyType,
     LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
     SetCondition, SetOptions, SetOutcome,
 };
@@ -46,8 +47,29 @@ const COMMAND_QUEUE_CAPACITY: usize = 64;
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
     kind: FfiResultKind,
+    status: FfiStatusCategory,
+    error_category: FfiErrorCategory,
     payload: Vec<u8>,
     client: Option<Box<FfiClient>>,
+}
+
+/// Owned asynchronous operation handle allocated by the native ABI.
+///
+/// A request owns copied inputs and exactly one completion receiver. It does
+/// not borrow the client after submission; closing the client completes an
+/// outstanding request with a structured closed error.
+pub struct FfiRequest {
+    control: Arc<FfiRequestControl>,
+    receiver: Mutex<Option<Receiver<FfiResult>>>,
+    ready: Mutex<Option<FfiResult>>,
+    state: AtomicU32,
+}
+
+/// Shared cancellation state observed by the one-engine worker.
+struct FfiRequestControl {
+    canceled: AtomicBool,
+    started: AtomicBool,
+    mutating: bool,
 }
 
 /// Native connection options passed by C and C++ bindings.
@@ -124,6 +146,15 @@ enum Command {
         set_options: SetOptions,
         response: SyncSender<FfiResult>,
     },
+    ExecuteAsync {
+        operation: FfiOperation,
+        application_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+        raw: bool,
+        request: Arc<FfiRequestControl>,
+        response: SyncSender<FfiResult>,
+    },
     NamespaceOpen {
         name: Vec<u8>,
         create_if_missing: bool,
@@ -162,45 +193,117 @@ struct WorkerOptions {
 
 impl FfiResult {
     fn error(message: impl Into<String>) -> Self {
+        Self::error_with_category(message, FfiErrorCategory::Internal)
+    }
+
+    fn error_with_category(message: impl Into<String>, error_category: FfiErrorCategory) -> Self {
         Self {
             kind: FfiResultKind::Error,
+            status: if error_category == FfiErrorCategory::ResourceExhausted {
+                FfiStatusCategory::ResourceExhausted
+            } else if error_category == FfiErrorCategory::Canceled {
+                FfiStatusCategory::Canceled
+            } else if error_category == FfiErrorCategory::UnknownMutation {
+                FfiStatusCategory::UnknownMutation
+            } else {
+                FfiStatusCategory::Error
+            },
+            error_category,
             payload: message.into().into_bytes(),
-            client: None,
-        }
-    }
-
-    fn cancelled(message: impl Into<String>) -> Self {
-        Self {
-            kind: FfiResultKind::Cancelled,
-            payload: message.into().into_bytes(),
-            client: None,
-        }
-    }
-
-    fn from_error(error: crate::Error) -> Self {
-        let kind = match error {
-            crate::Error::AmbiguousOutcome { .. } => FfiResultKind::UnknownMutation,
-            crate::Error::Timeout { .. } => FfiResultKind::Cancelled,
-            _ => FfiResultKind::Error,
-        };
-        Self {
-            kind,
-            payload: error.to_string().into_bytes(),
             client: None,
         }
     }
 
     fn success(kind: FfiResultKind, payload: Vec<u8>) -> Self {
+        let status = match kind {
+            FfiResultKind::NotFound => FfiStatusCategory::NotFound,
+            FfiResultKind::Created
+            | FfiResultKind::Replaced
+            | FfiResultKind::Deleted
+            | FfiResultKind::NotDeleted
+            | FfiResultKind::NotStored => FfiStatusCategory::Mutation,
+            FfiResultKind::Canceled => FfiStatusCategory::Canceled,
+            FfiResultKind::UnknownMutation => FfiStatusCategory::UnknownMutation,
+            FfiResultKind::ResourceExhausted => FfiStatusCategory::ResourceExhausted,
+            FfiResultKind::Error => FfiStatusCategory::Error,
+            _ => FfiStatusCategory::Success,
+        };
         Self {
             kind,
+            status,
+            error_category: FfiErrorCategory::None,
             payload,
             client: None,
         }
     }
 
+    fn with_status(
+        kind: FfiResultKind,
+        status: FfiStatusCategory,
+        error_category: FfiErrorCategory,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            kind,
+            status,
+            error_category,
+            payload,
+            client: None,
+        }
+    }
+
+    fn from_error(error: crate::Error) -> Self {
+        let category = match &error {
+            crate::Error::Configuration { .. } => FfiErrorCategory::Configuration,
+            crate::Error::Connection(_) | crate::Error::Runtime { .. } => {
+                FfiErrorCategory::Transport
+            }
+            crate::Error::Timeout { .. } => FfiErrorCategory::Timeout,
+            crate::Error::Transport { .. } | crate::Error::Io(_) => FfiErrorCategory::Transport,
+            crate::Error::Server { code, .. } => {
+                if matches!(
+                    code.as_u8(),
+                    openkache_protocol::Status::TooLarge as u8
+                        | openkache_protocol::Status::Overloaded as u8
+                        | openkache_protocol::Status::NoCapacity as u8
+                ) {
+                    FfiErrorCategory::ResourceExhausted
+                } else {
+                    FfiErrorCategory::Server
+                }
+            }
+            crate::Error::UnexpectedResponse { .. } | crate::Error::Protocol(_) => {
+                FfiErrorCategory::Protocol
+            }
+            crate::Error::ResponseTooLarge { .. } => FfiErrorCategory::ResourceExhausted,
+            crate::Error::Tls(_) => FfiErrorCategory::Transport,
+            crate::Error::Value(_) => FfiErrorCategory::Value,
+            crate::Error::Key(_) => FfiErrorCategory::Key,
+            crate::Error::ClientClosed => FfiErrorCategory::Closed,
+            crate::Error::AmbiguousOutcome { .. } => FfiErrorCategory::UnknownMutation,
+        };
+        let status = if category == FfiErrorCategory::UnknownMutation {
+            FfiStatusCategory::UnknownMutation
+        } else if category == FfiErrorCategory::ResourceExhausted {
+            FfiStatusCategory::ResourceExhausted
+        } else {
+            FfiStatusCategory::Error
+        };
+        let kind = if category == FfiErrorCategory::UnknownMutation {
+            FfiResultKind::UnknownMutation
+        } else if category == FfiErrorCategory::ResourceExhausted {
+            FfiResultKind::ResourceExhausted
+        } else {
+            FfiResultKind::Error
+        };
+        Self::with_status(kind, status, category, error.to_string().into_bytes())
+    }
+
     fn connected(client: FfiClient) -> Self {
         Self {
             kind: FfiResultKind::Connected,
+            status: FfiStatusCategory::Success,
+            error_category: FfiErrorCategory::None,
             payload: Vec::new(),
             client: Some(Box::new(client)),
         }
@@ -286,7 +389,10 @@ impl FfiClient {
     ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
-            return FfiResult::error("client request timeout exceeds the platform clock range");
+            return FfiResult::error_with_category(
+                "client request timeout exceeds the platform clock range",
+                FfiErrorCategory::Timeout,
+            );
         };
         let command = Command::Execute {
             operation,
@@ -298,29 +404,81 @@ impl FfiClient {
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(error) = self.commands.send_timeout(command, remaining) {
-            return FfiResult::cancelled(format!("client worker queue deadline exceeded: {error}"));
+            return FfiResult::error_with_category(
+                format!("client worker queue deadline exceeded: {error}"),
+                FfiErrorCategory::ResourceExhausted,
+            );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         receiver.recv_timeout(remaining).unwrap_or_else(|error| {
-            if matches!(
-                operation,
-                FfiOperation::Set
-                    | FfiOperation::SetJson
-                    | FfiOperation::SetStructured
-                    | FfiOperation::Delete
-            ) {
-                FfiResult {
-                    kind: FfiResultKind::UnknownMutation,
-                    payload: format!(
-                        "client mutation outcome is unknown after cancellation: {error}"
-                    )
-                    .into_bytes(),
-                    client: None,
-                }
-            } else {
-                FfiResult::cancelled(format!("client operation timed out: {error}"))
-            }
+            FfiResult::error_with_category(
+                format!("client operation timed out: {error}"),
+                FfiErrorCategory::Timeout,
+            )
         })
+    }
+
+    fn execute_async(
+        &self,
+        operation: FfiOperation,
+        application_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+        raw: bool,
+    ) -> FfiRequest {
+        let (response, receiver) = sync_channel(1);
+        let control = Arc::new(FfiRequestControl {
+            canceled: AtomicBool::new(false),
+            started: AtomicBool::new(false),
+            mutating: matches!(
+                operation,
+                FfiOperation::Set | FfiOperation::SetJson | FfiOperation::Delete
+            ),
+        });
+        let request = FfiRequest {
+            control: Arc::clone(&control),
+            receiver: Mutex::new(Some(receiver)),
+            ready: Mutex::new(None),
+            state: AtomicU32::new(FfiRequestState::Pending.code()),
+        };
+        let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
+            *request
+                .ready
+                .lock()
+                .expect("request ready lock is not poisoned") =
+                Some(FfiResult::error_with_category(
+                    "client request timeout exceeds the platform clock range",
+                    FfiErrorCategory::Timeout,
+                ));
+            request
+                .state
+                .store(FfiRequestState::Ready.code(), Ordering::Release);
+            return request;
+        };
+        let command = Command::ExecuteAsync {
+            operation,
+            application_key,
+            value,
+            set_options,
+            raw,
+            request: control,
+            response,
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Err(error) = self.commands.send_timeout(command, remaining) {
+            *request
+                .ready
+                .lock()
+                .expect("request ready lock is not poisoned") =
+                Some(FfiResult::error_with_category(
+                    format!("client worker queue deadline exceeded: {error}"),
+                    FfiErrorCategory::ResourceExhausted,
+                ));
+            request
+                .state
+                .store(FfiRequestState::Ready.code(), Ordering::Release);
+        }
+        request
     }
 
     fn execute_scoped(
@@ -331,7 +489,7 @@ impl FfiClient {
         value: Vec<u8>,
         set_options: SetOptions,
     ) -> FfiResult {
-        self.send_command_with_response(Some(operation), |response| Command::ExecuteScoped {
+        self.send_command_with_response(|response| Command::ExecuteScoped {
             operation,
             namespace_id,
             item_id,
@@ -347,15 +505,12 @@ impl FfiClient {
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> FfiResult {
-        self.send_command_with_response(
-            create_if_missing.then_some(FfiOperation::NamespaceOpen),
-            |response| Command::NamespaceOpen {
-                name,
-                create_if_missing,
-                policy,
-                response,
-            },
-        )
+        self.send_command_with_response(|response| Command::NamespaceOpen {
+            name,
+            create_if_missing,
+            policy,
+            response,
+        })
     }
 
     fn namespace_update_policy(
@@ -364,70 +519,214 @@ impl FfiClient {
         expected_revision: u64,
         policy: NamespacePolicy,
     ) -> FfiResult {
-        self.send_command_with_response(Some(FfiOperation::NamespaceUpdatePolicy), |response| {
-            Command::NamespaceUpdatePolicy {
-                namespace_id,
-                expected_revision,
-                policy,
-                response,
-            }
+        self.send_command_with_response(|response| Command::NamespaceUpdatePolicy {
+            namespace_id,
+            expected_revision,
+            policy,
+            response,
         })
     }
 
     fn namespace_delete(&self, namespace_id: u64, expected_revision: u64) -> FfiResult {
-        self.send_command_with_response(Some(FfiOperation::NamespaceDelete), |response| {
-            Command::NamespaceDelete {
-                namespace_id,
-                expected_revision,
-                response,
-            }
+        self.send_command_with_response(|response| Command::NamespaceDelete {
+            namespace_id,
+            expected_revision,
+            response,
         })
     }
 
     fn send_command_with_response(
         &self,
-        operation: Option<FfiOperation>,
         build: impl FnOnce(SyncSender<FfiResult>) -> Command,
     ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
-            return FfiResult::error("client request timeout exceeds the platform clock range");
+            return FfiResult::error_with_category(
+                "client request timeout exceeds the platform clock range",
+                FfiErrorCategory::Timeout,
+            );
         };
         let command = build(response);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(error) = self.commands.send_timeout(command, remaining) {
-            return FfiResult::cancelled(format!("client worker queue deadline exceeded: {error}"));
+            return FfiResult::error_with_category(
+                format!("client worker queue deadline exceeded: {error}"),
+                FfiErrorCategory::ResourceExhausted,
+            );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         receiver.recv_timeout(remaining).unwrap_or_else(|error| {
-            if operation.is_some_and(|operation| {
-                matches!(
-                    operation,
-                    FfiOperation::Set
-                        | FfiOperation::SetJson
-                        | FfiOperation::SetStructured
-                        | FfiOperation::Delete
-                        | FfiOperation::NamespaceOpen
-                        | FfiOperation::NamespaceUpdatePolicy
-                        | FfiOperation::NamespaceDelete
-                )
-            }) {
-                FfiResult {
-                    kind: FfiResultKind::UnknownMutation,
-                    payload: format!(
-                        "client mutation outcome is unknown after cancellation: {error}"
-                    )
-                    .into_bytes(),
-                    client: None,
-                }
-            } else {
-                FfiResult::cancelled(format!("client operation timed out: {error}"))
-            }
+            FfiResult::error_with_category(
+                format!("client operation timed out: {error}"),
+                FfiErrorCategory::Timeout,
+            )
         })
     }
 
     fn connection_state(&self) -> u32 {
         self.state.load(Ordering::Acquire)
+    }
+}
+
+impl FfiRequest {
+    /// Builds a request which has already completed before it could be
+    /// submitted to the shared worker.
+    ///
+    /// Validation errors are represented by a normal result handle so native
+    /// callers can use one poll/wait/free lifecycle for both submitted and
+    /// rejected requests.
+    fn completed(result: FfiResult) -> Self {
+        Self {
+            control: Arc::new(FfiRequestControl {
+                canceled: AtomicBool::new(false),
+                started: AtomicBool::new(false),
+                mutating: false,
+            }),
+            receiver: Mutex::new(None),
+            ready: Mutex::new(Some(result)),
+            state: AtomicU32::new(FfiRequestState::Ready.code()),
+        }
+    }
+
+    fn poll(&self) -> FfiRequestState {
+        let current = self.state.load(Ordering::Acquire);
+        if current != FfiRequestState::Pending.code() {
+            return FfiRequestState::try_from(current).unwrap_or(FfiRequestState::Freed);
+        }
+        if self
+            .ready
+            .lock()
+            .expect("request ready lock is not poisoned")
+            .is_some()
+        {
+            self.state
+                .store(FfiRequestState::Ready.code(), Ordering::Release);
+            return FfiRequestState::Ready;
+        }
+        let receiver_guard = self
+            .receiver
+            .lock()
+            .expect("request receiver lock is not poisoned");
+        let Some(receiver) = receiver_guard.as_ref() else {
+            return FfiRequestState::Consumed;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                *self
+                    .ready
+                    .lock()
+                    .expect("request ready lock is not poisoned") = Some(result);
+                self.state
+                    .store(FfiRequestState::Ready.code(), Ordering::Release);
+                FfiRequestState::Ready
+            }
+            Err(TryRecvError::Empty) => FfiRequestState::Pending,
+            Err(TryRecvError::Disconnected) => {
+                *self
+                    .ready
+                    .lock()
+                    .expect("request ready lock is not poisoned") =
+                    Some(FfiResult::error_with_category(
+                        "request completion channel closed",
+                        FfiErrorCategory::Closed,
+                    ));
+                self.state
+                    .store(FfiRequestState::Ready.code(), Ordering::Release);
+                FfiRequestState::Ready
+            }
+        }
+    }
+
+    fn wait(&self, timeout: Duration) -> FfiResult {
+        if let Some(result) = self
+            .ready
+            .lock()
+            .expect("request ready lock is not poisoned")
+            .take()
+        {
+            self.state
+                .store(FfiRequestState::Consumed.code(), Ordering::Release);
+            return result;
+        }
+        let receiver_guard = self
+            .receiver
+            .lock()
+            .expect("request receiver lock is not poisoned");
+        let Some(receiver) = receiver_guard.as_ref() else {
+            return FfiResult::error_with_category(
+                "request result was already consumed",
+                FfiErrorCategory::Closed,
+            );
+        };
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => {
+                drop(receiver_guard);
+                // Remove the receiver only after a result has been received.
+                // A timeout must leave the request pending so callers can
+                // poll or wait again without losing the completion channel.
+                self.receiver
+                    .lock()
+                    .expect("request receiver lock is not poisoned")
+                    .take();
+                self.state
+                    .store(FfiRequestState::Consumed.code(), Ordering::Release);
+                result
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                FfiResult::error_with_category("request wait timed out", FfiErrorCategory::Timeout)
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                drop(receiver_guard);
+                self.receiver
+                    .lock()
+                    .expect("request receiver lock is not poisoned")
+                    .take();
+                self.state
+                    .store(FfiRequestState::Consumed.code(), Ordering::Release);
+                FfiResult::error_with_category(
+                    "request completion channel closed",
+                    FfiErrorCategory::Closed,
+                )
+            }
+        }
+    }
+
+    fn cancel(&self) -> FfiRequestState {
+        if self
+            .state
+            .compare_exchange(
+                FfiRequestState::Pending.code(),
+                FfiRequestState::Canceled.code(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.control.canceled.store(true, Ordering::Release);
+            *self
+                .ready
+                .lock()
+                .expect("request ready lock is not poisoned") = Some(
+                if self.control.mutating && self.control.started.load(Ordering::Acquire) {
+                    FfiResult::with_status(
+                        FfiResultKind::UnknownMutation,
+                        FfiStatusCategory::UnknownMutation,
+                        FfiErrorCategory::UnknownMutation,
+                        b"mutation outcome is unknown after cancellation".to_vec(),
+                    )
+                } else {
+                    FfiResult::with_status(
+                        FfiResultKind::Canceled,
+                        FfiStatusCategory::Canceled,
+                        FfiErrorCategory::Canceled,
+                        b"request canceled".to_vec(),
+                    )
+                },
+            );
+            return FfiRequestState::Canceled;
+        }
+        FfiRequestState::try_from(self.state.load(Ordering::Acquire))
+            .unwrap_or(FfiRequestState::Freed)
     }
 }
 
@@ -602,6 +901,62 @@ fn run_worker(
                 );
                 let _ = response.send(result);
             }
+            Command::ExecuteAsync {
+                operation,
+                application_key,
+                value,
+                set_options,
+                raw,
+                request,
+                response,
+            } => {
+                // A queued request may be canceled before the worker reaches
+                // it. Do not send a mutation in that case: cancellation
+                // before transmission is definitive.
+                if request.canceled.load(Ordering::Acquire) {
+                    drop(response);
+                    continue;
+                }
+                request.started.store(true, Ordering::Release);
+                let task_request = Arc::clone(&request);
+                let task_client = client.clone();
+                let task = async move {
+                    let result = execute(
+                        &task_client,
+                        operation,
+                        application_key,
+                        value,
+                        set_options,
+                        raw,
+                    )
+                    .await;
+                    if task_request.canceled.load(Ordering::Acquire) {
+                        if task_request.mutating {
+                            FfiResult::with_status(
+                                FfiResultKind::UnknownMutation,
+                                FfiStatusCategory::UnknownMutation,
+                                FfiErrorCategory::UnknownMutation,
+                                b"mutation outcome is unknown after cancellation".to_vec(),
+                            )
+                        } else {
+                            FfiResult::with_status(
+                                FfiResultKind::Canceled,
+                                FfiStatusCategory::Canceled,
+                                FfiErrorCategory::Canceled,
+                                b"request canceled".to_vec(),
+                            )
+                        }
+                    } else {
+                        result
+                    }
+                };
+                let response_sender = response;
+                runtime
+                    .spawn(async move {
+                        let _ = response_sender.send(task.await);
+                    })
+                    .detach();
+            }
             Command::NamespaceOpen {
                 name,
                 create_if_missing,
@@ -692,10 +1047,6 @@ async fn execute_protected(
             .get_canonical_key_unchecked(canonical_key.as_slice())
             .await
             .and_then(json_result),
-        FfiOperation::GetStructured => client
-            .get_structured_canonical_key_unchecked(canonical_key.as_slice())
-            .await
-            .and_then(structured_result),
         FfiOperation::Set => client
             .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
@@ -711,17 +1062,6 @@ async fn execute_protected(
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         },
-        FfiOperation::SetStructured => {
-            let structured = decode(&value).map_err(crate::value::Error::Structured)?;
-            client
-                .set_structured_canonical_key_unchecked(
-                    canonical_key.as_slice(),
-                    structured,
-                    set_options,
-                )
-                .await
-                .map(set_result)
-        }
         FfiOperation::Delete => client
             .delete_canonical_key_unchecked(canonical_key.as_slice())
             .await
@@ -775,12 +1115,9 @@ async fn execute_raw(
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
         FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
-        FfiOperation::GetJson
-        | FfiOperation::SetJson
-        | FfiOperation::GetStructured
-        | FfiOperation::SetStructured => Err(crate::Error::configuration(
+        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
             "operation",
-            "exact item-ID calls do not support formatted structured or JSON operations",
+            "exact item-ID calls do not support formatted JSON operations",
         )),
         _ => Err(crate::Error::configuration(
             "operation",
@@ -859,7 +1196,10 @@ async fn namespace_open(
                 },
                 payload,
             ),
-            Err(error) => FfiResult::error(error.to_string()),
+            Err(error) => FfiResult::from_error(crate::Error::configuration(
+                "namespace_descriptor",
+                error,
+            )),
         },
         Err(error) => FfiResult::from_error(error),
     }
@@ -878,7 +1218,10 @@ async fn namespace_update_policy(
     {
         Ok(descriptor) => match ffi_namespace_descriptor(descriptor) {
             Ok(payload) => FfiResult::success(FfiResultKind::Value, payload),
-            Err(error) => FfiResult::error(error),
+            Err(error) => FfiResult::from_error(crate::Error::configuration(
+                "namespace_descriptor",
+                error,
+            )),
         },
         Err(error) => FfiResult::from_error(error),
     }
@@ -955,17 +1298,6 @@ fn raw_value_result(value: Value) -> FfiResult {
     match value {
         Value::Raw(payload) => bytes_result(payload),
         Value::Json(_) => FfiResult::error("formatted value is not Raw serialization"),
-    }
-}
-
-fn structured_result(
-    outcome: GetOutcome<StructuredValue>,
-) -> std::result::Result<FfiResult, crate::Error> {
-    match outcome {
-        GetOutcome::Found(value) => encode(&value)
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| crate::value::Error::Structured(error).into()),
-        GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
@@ -1266,6 +1598,139 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
 /// non-empty application-key/value pointer pair must identify readable memory for this call, and
 /// the client must not be freed until this call returns.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    typed_execute_entry(
+        client,
+        operation,
+        key_spec,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        Some((set_condition, ttl_enabled, ttl_ms)),
+        None,
+    )
+}
+
+/// Executes a typed protected operation with the complete wire SET policy.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed_with_options(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    typed_execute_entry(
+        client,
+        operation,
+        key_spec,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        None,
+        Some((set_flags, ttl_ms)),
+    )
+}
+
+/// Executes a typed operation asynchronously through the client's shared worker.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_async(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> *mut FfiRequest {
+    typed_async_entry(
+        client,
+        operation,
+        key_spec,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        Some((set_condition, ttl_enabled, ttl_ms)),
+        None,
+        false,
+    )
+}
+
+/// Executes a typed operation asynchronously with complete SET policy flags.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_with_options_async(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiRequest {
+    typed_async_entry(
+        client,
+        operation,
+        key_spec,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        None,
+        Some((set_flags, ttl_ms)),
+        false,
+    )
+}
+
+/// Executes an exact Item ID operation asynchronously without reinterpretation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_raw_async(
+    client: *const FfiClient,
+    operation: u32,
+    item_id: *const u8,
+    item_id_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> *mut FfiRequest {
+    typed_async_entry(
+        client,
+        operation,
+        FfiKeySpec::Bytes.code(),
+        item_id,
+        item_id_length,
+        value,
+        value_length,
+        Some((set_condition, ttl_enabled, ttl_ms)),
+        None,
+        true,
+    )
+}
+
 pub unsafe extern "C" fn openkache_client_execute(
     client: *const FfiClient,
     operation: u32,
@@ -1286,70 +1751,6 @@ pub unsafe extern "C" fn openkache_client_execute(
         value_length,
         set_condition,
         ttl_enabled,
-        ttl_ms,
-        false,
-    )
-}
-
-/// Retrieves one StructuredValue-CBOR-v1 payload through the protected native ABI.
-///
-/// The result payload is the canonical StructuredValue-CBOR-v1 bytes. It is
-/// never converted through the compatibility JSON or Raw value paths.
-///
-/// # Safety
-///
-/// `client` must be a live pointer returned by
-/// [`openkache_client_result_take_client`]. The canonical key pointer must
-/// identify readable memory for the duration of this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_get_structured(
-    client: *const FfiClient,
-    canonical_key: *const u8,
-    canonical_key_length: usize,
-) -> *mut FfiResult {
-    execute_entry(
-        client,
-        FfiOperation::GetStructured as u32,
-        canonical_key,
-        canonical_key_length,
-        ptr::null(),
-        0,
-        FfiSetCondition::Any as u32,
-        0,
-        0,
-        false,
-    )
-}
-
-/// Stores one StructuredValue-CBOR-v1 payload through the protected native ABI.
-///
-/// The input value is decoded and validated by the shared StructuredValue
-/// codec before protection. It is never routed through compatibility JSON or
-/// Raw value operations.
-///
-/// # Safety
-///
-/// `client` must be a live pointer returned by
-/// [`openkache_client_result_take_client`]. The canonical key and value
-/// pointers must identify readable memory for the duration of this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_set_structured(
-    client: *const FfiClient,
-    canonical_key: *const u8,
-    canonical_key_length: usize,
-    value: *const u8,
-    value_length: usize,
-    set_flags: u8,
-    ttl_ms: u64,
-) -> *mut FfiResult {
-    execute_entry_with_flags(
-        client,
-        FfiOperation::SetStructured as u32,
-        canonical_key,
-        canonical_key_length,
-        value,
-        value_length,
-        set_flags,
         ttl_ms,
         false,
     )
@@ -1518,11 +1919,7 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
                 Err("operation does not accept a value".to_owned())
             }
-            FfiOperation::GetJson
-            | FfiOperation::SetJson
-            | FfiOperation::GetStructured
-            | FfiOperation::SetStructured
-            | FfiOperation::Ping => Err(
+            FfiOperation::GetJson | FfiOperation::SetJson | FfiOperation::Ping => Err(
                 "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
             ),
             FfiOperation::NamespaceOpen
@@ -1712,6 +2109,181 @@ fn execute_entry(
     )
 }
 
+fn ffi_key_bytes(key_spec: u32, key: Vec<u8>, raw: bool) -> std::result::Result<Vec<u8>, String> {
+    if raw {
+        if key.len() > crate::MAX_ITEM_ID_BYTES {
+            return Err(format!(
+                "item_id must contain at most {} bytes, got {}",
+                crate::MAX_ITEM_ID_BYTES,
+                key.len()
+            ));
+        }
+        return Ok(key);
+    }
+    let spec = FfiKeySpec::try_from(key_spec)
+        .map_err(|value| format!("unsupported key specification {value}"))?;
+    let key_type = match spec {
+        FfiKeySpec::Text => KeyType::Text,
+        FfiKeySpec::Bytes => KeyType::Bytes,
+        FfiKeySpec::Integer => KeyType::Integer,
+    };
+    KeySpace::new(key_type)
+        .resolve_logical_bytes(&key)
+        .map(|key| key.into_canonical_bytes())
+        .map_err(|error| error.to_string())
+}
+
+fn set_options_from_legacy(
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> std::result::Result<SetOptions, String> {
+    let condition = match FfiSetCondition::try_from(set_condition)
+        .map_err(|condition| format!("unsupported SET condition {condition}"))?
+    {
+        FfiSetCondition::Any => SetCondition::Any,
+        FfiSetCondition::IfAbsent => SetCondition::IfAbsent,
+        FfiSetCondition::IfPresent => SetCondition::IfPresent,
+    };
+    let mut set_options = match condition {
+        SetCondition::Any => SetOptions::new(),
+        SetCondition::IfAbsent => SetOptions::new().if_absent(),
+        SetCondition::IfPresent => SetOptions::new().if_present(),
+    };
+    if ttl_enabled != 0 {
+        if ttl_ms == 0 {
+            return Err("SET TTL must be greater than zero milliseconds".to_owned());
+        }
+        set_options = set_options.expires_after_millis(ttl_ms);
+    }
+    Ok(set_options)
+}
+
+fn validated_execute(
+    operation: u32,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    raw: bool,
+    legacy_options: Option<(u32, u8, u64)>,
+    complete_flags: Option<(u8, u64)>,
+) -> std::result::Result<(FfiOperation, Vec<u8>, Vec<u8>, SetOptions), String> {
+    let operation = FfiOperation::try_from(operation)
+        .map_err(|operation| format!("unsupported operation {operation}"))?;
+    if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
+        return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
+    }
+    let set_options = if let Some((flags, ttl_ms)) = complete_flags {
+        if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+            set_options_from_flags(flags, ttl_ms)?
+        } else {
+            if flags != 0 || ttl_ms != 0 {
+                return Err("SET flags and TTL require a SET operation".to_owned());
+            }
+            SetOptions::new()
+        }
+    } else if let Some((set_condition, ttl_enabled, ttl_ms)) = legacy_options {
+        set_options_from_legacy(set_condition, ttl_enabled, ttl_ms)?
+    } else {
+        SetOptions::new()
+    };
+    match operation {
+        FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync | FfiOperation::Reconnect
+            if !key.is_empty() =>
+        {
+            Err("operation does not accept an application key".to_owned())
+        }
+        FfiOperation::Ping
+        | FfiOperation::Get
+        | FfiOperation::GetJson
+        | FfiOperation::Delete
+        | FfiOperation::Stats
+        | FfiOperation::Sync
+        | FfiOperation::Reconnect
+            if !value.is_empty() =>
+        {
+            Err("operation does not accept a value".to_owned())
+        }
+        operation
+            if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
+                && (set_options.condition() != SetCondition::Any
+                    || set_options.time_to_live_millis().is_some()) =>
+        {
+            Err("SET options require a SET operation".to_owned())
+        }
+        _ => Ok((operation, key, value, set_options)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn typed_execute_entry(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    legacy_options: Option<(u32, u8, u64)>,
+    complete_flags: Option<(u8, u64)>,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let key = ffi_key_bytes(
+            key_spec,
+            copy_bytes(application_key, application_key_length, "application_key")?,
+            false,
+        )?;
+        let value = copy_bytes(value, value_length, "value")?;
+        let (operation, key, value, set_options) =
+            validated_execute(operation, key, value, false, legacy_options, complete_flags)?;
+        Ok(client.execute(operation, key, value, set_options, false))
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn typed_async_entry(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    legacy_options: Option<(u32, u8, u64)>,
+    complete_flags: Option<(u8, u64)>,
+    raw: bool,
+) -> *mut FfiRequest {
+    let request = catch_unwind(AssertUnwindSafe(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let key = ffi_key_bytes(
+            key_spec,
+            copy_bytes(application_key, application_key_length, "application_key")?,
+            raw,
+        )?;
+        let value = copy_bytes(value, value_length, "value")?;
+        let (operation, key, value, set_options) =
+            validated_execute(operation, key, value, raw, legacy_options, complete_flags)?;
+        Ok::<FfiRequest, String>(client.execute_async(operation, key, value, set_options, raw))
+    }));
+    match request {
+        Ok(Ok(request)) => Box::into_raw(Box::new(request)),
+        Ok(Err(error)) => Box::into_raw(Box::new(FfiRequest::completed(
+            FfiResult::error_with_category(error, FfiErrorCategory::InvalidInput),
+        ))),
+        Err(_) => Box::into_raw(Box::new(FfiRequest::completed(
+            FfiResult::error_with_category("native client panicked", FfiErrorCategory::Internal),
+        ))),
+    }
+}
+
 fn execute_entry_with_flags(
     client: *const FfiClient,
     operation: u32,
@@ -1763,19 +2335,8 @@ fn execute_entry_inner(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw
-            && matches!(
-                operation,
-                FfiOperation::GetJson
-                    | FfiOperation::SetJson
-                    | FfiOperation::GetStructured
-                    | FfiOperation::SetStructured
-            )
-        {
-            return Err(
-                "exact item-ID calls do not support formatted structured or JSON operations"
-                    .to_owned(),
-            );
+        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
+            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
         }
         if raw
             && matches!(
@@ -1791,10 +2352,7 @@ fn execute_entry_inner(
             ));
         }
         let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-            if matches!(
-                operation,
-                FfiOperation::Set | FfiOperation::SetJson | FfiOperation::SetStructured
-            ) {
+            if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
                 set_options_from_flags(flags, ttl_ms)?
             } else {
                 if flags != 0 || ttl_ms != 0 {
@@ -1835,7 +2393,6 @@ fn execute_entry_inner(
             FfiOperation::Ping
             | FfiOperation::Get
             | FfiOperation::GetJson
-            | FfiOperation::GetStructured
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
@@ -1845,11 +2402,9 @@ fn execute_entry_inner(
                 Err("operation does not accept a value".to_owned())
             }
             operation
-                if !matches!(
-                    operation,
-                    FfiOperation::Set | FfiOperation::SetJson | FfiOperation::SetStructured
-                ) && (set_options.condition() != SetCondition::Any
-                    || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
+                    && (set_options.condition() != SetCondition::Any
+                        || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_owned())
             }
@@ -1871,6 +2426,86 @@ pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiCli
     unsafe { client.as_ref() }.map_or(ConnectionState::Unknown.code(), FfiClient::connection_state)
 }
 
+/// Returns the current state of an asynchronous request without consuming its
+/// result.
+///
+/// A null request is reported as [`FfiRequestState::Freed`]. A ready request
+/// remains ready until [`openkache_client_request_wait`] consumes its result.
+///
+/// # Safety
+///
+/// If `request` is non-null, it must be a live pointer returned by one of the
+/// asynchronous execute functions and must remain valid until this call
+/// returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_request_poll(request: *const FfiRequest) -> u32 {
+    let Some(request) = (unsafe { request.as_ref() }) else {
+        return FfiRequestState::Freed.code();
+    };
+    request.poll().code()
+}
+
+/// Waits for an asynchronous request and returns its owned result handle.
+///
+/// The timeout is a maximum wait in milliseconds. A timeout returns a normal
+/// timeout result but leaves the request pending, allowing a later poll or
+/// wait. Once a result is returned, the request enters `Consumed` and must
+/// still be released with [`openkache_client_request_free`].
+///
+/// # Safety
+///
+/// `request` must be a live, uniquely accessed pointer returned by an
+/// asynchronous execute function. The request must not be freed concurrently
+/// with this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_request_wait(
+    request: *mut FfiRequest,
+    timeout_ms: u64,
+) -> *mut FfiResult {
+    let Some(request) = (unsafe { request.as_ref() }) else {
+        return boxed_result(FfiResult::error_with_category(
+            "request pointer must not be null",
+            FfiErrorCategory::InvalidInput,
+        ));
+    };
+    boxed_result(request.wait(Duration::from_millis(timeout_ms)))
+}
+
+/// Requests cancellation of an asynchronous operation.
+///
+/// Cancellation is cooperative. A mutating request that has started may
+/// complete as `UnknownMutation`, because the server outcome cannot be
+/// inferred after cancellation. Read-only requests complete as `Canceled`.
+///
+/// # Safety
+///
+/// If `request` is non-null, it must be a live pointer returned by an
+/// asynchronous execute function and remain valid until this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_request_cancel(request: *const FfiRequest) -> u32 {
+    let Some(request) = (unsafe { request.as_ref() }) else {
+        return FfiRequestState::Freed.code();
+    };
+    request.cancel().code()
+}
+
+/// Frees an asynchronous request handle exactly once.
+///
+/// Any unconsumed result is discarded with the request. Result handles
+/// returned by `request_wait` remain independently owned and must be freed
+/// with [`openkache_client_result_free`].
+///
+/// # Safety
+///
+/// `request` must be null or a unique live pointer returned by an asynchronous
+/// execute function. It must not be freed or accessed concurrently.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_request_free(request: *mut FfiRequest) {
+    if !request.is_null() {
+        drop(unsafe { Box::from_raw(request) });
+    }
+}
+
 /// Returns an FFI result discriminator.
 ///
 /// A null result is treated as [`FfiResultKind::Error`].
@@ -1881,6 +2516,34 @@ pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiCli
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_kind(result: *const FfiResult) -> u32 {
     unsafe { result.as_ref() }.map_or(FfiResultKind::Error.code(), |result| result.kind.code())
+}
+
+/// Returns the structured completion status category for a result.
+///
+/// A null result is treated as an error status.
+///
+/// # Safety
+///
+/// `result` must be null or a live pointer returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_result_status(result: *const FfiResult) -> u32 {
+    unsafe { result.as_ref() }.map_or(FfiStatusCategory::Error.code(), |result| {
+        result.status.code()
+    })
+}
+
+/// Returns the structured error category for a result.
+///
+/// A null result is treated as an internal error.
+///
+/// # Safety
+///
+/// `result` must be null or a live pointer returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_result_error_category(result: *const FfiResult) -> u32 {
+    unsafe { result.as_ref() }.map_or(FfiErrorCategory::Internal.code(), |result| {
+        result.error_category.code()
+    })
 }
 
 /// Returns a borrowed pointer to an FFI result payload.
@@ -1963,8 +2626,10 @@ fn boxed_result(result: FfiResult) -> *mut FfiResult {
 fn catch_result(operation: impl FnOnce() -> std::result::Result<FfiResult, String>) -> FfiResult {
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(result)) => result,
-        Ok(Err(error)) => FfiResult::error(error),
-        Err(_) => FfiResult::error("native client panicked"),
+        Ok(Err(error)) => {
+            FfiResult::error_with_category(error, FfiErrorCategory::InvalidInput)
+        }
+        Err(_) => FfiResult::error_with_category("native client panicked", FfiErrorCategory::Internal),
     }
 }
 

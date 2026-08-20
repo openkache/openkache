@@ -27,6 +27,7 @@ function native_abi_java_type(
   switch (type) {
     case "client_pointer":
     case "result_pointer":
+    case "request_pointer":
     case "u8_pointer":
       return "Pointer"
     case "struct_pointer":
@@ -54,6 +55,7 @@ function native_abi_kotlin_type(
   switch (type) {
     case "client_pointer":
     case "result_pointer":
+    case "request_pointer":
     case "u8_pointer":
       return "Pointer?"
     case "struct_pointer":
@@ -81,6 +83,8 @@ function native_abi_dart_native_type(
   switch (type) {
     case "client_pointer":
       return "ffi.Pointer<SmithyNativeClient>"
+    case "request_pointer":
+      return "ffi.Pointer<SmithyNativeRequest>"
     case "struct_pointer":
       if (structure_name === undefined) {
         throw new Error("Dart native struct pointer has no structure name")
@@ -112,6 +116,8 @@ function native_abi_dart_type(
   switch (type) {
     case "client_pointer":
       return "ffi.Pointer<SmithyNativeClient>"
+    case "request_pointer":
+      return "ffi.Pointer<SmithyNativeRequest>"
     case "struct_pointer":
       if (structure_name === undefined) {
         throw new Error("Dart native struct pointer has no structure name")
@@ -163,6 +169,8 @@ function native_abi_c_type(
       return `${pointer_qualifier}openkache_client_t *`
     case "result_pointer":
       return `${pointer_qualifier}openkache_client_result_t *`
+    case "request_pointer":
+      return `${pointer_qualifier}openkache_client_request_t *`
     case "u8_pointer":
       return `${pointer_qualifier}uint8_t *`
     case "struct_pointer":
@@ -212,6 +220,19 @@ ${fields}
 export function render_c_native_functions(contract: Client_Contract): string {
   return contract.ffi.native_abi_functions
     .map((function_) => {
+      const ownership = function_.parameters
+        .filter((parameter) => parameter.type.includes("pointer"))
+        .map(
+          (parameter) =>
+            `${parameter.name}:${parameter.ownership}/${parameter.lifetime}`,
+        )
+        .join(", ")
+      const return_ownership =
+        `${function_.return_ownership}/${function_.return_lifetime}`
+      const ownership_comment =
+        `/* ${function_.name} ownership: return:${return_ownership}${
+          ownership.length === 0 ? "" : `; parameters:${ownership}`
+        }. */\n`
       const parameters = function_.parameters.length === 0
         ? "void"
         : function_.parameters
@@ -220,7 +241,7 @@ export function render_c_native_functions(contract: Client_Contract): string {
               `    ${native_abi_c_type(parameter.type, parameter.mutable, parameter.structure_name)} ${native_abi_c_identifier(parameter.name)}`,
           )
           .join(",\n")
-      return `${native_abi_c_return_type(function_.return_type)} ${function_.name}(
+      return `${ownership_comment}${native_abi_c_return_type(function_.return_type)} ${function_.name}(
 ${parameters}
 );`
     })
@@ -302,6 +323,7 @@ function native_abi_kotlin_default(type: Native_Abi_Type): string {
   switch (type) {
     case "client_pointer":
     case "result_pointer":
+    case "request_pointer":
     case "u8_pointer":
     case "struct_pointer":
       return "null"
@@ -325,6 +347,8 @@ function native_abi_dart_field(
       return `  external ffi.Pointer<SmithyNativeClient> ${name};`
     case "result_pointer":
       return `  external ffi.Pointer<SmithyNativeResult> ${name};`
+    case "request_pointer":
+      return `  external ffi.Pointer<SmithyNativeRequest> ${name};`
     case "u8_pointer":
       return `  external ffi.Pointer<ffi.Uint8> ${name};`
     case "struct_pointer":
@@ -521,6 +545,8 @@ final class SmithyNativeClient extends ffi.Opaque {}
 
 final class SmithyNativeResult extends ffi.Opaque {}
 
+final class SmithyNativeRequest extends ffi.Opaque {}
+
 final class SmithyNativeDescriptor extends ffi.Struct {
 ${fields}
 }
@@ -623,6 +649,8 @@ function native_abi_python_type(
       return "_CLIENT_POINTER"
     case "result_pointer":
       return "_RESULT_POINTER"
+    case "request_pointer":
+      return "_REQUEST_POINTER"
     case "u8_pointer":
       return "_U8_POINTER"
     case "struct_pointer":
@@ -704,6 +732,7 @@ from .smithy_contract import SmithyFFINamespaceDescriptor
 
 _CLIENT_POINTER = _ctypes.c_void_p
 _RESULT_POINTER = _ctypes.c_void_p
+_REQUEST_POINTER = _ctypes.c_void_p
 _U8 = _ctypes.c_uint8
 _U8_POINTER = _ctypes.POINTER(_U8)
 
@@ -731,6 +760,7 @@ function native_abi_swift_type(
   switch (type) {
     case "client_pointer":
     case "result_pointer":
+    case "request_pointer":
       return "OpaquePointer?"
     case "u8_pointer":
       return `${pointer}<UInt8>?`
@@ -836,6 +866,7 @@ function native_abi_swift_default(type: Native_Abi_Type): string {
   switch (type) {
     case "client_pointer":
     case "result_pointer":
+    case "request_pointer":
     case "u8_pointer":
     case "struct_pointer":
       return "nil"
@@ -864,6 +895,7 @@ function native_abi_csharp_scalar_type(type: Native_Abi_Type): string {
   switch (type) {
     case "client_pointer":
     case "result_pointer":
+    case "request_pointer":
     case "u8_pointer":
     case "struct_pointer":
       return "IntPtr"
