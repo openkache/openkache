@@ -9,7 +9,7 @@ use crossfire::{AsyncRx, MAsyncTx};
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt, pin_mut, select};
-use openkache_protocol::{OwnedRequestFrame, Response, Status};
+use openkache_protocol::{Opcode, OwnedRequestFrame, Response, Status};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -690,8 +690,20 @@ impl RequestAdmission {
         // adapters pass the ID explicitly and this cheap prefix check catches
         // accidental default-token frames before any bytes reach a transport.
         let (opcode, encoded_id) = request_prefix(&request)?;
-        openkache_protocol::Opcode::try_from(opcode)
+        let opcode = Opcode::try_from(opcode)
             .map_err(|error| EngineError::Local(format!("request opcode is invalid: {error}")))?;
+        let expected_opcode = opcode_for_operation(self.metadata.operation).ok_or_else(|| {
+            EngineError::Local(format!(
+                "operation {:?} has no request opcode",
+                self.metadata.operation
+            ))
+        })?;
+        if opcode != expected_opcode {
+            return Err(EngineError::Local(format!(
+                "request opcode {opcode:?} does not match metadata operation {:?}",
+                self.metadata.operation
+            )));
+        }
         if encoded_id != request_id {
             return Err(EngineError::Local(format!(
                 "request frame ID {encoded_id} does not match reserved ID {request_id}"
@@ -760,6 +772,27 @@ impl Drop for RequestAdmission {
                 .remove(&self.request_id);
             self.engine.registry.cancel(self.request_id);
         }
+    }
+}
+
+/// Resolves the wire opcode owned by one generated protocol operation.
+///
+/// Request-admission metadata is captured before a caller allocates and
+/// encodes its frame. Keeping this correspondence check in the engine makes
+/// it impossible for an adapter to enqueue bytes under the wrong operation
+/// classification.
+fn opcode_for_operation(operation: Operation) -> Option<Opcode> {
+    match operation {
+        Operation::Ping => Some(Opcode::Ping),
+        Operation::Get => Some(Opcode::Get),
+        Operation::Set => Some(Opcode::Set),
+        Operation::Delete => Some(Opcode::Delete),
+        Operation::Stats => Some(Opcode::Stats),
+        Operation::Sync => Some(Opcode::Sync),
+        Operation::NamespaceOpen => Some(Opcode::NamespaceOpen),
+        Operation::NamespaceUpdatePolicy => Some(Opcode::NamespaceUpdatePolicy),
+        Operation::NamespaceDelete => Some(Opcode::NamespaceDelete),
+        _ => None,
     }
 }
 
