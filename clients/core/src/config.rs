@@ -433,13 +433,11 @@ pub enum ServerTrust {
     Custom(Vec<Certificate>),
 }
 
-/// ALPN identifiers offered during QUIC/TLS negotiation.
+/// ALPN identifier offered during QUIC/TLS negotiation.
 ///
-/// The identifiers use the protocol's `openkache/<positive-decimal-version>`
-/// grammar. Entries are offered in strict descending version order, as
-/// required by the wire contract. A negotiated version below `minimum_version`
-/// is rejected after the handshake, which lets a client advertise a fallback
-/// while still enforcing its deployment minimum.
+/// The current wire implementation supports only `openkache/1`. The
+/// constructor retains the versioned shape of this API for compatibility, but
+/// rejects every other protocol version before a connection is attempted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AlpnPolicy {
     protocols: Vec<Vec<u8>>,
@@ -447,14 +445,13 @@ pub struct AlpnPolicy {
 }
 
 impl AlpnPolicy {
-    /// Creates an ALPN policy from a strict descending list of protocol names.
+    /// Creates an ALPN policy for the supported wire protocol.
     ///
     /// # Arguments
     ///
-    /// * `protocols` - Non-empty ALPN names such as `openkache/2` and
-    ///   `openkache/1`, in descending version order.
-    /// * `minimum_version` - Lowest protocol version this client will accept
-    ///   after negotiation.
+    /// * `protocols` - A single `openkache/1` ALPN name.
+    /// * `minimum_version` - Must be `1`, the only protocol version currently
+    ///   implemented by this client.
     ///
     /// # Returns
     ///
@@ -462,9 +459,9 @@ impl AlpnPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Configuration`] when an identifier is malformed, the
-    /// order is not strictly descending, a duplicate is present, the minimum
-    /// is zero, or no offered version can satisfy the minimum.
+    /// Returns [`Error::Configuration`] when an identifier is malformed, more
+    /// than one protocol is supplied, the minimum is zero, or an unsupported
+    /// protocol version is requested.
     pub fn new(protocols: Vec<Vec<u8>>, minimum_version: u32) -> Result<Self> {
         if protocols.is_empty() {
             return Err(Error::configuration(
@@ -478,33 +475,30 @@ impl AlpnPolicy {
                 "must be greater than zero",
             ));
         }
-
-        let mut previous_version = None;
-        let mut has_acceptable_version = false;
-        for (index, protocol) in protocols.iter().enumerate() {
-            let version = parse_alpn_version(protocol).map_err(|message| {
-                Error::configuration(
-                    "alpn.protocols",
-                    format!("entry {index} is invalid: {message}"),
-                )
-            })?;
-            if version >= minimum_version {
-                has_acceptable_version = true;
-            }
-            if let Some(previous_version) = previous_version {
-                if version >= previous_version {
-                    return Err(Error::configuration(
-                        "alpn.protocols",
-                        "versions must be strictly descending with no duplicates",
-                    ));
-                }
-            }
-            previous_version = Some(version);
-        }
-        if !has_acceptable_version {
+        if minimum_version != 1 {
             return Err(Error::configuration(
                 "alpn.minimum_version",
-                "no offered protocol reaches the minimum version",
+                "only protocol version 1 is supported",
+            ));
+        }
+
+        if protocols.len() != 1 {
+            return Err(Error::configuration(
+                "alpn.protocols",
+                "only openkache/1 is supported",
+            ));
+        }
+        let protocol = &protocols[0];
+        parse_alpn_version(protocol).map_err(|message| {
+            Error::configuration("alpn.protocols", format!("entry 0 is invalid: {message}"))
+        })?;
+        if protocol.as_slice() != openkache_protocol::ALPN {
+            return Err(Error::configuration(
+                "alpn.protocols",
+                format!(
+                    "protocol {} is unsupported; only openkache/1 is supported",
+                    String::from_utf8_lossy(protocol)
+                ),
             ));
         }
         Ok(Self {
@@ -517,8 +511,8 @@ impl AlpnPolicy {
     ///
     /// # Arguments
     ///
-    /// * `versions` - Non-empty versions in strict descending order.
-    /// * `minimum_version` - Lowest version accepted after negotiation.
+    /// * `versions` - A single-element list containing version `1`.
+    /// * `minimum_version` - Must be `1`.
     ///
     /// # Returns
     ///
@@ -536,7 +530,7 @@ impl AlpnPolicy {
         Self::new(protocols, minimum_version)
     }
 
-    /// Returns the offered ALPN identifiers in negotiation order.
+    /// Returns the offered ALPN identifier.
     pub fn protocols(&self) -> &[Vec<u8>] {
         &self.protocols
     }
