@@ -97,7 +97,7 @@ pub use request::{
     RequestFramePackedField, RequestFramePackedValue, RequestFrameStep,
     decode_request_frame_header, project_request_frame, project_request_frame_header,
 };
-pub use request_encoder::encode_request_frame;
+pub use request_encoder::{encode_request_frame, encode_request_frame_with_id};
 pub use response::{
     OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseHeaderBytes, ResponseParts,
 };
@@ -106,25 +106,76 @@ pub use segments::{
     StableByteOwner, StableBytes, WireByteOwner, WireSegment,
 };
 
-/// The exact fixed-size item identifier carried by the wire protocol.
-#[repr(transparent)]
+/// Maximum number of bytes in one opaque Item ID.
+pub const MAX_ITEM_ID_BYTES: usize = ITEM_ID_BYTES;
+
+/// The opaque variable-length Item ID carried by the wire protocol.
+///
+/// The backing array keeps the maximum-width representation inline while the
+/// length preserves the exact wire identity. Empty IDs are valid.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ItemId([u8; ITEM_ID_BYTES]);
+pub struct ItemId {
+    len: u8,
+    bytes: [u8; ITEM_ID_BYTES],
+}
 
 impl ItemId {
-    /// Wraps an exact item ID without interpreting its bytes.
+    /// Wraps a legacy maximum-width item ID.
     pub const fn new(bytes: [u8; ITEM_ID_BYTES]) -> Self {
-        Self(bytes)
+        Self {
+            len: ITEM_ID_BYTES as u8,
+            bytes,
+        }
     }
 
-    /// Returns the complete item ID bytes.
-    pub const fn as_bytes(&self) -> &[u8; ITEM_ID_BYTES] {
-        &self.0
+    /// Copies an opaque Item ID of zero through the protocol maximum.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_ITEM_ID_BYTES {
+            return Err(ProtocolError::InvalidItemIdLength {
+                maximum: MAX_ITEM_ID_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        let mut item_id = Self {
+            len: bytes.len() as u8,
+            bytes: [0; ITEM_ID_BYTES],
+        };
+        item_id.bytes[..bytes.len()].copy_from_slice(bytes);
+        Ok(item_id)
     }
 
-    /// Consumes the item ID and returns its bytes.
-    pub const fn into_bytes(self) -> [u8; ITEM_ID_BYTES] {
-        self.0
+    /// Returns the exact Item ID byte count.
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Returns whether this Item ID is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the exact opaque Item ID bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+
+    /// Consumes this Item ID into an exact-length byte vector.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+
+    /// Returns a fixed-width storage identity for legacy storage boundaries.
+    ///
+    /// The wire ID remains length-sensitive; shorter IDs are domain-separated
+    /// before being passed to storage components that still require 32 bytes.
+    pub fn storage_bytes(&self) -> [u8; ITEM_ID_BYTES] {
+        if self.len() == ITEM_ID_BYTES {
+            return self.bytes;
+        }
+        let mut storage = [0; ITEM_ID_BYTES];
+        storage[0] = self.len;
+        storage[1..1 + self.len()].copy_from_slice(self.as_bytes());
+        storage
     }
 }
 
@@ -565,6 +616,8 @@ pub enum ProtocolError {
     VaruintOverflow { context: &'static str },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("item ID has {actual} bytes; maximum is {maximum}")]
+    InvalidItemIdLength { maximum: usize, actual: usize },
     #[error("request packed byte at offset {offset} violates its bit contract")]
     InvalidRequestPackedBits { offset: usize },
     #[error("request constant does not match at offset {offset}")]

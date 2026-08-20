@@ -347,6 +347,12 @@ export interface Wire_Operation_Contract {
   readonly response_framing?: Wire_Response_Framing
   /** Explicit adapter-owned aggregate opaque payload marker. */
   readonly opaque_aggregate?: boolean
+  /** Whether this operation is outside the stable v1 conformance surface. */
+  readonly experimental?: boolean
+  /** Exact draft revision required when the operation is experimental. */
+  readonly experimental_revision?: string
+  /** Whether this operation is modeled for an out-of-band control plane. */
+  readonly out_of_band?: boolean
   readonly success_statuses: readonly string[]
 }
 

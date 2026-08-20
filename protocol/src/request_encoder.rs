@@ -2,9 +2,7 @@
 
 use smallvec::SmallVec;
 
-use crate::request::{
-    MAX_REQUEST_FRAME_STATE_SLOTS, RequestFrameLayout, RequestFrameStep,
-};
+use crate::request::{MAX_REQUEST_FRAME_STATE_SLOTS, RequestFrameLayout, RequestFrameStep};
 use crate::segments::RequestPrefix;
 use crate::{
     MAX_OPERATION_REQUEST_FIELDS, MAX_REQUEST_FRAME_BYTES, OPCODE_BYTES, Opcode, OwnedRequestFrame,
@@ -41,6 +39,20 @@ pub fn encode_request_frame(
     layout: RequestFrameLayout,
     fields: impl IntoIterator<Item = Option<WireSegment>>,
 ) -> Result<OwnedRequestFrame> {
+    encode_request_frame_with_id(0, opcode, layout, fields)
+}
+
+/// Encodes a request with an explicit canonical request ID.
+///
+/// The request ID is emitted immediately after the fixed-width opcode and is
+/// retained by the server for response correlation. The legacy
+/// [`encode_request_frame`] entry point uses the valid zero token.
+pub fn encode_request_frame_with_id(
+    request_id: u64,
+    opcode: Opcode,
+    layout: RequestFrameLayout,
+    fields: impl IntoIterator<Item = Option<WireSegment>>,
+) -> Result<OwnedRequestFrame> {
     if layout.field_count > MAX_OPERATION_REQUEST_FIELDS {
         return Err(invalid_layout(
             "request field count exceeds the generated bound",
@@ -56,12 +68,14 @@ pub fn encode_request_frame(
         ));
     }
 
-    let mut plan = EncodePlan::new(layout.field_count);
+    let mut plan = EncodePlan::new(layout.field_count, request_id);
     plan.visit(layout.steps, &fields)?;
     plan.finish(&fields)?;
 
     let mut output = FrameOutput::new(plan.prefix_len);
     output.append_inline(&[opcode as u8])?;
+    let (request_id_bytes, request_id_len) = crate::encode_varuint(request_id);
+    output.append_inline(&request_id_bytes[..request_id_len])?;
     for piece in plan.pieces {
         match piece {
             FramePiece::Static(bytes) => output.append_inline(bytes)?,
@@ -104,10 +118,11 @@ struct EncodePlan {
 }
 
 impl EncodePlan {
-    fn new(field_count: usize) -> Self {
+    fn new(field_count: usize, request_id: u64) -> Self {
+        let request_id_len = crate::encode_varuint(request_id).1;
         Self {
-            encoded_len: OPCODE_BYTES,
-            prefix_len: OPCODE_BYTES,
+            encoded_len: OPCODE_BYTES + request_id_len,
+            prefix_len: OPCODE_BYTES + request_id_len,
             prefix_open: true,
             pieces: SmallVec::new(),
             used_fields: SmallVec::from_elem(false, field_count),
