@@ -187,10 +187,20 @@ impl OneLaneConnection {
             self.state = LaneState::Unclean;
             return Err(TcpTransportError::PipelinedRequest);
         }
-        validate_record(record)?;
+        if let Err(error) = validate_record(record) {
+            self.state = LaneState::Unclean;
+            return Err(error);
+        }
         let mut input = Cursor::new(record);
-        let read = self.tls.read_tls(&mut input)?;
+        let read = match self.tls.read_tls(&mut input) {
+            Ok(read) => read,
+            Err(error) => {
+                self.state = LaneState::Unclean;
+                return Err(error.into());
+            }
+        };
         if read != record.len() {
+            self.state = LaneState::Unclean;
             return Err(TcpTransportError::RecordTrailingBytes);
         }
         let io_state = self.tls.process_new_packets().map_err(|error| {
@@ -218,17 +228,22 @@ impl OneLaneConnection {
             let read = match self.tls.reader().read(&mut bytes) {
                 Ok(read) => read,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => return Err(TcpTransportError::Io(error)),
+                Err(error) => {
+                    self.state = LaneState::Unclean;
+                    return Err(TcpTransportError::Io(error));
+                }
             };
             if read == 0 {
                 break;
             }
             if read > buffered_limit.saturating_sub(self.plaintext.len()) {
+                self.state = LaneState::Unclean;
                 return Err(TcpTransportError::FrameTooLarge);
             }
-            self.plaintext
-                .try_reserve(read)
-                .map_err(|_| TcpTransportError::FrameTooLarge)?;
+            self.plaintext.try_reserve(read).map_err(|_| {
+                self.state = LaneState::Unclean;
+                TcpTransportError::FrameTooLarge
+            })?;
             self.plaintext.extend_from_slice(&bytes[..read]);
         }
         if io_state.peer_has_closed() {
@@ -252,7 +267,13 @@ impl OneLaneConnection {
             self.peer_close_seen = true;
             self.state = LaneState::Draining;
             if !self.plaintext.is_empty() {
-                let additional = ProtocolRequestFrame::header_bytes_needed(&self.plaintext)?;
+                let additional = match ProtocolRequestFrame::header_bytes_needed(&self.plaintext) {
+                    Ok(additional) => additional,
+                    Err(error) => {
+                        self.state = LaneState::Unclean;
+                        return Err(error.into());
+                    }
+                };
                 if additional != 0 {
                     self.state = LaneState::Unclean;
                     return Err(TcpTransportError::TruncatedFrame);
@@ -322,9 +343,13 @@ impl OneLaneConnection {
             return Err(TcpTransportError::Closed);
         }
         if response.len() > self.max_frame {
+            self.state = LaneState::Unclean;
             return Err(TcpTransportError::FrameTooLarge);
         }
-        self.tls.writer().write_all(response)?;
+        if let Err(error) = self.tls.writer().write_all(response) {
+            self.state = LaneState::Unclean;
+            return Err(error.into());
+        }
         Ok(())
     }
 
@@ -339,20 +364,34 @@ impl OneLaneConnection {
 
     /// Drains all currently buffered TLS records.
     pub(crate) fn take_records(&mut self) -> Result<Vec<Vec<u8>>, TcpTransportError> {
-        let mut records = Vec::new();
-        while self.tls.wants_write() {
-            let mut output = Cursor::new(Vec::new());
-            self.tls.write_tls(&mut output)?;
-            let output = output.into_inner();
-            if output.is_empty() {
-                break;
+        let result = (|| {
+            let mut records = Vec::new();
+            while self.tls.wants_write() {
+                let mut output = Cursor::new(Vec::new());
+                self.tls.write_tls(&mut output)?;
+                let output = output.into_inner();
+                if output.is_empty() {
+                    break;
+                }
+                records.extend(split_records(&output)?);
             }
-            records.extend(split_records(&output)?);
+            Ok(records)
+        })();
+        if result.is_err() {
+            self.state = LaneState::Unclean;
         }
-        Ok(records)
+        result
     }
 
     fn next_event(&mut self) -> Result<ReceiveEvent, TcpTransportError> {
+        let result = self.next_event_inner();
+        if result.is_err() {
+            self.state = LaneState::Unclean;
+        }
+        result
+    }
+
+    fn next_event_inner(&mut self) -> Result<ReceiveEvent, TcpTransportError> {
         if self.state == LaneState::Handshaking {
             return Ok(ReceiveEvent::NeedMore);
         }
