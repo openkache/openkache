@@ -38,21 +38,6 @@ impl OperationResponse {
     pub(super) fn into_parts(self) -> ResponseParts {
         self.parts
     }
-
-    /// Rewrites the response correlation token at the transport boundary.
-    ///
-    /// Operation adapters deliberately build responses without request
-    /// context; the stream lane owns that context and applies it immediately
-    /// before writing. All operation response parts have already passed the
-    /// protocol size checks, so changing only the compact request-ID field
-    /// cannot fail.
-    pub(super) fn with_request_id(mut self, request_id: u64) -> Self {
-        self.parts = self
-            .parts
-            .with_request_id(request_id)
-            .expect("validated operation response remains encodable");
-        self
-    }
 }
 
 impl From<Response> for OperationResponse {

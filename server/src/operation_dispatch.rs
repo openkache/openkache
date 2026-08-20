@@ -53,10 +53,6 @@ impl HeaderAdmissionRejection {
     pub(super) fn into_response(self) -> operation_transport::OperationResponse {
         self.response
     }
-
-    pub(super) const fn request_id(&self) -> u64 {
-        self.request_id
-    }
 }
 
 /// Runs an API-owned request-header admission hook before the transport reads
