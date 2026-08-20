@@ -226,7 +226,7 @@ async fn serve_connection<C: TransportConnection>(
 }
 
 /// Reuses one QUIC stream as a sequential request lane until either peer closes it.
-async fn serve_stream<S: SendStream, R: ReceiveStream>(
+pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
     network_shard: NetworkShard<'_>,
@@ -376,16 +376,19 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         // A mutating storage failure may have crossed its
                         // linearization point. Do not send an error response
                         // that would falsely guarantee that no mutation took
-                        // effect.
+                        // effect. The protocol requires terminating the
+                        // affected connection when the mutation outcome is
+                        // unknown, so no later request can be mistaken for a
+                        // retry on the same lane.
                         network_shard.abandoned_request();
-                        return false;
+                        return true;
                     }
                     Err(_) if may_mutate => {
                         // The worker request may already have crossed its mutation
                         // linearization point when this wait expires. An error response
                         // would falsely guarantee that it did not take effect.
                         network_shard.abandoned_request();
-                        return false;
+                        return true;
                     }
                     Err(_) => {
                         network_shard.record_request(

@@ -10,22 +10,24 @@ use openkache_protocol::Status;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use crate::channel::{self, AsyncReceiver};
+#[allow(unused_imports)]
+use crate::KvError;
+use crate::channel::{self, AsyncReceiver, Sender};
 use crate::network_runtime;
+use crate::network_runtime::{TcpListener, TcpStream};
 use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, ObservabilityStats,
     Operation,
 };
 use crate::platform::StorageDeviceKind;
 use crate::protocol::{NamespaceDescriptor, NamespacePolicy};
+use crate::transport::tcp::TlsTcpLane;
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
-    ServerTlsConfig, StreamReadError, TransportError,
+    ServerTlsConfig, StreamReadError, TransportError, strict_server_config,
 };
 use crate::{AppConfig, NetworkConfig, NetworkWorkerCache, QuicBackend, ThreadedKvkache};
-#[allow(unused_imports)]
-use crate::KvError;
 #[allow(unused_imports)]
 pub(crate) use crate::{contract, protocol};
 // Operation modules are nested below this composition root, while the
@@ -130,7 +132,9 @@ pub(crate) use lifecycle::{join_network_threads, shutdown_network_workers_and_ca
 /// Bound reuse-port sockets and the sharded SSD-backed cache they serve.
 pub struct KacheServer {
     sockets: Vec<std::net::UdpSocket>,
+    tcp_sockets: Vec<std::net::TcpListener>,
     local_addr: SocketAddr,
+    tcp_local_addr: SocketAddr,
     quic_backend: QuicBackend,
     tls: Arc<ServerTlsConfig>,
     access_policy: Arc<AccessPolicy>,

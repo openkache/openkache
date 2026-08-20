@@ -19,10 +19,9 @@ use openkache_protocol::{RequestFrameHeader, ResponseParts};
 
 #[path = "transport/tls.rs"]
 mod tls;
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-use tls::strict_server_config;
+pub(super) use tls::strict_server_config;
 #[path = "transport/tcp.rs"]
-mod tcp;
+pub(super) mod tcp;
 
 /// QUIC application error for connection-fatal malformed framing.
 pub(super) const QUIC_MALFORMED_FRAME_ERROR_CODE: u64 = 0x01;
@@ -484,7 +483,7 @@ pub struct TransportError {
 }
 
 impl TransportError {
-    fn backend(
+    pub(crate) fn backend(
         backend: &'static str,
         operation: &'static str,
         error: impl std::fmt::Display,

@@ -369,6 +369,7 @@ pub struct AppConfig {
     /// Exact generated draft revision admitted by the experimental API gate.
     pub experimental_api_revision: Option<String>,
     pub quic: QuicConfig,
+    pub tcp: TcpConfig,
     pub tls: TlsConfig,
     pub network: NetworkConfig,
     pub observability: ObservabilityConfig,
@@ -398,6 +399,7 @@ impl AppConfig {
             enable_experimental_api: false,
             experimental_api_revision: None,
             quic: QuicConfig::default(),
+            tcp: TcpConfig::default(),
             tls: TlsConfig::default(),
             network: NetworkConfig::with_cpu_ids(cpu_ids),
             observability: ObservabilityConfig::default(),
@@ -408,6 +410,18 @@ impl AppConfig {
             table: TableConfig::default(),
         }
     }
+}
+
+/// TLS-over-TCP listener configuration.
+///
+/// The listener is enabled for every [`KacheServer`](crate::server::KacheServer)
+/// bind. When `listen` is omitted, the server reuses the QUIC bind address
+/// (TCP and UDP may share a port); an explicit address is useful when the two
+/// transport profiles must be exposed on different interfaces or ports.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TcpConfig {
+    pub listen: Option<SocketAddr>,
 }
 
 /// Low-cardinality management endpoint and request-latency settings.

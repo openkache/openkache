@@ -12,6 +12,7 @@ pub(crate) type NetworkWorkerCompletion = (usize, std::result::Result<(), String
 
 pub(crate) struct NetworkWorkerHandle {
     pub(super) stop: Sender<()>,
+    pub(super) secondary_stop: Option<Sender<()>>,
     pub(super) thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -22,6 +23,7 @@ pub(crate) struct NetworkRolePlacement {
     entries: u32,
     event_interval: usize,
     stop: Sender<()>,
+    secondary_stop: Option<Sender<()>>,
 }
 
 impl NetworkRolePlacement {
@@ -40,7 +42,13 @@ impl NetworkRolePlacement {
             entries,
             event_interval,
             stop,
+            secondary_stop: None,
         }
+    }
+
+    pub(crate) fn with_secondary_stop(mut self, secondary_stop: Sender<()>) -> Self {
+        self.secondary_stop = Some(secondary_stop);
+        self
     }
 }
 
@@ -160,6 +168,7 @@ where
         entries,
         event_interval,
         stop,
+        secondary_stop,
     } = placement;
     let worker_id = reporter.worker_id;
     let finished = reporter.take_completion_sender();
@@ -173,7 +182,11 @@ where
                 "storage runtime on CPU {cpu_id} rejected its prepared network role"
             )));
         }
-        return Ok(NetworkWorkerHandle { stop, thread: None });
+        return Ok(NetworkWorkerHandle {
+            stop,
+            secondary_stop,
+            thread: None,
+        });
     }
 
     let thread = std::thread::Builder::new()
@@ -194,6 +207,7 @@ where
         })?;
     Ok(NetworkWorkerHandle {
         stop,
+        secondary_stop,
         thread: Some(thread),
     })
 }
