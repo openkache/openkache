@@ -6,8 +6,8 @@ This document defines the client-side v1 value encoding before it is handed to
 the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
 
-Cryptographic behavior is defined only in
-[Value Security Profiles](VALUE_SECURITY.md).
+Cryptographic behavior is defined only in the
+[Security Model](../SECURITY_MODEL.md).
 
 This is the target contract for the pre-freeze draft. Client implementations
 may temporarily lag while the draft is being completed, but an implementation
@@ -160,7 +160,7 @@ NOT guess an unknown selector.
 
 ### 4.1 Protection profiles
 
-`protection_id` selects one profile defined by `VALUE_SECURITY.md`.
+`protection_id` selects one profile defined by `SECURITY_MODEL.md`.
 
 | ID | Protection profile |
 |---:|---|
@@ -169,7 +169,7 @@ NOT guess an unknown selector.
 | `2` | `AES-SIV-CMAC` |
 
 Profile behavior and key selection are defined in
-[VALUE_SECURITY.md](VALUE_SECURITY.md). Maintained-client write defaults,
+[SECURITY_MODEL.md](../SECURITY_MODEL.md). Maintained-client write defaults,
 read allowlists, and per-operation overrides are defined in
 [CLIENT.md](CLIENT.md).
 
@@ -265,7 +265,8 @@ cryptographic protection does not hide that length.
 ## 7. Cryptographic protection
 
 The selector and envelope grammar in this document select one of the
-protection profiles defined in [VALUE_SECURITY.md](VALUE_SECURITY.md).
+protection profiles defined in
+[SECURITY_MODEL.md](../SECURITY_MODEL.md).
 That document is the sole normative source for value-key selection, KDF
 inputs, AAD, cryptographic constructions, protection overhead, and security
 properties. This document intentionally keeps no duplicate key schedule or
