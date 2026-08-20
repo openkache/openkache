@@ -16,6 +16,12 @@ bytes, and ``Map`` for maps. A checked safe-integer option rejects values that
 would round, and plain-object projection uses null-prototype objects with
 defined properties so names such as ``__proto__`` are safe.
 
+Client ``get_structured`` and ``set_structured`` invoke the required generated
+native selectors directly; they never reinterpret payloads through legacy JSON
+or Raw operations. The native boundary preserves an unknown mutation as
+``OpenKache_Unknown_Mutation_Error`` and local cancellation as
+``OpenKache_Cancelled_Error``.
+
 ## Purpose
 
 The package converts JavaScript values and configuration into shared-core

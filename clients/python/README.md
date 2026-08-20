@@ -20,7 +20,9 @@ byte strings, and both ``list`` and ``tuple`` map to model arrays.
 performs a strict conversion and rejects ``Undefined`` or map-key collisions
 instead of dropping information. Cache methods keep the legacy JSON selector
 explicit; structured payload operations use the generated structured-value ABI
-when the shared core exposes it.
+without JSON or Raw fallback. The native boundary preserves unknown mutation
+and cancellation outcomes as ``OpenKacheUnknownMutationError`` and
+``OpenKacheCancelledError``.
 
 ## Commands
 

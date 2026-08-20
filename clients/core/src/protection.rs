@@ -6,6 +6,7 @@ use crate::{
     ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, Result,
     transport::RequestBudget,
 };
+use openkache_value::Value as StructuredValue;
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
@@ -276,6 +277,18 @@ impl DataProtection {
             .map_err(Into::into)
     }
 
+    /// Serializes and protects a StructuredValue-CBOR-v1 value while binding its namespace.
+    pub fn seal_structured_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: &StructuredValue,
+    ) -> Result<ItemValue> {
+        self.codec
+            .seal_structured_in_namespace(namespace_id, item_id, value)
+            .map_err(Into::into)
+    }
+
     /// Authenticates and decodes one stored value into the core logical model.
     ///
     /// # Arguments
@@ -304,6 +317,18 @@ impl DataProtection {
     ) -> Result<Value> {
         self.codec
             .decode_in_namespace(namespace_id, item_id, encoded)
+            .map_err(Into::into)
+    }
+
+    /// Authenticates and decodes one StructuredValue-CBOR-v1 value.
+    pub fn open_structured_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<StructuredValue> {
+        self.codec
+            .open_structured_in_namespace(namespace_id, item_id, encoded)
             .map_err(Into::into)
     }
 

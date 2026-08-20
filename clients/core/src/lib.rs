@@ -42,6 +42,9 @@ pub use key::{
     KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey, canonical_key_bytes,
 };
 pub use openkache_protocol::ITEM_ID_BYTES;
+pub use openkache_value::{
+    Value as StructuredValue, decode as decode_structured_value, encode as encode_structured_value,
+};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]

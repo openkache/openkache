@@ -23,6 +23,7 @@ use openkache_client_core::{
         SMITHY_SET_CONDITION_IF_ABSENT, SMITHY_SET_CONDITION_IF_PRESENT,
         SMITHY_SET_OUTCOME_CREATED, SMITHY_SET_OUTCOME_NOT_STORED, SMITHY_SET_OUTCOME_REPLACED,
     },
+    decode_structured_value as decode_structured, encode_structured_value as encode_structured,
     value_envelope,
 };
 
@@ -125,7 +126,7 @@ impl NativeClient {
             .ping()
             .await
             .map(|_| ())
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Retrieves exact decoded bytes or `null` when the canonical key is absent.
@@ -135,13 +136,29 @@ impl NativeClient {
             .active_client()?
             .get_canonical_key(key.as_ref())
             .await
-            .map_err(native_error)?;
+            .map_err(native_core_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
             GetOutcome::Found(Value::Raw(bytes)) => Ok(Some(Uint8Array::new(bytes))),
             GetOutcome::Found(Value::Json(_)) => Err(native_error(
                 "stored value uses canonical JSON serialization, expected raw bytes",
             )),
+        }
+    }
+
+    /// Retrieves one canonical StructuredValue-CBOR-v1 payload.
+    #[napi]
+    pub async fn get_structured(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
+        let outcome = self
+            .active_client()?
+            .get_structured_canonical_key(key.as_ref())
+            .await
+            .map_err(native_core_error)?;
+        match outcome {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(value) => encode_structured(&value)
+                .map(|payload| Some(Uint8Array::new(payload)))
+                .map_err(native_error),
         }
     }
 
@@ -165,7 +182,7 @@ impl NativeClient {
             .active_client()?
             .get_canonical_key(key.as_ref())
             .await
-            .map_err(native_error)?
+            .map_err(native_core_error)?
         else {
             return Ok(None);
         };
@@ -186,7 +203,7 @@ impl NativeClient {
             .active_client()?
             .get_canonical_key(key.as_ref())
             .await
-            .map_err(native_error)?;
+            .map_err(native_core_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
             GetOutcome::Found(Value::Json(value)) => serde_json::to_string(&value)
@@ -218,6 +235,31 @@ impl NativeClient {
             ttl_ms,
         )
         .await
+    }
+
+    /// Stores one canonical StructuredValue-CBOR-v1 payload.
+    #[napi]
+    pub async fn set_structured(
+        &self,
+        key: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<f64>,
+    ) -> Result<String> {
+        let structured = decode_structured(value.as_ref()).map_err(native_error)?;
+        let options = parse_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .set_structured_canonical_key(key.as_ref(), structured, options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
     }
 
     /// Encodes and stores a canonical value envelope.
@@ -286,7 +328,7 @@ impl NativeClient {
             .set_canonical_key(key.as_ref(), Value::Json(value), options)
             .await
             .map(map_set_outcome)
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Deletes a key and reports whether it existed.
@@ -296,19 +338,25 @@ impl NativeClient {
             .delete_canonical_key(key.as_ref())
             .await
             .map(|outcome| outcome == DeleteOutcome::Deleted)
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Returns the server's JSON statistics payload.
     #[napi]
     pub async fn stats(&self) -> Result<String> {
-        self.active_client()?.stats().await.map_err(native_error)
+        self.active_client()?
+            .stats()
+            .await
+            .map_err(native_core_error)
     }
 
     /// Requests a server durability barrier.
     #[napi]
     pub async fn sync(&self) -> Result<()> {
-        self.active_client()?.sync().await.map_err(native_error)
+        self.active_client()?
+            .sync()
+            .await
+            .map_err(native_core_error)
     }
 
     /// Closes the shared core client. Repeated calls are safe.
@@ -316,7 +364,7 @@ impl NativeClient {
     pub async fn close(&self) -> Result<()> {
         let client = self.take_client()?;
         if let Some(client) = client {
-            client.close().await.map_err(native_error)?;
+            client.close().await.map_err(native_core_error)?;
         }
         Ok(())
     }
@@ -349,7 +397,7 @@ impl NativeClient {
         self.active_client()?
             .reconnect()
             .await
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Retrieves exact bytes for a fixed-size protocol item ID.
@@ -365,7 +413,7 @@ impl NativeClient {
                     .into_option()
                     .map(|value| Uint8Array::new(value.into_bytes()))
             })
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Retrieves exact bytes in an explicitly supplied namespace.
@@ -386,7 +434,7 @@ impl NativeClient {
                     .into_option()
                     .map(|value| Uint8Array::new(value.into_bytes()))
             })
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Stores exact bytes for a fixed-size protocol item ID.
@@ -412,7 +460,7 @@ impl NativeClient {
             .set(item_id, ItemValue::new(value.as_ref().to_vec()), options)
             .await
             .map(map_set_outcome)
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Stores exact bytes with all item-level policy selectors in an explicit namespace.
@@ -445,7 +493,7 @@ impl NativeClient {
             )
             .await
             .map(map_set_outcome)
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Deletes a fixed-size protocol item ID.
@@ -457,7 +505,7 @@ impl NativeClient {
             .delete(item_id)
             .await
             .map(|outcome| outcome == DeleteOutcome::Deleted)
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Deletes an item ID in an explicitly supplied namespace.
@@ -474,7 +522,7 @@ impl NativeClient {
             .delete_in_namespace(namespace_id, item_id)
             .await
             .map(|outcome| outcome == DeleteOutcome::Deleted)
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Retrieves a namespace by name and optionally creates it.
@@ -491,7 +539,7 @@ impl NativeClient {
             .raw()
             .namespace_open_with_outcome(name.as_bytes(), create_if_missing, policy)
             .await
-            .map_err(native_error)?;
+            .map_err(native_core_error)?;
         Ok(NativeNamespaceOpenOutput {
             descriptor: native_namespace_descriptor(descriptor),
             created,
@@ -514,7 +562,7 @@ impl NativeClient {
             .raw()
             .namespace_update_policy(namespace_id, expected_revision, policy)
             .await
-            .map_err(native_error)?;
+            .map_err(native_core_error)?;
         Ok(native_namespace_descriptor(descriptor))
     }
 
@@ -531,7 +579,7 @@ impl NativeClient {
             .raw()
             .namespace_delete(namespace_id, expected_revision)
             .await
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Retrieves statistics for an explicitly supplied namespace.
@@ -542,7 +590,7 @@ impl NativeClient {
             .raw()
             .stats_in_namespace(namespace_id)
             .await
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     /// Waits for a durability barrier in an explicitly supplied namespace.
@@ -553,7 +601,7 @@ impl NativeClient {
             .raw()
             .sync_in_namespace(namespace_id)
             .await
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 }
 
@@ -578,7 +626,7 @@ impl NativeClient {
             .set_canonical_key(key, Value::Raw(value), options)
             .await
             .map(map_set_outcome)
-            .map_err(native_error)
+            .map_err(native_core_error)
     }
 
     fn take_client(&self) -> Result<Option<Arc<ProtectedClient>>> {
@@ -1055,6 +1103,22 @@ fn map_set_outcome(outcome: SetOutcome) -> String {
 
 fn native_error(error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, error.to_string())
+}
+
+fn native_core_error(error: openkache_client_core::Error) -> Error {
+    let category = match &error {
+        openkache_client_core::Error::AmbiguousOutcome { .. } => Some("unknown_mutation"),
+        openkache_client_core::Error::Timeout { .. } => Some("cancelled"),
+        _ => None,
+    };
+    let message = error.to_string();
+    match category {
+        Some(category) => Error::new(
+            Status::GenericFailure,
+            format!("openkache:error:{category}:{message}"),
+        ),
+        None => native_error(message),
+    }
 }
 
 fn invalid_argument(message: impl Into<String>) -> Error {

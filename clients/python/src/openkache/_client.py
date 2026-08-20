@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 from os import PathLike
 from pathlib import Path
-from typing import Any, Final, Iterable, Literal, Sequence
+from typing import Any, Final, Iterable, Literal, NoReturn, Sequence
 
 from ._generated import (
     SmithyDeleteInput,
@@ -57,11 +57,13 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
     SMITHY_FFI_RESULT_CREATED,
+    SMITHY_FFI_RESULT_CANCELLED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
     SMITHY_FFI_RESULT_NOT_FOUND,
     SMITHY_FFI_RESULT_NOT_STORED,
     SMITHY_FFI_RESULT_REPLACED,
+    SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_RESULT_OK,
     SMITHY_FFI_RESULT_VALUE,
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
@@ -135,9 +137,23 @@ _BINARY64_MAX_INTEGER_BITS: Final = 1024
 class OpenKacheError(RuntimeError):
     """Base error raised by the Python client."""
 
+    kind = "error"
+
 
 class OpenKacheValueError(OpenKacheError, ValueError):
     """Invalid key, value, option, or value-format input."""
+
+
+class OpenKacheUnknownMutationError(OpenKacheError):
+    """A mutation may have reached the server but its outcome is unknown."""
+
+    kind = "unknown_mutation"
+
+
+class OpenKacheCancelledError(OpenKacheError):
+    """The native boundary cancelled the operation before a definitive result."""
+
+    kind = "cancelled"
 
 
 class ConnectionState(StrEnum):
@@ -448,7 +464,9 @@ class OpenKacheClient:
                 native_path=native_path,
             )
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
-        except (NativeError, OSError) as error:
+        except NativeError as error:
+            _raise_native_error(error)
+        except OSError as error:
             raise OpenKacheError(str(error)) from error
         return cls(native, selected_key_spec)
 
@@ -518,7 +536,7 @@ class OpenKacheClient:
                 key=_key_bytes(key, self._key_spec),
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         if payload is None:
             return None
         if isinstance(payload, tuple):
@@ -566,7 +584,7 @@ class OpenKacheClient:
                 ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         kind = result[0] if isinstance(result, tuple) else result
         if isinstance(kind, str):
             try:
@@ -689,7 +707,7 @@ class OpenKacheClient:
                 ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
 
     async def _value_operation(
         self,
@@ -729,7 +747,7 @@ class OpenKacheClient:
                 ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
 
     async def _execute_scoped(
         self,
@@ -757,7 +775,7 @@ class OpenKacheClient:
                 ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
 
     async def _set_operation(
         self,
@@ -868,7 +886,7 @@ class RawClient(SmithyOpenKacheApi):
                 ttl_ms=ttl_ms,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         if kind not in (SMITHY_FFI_RESULT_OK, SMITHY_FFI_RESULT_CREATED):
             raise OpenKacheError(f"NAMESPACE_OPEN returned unexpected native result {kind}")
         try:
@@ -877,7 +895,7 @@ class RawClient(SmithyOpenKacheApi):
                 payload,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         return SmithyNamespaceOpenOutput(
             descriptor=_namespace_descriptor(decoded),
             created=kind == SMITHY_FFI_RESULT_CREATED,
@@ -896,7 +914,7 @@ class RawClient(SmithyOpenKacheApi):
                 ttl_ms=ttl_ms,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(
                 f"NAMESPACE_UPDATE_POLICY returned unexpected native result {kind}"
@@ -907,7 +925,7 @@ class RawClient(SmithyOpenKacheApi):
                 payload,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         return SmithyNamespaceUpdatePolicyOutput(
             descriptor=_namespace_descriptor(decoded)
         )
@@ -922,7 +940,7 @@ class RawClient(SmithyOpenKacheApi):
                 expected_revision=input.expected_revision,
             )
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            _raise_native_error(error)
         return SmithyNamespaceDeleteOutput()
 
     async def close(self) -> None:
@@ -930,6 +948,16 @@ class RawClient(SmithyOpenKacheApi):
 
 
 Client = OpenKacheClient
+
+
+def _raise_native_error(error: NativeError) -> NoReturn:
+    """Project the generated native result category into Python exceptions."""
+
+    if error.result_kind == SMITHY_FFI_RESULT_UNKNOWN_MUTATION:
+        raise OpenKacheUnknownMutationError(str(error)) from error
+    if error.result_kind == SMITHY_FFI_RESULT_CANCELLED:
+        raise OpenKacheCancelledError(str(error)) from error
+    raise OpenKacheError(str(error)) from error
 
 
 def _connection_settings(
@@ -1427,7 +1455,9 @@ __all__ = [
     "CompressionOptions",
     "ConnectionState",
     "OpenKacheClient",
+    "OpenKacheCancelledError",
     "OpenKacheError",
+    "OpenKacheUnknownMutationError",
     "OpenKacheValueError",
     "RawClient",
     "ServerStats",

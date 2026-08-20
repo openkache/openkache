@@ -537,10 +537,14 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
             accept(value)
         elif major in (2, 3):
             length = length_or_value
-            if length > budget.max_bytes or cursor + length > len(source):
-                if cursor + length > len(source):
-                    raise StructuredValueError("value is truncated", ValueErrorKind.TRUNCATED)
+            # Check the declared bounded resource before looking at payload
+            # availability. This keeps malformed vectors deterministic across
+            # language bindings (for example ``58 05 41`` with max_bytes=4
+            # is a resource-limit failure, even though its body is truncated).
+            if length > budget.max_bytes:
                 _resource("bytes", budget.max_bytes, length)
+            if cursor + length > len(source):
+                raise StructuredValueError("value is truncated", ValueErrorKind.TRUNCATED)
             content = source[cursor : cursor + length]
             cursor += length
             if major == 2:

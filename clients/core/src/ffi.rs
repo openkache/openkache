@@ -13,6 +13,8 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use openkache_value::{Value as StructuredValue, decode, encode};
+
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::{
@@ -167,6 +169,27 @@ impl FfiResult {
         }
     }
 
+    fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            kind: FfiResultKind::Cancelled,
+            payload: message.into().into_bytes(),
+            client: None,
+        }
+    }
+
+    fn from_error(error: crate::Error) -> Self {
+        let kind = match error {
+            crate::Error::AmbiguousOutcome { .. } => FfiResultKind::UnknownMutation,
+            crate::Error::Timeout { .. } => FfiResultKind::Cancelled,
+            _ => FfiResultKind::Error,
+        };
+        Self {
+            kind,
+            payload: error.to_string().into_bytes(),
+            client: None,
+        }
+    }
+
     fn success(kind: FfiResultKind, payload: Vec<u8>) -> Self {
         Self {
             kind,
@@ -275,11 +298,28 @@ impl FfiClient {
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(error) = self.commands.send_timeout(command, remaining) {
-            return FfiResult::error(format!("client worker queue deadline exceeded: {error}"));
+            return FfiResult::cancelled(format!("client worker queue deadline exceeded: {error}"));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         receiver.recv_timeout(remaining).unwrap_or_else(|error| {
-            FfiResult::error(format!("client operation timed out: {error}"))
+            if matches!(
+                operation,
+                FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::SetStructured
+                    | FfiOperation::Delete
+            ) {
+                FfiResult {
+                    kind: FfiResultKind::UnknownMutation,
+                    payload: format!(
+                        "client mutation outcome is unknown after cancellation: {error}"
+                    )
+                    .into_bytes(),
+                    client: None,
+                }
+            } else {
+                FfiResult::cancelled(format!("client operation timed out: {error}"))
+            }
         })
     }
 
@@ -291,7 +331,7 @@ impl FfiClient {
         value: Vec<u8>,
         set_options: SetOptions,
     ) -> FfiResult {
-        self.send_command_with_response(|response| Command::ExecuteScoped {
+        self.send_command_with_response(Some(operation), |response| Command::ExecuteScoped {
             operation,
             namespace_id,
             item_id,
@@ -307,12 +347,15 @@ impl FfiClient {
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> FfiResult {
-        self.send_command_with_response(|response| Command::NamespaceOpen {
-            name,
-            create_if_missing,
-            policy,
-            response,
-        })
+        self.send_command_with_response(
+            create_if_missing.then_some(FfiOperation::NamespaceOpen),
+            |response| Command::NamespaceOpen {
+                name,
+                create_if_missing,
+                policy,
+                response,
+            },
+        )
     }
 
     fn namespace_update_policy(
@@ -321,24 +364,29 @@ impl FfiClient {
         expected_revision: u64,
         policy: NamespacePolicy,
     ) -> FfiResult {
-        self.send_command_with_response(|response| Command::NamespaceUpdatePolicy {
-            namespace_id,
-            expected_revision,
-            policy,
-            response,
+        self.send_command_with_response(Some(FfiOperation::NamespaceUpdatePolicy), |response| {
+            Command::NamespaceUpdatePolicy {
+                namespace_id,
+                expected_revision,
+                policy,
+                response,
+            }
         })
     }
 
     fn namespace_delete(&self, namespace_id: u64, expected_revision: u64) -> FfiResult {
-        self.send_command_with_response(|response| Command::NamespaceDelete {
-            namespace_id,
-            expected_revision,
-            response,
+        self.send_command_with_response(Some(FfiOperation::NamespaceDelete), |response| {
+            Command::NamespaceDelete {
+                namespace_id,
+                expected_revision,
+                response,
+            }
         })
     }
 
     fn send_command_with_response(
         &self,
+        operation: Option<FfiOperation>,
         build: impl FnOnce(SyncSender<FfiResult>) -> Command,
     ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
@@ -348,11 +396,33 @@ impl FfiClient {
         let command = build(response);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(error) = self.commands.send_timeout(command, remaining) {
-            return FfiResult::error(format!("client worker queue deadline exceeded: {error}"));
+            return FfiResult::cancelled(format!("client worker queue deadline exceeded: {error}"));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         receiver.recv_timeout(remaining).unwrap_or_else(|error| {
-            FfiResult::error(format!("client operation timed out: {error}"))
+            if operation.is_some_and(|operation| {
+                matches!(
+                    operation,
+                    FfiOperation::Set
+                        | FfiOperation::SetJson
+                        | FfiOperation::SetStructured
+                        | FfiOperation::Delete
+                        | FfiOperation::NamespaceOpen
+                        | FfiOperation::NamespaceUpdatePolicy
+                        | FfiOperation::NamespaceDelete
+                )
+            }) {
+                FfiResult {
+                    kind: FfiResultKind::UnknownMutation,
+                    payload: format!(
+                        "client mutation outcome is unknown after cancellation: {error}"
+                    )
+                    .into_bytes(),
+                    client: None,
+                }
+            } else {
+                FfiResult::cancelled(format!("client operation timed out: {error}"))
+            }
         })
     }
 
@@ -525,7 +595,7 @@ fn run_worker(
                         "native client worker panicked",
                     ))
                 })
-                .unwrap_or_else(|error| FfiResult::error(error.to_string()));
+                .unwrap_or_else(FfiResult::from_error);
                 state.store(
                     connection_state_value(client.connection_state()),
                     Ordering::Release,
@@ -602,7 +672,7 @@ async fn execute(
     } else {
         execute_protected(client, operation, application_key, value, set_options).await
     };
-    result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
+    result.unwrap_or_else(FfiResult::from_error)
 }
 
 async fn execute_protected(
@@ -622,6 +692,10 @@ async fn execute_protected(
             .get_canonical_key_unchecked(canonical_key.as_slice())
             .await
             .and_then(json_result),
+        FfiOperation::GetStructured => client
+            .get_structured_canonical_key_unchecked(canonical_key.as_slice())
+            .await
+            .and_then(structured_result),
         FfiOperation::Set => client
             .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
@@ -637,6 +711,17 @@ async fn execute_protected(
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         },
+        FfiOperation::SetStructured => {
+            let structured = decode(&value).map_err(crate::value::Error::Structured)?;
+            client
+                .set_structured_canonical_key_unchecked(
+                    canonical_key.as_slice(),
+                    structured,
+                    set_options,
+                )
+                .await
+                .map(set_result)
+        }
         FfiOperation::Delete => client
             .delete_canonical_key_unchecked(canonical_key.as_slice())
             .await
@@ -690,9 +775,12 @@ async fn execute_raw(
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
         FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
-        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
+        FfiOperation::GetJson
+        | FfiOperation::SetJson
+        | FfiOperation::GetStructured
+        | FfiOperation::SetStructured => Err(crate::Error::configuration(
             "operation",
-            "exact item-ID calls do not support formatted JSON operations",
+            "exact item-ID calls do not support formatted structured or JSON operations",
         )),
         _ => Err(crate::Error::configuration(
             "operation",
@@ -773,7 +861,7 @@ async fn namespace_open(
             ),
             Err(error) => FfiResult::error(error.to_string()),
         },
-        Err(error) => FfiResult::error(error.to_string()),
+        Err(error) => FfiResult::from_error(error),
     }
 }
 
@@ -790,9 +878,9 @@ async fn namespace_update_policy(
     {
         Ok(descriptor) => match ffi_namespace_descriptor(descriptor) {
             Ok(payload) => FfiResult::success(FfiResultKind::Value, payload),
-            Err(error) => FfiResult::error(error.to_string()),
+            Err(error) => FfiResult::error(error),
         },
-        Err(error) => FfiResult::error(error.to_string()),
+        Err(error) => FfiResult::from_error(error),
     }
 }
 
@@ -807,7 +895,7 @@ async fn namespace_delete(
         .await
     {
         Ok(()) => ok_result(),
-        Err(error) => FfiResult::error(error.to_string()),
+        Err(error) => FfiResult::from_error(error),
     }
 }
 
@@ -867,6 +955,17 @@ fn raw_value_result(value: Value) -> FfiResult {
     match value {
         Value::Raw(payload) => bytes_result(payload),
         Value::Json(_) => FfiResult::error("formatted value is not Raw serialization"),
+    }
+}
+
+fn structured_result(
+    outcome: GetOutcome<StructuredValue>,
+) -> std::result::Result<FfiResult, crate::Error> {
+    match outcome {
+        GetOutcome::Found(value) => encode(&value)
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
+            .map_err(|error| crate::value::Error::Structured(error).into()),
+        GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
@@ -1192,6 +1291,70 @@ pub unsafe extern "C" fn openkache_client_execute(
     )
 }
 
+/// Retrieves one StructuredValue-CBOR-v1 payload through the protected native ABI.
+///
+/// The result payload is the canonical StructuredValue-CBOR-v1 bytes. It is
+/// never converted through the compatibility JSON or Raw value paths.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by
+/// [`openkache_client_result_take_client`]. The canonical key pointer must
+/// identify readable memory for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_get_structured(
+    client: *const FfiClient,
+    canonical_key: *const u8,
+    canonical_key_length: usize,
+) -> *mut FfiResult {
+    execute_entry(
+        client,
+        FfiOperation::GetStructured as u32,
+        canonical_key,
+        canonical_key_length,
+        ptr::null(),
+        0,
+        FfiSetCondition::Any as u32,
+        0,
+        0,
+        false,
+    )
+}
+
+/// Stores one StructuredValue-CBOR-v1 payload through the protected native ABI.
+///
+/// The input value is decoded and validated by the shared StructuredValue
+/// codec before protection. It is never routed through compatibility JSON or
+/// Raw value operations.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by
+/// [`openkache_client_result_take_client`]. The canonical key and value
+/// pointers must identify readable memory for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_set_structured(
+    client: *const FfiClient,
+    canonical_key: *const u8,
+    canonical_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    execute_entry_with_flags(
+        client,
+        FfiOperation::SetStructured as u32,
+        canonical_key,
+        canonical_key_length,
+        value,
+        value_length,
+        set_flags,
+        ttl_ms,
+        false,
+    )
+}
+
 /// Executes one exact-item-ID operation without application-key derivation or
 /// value protection.
 ///
@@ -1355,7 +1518,11 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
                 Err("operation does not accept a value".to_owned())
             }
-            FfiOperation::GetJson | FfiOperation::SetJson | FfiOperation::Ping => Err(
+            FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::SetStructured
+            | FfiOperation::Ping => Err(
                 "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
             ),
             FfiOperation::NamespaceOpen
@@ -1596,8 +1763,19 @@ fn execute_entry_inner(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
+        if raw
+            && matches!(
+                operation,
+                FfiOperation::GetJson
+                    | FfiOperation::SetJson
+                    | FfiOperation::GetStructured
+                    | FfiOperation::SetStructured
+            )
+        {
+            return Err(
+                "exact item-ID calls do not support formatted structured or JSON operations"
+                    .to_owned(),
+            );
         }
         if raw
             && matches!(
@@ -1613,7 +1791,10 @@ fn execute_entry_inner(
             ));
         }
         let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-            if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+            if matches!(
+                operation,
+                FfiOperation::Set | FfiOperation::SetJson | FfiOperation::SetStructured
+            ) {
                 set_options_from_flags(flags, ttl_ms)?
             } else {
                 if flags != 0 || ttl_ms != 0 {
@@ -1654,6 +1835,7 @@ fn execute_entry_inner(
             FfiOperation::Ping
             | FfiOperation::Get
             | FfiOperation::GetJson
+            | FfiOperation::GetStructured
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
@@ -1663,9 +1845,11 @@ fn execute_entry_inner(
                 Err("operation does not accept a value".to_owned())
             }
             operation
-                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                    && (set_options.condition() != SetCondition::Any
-                        || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(
+                    operation,
+                    FfiOperation::Set | FfiOperation::SetJson | FfiOperation::SetStructured
+                ) && (set_options.condition() != SetCondition::Any
+                    || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_owned())
             }

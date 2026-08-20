@@ -241,11 +241,16 @@ export type Connection_State =
   | typeof SMITHY_FFI_CONNECTION_STATE_CLOSED_NAME
   | typeof SMITHY_FFI_CONNECTION_STATE_UNKNOWN_NAME
 
+export type OpenKache_Error_Kind =
+  | "openkache_error"
+  | "unknown_mutation"
+  | "cancelled"
+
 /**
  * Error returned by client validation, value codecs, native transport, or server failures.
  */
 export class OpenKache_Error extends Error {
-  readonly kind = "openkache_error" as const
+  readonly kind: OpenKache_Error_Kind
 
   /**
    * Creates a stable client error.
@@ -253,9 +258,30 @@ export class OpenKache_Error extends Error {
    * @param message - Human-readable failure description.
    * @param cause - Optional underlying failure.
    */
-  constructor(message: string, cause?: unknown) {
+  constructor(
+    message: string,
+    cause?: unknown,
+    kind: OpenKache_Error_Kind = "openkache_error",
+  ) {
     super(message, cause === undefined ? undefined : { cause })
     this.name = "OpenKache_Error"
+    this.kind = kind
+  }
+}
+
+/** A mutation may have reached the server but its outcome is unknown. */
+export class OpenKache_Unknown_Mutation_Error extends OpenKache_Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause, "unknown_mutation")
+    this.name = "OpenKache_Unknown_Mutation_Error"
+  }
+}
+
+/** The native boundary cancelled an operation before a definitive result. */
+export class OpenKache_Cancelled_Error extends OpenKache_Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause, "cancelled")
+    this.name = "OpenKache_Cancelled_Error"
   }
 }
 
@@ -492,16 +518,9 @@ export class OpenKache_Client {
         "representation must be lossless or native",
       )
     }
-    const get_structured = this.#native_client.get_structured
-    if (typeof get_structured !== "function") {
-      throw new OpenKache_Error(
-        "structured-value ABI is unavailable in the loaded native adapter",
-      )
-    }
     let payload: Uint8Array | null
     try {
-      payload = await get_structured.call(
-        this.#native_client,
+      payload = await this.#native_client.get_structured(
         owned_key_bytes(key, this.#key_spec),
       )
     } catch (error) {
@@ -522,9 +541,8 @@ export class OpenKache_Client {
   /**
    * Encodes and stores one StructuredValue-CBOR-v1 payload.
    *
-   * This method never routes through legacy JSON or Raw operations. Older
-   * native artifacts fail explicitly until their generated structured ABI is
-   * installed.
+   * This method never routes through legacy JSON or Raw operations; the
+   * generated native adapter owns the structured selector directly.
    */
   async set_structured(
     key: Client_Key,
@@ -533,12 +551,6 @@ export class OpenKache_Client {
   ): Promise<Set_Outcome> {
     this.#assert_open()
     validate_set_options(options)
-    const set_structured = this.#native_client.set_structured
-    if (typeof set_structured !== "function") {
-      throw new OpenKache_Error(
-        "structured-value ABI is unavailable in the loaded native adapter",
-      )
-    }
     let payload: Uint8Array
     try {
       payload = encode_structured_value(value)
@@ -549,8 +561,7 @@ export class OpenKache_Client {
       )
     }
     try {
-      const outcome = await set_structured.call(
-        this.#native_client,
+      const outcome = await this.#native_client.set_structured(
         owned_key_bytes(key, this.#key_spec),
         payload,
         options.condition,
@@ -1529,9 +1540,27 @@ function parse_connection_state(value: string): Connection_State {
 function as_openkache_error(error: unknown): OpenKache_Error {
   return error instanceof OpenKache_Error
     ? error
-    : new OpenKache_Error(error_message(error), error)
+    : native_category_error(error)
 }
 
 function error_message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function native_category_error(error: unknown): OpenKache_Error {
+  const message = error_message(error)
+  const categories: readonly [string, (message: string, cause: unknown) => OpenKache_Error][] = [
+    [
+      "openkache:error:unknown_mutation:",
+      (detail, cause) => new OpenKache_Unknown_Mutation_Error(detail, cause),
+    ],
+    [
+      "openkache:error:cancelled:",
+      (detail, cause) => new OpenKache_Cancelled_Error(detail, cause),
+    ],
+  ]
+  for (const [prefix, create] of categories) {
+    if (message.startsWith(prefix)) return create(message.slice(prefix.length), error)
+  }
+  return new OpenKache_Error(message, error)
 }
