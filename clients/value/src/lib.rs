@@ -93,6 +93,23 @@ impl Integer {
         }
     }
 
+    fn from_owned_sign_and_magnitude(negative: bool, mut magnitude: Vec<u8>) -> Self {
+        let first = magnitude
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(magnitude.len());
+        if first == magnitude.len() {
+            return Self::zero();
+        }
+        if first != 0 {
+            magnitude.drain(..first);
+        }
+        Self {
+            negative,
+            magnitude,
+        }
+    }
+
     /// Alias for [`Integer::from_sign_and_magnitude`].
     pub fn from_magnitude_be(sign: Sign, magnitude: impl AsRef<[u8]>) -> Self {
         Self::from_sign_and_magnitude(sign == Sign::Negative, magnitude)
@@ -376,6 +393,46 @@ pub enum Value {
     Map(Vec<(Value, Value)>),
 }
 
+impl Drop for Value {
+    fn drop(&mut self) {
+        // Move the root out of `self` and consume nested containers through an
+        // explicit worklist. This preserves caller-selected depth limits
+        // while preventing a deeply nested value from recursively unwinding
+        // the native stack during destruction.
+        let root = std::mem::replace(self, Self::Undefined);
+        let mut pending = vec![root];
+        while let Some(value) = pending.pop() {
+            let mut value = std::mem::ManuallyDrop::new(value);
+            // A type with a custom destructor cannot move fields out through
+            // a by-value pattern. Borrow the owned container, take its
+            // children, then explicitly drop scalar payloads. Forget the
+            // now-empty shell so this destructor does not recursively invoke
+            // itself.
+            unsafe {
+                match &mut *value {
+                    Self::Array(values) => pending.extend(std::mem::take(values)),
+                    Self::Map(entries) => {
+                        for (key, value) in std::mem::take(entries) {
+                            pending.push(key);
+                            pending.push(value);
+                        }
+                    }
+                    Self::Integer(integer) => std::ptr::drop_in_place(integer),
+                    Self::TextString(text) => std::ptr::drop_in_place(text),
+                    Self::Bytes(bytes) => std::ptr::drop_in_place(bytes),
+                    Self::Undefined
+                    | Self::Null
+                    | Self::Boolean(_)
+                    | Self::Float16(_)
+                    | Self::Float32(_)
+                    | Self::Float64(_) => {}
+                }
+                std::mem::forget(value);
+            }
+        }
+    }
+}
+
 impl Value {
     /// Constructs an exact arbitrary integer value.
     pub fn integer(value: impl Into<Integer>) -> Self {
@@ -646,6 +703,7 @@ pub fn encode_with_limits_and_budget(
     let mut output = Vec::new();
     let mut tasks = Vec::new();
     let mut item_count = 0usize;
+    let mut pending_items = 1usize;
     charge_allocation(&mut allocation, size_of::<(&Value, usize)>())?;
     tasks
         .try_reserve_exact(1)
@@ -658,6 +716,9 @@ pub fn encode_with_limits_and_budget(
         if item_count > limits.max_items {
             return Err(resource(Resource::Items, limits.max_items, item_count));
         }
+        pending_items = pending_items
+            .checked_sub(1)
+            .expect("the root or a declared child is always pending");
         match current {
             Value::Undefined => push_bytes(&mut output, &[0xf7], limits, &mut allocation)?,
             Value::Null => push_bytes(&mut output, &[0xf6], limits, &mut allocation)?,
@@ -690,8 +751,14 @@ pub fn encode_with_limits_and_budget(
                 if depth >= limits.max_depth {
                     return Err(resource(Resource::Depth, limits.max_depth, depth + 1));
                 }
-                append_head(4, values.len(), &mut output, limits, &mut allocation)?;
                 validate_count(values.len(), limits.max_items)?;
+                add_pending_items(
+                    &mut pending_items,
+                    values.len(),
+                    item_count,
+                    limits.max_items,
+                )?;
+                append_head(4, values.len(), &mut output, limits, &mut allocation)?;
                 charge_allocation(
                     &mut allocation,
                     values
@@ -719,6 +786,7 @@ pub fn encode_with_limits_and_budget(
                     .checked_mul(2)
                     .ok_or_else(|| resource(Resource::Items, limits.max_items, usize::MAX))?;
                 validate_count(task_count, limits.max_items)?;
+                add_pending_items(&mut pending_items, task_count, item_count, limits.max_items)?;
                 validate_map_entries_with_budget(entries, &mut allocation)?;
                 append_head(5, entries.len(), &mut output, limits, &mut allocation)?;
                 charge_allocation(
@@ -1379,7 +1447,7 @@ fn parse_item(
             Ok(ParsedItem::Value(Value::Integer(integer)))
         }
         2 | 3 => {
-            let length = read_length(bytes, cursor, additional, offset, limits)?;
+            let length = read_length(bytes, cursor, additional, offset, limits, Resource::Bytes)?;
             let end = cursor
                 .checked_add(length)
                 .ok_or_else(|| resource(Resource::Bytes, limits.max_bytes, usize::MAX))?;
@@ -1389,31 +1457,32 @@ fn parse_item(
             let content = &bytes[*cursor..end];
             *cursor = end;
             if major == 2 {
-                let mut owned = Vec::new();
+                Ok(ParsedItem::Value(Value::Bytes(clone_bytes(
+                    content, allocation,
+                )?)))
+            } else {
+                let text =
+                    std::str::from_utf8(content).map_err(|_| Error::InvalidUtf8 { offset })?;
                 charge_allocation(allocation, content.len())?;
+                let mut owned = String::new();
                 owned
                     .try_reserve_exact(content.len())
                     .map_err(|_| Error::Allocation {
                         size: content.len(),
                     })?;
-                owned.extend_from_slice(content);
-                Ok(ParsedItem::Value(Value::Bytes(owned)))
-            } else {
-                let text =
-                    std::str::from_utf8(content).map_err(|_| Error::InvalidUtf8 { offset })?;
-                charge_allocation(allocation, content.len())?;
-                Ok(ParsedItem::Value(Value::TextString(text.to_owned())))
+                owned.push_str(text);
+                Ok(ParsedItem::Value(Value::TextString(owned)))
             }
         }
         4 => {
-            let length = read_length(bytes, cursor, additional, offset, limits)?;
+            let length = read_length(bytes, cursor, additional, offset, limits, Resource::Items)?;
             if length > limits.max_items {
                 return Err(resource(Resource::Items, limits.max_items, length));
             }
             Ok(ParsedItem::Array(length))
         }
         5 => {
-            let length = read_length(bytes, cursor, additional, offset, limits)?;
+            let length = read_length(bytes, cursor, additional, offset, limits, Resource::Items)?;
             if length > limits.max_items {
                 return Err(resource(Resource::Items, limits.max_items, length));
             }
@@ -1436,7 +1505,14 @@ fn parse_item(
                     reason: "bignum tag must wrap a byte string",
                 });
             }
-            let length = read_length(bytes, cursor, bignum_additional, bignum_offset, limits)?;
+            let length = read_length(
+                bytes,
+                cursor,
+                bignum_additional,
+                bignum_offset,
+                limits,
+                Resource::IntegerBytes,
+            )?;
             if length == 0 {
                 return Err(Error::InvalidInteger {
                     offset,
@@ -1467,12 +1543,10 @@ fn parse_item(
             let model_magnitude = if tag == 3 {
                 add_one_be(magnitude, limits.max_integer_bytes, allocation)?
             } else {
-                charge_allocation(allocation, magnitude.len())?;
-                magnitude.to_vec()
+                clone_bytes(magnitude, allocation)?
             };
-            charge_allocation(allocation, model_magnitude.len())?;
             Ok(ParsedItem::Value(Value::Integer(
-                Integer::from_sign_and_magnitude(tag == 3, model_magnitude),
+                Integer::from_owned_sign_and_magnitude(tag == 3, model_magnitude),
             )))
         }
         7 => match additional {
@@ -1511,6 +1585,16 @@ fn parse_item(
             additional,
         }),
     }
+}
+
+fn clone_bytes(bytes: &[u8], allocation: &mut AllocationState<'_>) -> Result<Vec<u8>> {
+    charge_allocation(allocation, bytes.len())?;
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| Error::Allocation { size: bytes.len() })?;
+    owned.extend_from_slice(bytes);
+    Ok(owned)
 }
 
 fn add_one_be(
@@ -1591,12 +1675,19 @@ fn read_length(
     additional: u8,
     offset: usize,
     limits: Limits,
+    resource_kind: Resource,
 ) -> Result<usize> {
     let argument = read_argument(bytes, cursor, additional, offset)?;
-    let length = usize::try_from(argument)
-        .map_err(|_| resource(Resource::Bytes, limits.max_bytes, usize::MAX))?;
-    if length > limits.max_bytes {
-        return Err(resource(Resource::Bytes, limits.max_bytes, length));
+    let maximum = match resource_kind {
+        Resource::Bytes => limits.max_bytes,
+        Resource::Depth => limits.max_depth,
+        Resource::Items => limits.max_items,
+        Resource::IntegerBytes => limits.max_integer_bytes,
+    };
+    let length =
+        usize::try_from(argument).map_err(|_| resource(resource_kind, maximum, usize::MAX))?;
+    if length > maximum {
+        return Err(resource(resource_kind, maximum, length));
     }
     Ok(length)
 }
