@@ -14,7 +14,7 @@ Shared client topics are documented here:
 | Maintained binding architecture, request engine, native conversion, and local policies | [Client implementation guide](CLIENT.md) |
 | Typed keys, namespace hashing, and public key mapping | [Key format](KEY_FORMAT.md) |
 | Formatted value envelope and compression selection | [Value format](VALUE_FORMAT.md) |
-| Value-key schedule, AAD, and cryptographic protection | [Value security](VALUE_SECURITY.md) |
+| Security goals, threat model, value protection, and key lifecycle | [Security model](../SECURITY_MODEL.md) |
 | Public boundary fixtures for draft interoperability | [`fixtures/`](fixtures/) |
 | Cross-language value model, native mappings, and structured-value profiles | [Value project](value/SPEC.md) |
 | Wire framing, operations, transport profiles, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
@@ -28,6 +28,7 @@ formats or protocol behavior.
 | Package | Path | Implementation |
 |---|---|---|
 | Shared core | [`core/`](core/) | Transitional raw/protected engine; draft-contract migration pending |
+| Value model | [`value/`](value/) | Owned `Value` algebra and bounded StructuredValue-CBOR-v1 payload codec |
 | Rust | [`rust/`](rust/) | Transitional end-user SDK; byte APIs use the current Raw path |
 | CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Transitional Node-API SDK with typed keys, raw operations, and canonical JSON |
@@ -44,9 +45,9 @@ formats or protocol behavior.
 Java, Kotlin, and Dart currently contain registry metadata and scaffold source
 layouts only. They do not connect to OpenKache or expose cache operations yet.
 
-The [key](KEY_FORMAT.md), [value model](value/SPEC.md), [value
-envelope](VALUE_FORMAT.md), and [value security](VALUE_SECURITY.md) documents
-define the language-independent
+The [key](KEY_FORMAT.md), [value model](value/SPEC.md), and [value
+envelope](VALUE_FORMAT.md) documents, together with the
+[security model](../SECURITY_MODEL.md), define the language-independent
 pre-freeze v1 client contracts. The [client implementation guide](CLIENT.md)
 describes how OpenKache-maintained bindings share one core without making
 their API shape or local policy a requirement for third-party clients. The

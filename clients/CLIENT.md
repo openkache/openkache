@@ -9,7 +9,7 @@ This guide explains how the maintained language bindings share one
 language-independent client implementation. It does not redefine the
 [Wire Protocol](../protocol/SPEC.md), the [Client Key Format](KEY_FORMAT.md),
 or the [Client Value Format](VALUE_FORMAT.md) and
-[Value Security Profiles](VALUE_SECURITY.md). Those documents are the sources
+[Security Model](../SECURITY_MODEL.md). Those documents are the sources
 of truth for interoperable bytes, identity, formatted values, and protection.
 
 Third-party clients do not have to copy the local API design, retry defaults,
@@ -48,7 +48,7 @@ restated here:
 | QUIC/TLS-over-TCP negotiation, frames, operations, statuses, limits, and protocol outcomes | [Wire Protocol](../protocol/SPEC.md) |
 | Typed keys, canonical key bytes, mapping profiles, and Item ID derivation | [Client Key Format](KEY_FORMAT.md) |
 | Payload formats, compression framing, envelope selectors, and value limits | [Client Value Format](VALUE_FORMAT.md) |
-| Protection profiles, key selection, KDF, AAD, and security properties | [Value Security Profiles](VALUE_SECURITY.md) |
+| Security goals, threat model, protection profiles, key selection, KDF, and AAD | [Security Model](../SECURITY_MODEL.md) |
 | Cross-language logical values, native mappings, representations, and the initial structured-value codec profile | [Client Value Model](value/SPEC.md) |
 | Rust core APIs, features, commands, and source layout | [Client core README](core/README.md) |
 | Native API names, package configuration, and platform requirements | Each language package's README |
@@ -75,8 +75,8 @@ bindings:
 - namespace resolution needed by formatted operations;
 - key validation and Item ID mapping through the key format;
 - formatted-value serialization and compression through the value format;
-- value-key selection and cryptographic protection through the value security
-  profiles; and
+- value-key selection and cryptographic protection through the security model;
+  and
 - common configuration validation and stable error categories.
 
 The target core uses one connection/request engine. Mapped versus Exact
@@ -476,8 +476,8 @@ downgrades.
 
 ### 6.6 Value-key rotation
 
-The value security profiles own key IDs, key selection, and protection
-algorithms; the value format owns envelope validation. Maintained clients
+The security model owns key IDs, key selection, and protection algorithms; the
+value format owns envelope validation. Maintained clients
 implement only the operational read-old/write-new lifecycle around that
 format:
 

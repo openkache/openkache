@@ -2790,6 +2790,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "openkache-value"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "openssl-macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
