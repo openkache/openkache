@@ -93,6 +93,11 @@ crate.spec(
 crate.spec(package = "signal-hook", version = "0.4.4")
 crate.spec(
     default_features = False,
+    package = "tokio-rustls",
+    version = "0.26.4",
+)
+crate.spec(
+    default_features = False,
     features = ["build_cc", "usewait-on-address"],
     package = "snmalloc-rs",
     version = "0.7.4",

@@ -507,7 +507,7 @@ impl Registry {
         }
     }
 
-    fn mark_started(&self, id: u64) {
+    fn mark_started(&self, id: u64) -> bool {
         if let Some(entry) = self
             .entries
             .lock()
@@ -515,6 +515,9 @@ impl Registry {
             .get_mut(&id)
         {
             entry.started = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -1060,7 +1063,15 @@ impl RequestEngine {
                     let registry = Arc::clone(&self.inner.registry);
                     write = Some(
                         async move {
-                            registry.mark_started(id);
+                            if !registry.mark_started(id) {
+                                // Cancellation won the race before the lane
+                                // runner crossed its write boundary. The
+                                // command was already dequeued, so report a
+                                // no-op completion and let the runner retire
+                                // its local active marker without failing the
+                                // lane.
+                                return Ok((id, metadata));
+                            }
                             lane.write_request(request)
                                 .await
                                 .map_err(|error| (id, EngineError::Transport(error)))?;
@@ -1129,7 +1140,21 @@ impl RequestEngine {
                     write = None;
                     match write_result {
                         Ok((id, _metadata)) => {
-                            self.inner.registry.mark_transmitted(id);
+                            if self.inner.registry.metadata(id).is_some() {
+                                self.inner.registry.mark_transmitted(id);
+                            } else {
+                                active.remove(&id);
+                                if active.is_empty() {
+                                    // A read future may have been installed
+                                    // before this dequeued command observed
+                                    // cancellation. With no admitted request
+                                    // left, drop that pending read so the
+                                    // lane cannot wait forever for a response
+                                    // to a command that never crossed the
+                                    // write boundary.
+                                    reads = FuturesUnordered::new();
+                                }
+                            }
                         }
                         Err((id, error)) => {
                             if let EngineError::Transport(transport) = &error {

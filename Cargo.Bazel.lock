@@ -1,5 +1,5 @@
 {
-  "checksum": "33f215f38a5c5b82acc79aba4e7aad48c3926c9ef084564ca3b59dac24c149c1",
+  "checksum": "520107721df1bb53dd25687f2c7430c106dae29db800a378c0ff32476b669669",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -8064,6 +8064,10 @@
             {
               "id": "snmalloc-rs 0.7.4",
               "target": "snmalloc_rs"
+            },
+            {
+              "id": "tokio-rustls 0.26.4",
+              "target": "tokio_rustls"
             },
             {
               "id": "tracing-subscriber 0.3.23",
@@ -25943,6 +25947,58 @@
       ],
       "license_file": "LICENSE"
     },
+    "tokio-rustls 0.26.4": {
+      "name": "tokio-rustls",
+      "version": "0.26.4",
+      "package_url": "https://github.com/rustls/tokio-rustls",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/tokio-rustls/0.26.4/download",
+          "sha256": "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "tokio_rustls",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "tokio_rustls",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "rustls 0.23.43",
+              "target": "rustls"
+            },
+            {
+              "id": "tokio 1.53.1",
+              "target": "tokio"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.26.4"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "toml 1.1.4+spec-1.1.0": {
       "name": "toml",
       "version": "1.1.4+spec-1.1.0",
@@ -32109,6 +32165,7 @@
     "tikv-jemallocator 0.7.0",
     "time 0.3.54",
     "tokio 1.53.1",
+    "tokio-rustls 0.26.4",
     "toml 1.1.4+spec-1.1.0",
     "tracing 0.1.44",
     "tracing-subscriber 0.3.23",
