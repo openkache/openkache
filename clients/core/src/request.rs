@@ -33,7 +33,13 @@ pub(crate) struct RequestContext {
 pub(crate) trait RequestBuilder: Sized {
     fn context(&self) -> RequestContext;
 
-    fn into_frame(self) -> Result<OwnedRequestFrame>;
+    /// Encodes one attempt with the correlation token reserved by the
+    /// request engine.
+    ///
+    /// The token is part of the frame header, rather than adapter metadata,
+    /// so a transport can preserve the exact bytes sent on the wire and a
+    /// response can be dispatched without relying on lane ordering.
+    fn into_frame(self, request_id: u64) -> Result<OwnedRequestFrame>;
 }
 
 /// Retry state retaining one encoded frame only when another attempt is possible.
@@ -43,10 +49,10 @@ pub(crate) enum RequestAttempts<R> {
 }
 
 impl<R: RequestBuilder> RequestAttempts<R> {
-    pub(crate) fn new(request: R, replayable: bool) -> Result<Self> {
+    pub(crate) fn new(request: R, replayable: bool, request_id: u64) -> Result<Self> {
         if replayable {
             request
-                .into_frame()
+                .into_frame(request_id)
                 .map(|frame| Self::Replay(Some(Arc::new(frame))))
         } else {
             Ok(Self::Once(Some(request)))

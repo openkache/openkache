@@ -14,10 +14,12 @@ mod protected;
 mod protection;
 mod protocol;
 mod request;
+mod request_engine;
 mod transport;
 pub mod value;
 pub mod value_envelope;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -48,6 +50,11 @@ pub use protection::DataProtection;
 pub use protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
     NamespacePolicy, OverridePolicy, ProtocolError, SetCondition,
+};
+pub use request_engine::{
+    BytePermit, EngineError, InFlightByteBudget, RequestAdmission, RequestBytes, RequestEngine,
+    RequestHandle, RequestKind, RequestMetadata, ResponseBytes, TransportConnection,
+    TransportError, TransportKind, TransportLane,
 };
 pub use value::ItemValue;
 
@@ -397,6 +404,15 @@ struct Core<C: ClientConnection> {
     namespace_name: Vec<u8>,
     namespace_policy: NamespacePolicy,
     state: AtomicU32,
+    next_request_id: AtomicU64,
+    pending: futures_util::lock::Mutex<HashMap<u64, PendingEntry>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingEntry {
+    operation: Operation,
+    mutation: bool,
+    transmitted: bool,
 }
 
 struct RequestFailure {
@@ -482,6 +498,8 @@ impl<C: ClientConnection> Core<C> {
             namespace_name,
             namespace_policy,
             state: AtomicU32::new(ConnectionState::Connected.code()),
+            next_request_id: AtomicU64::new(0),
+            pending: futures_util::lock::Mutex::new(HashMap::new()),
         };
         Ok(core)
     }
@@ -662,20 +680,31 @@ impl<C: ClientConnection> Core<C> {
             self.reconnect_before(deadline).await?;
         }
         let context = request.context();
+        let response_safe = context.retry_policy.is_safe();
+        let request_id = self
+            .reserve_request_id(context.operation, !response_safe)
+            .await?;
         let (success_statuses, error_statuses) = {
             let wire = operation_wire_spec(context.opcode);
             (wire.success_statuses, wire.error_statuses)
         };
-        let response_safe = context.retry_policy.is_safe();
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
             1
         };
-        let mut attempts = RequestAttempts::new(request, response_safe && max_attempts > 1)?;
+        let mut attempts =
+            RequestAttempts::new(request, response_safe && max_attempts > 1, request_id)?;
         for attempt in 1..=max_attempts {
-            let connection = self.current_connection()?;
+            let connection = match self.current_connection() {
+                Ok(connection) => connection,
+                Err(error) => {
+                    self.complete_request(request_id).await;
+                    return Err(error);
+                }
+            };
             let Some(attempt_request) = attempts.next(attempt == max_attempts) else {
+                self.complete_request(request_id).await;
                 return Err(Error::Connection(
                     "request retry state was exhausted before the final attempt".into(),
                 ));
@@ -685,6 +714,7 @@ impl<C: ClientConnection> Core<C> {
                     &connection,
                     attempt_request,
                     context,
+                    request_id,
                     success_statuses,
                     error_statuses,
                     &mut decode,
@@ -692,7 +722,10 @@ impl<C: ClientConnection> Core<C> {
                 )
                 .await
             {
-                Ok(result) => return result,
+                Ok(result) => {
+                    self.complete_request(request_id).await;
+                    return result;
+                }
                 Err(failure) => {
                     if failure.invalidates_connection {
                         self.mark_disconnected(&connection);
@@ -701,7 +734,9 @@ impl<C: ClientConnection> Core<C> {
                         self.reconnect_failed(&connection, deadline).await?;
                         continue;
                     }
-                    if !response_safe && failure.may_have_reached_server {
+                    let transmitted = self.pending_was_transmitted(request_id).await;
+                    self.complete_request(request_id).await;
+                    if !response_safe && (failure.may_have_reached_server || transmitted) {
                         return Err(Error::AmbiguousOutcome {
                             operation: context.operation,
                             cause: Box::new(failure.error),
@@ -714,6 +749,45 @@ impl<C: ClientConnection> Core<C> {
         Err(Error::Connection(
             "request retry policy did not permit an attempt".into(),
         ))
+    }
+
+    async fn reserve_request_id(&self, operation: Operation, mutation: bool) -> Result<u64> {
+        let mut pending = self.pending.lock().await;
+        for _ in 0..=u64::MAX {
+            let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+            if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(request_id) {
+                entry.insert(PendingEntry {
+                    operation,
+                    mutation,
+                    transmitted: false,
+                });
+                return Ok(request_id);
+            }
+        }
+        Err(Error::Connection(
+            "request correlation table is exhausted".into(),
+        ))
+    }
+
+    async fn mark_transmitted(&self, request_id: u64) {
+        if let Some(entry) = self.pending.lock().await.get_mut(&request_id) {
+            entry.transmitted = true;
+        }
+    }
+
+    async fn pending_was_transmitted(&self, request_id: u64) -> bool {
+        self.pending
+            .lock()
+            .await
+            .get(&request_id)
+            .is_some_and(|entry| {
+                let _ = (entry.operation, entry.mutation);
+                entry.transmitted
+            })
+    }
+
+    async fn complete_request(&self, request_id: u64) {
+        self.pending.lock().await.remove(&request_id);
     }
 
     fn selected_namespace_id(&self) -> Result<u64> {
@@ -882,6 +956,7 @@ impl<C: ClientConnection> Core<C> {
         connection: &C,
         request: PendingRequest<R>,
         context: RequestContext,
+        request_id: u64,
         success_statuses: &'static [Status],
         error_statuses: &'static [Status],
         decode: &mut impl FnMut(Response) -> Result<T>,
@@ -895,9 +970,11 @@ impl<C: ClientConnection> Core<C> {
             .await
             .map_err(RequestFailure::before_send)?;
         let request = match request {
-            PendingRequest::Once(request) => {
-                RequestAttempt::Once(request.into_frame().map_err(RequestFailure::before_send)?)
-            }
+            PendingRequest::Once(request) => RequestAttempt::Once(
+                request
+                    .into_frame(request_id)
+                    .map_err(RequestFailure::before_send)?,
+            ),
             PendingRequest::Replay(parts) => RequestAttempt::Replay(parts),
         };
         let write_timeout = deadline
@@ -907,6 +984,7 @@ impl<C: ClientConnection> Core<C> {
             .write_request(request, write_timeout)
             .await
             .map_err(RequestFailure::after_send)?;
+        self.mark_transmitted(request_id).await;
         let parts = stream
             .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
             .await
@@ -915,6 +993,15 @@ impl<C: ClientConnection> Core<C> {
             .into_response()
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
+        if response.request_id != request_id {
+            return Err(RequestFailure::after_response(Error::UnexpectedResponse {
+                operation: context.operation,
+                message: format!(
+                    "response request ID {} does not match request ID {request_id}",
+                    response.request_id
+                ),
+            }));
+        }
         if error_statuses.contains(&response.status) {
             // A server may reject a request before consuming its complete frame
             // and close the lane. Retiring every confirmed error lane is safe.

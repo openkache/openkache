@@ -861,13 +861,7 @@ fn append_head(major: u8, length: usize, output: &mut Vec<u8>, limits: Limits) -
 }
 
 fn encode_integer(integer: &Integer, output: &mut Vec<u8>, limits: Limits) -> Result<()> {
-    if integer.magnitude.len() > limits.max_integer_bytes {
-        return Err(resource(
-            Resource::IntegerBytes,
-            limits.max_integer_bytes,
-            integer.magnitude.len(),
-        ));
-    }
+    validate_integer_magnitude(integer, limits)?;
     let magnitude = if integer.negative {
         integer.negative_cbor_magnitude()
     } else {
@@ -889,6 +883,17 @@ fn encode_integer(integer: &Integer, output: &mut Vec<u8>, limits: Limits) -> Re
         append_head(6, if integer.negative { 3 } else { 2 }, output, limits)?;
         append_head(2, magnitude.len(), output, limits)?;
         push_bytes(output, &magnitude, limits)?;
+    }
+    Ok(())
+}
+
+fn validate_integer_magnitude(integer: &Integer, limits: Limits) -> Result<()> {
+    if integer.magnitude.len() > limits.max_integer_bytes {
+        return Err(resource(
+            Resource::IntegerBytes,
+            limits.max_integer_bytes,
+            integer.magnitude.len(),
+        ));
     }
     Ok(())
 }
@@ -1174,6 +1179,7 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
                 let magnitude = (argument as u128) + 1;
                 Integer::from_sign_and_magnitude(true, magnitude.to_be_bytes())
             };
+            validate_integer_magnitude(&integer, limits)?;
             Ok(ParsedItem::Value(Value::Integer(integer)))
         }
         2 | 3 => {

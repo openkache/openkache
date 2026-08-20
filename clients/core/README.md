@@ -129,6 +129,23 @@ surface.
 requires an explicit certificate server name because the network destination
 does not provide one.
 
+## Request-engine migration
+
+The core exposes a transport-neutral `RequestEngine` for multiplexed lanes.
+Callers reserve an ID and one aggregate request/response byte permit with
+`admit`, encode that ID through the generated request codec, and submit the
+resulting opaque frame. `RequestHandle` dispatches a response by echoed request
+ID, validates the operation's generated status set, retains exact
+request/response bytes, and distinguishes local rejection, transport failure,
+and unknown mutation outcomes. Transport adapters implement `TransportLane`
+and may advertise QUIC or TLS-over-TCP through `TransportConnection`; the
+engine does not decode server values or impose a value representation.
+
+Existing convenience clients remain source-compatible during this migration.
+New adapters should use the engine boundary rather than assuming one request
+per lane or response order, and should call `shutdown`/`drain` exactly once
+when owning a connection lifecycle.
+
 ## Core components
 
 - `src/lib.rs` provides raw lifecycle, retries, operations, and versioned

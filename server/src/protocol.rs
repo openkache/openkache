@@ -139,6 +139,8 @@ pub enum ProtocolError {
     VaruintOverflow { context: &'static str },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("item ID has {actual} bytes; maximum is {maximum}")]
+    InvalidItemIdLength { maximum: usize, actual: usize },
     #[error("request packed byte at offset {offset} violates its bit contract")]
     InvalidRequestPackedBits { offset: usize },
     #[error("request constant does not match at offset {offset}")]
@@ -188,8 +190,8 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
             }
-            openkache_protocol::ProtocolError::InvalidItemIdLength { .. } => {
-                Self::InvalidFieldSequence("item ID length is outside the supported range")
+            openkache_protocol::ProtocolError::InvalidItemIdLength { maximum, actual } => {
+                Self::InvalidItemIdLength { maximum, actual }
             }
             openkache_protocol::ProtocolError::InvalidRequestPackedBits { offset } => {
                 Self::InvalidRequestPackedBits { offset }
