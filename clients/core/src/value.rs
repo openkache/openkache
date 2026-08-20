@@ -1031,35 +1031,67 @@ impl ValueCodec {
                 size: envelope_prefix,
                 maximum: self.limits.max_envelope_bytes,
             })?;
-        let (transformed, compression_id, _transformed_permit) = compress_if_beneficial(
+        let (mut transformed, mut compression_id, mut transformed_permit) = compress_if_beneficial(
             payload,
             self.compression,
             &self.limits,
             self.budget(),
             max_body_bytes,
         )?;
-        let selector = make_selector(
+        let mut selector = make_selector(
             self.encryption.selector_id(),
             compression_id,
             payload_format,
         )?;
-        let aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
-        let encoded_length = VERSION_BYTES
-            .len()
-            .checked_add(envelope_prefix - VERSION_BYTES.len())
-            .and_then(|length| length.checked_add(transformed.len()))
-            .ok_or(Error::ResourceLimit {
-                resource: Resource::EnvelopeBytes,
-                limit: self.limits.max_envelope_bytes,
-                actual: usize::MAX,
-            })?;
+        let mut aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
+        let encoded_size = |body_length: usize| {
+            envelope_prefix
+                .checked_add(body_length)
+                .ok_or(Error::ResourceLimit {
+                    resource: Resource::EnvelopeBytes,
+                    limit: self.limits.max_envelope_bytes,
+                    actual: usize::MAX,
+                })
+        };
+        let mut encoded_length = encoded_size(transformed.len())?;
         if encoded_length > self.limits.max_envelope_bytes {
             return Err(Error::EncodedValueTooLarge {
                 size: encoded_length,
                 maximum: self.limits.max_envelope_bytes,
             });
         }
-        let _encoded_permit = self.reserve(encoded_length, Resource::EnvelopeBytes)?;
+        let _encoded_permit = match self.reserve(encoded_length, Resource::EnvelopeBytes) {
+            Ok(permit) => permit,
+            Err(compressed_error) if compression_id == COMPRESSION_ZSTANDARD => {
+                // Compression is only an optimization. Drop the temporary
+                // frame and its reservation before retrying the raw body so
+                // the fallback observes the true aggregate budget.
+                drop(transformed);
+                drop(transformed_permit.take());
+                let (raw, raw_compression, raw_permit) =
+                    raw_payload(payload, &self.limits, self.budget(), max_body_bytes)?;
+                transformed = raw;
+                compression_id = raw_compression;
+                transformed_permit = raw_permit;
+                selector = make_selector(
+                    self.encryption.selector_id(),
+                    compression_id,
+                    payload_format,
+                )?;
+                aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
+                encoded_length = encoded_size(transformed.len())?;
+                if encoded_length > self.limits.max_envelope_bytes {
+                    return Err(Error::EncodedValueTooLarge {
+                        size: encoded_length,
+                        maximum: self.limits.max_envelope_bytes,
+                    });
+                }
+                self.reserve(encoded_length, Resource::EnvelopeBytes)
+                    .map_err(|_| compressed_error)?
+            }
+            Err(error) => return Err(error),
+        };
+        let _transformed_permit = transformed_permit;
         let body = match self.encryption {
             Encryption::Unprotected => transformed,
             Encryption::Compact => self.encrypt_compact(
