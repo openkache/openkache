@@ -1,10 +1,28 @@
 # OpenKache Namespace Lifecycle (WIP Draft)
 
-> **Status:** Work in progress. This feature is not part of stable protocol v1,
-> has no assigned stable opcodes, and is not an implementation requirement.
+> **Status:** Namespace lifecycle/management is work in progress. It is not part
+> of stable protocol v1, has no assigned stable opcodes, and is not an
+> implementation requirement. Stable data operations still require the
+> server-assigned namespace ID and namespace-policy semantics defined by
+> `SPEC.md`.
 
 Stable v1 data operations carry a server-assigned `namespace_id`. This document
 preserves the proposed lifecycle design for later revision.
+
+The Smithy model currently retains `NamespaceOpen`,
+`NamespaceUpdatePolicy`, and `NamespaceDelete` as `outOfBand` operations so
+private or control-plane adapters can describe the draft shapes. They do not
+reserve stable v1 opcodes or statuses. The current Rust server keeps
+compatibility registrations for these shapes so legacy/control-plane callers
+can reach them on the data lane, but that route is transitional and does not
+constitute stable-v1 conformance. Their transitional error lists and response
+names must not be used to validate a stable v1 frame. A future namespace API
+must first receive an explicit assignment in [`SPEC.md`](SPEC.md) before the
+Smithy operations can become stable wire-visible. The model's
+`NamespaceDescriptor.revision` and
+`NamespaceUpdatePolicy.expectedRevision` are legacy optimistic-concurrency
+fields for that out-of-band shape; they do not revise the proposed immutable
+policy or namespace-replacement rules below.
 
 ## Open questions
 
@@ -59,3 +77,7 @@ Namespace policy is immutable for the lifetime of a namespace in v1. A policy
 change, if supported later, creates a new namespace identity rather than
 changing the meaning of existing items. This section records design intent
 only; it does not reserve opcodes, statuses, or a finalized frame layout.
+In particular, the Smithy `NamespaceUpdatePolicy` shape is a WIP control-plane
+proposal. Its revision fields are non-normative until a future lifecycle
+proposal resolves whether policy changes replace a namespace, and it does not
+change that stable-v1 rule.

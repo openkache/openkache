@@ -38,9 +38,11 @@ Version 1 specifies:
 
 `STATS` and `EXPERIMENTAL_SYNC` are experimental operations. They are not part
 of the stable v1 operation conformance surface. A server MAY enable them with
-an `enable_experimental_api` server setting. Their current contracts are
-documented separately in [`EXPERIMENTAL.md`](EXPERIMENTAL.md). An implementation
-that does not enable the setting treats their opcodes as unassigned.
+an `enable_experimental_api` server setting, but only when the client and
+server have coordinated the exact experimental revision documented in
+[`EXPERIMENTAL.md`](EXPERIMENTAL.md). An implementation that does not enable
+the setting, or that has not coordinated that exact revision, treats their
+opcodes as unassigned.
 
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
@@ -179,10 +181,11 @@ The ALPN negotiation selects the connection's frame version. Frames contain no
 version field. Once v1 negotiation succeeds, every OpenKache frame on the
 connection uses this specification. During the pre-freeze draft period,
 implementations using the provisional `openkache/1` identifier coordinate the
-active draft revision out of band. An implementation claiming this revision
-MUST NOT use an older common-header layout. The draft deliberately keeps
-`openkache/1`; after v1 is finalized, an incompatible framing or field meaning
-requires a different ALPN identifier.
+active draft revision out of band; no frame field or ALPN value selects an
+experimental revision. An implementation claiming this revision MUST NOT use
+an older common-header layout. The draft deliberately keeps `openkache/1`;
+after v1 is finalized, an incompatible framing or field meaning requires a
+different ALPN identifier.
 
 Peers without a common ALPN identifier MUST fail negotiation.
 
@@ -327,7 +330,7 @@ retry or deduplicate an earlier request.
 If a receiver detects malformed framing, it MUST stop processing the affected
 connection. On QUIC it closes the connection with application error code
 `0x01` (`MALFORMED_FRAME`). On TLS-over-TCP it closes the TLS/TCP connection
-without an error response. The receiver MUST NOT scan for a possible next frame. A
+without an error response. The receiver MUST NOT scan for a possible next frame.
 A complete request frame whose fields are well-delimited but fail operation
 validation is not malformed framing; it MUST receive the applicable error
 response once the server has consumed the frame and can preserve the next
@@ -490,13 +493,17 @@ encode its `item_id_len` and then exactly that many Item ID bytes.
 or shorter encoding.
 
 Opcodes `05` and `06` are not stable v1 operations. A server with
-`enable_experimental_api` may recognize their current experimental layouts.
-Otherwise they are unassigned and malformed. See
+`enable_experimental_api` may recognize their current experimental layouts only
+when the client and server have coordinated the exact experimental revision.
+Otherwise they are unassigned and malformed. The public
+`EXPERIMENTAL_SYNC` name corresponds to the transitional Smithy operation
+`Sync` and enum text `sync`; this is a naming distinction only. See
 [`EXPERIMENTAL.md`](EXPERIMENTAL.md).
 
-Every opcode not assigned above or enabled by that experimental setting is
-unassigned. A server receiving one MUST terminate the connection without a
-response and MUST NOT scan for a possible next frame.
+Every opcode not assigned above or enabled by both that experimental setting
+and the coordinated revision is unassigned. A server receiving one MUST
+terminate the connection without a response and MUST NOT scan for a possible
+next frame.
 
 ### Opcodes
 
@@ -509,11 +516,23 @@ response and MUST NOT scan for a possible next frame.
 | `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 length(itemId) + itemId | empty | — | — |
 <!-- openkache:generated-protocol-operation-table:end -->
 
+In the `SET` row, `vu128 length(value)` is the length prefix for the trailing
+`value:value_len` body. The complete byte order is the grammar above: the value
+body follows the optional TTL and Item ID.
+
 During this pre-freeze migration, this document is the source of truth and the
 machine-readable model may lag. After migration, the model will own stable
 assignments, field order, wire widths, and generated constants; this document
 will continue to own semantic and rejection rules. A release conformance check
 MUST fail when the finalized model and table differ.
+
+The transitional Smithy model also retains legacy status/opcode members (some
+used by private adapters): `Accepted`, `UnsupportedOpcode`, `Timeout`,
+`Conflict`, `NamespaceNotEmpty`, `NamespaceOpen`, `NamespaceUpdatePolicy`, and
+`NamespaceDelete`. These members, along with transitional operation error
+lists, are not assignments in this draft; stable-v1 senders and receivers MUST
+follow the tables above. Raw generated enum decoding is not a substitute for
+stable-v1 validation.
 
 ### `SET` flags
 
@@ -788,9 +807,10 @@ For `SET` or `DELETE`, an error response MUST guarantee that the mutation did
 not take effect. Otherwise the server MUST close the connection without an
 error response, leaving the operation outcome unknown.
 
-## Response contract by request
+## Stable-v1 response contract by request
 
-For a valid request, the following are the domain success and result statuses:
+For a valid stable-v1 request, the following are the domain success and result
+statuses:
 
 | Request | Allowed domain statuses | Payload |
 |---|---|---|
@@ -799,7 +819,8 @@ For a valid request, the following are the domain success and result statuses:
 | `SET` | `Created`, `Replaced`, `NotStored` | Always empty |
 | `DELETE` | `Deleted`, `NotFound` | Always empty |
 
-Common error statuses MAY be returned only when their stated condition applies:
+For stable-v1 requests, common error statuses MAY be returned only when their
+stated condition applies:
 
 | Status | Applicable requests |
 |---|---|
@@ -811,6 +832,12 @@ Common error statuses MAY be returned only when their stated condition applies:
 | `NoCapacity` | `SET` that cannot be admitted without evicting protected items |
 | `PolicyConflict` | `SET` that selects a disallowed item-policy override |
 | `NamespaceNotFound` | `GET`, `SET`, or `DELETE` addressing a missing namespace |
+
+The experimental operations in [`EXPERIMENTAL.md`](EXPERIMENTAL.md) have their
+own status applicability. In particular, an authorized `STATS` or
+`EXPERIMENTAL_SYNC` request for a missing namespace MUST return
+`NamespaceNotFound`; that experimental exception does not add a stable-v1
+operation or status assignment.
 
 The effect guarantees are:
 
