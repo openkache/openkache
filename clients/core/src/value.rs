@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::mem::size_of;
+use std::mem::{ManuallyDrop, size_of};
 use std::sync::{Arc, OnceLock};
 
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
@@ -47,6 +47,11 @@ pub const MAX_EXPANDED_PAYLOAD_BYTES: usize = 67_108_864;
 pub const MAX_ZSTD_WINDOW_BYTES: usize = 67_108_864;
 /// Maximum canonical unsigned-64-bit `vu128` width used by this profile.
 pub const MAX_VU128_BYTES: usize = 9;
+/// Maximum nesting policy accepted by compatibility JSON and StructuredValue
+/// conversions.  Keeping this independent from caller-provided limits prevents
+/// an unbounded depth setting from reintroducing recursive parser/serializer
+/// work at an FFI boundary.
+pub const MAX_VALUE_DEPTH: usize = openkache_value::DEFAULT_MAX_DEPTH;
 /// Number of bytes in an AES-256-GCM-SIV nonce.
 pub const GCM_SIV_NONCE_BYTES: usize = 12;
 /// Number of bytes in an AEAD authentication tag.
@@ -169,7 +174,7 @@ impl From<ItemValue> for Vec<u8> {
 }
 
 /// Common logical JSON value retained as a compatibility adapter.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum JsonValue {
     /// JSON `null`.
     Null,
@@ -183,6 +188,92 @@ pub enum JsonValue {
     Array(Vec<Self>),
     /// Object entries with unique names.
     Object(Vec<(String, Self)>),
+}
+
+impl Clone for JsonValue {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Visit(&'a JsonValue),
+            Array(usize),
+            Object(&'a [(String, JsonValue)]),
+        }
+
+        let mut tasks = Vec::new();
+        let mut values = Vec::new();
+        tasks.push(Task::Visit(self));
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(value) => match value {
+                    JsonValue::Null => values.push(JsonValue::Null),
+                    JsonValue::Boolean(value) => values.push(JsonValue::Boolean(*value)),
+                    JsonValue::Number(value) => values.push(JsonValue::Number(*value)),
+                    JsonValue::String(value) => values.push(JsonValue::String(value.clone())),
+                    JsonValue::Array(children) => {
+                        tasks.push(Task::Array(children.len()));
+                        for child in children.iter().rev() {
+                            tasks.push(Task::Visit(child));
+                        }
+                    }
+                    JsonValue::Object(entries) => {
+                        tasks.push(Task::Object(entries));
+                        for (_, child) in entries.iter().rev() {
+                            tasks.push(Task::Visit(child));
+                        }
+                    }
+                },
+                Task::Array(length) => {
+                    let start = values
+                        .len()
+                        .checked_sub(length)
+                        .expect("every array child was cloned before its parent");
+                    let children: Vec<_> = values.drain(start..).collect();
+                    values.push(JsonValue::Array(children));
+                }
+                Task::Object(entries) => {
+                    let start = values
+                        .len()
+                        .checked_sub(entries.len())
+                        .expect("every object child was cloned before its parent");
+                    let children: Vec<_> = values.drain(start..).collect();
+                    let entries = entries
+                        .iter()
+                        .zip(children)
+                        .map(|((key, _), value)| (key.clone(), value))
+                        .collect();
+                    values.push(JsonValue::Object(entries));
+                }
+            }
+        }
+        values
+            .pop()
+            .expect("the root JSON value always produces one clone")
+    }
+}
+
+impl Drop for JsonValue {
+    fn drop(&mut self) {
+        let root = std::mem::replace(self, Self::Null);
+        let mut pending = vec![root];
+        while let Some(value) = pending.pop() {
+            let mut value = ManuallyDrop::new(value);
+            // SAFETY: each container is emptied before its shell is forgotten,
+            // so no nested JsonValue destructor can recurse on this stack.
+            unsafe {
+                match &mut *value {
+                    Self::Array(children) => pending.extend(std::mem::take(children)),
+                    Self::Object(entries) => {
+                        for (key, child) in std::mem::take(entries) {
+                            drop(key);
+                            pending.push(child);
+                        }
+                    }
+                    Self::String(value) => std::ptr::drop_in_place(value),
+                    Self::Null | Self::Boolean(_) | Self::Number(_) => {}
+                }
+                std::mem::forget(value);
+            }
+        }
+    }
 }
 
 impl JsonValue {
@@ -1633,6 +1724,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Parse one complete JSON input for compatibility adapters.
 #[allow(dead_code)]
 pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
+    let budget = RequestBudget::new(MAX_EXPANDED_PAYLOAD_BYTES);
+    parse_json_input_with_budget(payload, &budget)
+}
+
+pub(crate) fn parse_json_input_with_budget(
+    payload: &[u8],
+    budget: &RequestBudget,
+) -> Result<JsonValue> {
     if payload.len() > MAX_EXPANDED_PAYLOAD_BYTES {
         return Err(Error::ResourceLimit {
             resource: Resource::ExpandedPayloadBytes,
@@ -1640,15 +1739,56 @@ pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
             actual: payload.len(),
         });
     }
-    validate_json_integer_tokens(payload)?;
+    let limits = ValueLimits::default();
+    let _input_permit = reserve_budget(
+        budget,
+        payload.len(),
+        &limits,
+        Resource::ExpandedPayloadBytes,
+    )?;
+    validate_json_nesting(payload, limits.max_depth)?;
     let mut deserializer = serde_json::Deserializer::from_slice(payload);
     let value = JsonValue::deserialize(&mut deserializer)
         .map_err(|error| Error::InvalidJson(error.to_string()))?;
     deserializer
         .end()
         .map_err(|error| Error::InvalidJson(error.to_string()))?;
+    drop(_input_permit);
+    validate_json_integer_tokens(payload, budget)?;
     validate_json(&value)?;
     Ok(value)
+}
+
+fn validate_json_nesting(payload: &[u8], maximum: usize) -> Result<()> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in payload {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| structured_depth(maximum, usize::MAX))?;
+                if depth > maximum {
+                    return Err(structured_depth(maximum, depth));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
@@ -1665,7 +1805,7 @@ fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
     Ok(JsonValue::Number(value))
 }
 
-fn validate_json_integer_tokens(payload: &[u8]) -> Result<()> {
+fn validate_json_integer_tokens(payload: &[u8], budget: &RequestBudget) -> Result<()> {
     let mut in_string = false;
     let mut index = 0;
     while index < payload.len() {
@@ -1695,7 +1835,7 @@ fn validate_json_integer_tokens(payload: &[u8]) -> Result<()> {
                 }
                 index += 1;
             }
-            validate_json_number_token(&payload[start..index])?;
+            validate_json_number_token(&payload[start..index], budget)?;
             continue;
         }
         index += 1;
@@ -1703,7 +1843,7 @@ fn validate_json_integer_tokens(payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_json_number_token(token: &[u8]) -> Result<()> {
+fn validate_json_number_token(token: &[u8], budget: &RequestBudget) -> Result<()> {
     let Ok(token) = std::str::from_utf8(token) else {
         return Ok(());
     };
@@ -1718,11 +1858,17 @@ fn validate_json_number_token(token: &[u8]) -> Result<()> {
             "JSON numbers must be finite IEEE-754 values".into(),
         ));
     }
-    let Some(expected) = integer_token(token) else {
+    let Some((negative, expected)) = integer_token(token) else {
         return Ok(());
     };
-    let actual = normalize_integer_string(&format!("{value:.0}"));
-    if actual != expected {
+    let _permit = reserve_budget(
+        budget,
+        token.len().saturating_add(32),
+        &ValueLimits::default(),
+        Resource::StructuredValue,
+    )?;
+    let actual = format!("{value:.0}");
+    if !normalized_integer_matches(&actual, negative, expected) {
         return Err(Error::InvalidJson(
             "JSON integers must be exactly representable as IEEE-754 binary64 values".into(),
         ));
@@ -1730,7 +1876,7 @@ fn validate_json_number_token(token: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn integer_token(token: &str) -> Option<String> {
+fn integer_token(token: &str) -> Option<(bool, &str)> {
     let (negative, token) = token
         .strip_prefix('-')
         .map_or((false, token), |token| (true, token));
@@ -1739,26 +1885,17 @@ fn integer_token(token: &str) -> Option<String> {
     }
     let digits = token.trim_start_matches('0');
     if digits.is_empty() {
-        return Some("0".to_owned());
+        return Some((false, "0"));
     }
-    let mut normalized = digits.to_owned();
-    if negative {
-        normalized.insert(0, '-');
-    }
-    Some(normalized)
+    Some((negative, digits))
 }
 
-fn normalize_integer_string(value: &str) -> String {
+fn normalized_integer_matches(value: &str, expected_negative: bool, expected: &str) -> bool {
     let negative = value.starts_with('-');
     let digits = value.strip_prefix('-').unwrap_or(value);
     let digits = digits.trim_start_matches('0');
-    if digits.is_empty() {
-        "0".to_owned()
-    } else if negative {
-        format!("-{digits}")
-    } else {
-        digits.to_owned()
-    }
+    let digits = if digits.is_empty() { "0" } else { digits };
+    negative == expected_negative && digits == expected
 }
 
 #[allow(dead_code)]
@@ -1835,31 +1972,104 @@ fn validate_json_limits(
     limits: ValueLimits,
     budget: &RequestBudget,
 ) -> Result<()> {
-    fn visit(
-        value: &JsonValue,
-        depth: usize,
-        item_count: &mut usize,
-        pending_items: &mut usize,
-        limits: ValueLimits,
+    enum Frame<'a> {
+        Array {
+            values: &'a [JsonValue],
+            next: usize,
+            depth: usize,
+            _permit: BytePermit,
+        },
+        Object {
+            entries: &'a [(String, JsonValue)],
+            next: usize,
+            depth: usize,
+            _permit: BytePermit,
+        },
+    }
+
+    fn push_frame<'a>(
+        stack: &mut Vec<Frame<'a>>,
+        frame: Frame<'a>,
         budget: &RequestBudget,
+        limits: ValueLimits,
     ) -> Result<()> {
-        *pending_items = pending_items
+        // Reserve the frame's logical slot before allowing Vec to grow.  The
+        // permit lives with the frame and is released as soon as that level
+        // has been fully visited.
+        let permit = reserve_budget(
+            budget,
+            size_of::<Frame<'_>>(),
+            &limits,
+            Resource::StructuredValue,
+        )?;
+        stack
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        match frame {
+            Frame::Array {
+                values,
+                next,
+                depth,
+                ..
+            } => stack.push(Frame::Array {
+                values,
+                next,
+                depth,
+                _permit: permit,
+            }),
+            Frame::Object {
+                entries,
+                next,
+                depth,
+                ..
+            } => stack.push(Frame::Object {
+                entries,
+                next,
+                depth,
+                _permit: permit,
+            }),
+        }
+        Ok(())
+    }
+
+    let mut stack = Vec::new();
+    let mut current = Some((value, 0usize));
+    let mut item_count = 0usize;
+    let mut pending_items = 1usize;
+    while let Some((value, depth)) = current.take() {
+        pending_items = pending_items
             .checked_sub(1)
             .expect("the root or a declared child is always pending");
-        *item_count = item_count
+        item_count = item_count
             .checked_add(1)
             .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
-        if *item_count > limits.max_items {
-            return Err(structured_resource(limits.max_items, *item_count));
+        if item_count > limits.max_items {
+            return Err(structured_resource(limits.max_items, item_count));
         }
         match value {
             JsonValue::Array(values) => {
                 if depth >= limits.max_depth {
                     return Err(structured_depth(limits.max_depth, depth + 1));
                 }
-                add_json_pending_items(pending_items, values.len(), *item_count, limits.max_items)?;
-                for value in values {
-                    visit(value, depth + 1, item_count, pending_items, limits, budget)?;
+                add_json_pending_items(
+                    &mut pending_items,
+                    values.len(),
+                    item_count,
+                    limits.max_items,
+                )?;
+                if let Some(child) = values.first() {
+                    push_frame(
+                        &mut stack,
+                        Frame::Array {
+                            values,
+                            next: 1,
+                            depth,
+                            _permit: reserve_budget(budget, 0, &limits, Resource::StructuredValue)?,
+                        },
+                        budget,
+                        limits,
+                    )?;
+                    current = Some((child, depth + 1));
                 }
             }
             JsonValue::Object(entries) => {
@@ -1871,18 +2081,37 @@ fn validate_json_limits(
                     .len()
                     .checked_mul(2)
                     .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
-                add_json_pending_items(pending_items, child_count, *item_count, limits.max_items)?;
-                for (_, value) in entries {
-                    *pending_items = pending_items
+                add_json_pending_items(
+                    &mut pending_items,
+                    child_count,
+                    item_count,
+                    limits.max_items,
+                )?;
+                if let Some((_, child)) = entries.first() {
+                    // Consume the first object's key before descending into
+                    // its value; keys count as model items for compatibility
+                    // with the StructuredValue map budget.
+                    pending_items = pending_items
                         .checked_sub(1)
                         .expect("the declared object key is always pending");
-                    *item_count = item_count
+                    item_count = item_count
                         .checked_add(1)
                         .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
-                    if *item_count > limits.max_items {
-                        return Err(structured_resource(limits.max_items, *item_count));
+                    if item_count > limits.max_items {
+                        return Err(structured_resource(limits.max_items, item_count));
                     }
-                    visit(value, depth + 1, item_count, pending_items, limits, budget)?;
+                    push_frame(
+                        &mut stack,
+                        Frame::Object {
+                            entries,
+                            next: 1,
+                            depth,
+                            _permit: reserve_budget(budget, 0, &limits, Resource::StructuredValue)?,
+                        },
+                        budget,
+                        limits,
+                    )?;
+                    current = Some((child, depth + 1));
                 }
             }
             JsonValue::Number(number) if !number.is_finite() => {
@@ -1892,19 +2121,48 @@ fn validate_json_limits(
             }
             _ => {}
         }
-        Ok(())
-    }
 
-    let mut item_count = 0usize;
-    let mut pending_items = 1usize;
-    visit(
-        value,
-        0,
-        &mut item_count,
-        &mut pending_items,
-        limits,
-        budget,
-    )
+        while current.is_none() {
+            let Some(frame) = stack.last_mut() else {
+                break;
+            };
+            match frame {
+                Frame::Array {
+                    values,
+                    next,
+                    depth,
+                    ..
+                } if *next < values.len() => {
+                    let child = &values[*next];
+                    *next += 1;
+                    current = Some((child, *depth + 1));
+                }
+                Frame::Object {
+                    entries,
+                    next,
+                    depth,
+                    ..
+                } if *next < entries.len() => {
+                    let (_, child) = &entries[*next];
+                    *next += 1;
+                    pending_items = pending_items
+                        .checked_sub(1)
+                        .expect("the declared object key is always pending");
+                    item_count = item_count
+                        .checked_add(1)
+                        .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
+                    if item_count > limits.max_items {
+                        return Err(structured_resource(limits.max_items, item_count));
+                    }
+                    current = Some((child, *depth + 1));
+                }
+                _ => {
+                    stack.pop();
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn add_json_pending_items(
@@ -1962,6 +2220,32 @@ impl JsonAllocation<'_> {
         owned.push_str(value);
         Ok(owned)
     }
+
+    fn push_structured(
+        &mut self,
+        values: &mut Vec<StructuredValue>,
+        value: StructuredValue,
+    ) -> Result<()> {
+        self.reserve(size_of::<StructuredValue>())?;
+        values.try_reserve(1).map_err(|_| Error::Allocation {
+            size: size_of::<StructuredValue>(),
+        })?;
+        values.push(value);
+        Ok(())
+    }
+
+    fn push_json(
+        &mut self,
+        values: &mut Vec<Option<JsonValue>>,
+        value: Option<JsonValue>,
+    ) -> Result<()> {
+        self.reserve(size_of::<Option<JsonValue>>())?;
+        values.try_reserve(1).map_err(|_| Error::Allocation {
+            size: size_of::<Option<JsonValue>>(),
+        })?;
+        values.push(value);
+        Ok(())
+    }
 }
 
 fn json_to_structured(
@@ -1969,49 +2253,13 @@ fn json_to_structured(
     limits: ValueLimits,
     budget: &RequestBudget,
 ) -> Result<(StructuredValue, Vec<BytePermit>)> {
-    fn convert(
-        value: &JsonValue,
-        depth: usize,
-        item_count: &mut usize,
-        limits: ValueLimits,
-        allocation: &mut JsonAllocation<'_>,
-    ) -> Result<StructuredValue> {
-        *item_count = item_count
-            .checked_add(1)
-            .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
-        if *item_count > limits.max_items {
-            return Err(structured_resource(limits.max_items, *item_count));
-        }
-        Ok(match value {
-            JsonValue::Null => StructuredValue::Null,
-            JsonValue::Boolean(value) => StructuredValue::Boolean(*value),
-            JsonValue::Number(value) => StructuredValue::Float64(value.to_bits()),
-            JsonValue::String(value) => {
-                StructuredValue::TextString(allocation.clone_string(value)?)
-            }
-            JsonValue::Array(values) => {
-                if depth >= limits.max_depth {
-                    return Err(structured_depth(limits.max_depth, depth + 1));
-                }
-                let mut converted = allocation.reserve_vec(values.len())?;
-                for value in values {
-                    converted.push(convert(value, depth + 1, item_count, limits, allocation)?);
-                }
-                StructuredValue::Array(converted)
-            }
-            JsonValue::Object(entries) => {
-                if depth >= limits.max_depth {
-                    return Err(structured_depth(limits.max_depth, depth + 1));
-                }
-                let mut converted = allocation.reserve_vec(entries.len())?;
-                for (key, value) in entries {
-                    let key = allocation.clone_string(key)?;
-                    let value = convert(value, depth + 1, item_count, limits, allocation)?;
-                    converted.push((StructuredValue::TextString(key), value));
-                }
-                StructuredValue::Map(converted)
-            }
-        })
+    enum Task<'a> {
+        Visit(&'a JsonValue, usize),
+        Array(Vec<StructuredValue>),
+        Object {
+            entries: &'a [(String, JsonValue)],
+            converted: Vec<(StructuredValue, StructuredValue)>,
+        },
     }
 
     let mut allocation = JsonAllocation {
@@ -2019,8 +2267,105 @@ fn json_to_structured(
         limits,
         permits: Vec::new(),
     };
+    let mut tasks = Vec::new();
+    let mut results = Vec::new();
+    allocation.reserve(size_of::<Task<'_>>())?;
+    tasks
+        .try_reserve_exact(1)
+        .map_err(|_| Error::Allocation { size: 1 })?;
+    tasks.push(Task::Visit(value, 0));
     let mut item_count = 0usize;
-    let value = convert(value, 0, &mut item_count, limits, &mut allocation)?;
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Visit(value, depth) => {
+                item_count = item_count
+                    .checked_add(1)
+                    .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
+                if item_count > limits.max_items {
+                    return Err(structured_resource(limits.max_items, item_count));
+                }
+                match value {
+                    JsonValue::Null => {
+                        allocation.push_structured(&mut results, StructuredValue::Null)?
+                    }
+                    JsonValue::Boolean(value) => allocation
+                        .push_structured(&mut results, StructuredValue::Boolean(*value))?,
+                    JsonValue::Number(value) => allocation
+                        .push_structured(&mut results, StructuredValue::Float64(value.to_bits()))?,
+                    JsonValue::String(value) => {
+                        let value = allocation.clone_string(value)?;
+                        allocation
+                            .push_structured(&mut results, StructuredValue::TextString(value))?
+                    }
+                    JsonValue::Array(values) => {
+                        if depth >= limits.max_depth {
+                            return Err(structured_depth(limits.max_depth, depth + 1));
+                        }
+                        let converted = allocation.reserve_vec(values.len())?;
+                        allocation.reserve(size_of::<Task<'_>>())?;
+                        tasks
+                            .try_reserve(values.len().saturating_add(1))
+                            .map_err(|_| Error::Allocation {
+                                size: values.len().saturating_add(1),
+                            })?;
+                        tasks.push(Task::Array(converted));
+                        for child in values.iter().rev() {
+                            allocation.reserve(size_of::<Task<'_>>())?;
+                            tasks.push(Task::Visit(child, depth + 1));
+                        }
+                    }
+                    JsonValue::Object(entries) => {
+                        if depth >= limits.max_depth {
+                            return Err(structured_depth(limits.max_depth, depth + 1));
+                        }
+                        let converted = allocation.reserve_vec(entries.len())?;
+                        allocation.reserve(size_of::<Task<'_>>())?;
+                        tasks
+                            .try_reserve(entries.len().saturating_add(1))
+                            .map_err(|_| Error::Allocation {
+                                size: entries.len().saturating_add(1),
+                            })?;
+                        tasks.push(Task::Object { entries, converted });
+                        for (_, child) in entries.iter().rev() {
+                            allocation.reserve(size_of::<Task<'_>>())?;
+                            tasks.push(Task::Visit(child, depth + 1));
+                        }
+                    }
+                }
+            }
+            Task::Array(mut converted) => {
+                let length = converted.capacity();
+                let start = results
+                    .len()
+                    .checked_sub(length)
+                    .expect("every array child was converted before its parent");
+                let children: Vec<_> = results.drain(start..).collect();
+                converted.extend(children);
+                allocation.push_structured(&mut results, StructuredValue::Array(converted))?;
+            }
+            Task::Object {
+                entries,
+                mut converted,
+            } => {
+                let length = converted.capacity();
+                let start = results
+                    .len()
+                    .checked_sub(length)
+                    .expect("every object child was converted before its parent");
+                let children: Vec<_> = results.drain(start..).collect();
+                for ((key, _), value) in entries.iter().zip(children) {
+                    converted.push((
+                        StructuredValue::TextString(allocation.clone_string(key)?),
+                        value,
+                    ));
+                }
+                allocation.push_structured(&mut results, StructuredValue::Map(converted))?;
+            }
+        }
+    }
+    let value = results
+        .pop()
+        .expect("the root JSON value always produces one structured value");
     Ok((value, allocation.permits))
 }
 
@@ -2029,58 +2374,13 @@ fn structured_to_json(
     limits: ValueLimits,
     budget: &RequestBudget,
 ) -> Result<(Option<JsonValue>, Vec<BytePermit>)> {
-    fn convert(
-        value: &StructuredValue,
-        depth: usize,
-        limits: ValueLimits,
-        allocation: &mut JsonAllocation<'_>,
-    ) -> Result<Option<JsonValue>> {
-        Ok(match value {
-            StructuredValue::Undefined => None,
-            StructuredValue::Null => Some(JsonValue::Null),
-            StructuredValue::Boolean(value) => Some(JsonValue::Boolean(*value)),
-            StructuredValue::Float16(bits) => Some(JsonValue::number(f16_to_f64(*bits))?),
-            StructuredValue::Float32(bits) => {
-                Some(JsonValue::number(f32::from_bits(*bits) as f64)?)
-            }
-            StructuredValue::Float64(bits) => Some(JsonValue::number(f64::from_bits(*bits))?),
-            StructuredValue::Integer(integer) => {
-                Some(JsonValue::number(integer_to_binary64(integer)?)?)
-            }
-            StructuredValue::TextString(value) => {
-                Some(JsonValue::String(allocation.clone_string(value)?))
-            }
-            StructuredValue::Bytes(_) => None,
-            StructuredValue::Array(values) => {
-                if depth >= limits.max_depth {
-                    return Err(structured_depth(limits.max_depth, depth + 1));
-                }
-                let mut converted = allocation.reserve_vec(values.len())?;
-                for value in values {
-                    converted.push(
-                        convert(value, depth + 1, limits, allocation)?
-                            .ok_or(Error::UnsupportedStructuredValue)?,
-                    );
-                }
-                Some(JsonValue::Array(converted))
-            }
-            StructuredValue::Map(entries) => {
-                if depth >= limits.max_depth {
-                    return Err(structured_depth(limits.max_depth, depth + 1));
-                }
-                let mut converted = allocation.reserve_vec(entries.len())?;
-                for (key, value) in entries {
-                    let StructuredValue::TextString(key) = key else {
-                        return Ok(None);
-                    };
-                    let key = allocation.clone_string(key)?;
-                    let value = convert(value, depth + 1, limits, allocation)?
-                        .ok_or(Error::UnsupportedStructuredValue)?;
-                    converted.push((key, value));
-                }
-                Some(JsonValue::Object(converted))
-            }
-        })
+    enum Task<'a> {
+        Visit(&'a StructuredValue, usize),
+        Array(Vec<JsonValue>),
+        Object {
+            entries: &'a [(StructuredValue, StructuredValue)],
+            converted: Vec<(String, JsonValue)>,
+        },
     }
 
     let mut allocation = JsonAllocation {
@@ -2088,7 +2388,123 @@ fn structured_to_json(
         limits,
         permits: Vec::new(),
     };
-    let value = convert(value, 0, limits, &mut allocation)?;
+    let mut tasks = Vec::new();
+    let mut results = Vec::new();
+    allocation.reserve(size_of::<Task<'_>>())?;
+    tasks
+        .try_reserve_exact(1)
+        .map_err(|_| Error::Allocation { size: 1 })?;
+    tasks.push(Task::Visit(value, 0));
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Visit(value, depth) => match value {
+                StructuredValue::Undefined | StructuredValue::Bytes(_) => {
+                    allocation.push_json(&mut results, None)?;
+                }
+                StructuredValue::Null => {
+                    allocation.push_json(&mut results, Some(JsonValue::Null))?
+                }
+                StructuredValue::Boolean(value) => {
+                    allocation.push_json(&mut results, Some(JsonValue::Boolean(*value)))?
+                }
+                StructuredValue::Float16(bits) => allocation
+                    .push_json(&mut results, Some(JsonValue::number(f16_to_f64(*bits))?))?,
+                StructuredValue::Float32(bits) => allocation.push_json(
+                    &mut results,
+                    Some(JsonValue::number(f32::from_bits(*bits) as f64)?),
+                )?,
+                StructuredValue::Float64(bits) => allocation.push_json(
+                    &mut results,
+                    Some(JsonValue::number(f64::from_bits(*bits))?),
+                )?,
+                StructuredValue::Integer(integer) => allocation.push_json(
+                    &mut results,
+                    Some(JsonValue::number(integer_to_binary64(integer)?)?),
+                )?,
+                StructuredValue::TextString(value) => {
+                    let value = allocation.clone_string(value)?;
+                    allocation.push_json(&mut results, Some(JsonValue::String(value)))?
+                }
+                StructuredValue::Array(values) => {
+                    if depth >= limits.max_depth {
+                        return Err(structured_depth(limits.max_depth, depth + 1));
+                    }
+                    let converted = allocation.reserve_vec(values.len())?;
+                    allocation.reserve(size_of::<Task<'_>>())?;
+                    tasks
+                        .try_reserve(values.len().saturating_add(1))
+                        .map_err(|_| Error::Allocation {
+                            size: values.len().saturating_add(1),
+                        })?;
+                    tasks.push(Task::Array(converted));
+                    for child in values.iter().rev() {
+                        allocation.reserve(size_of::<Task<'_>>())?;
+                        tasks.push(Task::Visit(child, depth + 1));
+                    }
+                }
+                StructuredValue::Map(entries) => {
+                    if depth >= limits.max_depth {
+                        return Err(structured_depth(limits.max_depth, depth + 1));
+                    }
+                    if entries
+                        .iter()
+                        .any(|(key, _)| !matches!(key, StructuredValue::TextString(_)))
+                    {
+                        allocation.push_json(&mut results, None)?;
+                        continue;
+                    }
+                    let converted = allocation.reserve_vec(entries.len())?;
+                    allocation.reserve(size_of::<Task<'_>>())?;
+                    tasks
+                        .try_reserve(entries.len().saturating_add(1))
+                        .map_err(|_| Error::Allocation {
+                            size: entries.len().saturating_add(1),
+                        })?;
+                    tasks.push(Task::Object { entries, converted });
+                    for (_, child) in entries.iter().rev() {
+                        allocation.reserve(size_of::<Task<'_>>())?;
+                        tasks.push(Task::Visit(child, depth + 1));
+                    }
+                }
+            },
+            Task::Array(mut converted) => {
+                let length = converted.capacity();
+                let start = results
+                    .len()
+                    .checked_sub(length)
+                    .expect("every array child was converted before its parent");
+                let children: Vec<_> = results.drain(start..).collect();
+                for child in children {
+                    converted.push(child.ok_or(Error::UnsupportedStructuredValue)?);
+                }
+                allocation.push_json(&mut results, Some(JsonValue::Array(converted)))?;
+            }
+            Task::Object {
+                entries,
+                mut converted,
+            } => {
+                let length = converted.capacity();
+                let start = results
+                    .len()
+                    .checked_sub(length)
+                    .expect("every object child was converted before its parent");
+                let children: Vec<_> = results.drain(start..).collect();
+                for ((key, _), child) in entries.iter().zip(children) {
+                    let StructuredValue::TextString(key) = key else {
+                        return Ok((None, allocation.permits));
+                    };
+                    converted.push((
+                        allocation.clone_string(key)?,
+                        child.ok_or(Error::UnsupportedStructuredValue)?,
+                    ));
+                }
+                allocation.push_json(&mut results, Some(JsonValue::Object(converted)))?;
+            }
+        }
+    }
+    let value = results
+        .pop()
+        .expect("the root structured value always produces one result");
     Ok((value, allocation.permits))
 }
 
@@ -2214,10 +2630,12 @@ fn validate_item_id(item_id: &[u8]) -> Result<()> {
 }
 
 fn validate_limits(limits: ValueLimits) -> Result<()> {
+    if limits.max_depth == 0 || limits.max_depth > MAX_VALUE_DEPTH {
+        return Err(structured_resource(MAX_VALUE_DEPTH, limits.max_depth));
+    }
     if limits.max_envelope_bytes == 0
         || limits.max_expanded_payload_bytes == 0
         || limits.max_zstd_window_bytes == 0
-        || limits.max_depth == 0
         || limits.max_items == 0
         || limits.max_integer_bytes == 0
         || limits.max_in_flight_bytes == 0

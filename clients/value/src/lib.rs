@@ -15,6 +15,11 @@ use std::str::FromStr;
 pub const MAX_VALUE_BYTES: usize = 67_108_864;
 /// Default maximum nesting depth for a value.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
+/// Absolute maximum nesting depth accepted by the bounded codec.
+///
+/// The codec traverses iteratively, but callers must not be able to turn a
+/// configuration knob into an effectively unbounded worklist or destructor.
+pub const MAX_ALLOWED_DEPTH: usize = 1_000_000;
 /// Default maximum number of model nodes in one value.
 pub const DEFAULT_MAX_ITEMS: usize = 1_000_000;
 /// Default maximum bignum magnitude size.
@@ -79,18 +84,36 @@ impl Integer {
     /// Leading zero bytes are removed. An empty or all-zero magnitude is
     /// normalized to positive zero.
     pub fn from_sign_and_magnitude(negative: bool, magnitude: impl AsRef<[u8]>) -> Self {
+        Self::try_from_sign_and_magnitude(negative, magnitude)
+            .expect("integer magnitude allocation failed")
+    }
+
+    /// Fallibly constructs an integer from a sign and big-endian magnitude.
+    ///
+    /// Leading zero bytes are removed. An empty or all-zero magnitude is
+    /// normalized to positive zero.
+    pub fn try_from_sign_and_magnitude(
+        negative: bool,
+        magnitude: impl AsRef<[u8]>,
+    ) -> Result<Self> {
         let bytes = magnitude.as_ref();
         let first = bytes
             .iter()
             .position(|byte| *byte != 0)
             .unwrap_or(bytes.len());
         if first == bytes.len() {
-            return Self::zero();
+            return Ok(Self::zero());
         }
-        Self {
+        let bytes = &bytes[first..];
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| Error::Allocation { size: bytes.len() })?;
+        owned.extend_from_slice(bytes);
+        Ok(Self {
             negative,
-            magnitude: bytes[first..].to_vec(),
-        }
+            magnitude: owned,
+        })
     }
 
     fn from_owned_sign_and_magnitude(negative: bool, mut magnitude: Vec<u8>) -> Self {
@@ -367,7 +390,7 @@ impl From<u128> for Integer {
 }
 
 /// A logical value in the cross-language model.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Value {
     /// A language-level undefined value.
     Undefined,
@@ -391,6 +414,80 @@ pub enum Value {
     Array(Vec<Value>),
     /// Ordered key/value entries. Keys must be scalar and unique by model equality.
     Map(Vec<(Value, Value)>),
+}
+
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Visit(&'a Value),
+            Array(usize),
+            Map(usize),
+        }
+
+        let mut tasks = Vec::new();
+        let mut values = Vec::new();
+        tasks.push(Task::Visit(self));
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(value) => match value {
+                    Value::Undefined => values.push(Value::Undefined),
+                    Value::Null => values.push(Value::Null),
+                    Value::Boolean(value) => values.push(Value::Boolean(*value)),
+                    Value::Integer(value) => values.push(Value::Integer(value.clone())),
+                    Value::Float16(value) => values.push(Value::Float16(*value)),
+                    Value::Float32(value) => values.push(Value::Float32(*value)),
+                    Value::Float64(value) => values.push(Value::Float64(*value)),
+                    Value::TextString(value) => values.push(Value::TextString(value.clone())),
+                    Value::Bytes(value) => values.push(Value::Bytes(value.clone())),
+                    Value::Array(children) => {
+                        tasks.push(Task::Array(children.len()));
+                        for child in children.iter().rev() {
+                            tasks.push(Task::Visit(child));
+                        }
+                    }
+                    Value::Map(entries) => {
+                        tasks.push(Task::Map(entries.len()));
+                        for (key, value) in entries.iter().rev() {
+                            tasks.push(Task::Visit(value));
+                            tasks.push(Task::Visit(key));
+                        }
+                    }
+                },
+                Task::Array(length) => {
+                    let start = values
+                        .len()
+                        .checked_sub(length)
+                        .expect("every array child was cloned before its parent");
+                    let children: Vec<_> = values.drain(start..).collect();
+                    values.push(Value::Array(children));
+                }
+                Task::Map(length) => {
+                    let child_count = length
+                        .checked_mul(2)
+                        .expect("map clone child count fits in memory");
+                    let start = values
+                        .len()
+                        .checked_sub(child_count)
+                        .expect("every map child was cloned before its parent");
+                    let children: Vec<_> = values.drain(start..).collect();
+                    let mut entries = Vec::new();
+                    entries
+                        .try_reserve_exact(length)
+                        .expect("map clone allocation failed");
+                    let mut children = children.into_iter();
+                    for _ in 0..length {
+                        let key = children.next().expect("map key clone is present");
+                        let value = children.next().expect("map value clone is present");
+                        entries.push((key, value));
+                    }
+                    values.push(Value::Map(entries));
+                }
+            }
+        }
+        values
+            .pop()
+            .expect("the root structured value always produces one clone")
+    }
 }
 
 impl Drop for Value {
@@ -970,6 +1067,13 @@ fn validate_limits(limits: Limits) -> Result<()> {
     if limits.max_depth == 0 {
         return Err(resource(Resource::Depth, 1, 0));
     }
+    if limits.max_depth > MAX_ALLOWED_DEPTH {
+        return Err(resource(
+            Resource::Depth,
+            MAX_ALLOWED_DEPTH,
+            limits.max_depth,
+        ));
+    }
     if limits.max_items == 0 {
         return Err(resource(Resource::Items, 1, 0));
     }
@@ -1522,12 +1626,25 @@ fn parse_item(
                     (u128::BITS as usize - magnitude.leading_zeros() as usize).div_ceil(8)
                 },
             )?;
-            let integer = if major == 0 {
-                Integer::from_u128(argument as u128)
+            let magnitude = if major == 0 {
+                argument as u128
             } else {
-                let magnitude = (argument as u128) + 1;
-                Integer::from_sign_and_magnitude(true, magnitude.to_be_bytes())
+                (argument as u128) + 1
             };
+            let magnitude_bytes = magnitude.to_be_bytes();
+            let first_nonzero = magnitude_bytes
+                .iter()
+                .position(|byte| *byte != 0)
+                .unwrap_or(magnitude_bytes.len());
+            let magnitude_bytes = &magnitude_bytes[first_nonzero..];
+            let mut owned_magnitude = Vec::new();
+            owned_magnitude
+                .try_reserve_exact(magnitude_bytes.len())
+                .map_err(|_| Error::Allocation {
+                    size: magnitude_bytes.len(),
+                })?;
+            owned_magnitude.extend_from_slice(magnitude_bytes);
+            let integer = Integer::from_owned_sign_and_magnitude(major == 1, owned_magnitude);
             validate_integer_magnitude(&integer, limits)?;
             Ok(ParsedItem::Value(Value::Integer(integer)))
         }

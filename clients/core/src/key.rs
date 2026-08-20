@@ -95,10 +95,17 @@ impl PortableInteger {
             .iter()
             .position(|byte| *byte != 0)
             .unwrap_or(magnitude.len());
-        let magnitude = magnitude[first_nonzero..].to_vec();
+        let magnitude = &magnitude[first_nonzero..];
+        let mut owned_magnitude = Vec::new();
+        owned_magnitude
+            .try_reserve_exact(magnitude.len())
+            .map_err(|_| KeyError::Allocation {
+                size: magnitude.len(),
+            })?;
+        owned_magnitude.extend_from_slice(magnitude);
         Ok(Self {
-            negative: negative && !magnitude.is_empty(),
-            magnitude,
+            negative: negative && !owned_magnitude.is_empty(),
+            magnitude: owned_magnitude,
         })
     }
 
@@ -112,26 +119,27 @@ impl PortableInteger {
         &self.magnitude
     }
 
-    fn cbor_bytes(&self, output: &mut Vec<u8>) {
+    fn cbor_bytes(&self, output: &mut Vec<u8>) -> std::result::Result<(), KeyError> {
         if !self.negative {
             if let Some(value) = as_u64(&self.magnitude) {
-                encode_argument(output, 0, value);
+                encode_argument(output, 0, value)?;
             } else {
-                output.push(0xc2);
-                encode_argument(output, 2, self.magnitude.len() as u64);
-                output.extend_from_slice(&self.magnitude);
+                push_bytes(output, &[0xc2])?;
+                encode_argument(output, 2, self.magnitude.len() as u64)?;
+                push_bytes(output, &self.magnitude)?;
             }
-            return;
+            return Ok(());
         }
 
-        let transformed = subtract_one(&self.magnitude);
+        let transformed = subtract_one(&self.magnitude)?;
         if let Some(value) = as_u64(&transformed) {
-            encode_argument(output, 1, value);
+            encode_argument(output, 1, value)?;
         } else {
-            output.push(0xc3);
-            encode_argument(output, 2, transformed.len() as u64);
-            output.extend_from_slice(&transformed);
+            push_bytes(output, &[0xc3])?;
+            encode_argument(output, 2, transformed.len() as u64)?;
+            push_bytes(output, &transformed)?;
         }
+        Ok(())
     }
 }
 
@@ -198,16 +206,20 @@ impl PortableKey {
 
     /// Encodes this key using deterministic CBOR preferred serialization.
     pub fn canonical_bytes(&self) -> std::result::Result<Vec<u8>, KeyError> {
-        let mut output = Vec::with_capacity(self.estimated_cbor_size());
+        let mut output = Vec::new();
+        let reserve_hint = self.estimated_cbor_size().min(MAX_CANONICAL_KEY_BYTES);
+        output
+            .try_reserve_exact(reserve_hint)
+            .map_err(|_| KeyError::Allocation { size: reserve_hint })?;
         match self {
-            Self::Integer(value) => value.cbor_bytes(&mut output),
+            Self::Integer(value) => value.cbor_bytes(&mut output)?,
             Self::Text(value) => {
-                encode_argument(&mut output, 3, value.len() as u64);
-                output.extend_from_slice(value.as_bytes());
+                encode_argument(&mut output, 3, value.len() as u64)?;
+                push_bytes(&mut output, value.as_bytes())?;
             }
             Self::Bytes(value) => {
-                encode_argument(&mut output, 2, value.len() as u64);
-                output.extend_from_slice(value);
+                encode_argument(&mut output, 2, value.len() as u64)?;
+                push_bytes(&mut output, value)?;
             }
         }
         if output.len() > MAX_CANONICAL_KEY_BYTES {
@@ -299,24 +311,42 @@ impl<const N: usize> From<&[u8; N]> for PortableKey {
 impl_signed_integer!(i8, i16, i32, i64, i128, isize);
 impl_unsigned_integer!(u8, u16, u32, u64, u128, usize);
 
-fn encode_argument(output: &mut Vec<u8>, major: u8, value: u64) {
+fn encode_argument(
+    output: &mut Vec<u8>,
+    major: u8,
+    value: u64,
+) -> std::result::Result<(), KeyError> {
     debug_assert!(major <= 7);
     let prefix = major << 5;
     if value <= 23 {
-        output.push(prefix | value as u8);
+        push_bytes(output, &[prefix | value as u8])?;
     } else if value <= u8::MAX as u64 {
-        output.push(prefix | 24);
-        output.push(value as u8);
+        push_bytes(output, &[prefix | 24, value as u8])?;
     } else if value <= u16::MAX as u64 {
-        output.push(prefix | 25);
-        output.extend_from_slice(&(value as u16).to_be_bytes());
+        let mut bytes = [0_u8; 3];
+        bytes[0] = prefix | 25;
+        bytes[1..].copy_from_slice(&(value as u16).to_be_bytes());
+        push_bytes(output, &bytes)?;
     } else if value <= u32::MAX as u64 {
-        output.push(prefix | 26);
-        output.extend_from_slice(&(value as u32).to_be_bytes());
+        let mut bytes = [0_u8; 5];
+        bytes[0] = prefix | 26;
+        bytes[1..].copy_from_slice(&(value as u32).to_be_bytes());
+        push_bytes(output, &bytes)?;
     } else {
-        output.push(prefix | 27);
-        output.extend_from_slice(&value.to_be_bytes());
+        let mut bytes = [0_u8; 9];
+        bytes[0] = prefix | 27;
+        bytes[1..].copy_from_slice(&value.to_be_bytes());
+        push_bytes(output, &bytes)?;
     }
+    Ok(())
+}
+
+fn push_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> std::result::Result<(), KeyError> {
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| KeyError::Allocation { size: bytes.len() })?;
+    output.extend_from_slice(bytes);
+    Ok(())
 }
 
 fn as_u64(magnitude: &[u8]) -> Option<u64> {
@@ -330,9 +360,15 @@ fn as_u64(magnitude: &[u8]) -> Option<u64> {
     Some(value)
 }
 
-fn subtract_one(magnitude: &[u8]) -> Vec<u8> {
+fn subtract_one(magnitude: &[u8]) -> std::result::Result<Vec<u8>, KeyError> {
     debug_assert!(!magnitude.is_empty());
-    let mut output = magnitude.to_vec();
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(magnitude.len())
+        .map_err(|_| KeyError::Allocation {
+            size: magnitude.len(),
+        })?;
+    output.extend_from_slice(magnitude);
     for byte in output.iter_mut().rev() {
         if *byte != 0 {
             *byte -= 1;
@@ -344,11 +380,20 @@ fn subtract_one(magnitude: &[u8]) -> Vec<u8> {
         .iter()
         .position(|byte| *byte != 0)
         .unwrap_or(output.len());
-    output[first_nonzero..].to_vec()
+    if first_nonzero != 0 {
+        output.drain(..first_nonzero);
+    }
+    Ok(output)
 }
 
 fn add_one(magnitude: &[u8]) -> std::result::Result<Vec<u8>, KeyError> {
-    let mut output = magnitude.to_vec();
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(magnitude.len())
+        .map_err(|_| KeyError::Allocation {
+            size: magnitude.len(),
+        })?;
+    output.extend_from_slice(magnitude);
     if output.is_empty() {
         return Err(KeyError::NonCanonical);
     }
@@ -359,6 +404,9 @@ fn add_one(magnitude: &[u8]) -> std::result::Result<Vec<u8>, KeyError> {
         }
         *byte = 0;
     }
+    output
+        .try_reserve_exact(1)
+        .map_err(|_| KeyError::Allocation { size: 1 })?;
     output.insert(0, 1);
     Ok(output)
 }
@@ -469,7 +517,13 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_bytes(&mut self, length: u64) -> std::result::Result<Vec<u8>, KeyError> {
-        Ok(self.read_borrowed_bytes(length)?.to_vec())
+        let bytes = self.read_borrowed_bytes(length)?;
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| KeyError::Allocation { size: bytes.len() })?;
+        owned.extend_from_slice(bytes);
+        Ok(owned)
     }
 
     fn validate_key(&mut self) -> std::result::Result<KeySpec, KeyError> {
@@ -600,6 +654,12 @@ pub(crate) fn validate_canonical_key(
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum KeyError {
+    /// An owned key representation could not reserve its bounded storage.
+    #[error("failed to allocate {size} bytes for the canonical key")]
+    Allocation {
+        /// Requested bytes.
+        size: usize,
+    },
     /// A key exceeded the common SDK size limit.
     #[error("canonical key is too large: {size} bytes exceeds {maximum}")]
     TooLarge {

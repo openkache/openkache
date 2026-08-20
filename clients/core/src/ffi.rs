@@ -4,6 +4,7 @@
 //! other native bindings only marshal buffers and interpret result discriminators; connection
 //! management, retries, protocol framing, and value protection remain in this crate.
 
+use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
@@ -32,6 +33,7 @@ pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
+use crate::transport::{BytePermit, RequestBudget};
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
@@ -46,6 +48,8 @@ pub struct FfiResult {
     kind: FfiResultKind,
     payload: Vec<u8>,
     client: Option<Box<FfiClient>>,
+    #[allow(dead_code)]
+    budget_permits: Vec<BytePermit>,
 }
 
 /// Native connection options passed by C and C++ bindings.
@@ -164,6 +168,7 @@ impl FfiResult {
             kind: FfiResultKind::Error,
             payload: message.into().into_bytes(),
             client: None,
+            budget_permits: Vec::new(),
         }
     }
 
@@ -172,6 +177,20 @@ impl FfiResult {
             kind,
             payload,
             client: None,
+            budget_permits: Vec::new(),
+        }
+    }
+
+    fn success_with_permits(
+        kind: FfiResultKind,
+        payload: Vec<u8>,
+        budget_permits: Vec<BytePermit>,
+    ) -> Self {
+        Self {
+            kind,
+            payload,
+            client: None,
+            budget_permits,
         }
     }
 
@@ -180,6 +199,7 @@ impl FfiResult {
             kind: FfiResultKind::Connected,
             payload: Vec::new(),
             client: Some(Box::new(client)),
+            budget_permits: Vec::new(),
         }
     }
 }
@@ -621,12 +641,12 @@ async fn execute_protected(
         FfiOperation::GetJson => client
             .get_canonical_key_unchecked(canonical_key.as_slice())
             .await
-            .and_then(json_result),
+            .and_then(|value| json_result(value, &client.raw().request_budget())),
         FfiOperation::Set => client
             .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
             .map(set_result),
-        FfiOperation::SetJson => match parse_json(&value) {
+        FfiOperation::SetJson => match parse_json(&value, &client.raw().request_budget()) {
             Ok(json) => client
                 .set_canonical_key_unchecked(
                     canonical_key.as_slice(),
@@ -891,18 +911,68 @@ fn set_result(outcome: SetOutcome) -> FfiResult {
     )
 }
 
-fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, crate::Error> {
+fn json_result(
+    outcome: GetOutcome<Value>,
+    budget: &RequestBudget,
+) -> std::result::Result<FfiResult, crate::Error> {
     match outcome {
-        GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
+        GetOutcome::Found(Value::Json(value)) => {
+            let mut writer = BudgetedJsonWriter::new(budget);
+            serde_json_canonicalizer::to_writer(&value, &mut writer)
+                .map_err(|error| crate::value::Error::InvalidJson(error.to_string()))?;
+            let (payload, permits) = writer.finish();
+            Ok(FfiResult::success_with_permits(
+                FfiResultKind::Value,
+                payload,
+                permits,
+            ))
+        }
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
-fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
-    crate::value::parse_json_input(bytes).map_err(|error| error.to_string())
+fn parse_json(bytes: &[u8], budget: &RequestBudget) -> std::result::Result<JsonValue, String> {
+    crate::value::parse_json_input_with_budget(bytes, budget).map_err(|error| error.to_string())
+}
+
+struct BudgetedJsonWriter {
+    budget: RequestBudget,
+    payload: Vec<u8>,
+    permits: Vec<BytePermit>,
+}
+
+impl BudgetedJsonWriter {
+    fn new(budget: &RequestBudget) -> Self {
+        Self {
+            budget: budget.clone(),
+            payload: Vec::new(),
+            permits: Vec::new(),
+        }
+    }
+
+    fn finish(self) -> (Vec<u8>, Vec<BytePermit>) {
+        (self.payload, self.permits)
+    }
+}
+
+impl Write for BudgetedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let permit = self
+            .budget
+            .try_reserve(bytes.len())
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+        self.payload
+            .try_reserve_exact(bytes.len())
+            .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error.to_string()))?;
+        self.payload.extend_from_slice(bytes);
+        self.permits.push(permit);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Returns the native ABI version implemented by this library.
