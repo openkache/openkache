@@ -6,7 +6,7 @@ use openkache_protocol::request_fields::{
 };
 use openkache_protocol::{
     ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, Opcode, OwnedRequestFrame, WireSegment,
-    encode_request_frame, wire_request_layout,
+    encode_request_frame_with_id, wire_request_layout,
 };
 
 use crate::Operation;
@@ -226,7 +226,7 @@ impl RequestBuilder for OperationRequest {
         self.context
     }
 
-    fn into_frame(self) -> crate::Result<OwnedRequestFrame> {
+    fn into_frame(self, request_id: u64) -> crate::Result<OwnedRequestFrame> {
         let layout = wire_request_layout(self.context.opcode);
         if self
             .fields
@@ -239,7 +239,8 @@ impl RequestBuilder for OperationRequest {
                 ),
             ));
         }
-        encode_request_frame(
+        encode_request_frame_with_id(
+            request_id,
             self.context.opcode,
             layout,
             self.fields.into_iter().take(layout.field_count),

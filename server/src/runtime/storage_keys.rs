@@ -9,6 +9,7 @@ use crate::StorageKey;
 pub(crate) const DOMAIN_V2_CONTEXT: &str = "OpenKache StorageKey DomainV2 root";
 pub(crate) const INTERNAL_STORAGE_DOMAIN_ID: u64 = 0;
 pub(crate) const SCOPED_STORAGE_ADDRESS_TAG: &[u8] = b"\xffSK\x01";
+pub(crate) const ITEM_ID_STORAGE_SCOPE: &[u8] = b"OpenKache Item ID v1";
 const STORAGE_KEY_DIGEST_START: usize = 8;
 
 pub(crate) fn derive_domain_key(server_secret: &[u8; 32]) -> [u8; 32] {
