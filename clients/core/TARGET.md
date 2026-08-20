@@ -52,5 +52,5 @@ cryptographic, compression, and decoding work.
 - [Client implementation guide](../CLIENT.md)
 - [Key format](../KEY_FORMAT.md)
 - [Value format](../VALUE_FORMAT.md)
-- [Value security](../VALUE_SECURITY.md)
+- [Security model](../../SECURITY_MODEL.md)
 - [Wire protocol](../../protocol/SPEC.md)
