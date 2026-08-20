@@ -1108,15 +1108,20 @@ func smithyDecodeOptionalUTF8(value *[]byte) *string {
 `
     : ""
   const compatibility_helpers = `${item_id_helpers}${optional_values_helpers}`
+  const imports = [
+    "	\"context\"",
+    f64_array_helpers.length > 0 || optional_values_helpers.length > 0
+      ? "	\"encoding/binary\""
+      : "",
+    item_id_helpers.length > 0 ? "	\"fmt\"" : "",
+    f64_array_helpers.length > 0 ? "	\"math\"" : "",
+  ].filter((entry) => entry.length > 0).join("\n")
   return `// Code generated from the OpenKache Smithy client contract. DO NOT EDIT.
 
 package openkache
 
 import (
-	"context"
-	"encoding/binary"
-${compatibility_helpers.length > 0 ? '\t"fmt"\n' : ""}
-	"math"
+${imports}
 )
 
 ${methods}
