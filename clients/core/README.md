@@ -36,8 +36,8 @@ adapter depends on this core directly.
   native mappings, and the initial codec profile.
 - The [value-format specification](../VALUE_FORMAT.md) defines the formatted
   value envelope and compression.
-- The [value security profiles](../VALUE_SECURITY.md) define the value-key
-  schedule, AAD, and cryptographic constructions.
+- The [security model](../../SECURITY_MODEL.md) defines the threat model,
+  value-key schedule, AAD, and cryptographic constructions.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
   operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
@@ -100,7 +100,7 @@ complete.
 
 `ValueCodec` composes the value model with the formatted-value envelope. The
 value model owns structured-value semantics, the value format owns envelope
-and compression bytes, and the value security profiles own protection. Neither
+and compression bytes, and the security model owns protection. Neither
 the wire protocol nor the server parses these client-owned formats.
 
 Use `ProtectedClient` when the core should derive the item ID and transform

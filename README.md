@@ -68,7 +68,8 @@ so moving ciphertext to another cache item or namespace fails authentication.
 Protected clients hide typed application keys behind namespace-bound BLAKE3
 item IDs. The server observes
 deterministic item IDs and encoded sizes, but not application keys or value
-plaintext.
+plaintext. The complete threat model and protection matrix are documented in
+[`SECURITY_MODEL.md`](SECURITY_MODEL.md).
 
 The value-format design is pre-freeze. This branch implements the
 namespace-bound key conversion and Item ID derivation; migration of the
