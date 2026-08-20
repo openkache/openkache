@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
@@ -669,8 +670,11 @@ impl ValueCodec {
             Value::Raw(bytes) => self.seal_opaque_in_namespace(namespace_id, item_id, &bytes),
             Value::Json(value) => {
                 validate_json(&value)?;
-                let structured = json_to_structured(&value)?;
-                self.seal_structured_in_namespace(namespace_id, item_id, &structured)
+                let mut model_permits = Vec::new();
+                let structured = json_to_structured(&value, self, &mut model_permits)?;
+                let result = self.seal_structured_in_namespace(namespace_id, item_id, &structured);
+                drop(model_permits);
+                result
             }
         }
     }
@@ -751,12 +755,13 @@ impl ValueCodec {
         item_id: ItemId,
         value: &StructuredValue,
     ) -> Result<ItemValue> {
-        let (payload, _structured_permits) = self.encode_structured_payload(value)?;
-        self.encode_payload(
+        let (payload, payload_permit) = self.encode_structured_payload(value)?;
+        self.encode_payload_owned(
             namespace_id,
             item_id.as_bytes(),
             PAYLOAD_STRUCTURED_CBOR_V1,
-            &payload,
+            payload,
+            payload_permit,
         )
     }
 
@@ -767,8 +772,14 @@ impl ValueCodec {
         item_id: &[u8],
         value: &StructuredValue,
     ) -> Result<ItemValue> {
-        let (payload, _structured_permits) = self.encode_structured_payload(value)?;
-        self.encode_payload(namespace_id, item_id, PAYLOAD_STRUCTURED_CBOR_V1, &payload)
+        let (payload, payload_permit) = self.encode_structured_payload(value)?;
+        self.encode_payload_owned(
+            namespace_id,
+            item_id,
+            PAYLOAD_STRUCTURED_CBOR_V1,
+            payload,
+            payload_permit,
+        )
     }
 
     /// Decode a compatibility logical value.
@@ -789,7 +800,8 @@ impl ValueCodec {
             PAYLOAD_STRUCTURED_CBOR_V1 => {
                 let (structured, _structured_permits) =
                     self.decode_structured_payload(&decoded.payload)?;
-                structured_to_json(&structured)?
+                let mut model_permits = Vec::new();
+                structured_to_json(&structured, self, &mut model_permits)?
                     .map(Value::Json)
                     .ok_or_else(|| Error::UnsupportedStructuredValue)
             }
@@ -880,16 +892,13 @@ impl ValueCodec {
         Ok(structured)
     }
 
-    fn encode_structured_payload(
-        &self,
-        value: &StructuredValue,
-    ) -> Result<(Vec<u8>, Vec<BytePermit>)> {
-        let mut permits = Vec::new();
+    fn encode_structured_payload(&self, value: &StructuredValue) -> Result<(Vec<u8>, BytePermit)> {
+        let mut temporary_permits = Vec::new();
         let mut reserve = |size: usize| {
             let Ok(permit) = self.reserve(size, Resource::StructuredValue) else {
                 return false;
             };
-            permits.push(permit);
+            temporary_permits.push(permit);
             true
         };
         let payload = encode_with_limits_and_budget(
@@ -899,7 +908,13 @@ impl ValueCodec {
             &mut reserve,
         )
         .map_err(Error::Structured)?;
-        Ok((payload, permits))
+        // The callback accounts all temporary encoder work cumulatively. Once
+        // encoding has completed only the returned CBOR bytes remain live;
+        // retain one exact permit for that output rather than carrying every
+        // historical callback reservation into envelope encoding.
+        drop(temporary_permits);
+        let payload_permit = self.reserve(payload.len(), Resource::StructuredValue)?;
+        Ok((payload, payload_permit))
     }
 
     fn decode_structured_payload(
@@ -907,7 +922,6 @@ impl ValueCodec {
         payload: &[u8],
     ) -> Result<(StructuredValue, Vec<BytePermit>)> {
         let mut permits = Vec::new();
-        permits.push(self.reserve(payload.len(), Resource::StructuredValue)?);
         let mut reserve = |size: usize| {
             let Ok(permit) = self.reserve(size, Resource::StructuredValue) else {
                 return false;
@@ -951,13 +965,51 @@ impl ValueCodec {
         payload_format: u8,
         payload: &[u8],
     ) -> Result<ItemValue> {
+        self.encode_payload_input(
+            namespace_id,
+            item_id,
+            payload_format,
+            PayloadInput::Borrowed(payload),
+        )
+    }
+
+    fn encode_payload_owned(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        payload_format: u8,
+        payload: Vec<u8>,
+        payload_permit: BytePermit,
+    ) -> Result<ItemValue> {
+        self.encode_payload_input(
+            namespace_id,
+            item_id,
+            payload_format,
+            PayloadInput::Owned {
+                bytes: payload,
+                permit: payload_permit,
+            },
+        )
+    }
+
+    fn encode_payload_input(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        payload_format: u8,
+        input: PayloadInput<'_>,
+    ) -> Result<ItemValue> {
         validate_namespace(namespace_id)?;
         validate_item_id(item_id)?;
-        if payload.len() > self.limits.max_expanded_payload_bytes {
+        let payload_len = match &input {
+            PayloadInput::Borrowed(payload) => payload.len(),
+            PayloadInput::Owned { bytes, .. } => bytes.len(),
+        };
+        if payload_len > self.limits.max_expanded_payload_bytes {
             return Err(Error::ResourceLimit {
                 resource: Resource::ExpandedPayloadBytes,
                 limit: self.limits.max_expanded_payload_bytes,
-                actual: payload.len(),
+                actual: payload_len,
             });
         }
         let key_id = if self.encryption == Encryption::Unprotected {
@@ -994,13 +1046,23 @@ impl ValueCodec {
                 size: envelope_prefix,
                 maximum: self.limits.max_envelope_bytes,
             })?;
-        let (transformed, compression_id, _transformed_permit) = compress_if_beneficial(
-            payload,
-            self.compression,
-            &self.limits,
-            self.budget(),
-            max_body_bytes,
-        )?;
+        let (transformed, compression_id, _transformed_permit) = match input {
+            PayloadInput::Borrowed(payload) => compress_if_beneficial(
+                payload,
+                self.compression,
+                &self.limits,
+                self.budget(),
+                max_body_bytes,
+            )?,
+            PayloadInput::Owned { bytes, permit } => compress_owned(
+                bytes,
+                permit,
+                self.compression,
+                &self.limits,
+                self.budget(),
+                max_body_bytes,
+            )?,
+        };
         let selector = make_selector(
             self.encryption.selector_id(),
             compression_id,
@@ -1129,20 +1191,6 @@ impl ValueCodec {
         }
         encoded.drain(..offset);
         let body = encoded;
-        let decrypted_permit = match protection {
-            Encryption::Unprotected => None,
-            Encryption::Compact => Some(self.reserve(
-                body.len().saturating_sub(SIV_SYNTHETIC_IV_BYTES),
-                Resource::ExpandedPayloadBytes,
-            )?),
-            Encryption::Robust => Some(
-                self.reserve(
-                    body.len()
-                        .saturating_sub(GCM_SIV_NONCE_BYTES + AUTH_TAG_BYTES),
-                    Resource::ExpandedPayloadBytes,
-                )?,
-            ),
-        };
         let transformed = match protection {
             Encryption::Unprotected => body,
             Encryption::Compact => {
@@ -1189,7 +1237,6 @@ impl ValueCodec {
             payload,
             _response_permit: response_permit,
             _envelope_permit: envelope_permit,
-            _decrypted_permit: decrypted_permit,
             _payload_permit: payload_permit,
         })
     }
@@ -1360,8 +1407,12 @@ struct DecodedPayload {
     payload: Vec<u8>,
     _response_permit: Option<Arc<BytePermit>>,
     _envelope_permit: Option<BytePermit>,
-    _decrypted_permit: Option<BytePermit>,
     _payload_permit: Option<BytePermit>,
+}
+
+enum PayloadInput<'a> {
+    Borrowed(&'a [u8]),
+    Owned { bytes: Vec<u8>, permit: BytePermit },
 }
 
 /// Resource dimensions exposed by value errors.
@@ -1708,34 +1759,89 @@ fn validate_json_object(entries: &[(String, JsonValue)]) -> Result<()> {
     Ok(())
 }
 
-fn json_to_structured(value: &JsonValue) -> Result<StructuredValue> {
+fn json_to_structured(
+    value: &JsonValue,
+    codec: &ValueCodec,
+    permits: &mut Vec<BytePermit>,
+) -> Result<StructuredValue> {
     Ok(match value {
         JsonValue::Null => StructuredValue::Null,
         JsonValue::Boolean(value) => StructuredValue::Boolean(*value),
         JsonValue::Number(value) => StructuredValue::Float64(value.to_bits()),
-        JsonValue::String(value) => StructuredValue::TextString(value.clone()),
-        JsonValue::Array(values) => StructuredValue::Array(
-            values
-                .iter()
-                .map(json_to_structured)
-                .collect::<Result<Vec<_>>>()?,
-        ),
-        JsonValue::Object(entries) => StructuredValue::map(
-            entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        StructuredValue::TextString(key.clone()),
-                        json_to_structured(value)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )
-        .map_err(Error::Structured)?,
+        JsonValue::String(value) => {
+            permits.push(codec.reserve(value.len(), Resource::StructuredValue)?);
+            StructuredValue::TextString(value.clone())
+        }
+        JsonValue::Array(values) => {
+            permits.push(
+                codec.reserve(
+                    values
+                        .len()
+                        .checked_mul(size_of::<StructuredValue>())
+                        .ok_or(Error::Allocation { size: usize::MAX })?,
+                    Resource::StructuredValue,
+                )?,
+            );
+            let mut converted = Vec::new();
+            converted
+                .try_reserve_exact(values.len())
+                .map_err(|_| Error::Allocation {
+                    size: values
+                        .len()
+                        .checked_mul(size_of::<StructuredValue>())
+                        .unwrap_or(usize::MAX),
+                })?;
+            for value in values {
+                converted.push(json_to_structured(value, codec, permits)?);
+            }
+            StructuredValue::Array(converted)
+        }
+        JsonValue::Object(entries) => {
+            permits.push(
+                codec.reserve(
+                    entries
+                        .len()
+                        .checked_mul(size_of::<(StructuredValue, StructuredValue)>())
+                        .ok_or(Error::Allocation { size: usize::MAX })?,
+                    Resource::StructuredValue,
+                )?,
+            );
+            let mut converted = Vec::new();
+            converted
+                .try_reserve_exact(entries.len())
+                .map_err(|_| Error::Allocation {
+                    size: entries
+                        .len()
+                        .checked_mul(size_of::<(StructuredValue, StructuredValue)>())
+                        .unwrap_or(usize::MAX),
+                })?;
+            for (key, value) in entries {
+                permits.push(codec.reserve(key.len(), Resource::StructuredValue)?);
+                converted.push((
+                    StructuredValue::TextString(key.clone()),
+                    json_to_structured(value, codec, permits)?,
+                ));
+            }
+            // `StructuredValue::map` performs one transient duplicate-key
+            // index allocation. Keep that work inside the shared budget while
+            // validation runs, then release it before the model is returned.
+            let index_bytes = entries
+                .len()
+                .checked_mul(size_of::<(u64, Vec<usize>)>() + size_of::<usize>())
+                .ok_or(Error::Allocation { size: usize::MAX })?;
+            let index_permit = codec.reserve(index_bytes, Resource::StructuredValue)?;
+            let result = StructuredValue::map(converted).map_err(Error::Structured);
+            drop(index_permit);
+            result?
+        }
     })
 }
 
-fn structured_to_json(value: &StructuredValue) -> Result<Option<JsonValue>> {
+fn structured_to_json(
+    value: &StructuredValue,
+    codec: &ValueCodec,
+    permits: &mut Vec<BytePermit>,
+) -> Result<Option<JsonValue>> {
     Ok(match value {
         StructuredValue::Undefined => None,
         StructuredValue::Null => Some(JsonValue::Null),
@@ -1746,23 +1852,66 @@ fn structured_to_json(value: &StructuredValue) -> Result<Option<JsonValue>> {
         StructuredValue::Integer(integer) => {
             Some(JsonValue::number(integer_to_binary64(integer)?)?)
         }
-        StructuredValue::TextString(value) => Some(JsonValue::String(value.clone())),
+        StructuredValue::TextString(value) => {
+            permits.push(codec.reserve(value.len(), Resource::StructuredValue)?);
+            Some(JsonValue::String(value.clone()))
+        }
         StructuredValue::Bytes(_) => None,
-        StructuredValue::Array(values) => Some(JsonValue::Array(
-            values
-                .iter()
-                .map(|value| structured_to_json(value)?.ok_or(Error::UnsupportedStructuredValue))
-                .collect::<Result<Vec<_>>>()?,
-        )),
+        StructuredValue::Array(values) => {
+            permits.push(
+                codec.reserve(
+                    values
+                        .len()
+                        .checked_mul(size_of::<JsonValue>())
+                        .ok_or(Error::Allocation { size: usize::MAX })?,
+                    Resource::StructuredValue,
+                )?,
+            );
+            let mut converted = Vec::new();
+            converted
+                .try_reserve_exact(values.len())
+                .map_err(|_| Error::Allocation {
+                    size: values
+                        .len()
+                        .checked_mul(size_of::<JsonValue>())
+                        .unwrap_or(usize::MAX),
+                })?;
+            for value in values {
+                converted.push(
+                    structured_to_json(value, codec, permits)?
+                        .ok_or(Error::UnsupportedStructuredValue)?,
+                );
+            }
+            Some(JsonValue::Array(converted))
+        }
         StructuredValue::Map(entries) => {
-            let mut object = Vec::with_capacity(entries.len());
+            permits.push(
+                codec.reserve(
+                    entries
+                        .len()
+                        .checked_mul(size_of::<(String, JsonValue)>())
+                        .ok_or(Error::Allocation { size: usize::MAX })?,
+                    Resource::StructuredValue,
+                )?,
+            );
+            let mut object = Vec::new();
+            object
+                .try_reserve_exact(entries.len())
+                .map_err(|_| Error::Allocation {
+                    size: entries
+                        .len()
+                        .checked_mul(size_of::<(String, JsonValue)>())
+                        .unwrap_or(usize::MAX),
+                })?;
             for (key, value) in entries {
                 let StructuredValue::TextString(key) = key else {
                     return Ok(None);
                 };
+                permits.push(codec.reserve(key.len(), Resource::StructuredValue)?);
                 object.push((
                     key.clone(),
-                    structured_to_json(value)?.ok_or(Error::UnsupportedStructuredValue)?,
+                    structured_to_json(value, codec, permits)?
+                        .ok_or(Error::UnsupportedStructuredValue)?,
                 ));
             }
             Some(JsonValue::Object(object))
@@ -1952,11 +2101,94 @@ fn compress_if_beneficial(
         return raw_payload(payload, limits, budget, max_body_bytes);
     }
     let bound = ZSTD_compressBound(payload.len());
-    if bound > max_body_bytes || bound > limits.max_in_flight_bytes {
-        // A compression bound is only a temporary allocation requirement. If
-        // it cannot fit, retain the v1 raw envelope whenever its complete
-        // body still fits the configured envelope and byte budgets.
+    if bound > limits.max_in_flight_bytes {
+        // A compression bound is a temporary allocation requirement. If it
+        // cannot fit the operation's in-flight limit, retain the v1 raw
+        // envelope whenever its complete body still fits.  Do not apply the
+        // envelope-body limit to the bound itself: a payload may be too large
+        // to store raw while its actual compressed frame still fits.
         return raw_payload(payload, limits, budget, max_body_bytes);
+    }
+    let compression_permit = match reserve_budget(budget, bound, limits, Resource::EnvelopeBytes) {
+        Ok(permit) => permit,
+        Err(_error) if payload.len() <= max_body_bytes => {
+            // A competing operation may consume the temporary compression
+            // capacity even though the raw envelope remains valid.
+            return raw_payload(payload, limits, budget, max_body_bytes);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut compressed = Vec::new();
+    compressed
+        .try_reserve_exact(bound)
+        .map_err(|_| Error::Allocation { size: bound })?;
+    compressed.resize(bound, 0);
+    let compressed_length = ZSTD_compress(&mut compressed, payload, options.level);
+    if let Err(error) = check_zstandard("compression", compressed_length) {
+        drop(compression_permit);
+        return Err(error);
+    }
+    if compressed_length >= payload.len()
+        || payload.len() - compressed_length < options.minimum_savings
+    {
+        drop(compression_permit);
+        return raw_payload(payload, limits, budget, max_body_bytes);
+    }
+    if compressed_length > max_body_bytes {
+        drop(compression_permit);
+        if payload.len() <= max_body_bytes {
+            return raw_payload(payload, limits, budget, max_body_bytes);
+        }
+        let size = limits
+            .max_envelope_bytes
+            .saturating_sub(max_body_bytes)
+            .saturating_add(compressed_length);
+        return Err(Error::EncodedValueTooLarge {
+            size,
+            maximum: limits.max_envelope_bytes,
+        });
+    }
+    compressed.truncate(compressed_length);
+    // The bound is only a scratch allocation. Copy the frame into an exact
+    // output-sized buffer so the permit retained by the caller reflects the
+    // bytes that remain live after compression.
+    let output_permit = reserve_budget(budget, compressed_length, limits, Resource::EnvelopeBytes)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(compressed_length)
+        .map_err(|_| Error::Allocation {
+            size: compressed_length,
+        })?;
+    output.extend_from_slice(&compressed);
+    drop(compressed);
+    drop(compression_permit);
+    Ok((output, COMPRESSION_ZSTANDARD, Some(output_permit)))
+}
+
+fn compress_owned(
+    payload: Vec<u8>,
+    payload_permit: BytePermit,
+    compression: Compression,
+    limits: &ValueLimits,
+    budget: &RequestBudget,
+    max_body_bytes: usize,
+) -> Result<(Vec<u8>, u8, Option<BytePermit>)> {
+    let Compression::Zstandard(options) = compression else {
+        return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+    };
+    if payload.len() < options.minimum_input_size {
+        return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+    }
+    let bound = ZSTD_compressBound(payload.len());
+    if bound > limits.max_in_flight_bytes {
+        if payload.len() <= max_body_bytes {
+            return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+        }
+        return Err(encoded_body_too_large(
+            payload.len(),
+            limits.max_envelope_bytes,
+            max_body_bytes,
+        ));
     }
     let compression_permit = reserve_budget(budget, bound, limits, Resource::EnvelopeBytes)?;
     let mut compressed = Vec::new();
@@ -1964,16 +2196,56 @@ fn compress_if_beneficial(
         .try_reserve_exact(bound)
         .map_err(|_| Error::Allocation { size: bound })?;
     compressed.resize(bound, 0);
-    let compressed_length = ZSTD_compress(&mut compressed, payload, options.level);
-    check_zstandard("compression", compressed_length)?;
+    let compressed_length = ZSTD_compress(&mut compressed, &payload, options.level);
+    if let Err(error) = check_zstandard("compression", compressed_length) {
+        drop(compression_permit);
+        return Err(error);
+    }
     if compressed_length >= payload.len()
         || payload.len() - compressed_length < options.minimum_savings
     {
         drop(compression_permit);
-        return raw_payload(payload, limits, budget, max_body_bytes);
+        return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+    }
+    if compressed_length > max_body_bytes {
+        drop(compression_permit);
+        if payload.len() <= max_body_bytes {
+            return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+        }
+        return Err(encoded_body_too_large(
+            compressed_length,
+            limits.max_envelope_bytes,
+            max_body_bytes,
+        ));
     }
     compressed.truncate(compressed_length);
-    Ok((compressed, COMPRESSION_ZSTANDARD, Some(compression_permit)))
+    let output_permit = reserve_budget(budget, compressed_length, limits, Resource::EnvelopeBytes)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(compressed_length)
+        .map_err(|_| Error::Allocation {
+            size: compressed_length,
+        })?;
+    output.extend_from_slice(&compressed);
+    drop(compressed);
+    drop(compression_permit);
+    drop(payload);
+    drop(payload_permit);
+    Ok((output, COMPRESSION_ZSTANDARD, Some(output_permit)))
+}
+
+fn encoded_body_too_large(
+    body_length: usize,
+    max_envelope_bytes: usize,
+    max_body_bytes: usize,
+) -> Error {
+    let size = max_envelope_bytes
+        .saturating_sub(max_body_bytes)
+        .saturating_add(body_length);
+    Error::EncodedValueTooLarge {
+        size,
+        maximum: max_envelope_bytes,
+    }
 }
 
 fn raw_payload(
