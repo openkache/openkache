@@ -15,7 +15,8 @@ use super::tls::{self, ConformanceError};
 use crate::network_runtime::TcpStream;
 use crate::protocol::RequestFrame as ProtocolRequestFrame;
 use crate::transport::{
-    ReceiveStream, RequestBudget, RequestFrame, SendStream, StreamReadError, TransportError,
+    ReceiveStream, RequestBudget, RequestFrame, RequestRead, SendStream, StreamReadError,
+    TransportError,
 };
 use futures_util::lock::Mutex;
 use openkache_protocol::ResponseParts;
@@ -228,7 +229,7 @@ impl ReceiveStream for TlsTcpReceiveStream {
             openkache_protocol::RequestFrameHeader,
             &[u8],
         ) -> Result<(), T>,
-    ) -> impl Future<Output = Result<Result<RequestFrame, T>, StreamReadError>> {
+    ) -> impl Future<Output = Result<RequestRead<T>, StreamReadError>> {
         let lane = Arc::clone(&self.lane);
         let budget = budget.clone();
         async move {
@@ -248,15 +249,9 @@ impl ReceiveStream for TlsTcpReceiveStream {
                                     .map_err(|error| tcp_error(error, "read"))?;
                                 let Some(record) = record else {
                                     match state.connection.receive_eof() {
-                                        Ok(ReceiveEvent::NeedMore)
-                                        | Ok(ReceiveEvent::PeerCloseNotify) => {
-                                            return Err(StreamReadError::Transport(
-                                                TransportError::backend(
-                                                    "tls-tcp",
-                                                    "read",
-                                                    "stream ended after TLS close_notify",
-                                                ),
-                                            ));
+                                        Ok(ReceiveEvent::PeerCloseNotify)
+                                        | Ok(ReceiveEvent::NeedMore) => {
+                                            return Ok(RequestRead::Finished);
                                         }
                                         Ok(ReceiveEvent::Request(_)) => {
                                             return Err(StreamReadError::Transport(
@@ -307,7 +302,7 @@ impl ReceiveStream for TlsTcpReceiveStream {
                                 )?;
                             let frame_len = header.frame_len()?;
                             if frame_len != frame.len() {
-                                return Err(StreamReadError::Protocol(
+                                return Err(StreamReadError::Malformed(
                                     openkache_protocol::ProtocolError::FrameLength {
                                         expected: frame_len,
                                         actual: frame.len(),
@@ -320,35 +315,33 @@ impl ReceiveStream for TlsTcpReceiveStream {
                                 header,
                                 &frame[..header.encoded_len()],
                             )
-                            .err();
-                            let permit = budget.acquire(header.body_len(), timeout).await?;
+                                .err();
+                            let permit = match budget.acquire(header.body_len(), timeout).await {
+                                Ok(permit) => permit,
+                                Err(StreamReadError::Timeout) => {
+                                    return Ok(RequestRead::Overloaded {
+                                        header,
+                                        timed_out: true,
+                                    });
+                                }
+                                Err(StreamReadError::TooLarge) => {
+                                    return Ok(RequestRead::Overloaded {
+                                        header,
+                                        timed_out: false,
+                                    });
+                                }
+                                Err(error) => return Err(error),
+                            };
                             if let Some(rejection) = rejection {
                                 drop(permit);
-                                return Ok(Err(rejection));
+                                return Ok(RequestRead::Rejected { header, rejection });
                             }
-                            return Ok(Ok(RequestFrame::new(
-                                frame,
-                                permit,
+                            return Ok(RequestRead::Frame(RequestFrame::new(
+                                header, frame, permit,
                             )));
                         }
                         ReceiveEvent::PeerCloseNotify => {
-                            let mut state = lane.lock().await;
-                            // Sequential request dispatch has no outstanding
-                            // response when the next read observes close_notify.
-                            state
-                                .connection
-                                .finish_response()
-                                .map_err(map_stream_error)?;
-                            flush_records(&mut state)
-                                .await
-                                .map_err(|error| tcp_error(error, "write"))?;
-                            return Err(StreamReadError::Transport(
-                                TransportError::backend(
-                                    "tls-tcp",
-                                    "read",
-                                    "stream ended after TLS close_notify",
-                                ),
-                            ));
+                            return Ok(RequestRead::Finished);
                         }
                         ReceiveEvent::Backpressure => {
                             return Err(StreamReadError::TooLarge);
@@ -360,6 +353,12 @@ impl ReceiveStream for TlsTcpReceiveStream {
             .await
             .map_err(|_| StreamReadError::Timeout)?
         }
+    }
+
+    fn stop(&mut self) {
+        // TLS-over-TCP has no directional reset primitive. The lane's
+        // connection future is dropped by the caller, which closes the
+        // underlying socket and retires both halves.
     }
 }
 
@@ -395,6 +394,15 @@ impl SendStream for TlsTcpSendStream {
             .map_err(|_| TransportError::backend("tls-tcp", "write response", "timed out"))?;
             result.map_err(|error| tcp_error(error, "write response"))
         }
+    }
+
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        // Dropping the shared lane closes the socket; there is no separate
+        // response-direction reset in the TLS-over-TCP profile.
     }
 }
 
@@ -446,7 +454,7 @@ async fn flush_records(state: &mut TlsTcpLaneInner) -> Result<(), TcpTransportEr
 
 fn map_stream_error(error: TcpTransportError) -> StreamReadError {
     match error {
-        TcpTransportError::Protocol(error) => StreamReadError::Protocol(error),
+        TcpTransportError::Protocol(error) => StreamReadError::Malformed(error),
         TcpTransportError::FrameTooLarge | TcpTransportError::RecordTooLarge => {
             StreamReadError::TooLarge
         }

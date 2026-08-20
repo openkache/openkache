@@ -8,7 +8,7 @@ use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
     DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
-    NamespaceDescriptor, NamespacePolicy, TypedKey, Result, RetryPolicy, ServerTrust,
+    NamespaceDescriptor, NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust, TypedKey,
     SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
@@ -80,7 +80,6 @@ impl ProtectionSettings {
                     self.compression,
                     Encryption::Unprotected,
                 )
-                .map(Arc::new)
             }
         }?;
         Ok(Arc::new(protection.with_budget(budget)))

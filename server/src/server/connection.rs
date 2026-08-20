@@ -1,5 +1,8 @@
 use super::*;
 use std::collections::VecDeque;
+use std::fmt::Write as _;
+
+use crate::protocol::Response;
 
 #[derive(Clone)]
 pub(super) struct NetworkWorkerLimits {
@@ -311,7 +314,7 @@ async fn serve_connection<C: TransportConnection>(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LaneOutcome {
+pub(super) enum LaneOutcome {
     Finished,
     Cancelled,
     Malformed,
@@ -338,7 +341,7 @@ enum LaneRequest {
 /// waiting on storage, while the queue bound keeps body permits and frame
 /// allocations finite. Only the queue head executes and writes, preserving
 /// effect and response order.
-async fn serve_stream<S: SendStream, R: ReceiveStream>(
+pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
     network_shard: NetworkShard<'_>,

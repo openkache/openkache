@@ -182,8 +182,6 @@ pub(super) trait Connection {
     /// reject it without reading application bytes.
     fn accept_uni(&self) -> impl Future<Output = Result<Self::ReceiveStream, TransportError>>;
 
-    /// Closes this connection with an application error.
-    fn close(&self, error_code: u64, reason: &[u8]);
 }
 
 /// Receive half of one request stream.
