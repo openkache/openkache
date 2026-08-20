@@ -15,6 +15,11 @@ use std::str::FromStr;
 pub const MAX_VALUE_BYTES: usize = 67_108_864;
 /// Default maximum nesting depth for a value.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
+/// Absolute maximum nesting depth accepted by the bounded codec.
+///
+/// The codec traverses iteratively, but callers must not be able to turn a
+/// configuration knob into an effectively unbounded worklist or destructor.
+pub const MAX_ALLOWED_DEPTH: usize = 1_000_000;
 /// Default maximum number of model nodes in one value.
 pub const DEFAULT_MAX_ITEMS: usize = 1_000_000;
 /// Default maximum bignum magnitude size.
@@ -969,6 +974,13 @@ fn validate_limits(limits: Limits) -> Result<()> {
     }
     if limits.max_depth == 0 {
         return Err(resource(Resource::Depth, 1, 0));
+    }
+    if limits.max_depth > MAX_ALLOWED_DEPTH {
+        return Err(resource(
+            Resource::Depth,
+            MAX_ALLOWED_DEPTH,
+            limits.max_depth,
+        ));
     }
     if limits.max_items == 0 {
         return Err(resource(Resource::Items, 1, 0));
