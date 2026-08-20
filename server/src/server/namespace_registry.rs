@@ -450,13 +450,17 @@ impl NamespaceRegistry {
         &mut self,
         namespace_id: u64,
         storage_key: StorageKey,
-        deleted: bool,
+        _deleted: bool,
     ) -> std::result::Result<(), NamespaceError> {
-        let removed = deleted
-            && self
-                .by_id
-                .get_mut(&namespace_id)
-                .is_some_and(|entry| entry.items.remove(&storage_key));
+        // A successful DELETE response is authoritative even when storage
+        // reports that no live value was removed: the latter includes an
+        // expired value, which is logically absent at the mutation boundary.
+        // Removing either state lets namespace membership converge and allows
+        // an otherwise empty namespace to be deleted after TTL expiration.
+        let removed = self
+            .by_id
+            .get_mut(&namespace_id)
+            .is_some_and(|entry| entry.items.remove(&storage_key));
         if removed
             && self
                 .append_event(JournalEvent::MarkDelete {

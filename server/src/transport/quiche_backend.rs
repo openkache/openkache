@@ -117,9 +117,7 @@ impl super::Connection for Connection {
         });
     }
 
-    async fn accept_bi(
-        &self,
-    ) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
+    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
         let stream = self
             .streams
             .recv_async_network()
@@ -279,8 +277,7 @@ impl super::ReceiveStream for ReceiveStream {
         })
         .await
         .map_err(|_| StreamReadError::Timeout)??;
-        let has_trailing_bytes = self.buffered.len() > frame_len;
-        let frame = if !has_trailing_bytes {
+        let frame = if self.buffered.len() == frame_len {
             std::mem::take(&mut self.buffered)
         } else {
             self.buffered.drain(..frame_len).collect()
@@ -289,11 +286,7 @@ impl super::ReceiveStream for ReceiveStream {
             drop(permit);
             return Ok(Err(rejection));
         }
-        Ok(Ok(RequestFrame::with_trailing_bytes(
-            frame,
-            permit,
-            has_trailing_bytes,
-        )))
+        Ok(Ok(RequestFrame::new(frame, permit)))
     }
 }
 

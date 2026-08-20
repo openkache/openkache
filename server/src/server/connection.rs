@@ -292,7 +292,6 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::Transport(_)) => break,
         };
         let request_bytes = std::mem::take(&mut frame.bytes);
-        let terminal_after_response = frame.has_trailing_bytes;
         let response_result = match request_projection::project_owned_request(request_bytes) {
             Ok(input) => {
                 let operation_id = input.operation_id();
@@ -416,9 +415,6 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         if !write_response(&mut send, response, request_id, request_timeout).await {
             network_shard.response_write_failure();
             break;
-        }
-        if terminal_after_response {
-            return true;
         }
     }
     false

@@ -217,24 +217,13 @@ pub(super) enum StreamReadError {
 /// Request bytes paired with the server-wide memory-budget reservation they consume.
 pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
-    /// Whether the transport had already delivered bytes beyond this frame.
-    ///
-    /// QUIC stream reads may coalesce multiple client writes. If the backend
-    /// exposes those trailing bytes, the lane must be retired after the
-    /// current response because the peer violated request/response lockstep.
-    pub(super) has_trailing_bytes: bool,
     _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
-    fn with_trailing_bytes(
-        bytes: Vec<u8>,
-        permit: RequestBudgetPermit,
-        has_trailing_bytes: bool,
-    ) -> Self {
+    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit) -> Self {
         Self {
             bytes,
-            has_trailing_bytes,
             _permit: permit,
         }
     }
@@ -482,20 +471,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         drop(permit);
         return Ok(Err(rejection));
     }
-    // Probe the backend's already-readable bytes once so a client that pipelined a second
-    // request cannot make us interpret that request after the first response.
-    // The zero-duration timeout is non-blocking: when no byte is buffered the
-    // receive future is cancelled and the lane remains reusable.
-    let has_trailing_bytes =
-        match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await {
-            Err(_) => false,
-            Ok(result) => result.map_err(StreamReadError::Transport)?,
-        };
-    Ok(Ok(RequestFrame::with_trailing_bytes(
-        body,
-        permit,
-        has_trailing_bytes,
-    )))
+    Ok(Ok(RequestFrame::new(body, permit)))
 }
 
 /// Stable transport failure with backend and operation context.
@@ -557,12 +533,12 @@ fn response_write_segments(parts: ResponseParts) -> ResponseWriteSegments {
     ResponseWriteSegments(parts.into_segments())
 }
 
-#[cfg(feature = "quic-quinn")]
-#[path = "transport/quinn_backend.rs"]
-mod quinn_backend;
 #[cfg(feature = "quic-noq")]
 #[path = "transport/noq_backend.rs"]
 mod noq_backend;
 #[cfg(feature = "quic-quiche")]
 #[path = "transport/quiche_backend.rs"]
 mod quiche_backend;
+#[cfg(feature = "quic-quinn")]
+#[path = "transport/quinn_backend.rs"]
+mod quinn_backend;

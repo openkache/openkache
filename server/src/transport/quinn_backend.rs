@@ -95,14 +95,7 @@ impl super::Connection for Connection {
         self.0
             .accept_bi()
             .await
-            .map(|(send, receive)| {
-                (
-                    SendStream(send),
-                    ReceiveStream {
-                        stream: receive,
-                    },
-                )
-            })
+            .map(|(send, receive)| (SendStream(send), ReceiveStream { stream: receive }))
             .map_err(|error| TransportError::backend(NAME, "stream accept", error))
     }
 }

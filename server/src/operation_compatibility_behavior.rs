@@ -9,7 +9,7 @@ use std::future::Future;
 
 use super::super::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy,
-    OverridePolicy, SetOptions,
+    OverridePolicy, SetCondition, SetOptions,
 };
 use super::NamespaceError;
 use super::operation_compatibility_decode::{GetInput, NamespaceInput, SetInput};
@@ -113,14 +113,7 @@ fn namespace_error(error: NamespaceError, message: &'static [u8]) -> OperationOu
 }
 
 pub(super) fn mutation_domain_error(is_set: bool, error: StorageError) -> OperationOutcome {
-    let safe_before_mutation = matches!(
-        &error,
-        StorageError::InvalidRequest(_)
-            | StorageError::NoCapacity(_)
-            | StorageError::Overloaded(_)
-            | StorageError::TooLarge(_)
-    );
-    if !safe_before_mutation {
+    if !mutation_is_definitively_absent(&error) {
         return OperationOutcome::abandoned();
     }
     if matches!(error, StorageError::NoCapacity(_)) && !is_set {
@@ -128,6 +121,16 @@ pub(super) fn mutation_domain_error(is_set: bool, error: StorageError) -> Operat
     } else {
         domain_storage(error)
     }
+}
+
+fn mutation_is_definitively_absent(error: &StorageError) -> bool {
+    matches!(
+        error,
+        StorageError::InvalidRequest(_)
+            | StorageError::NoCapacity(_)
+            | StorageError::Overloaded(_)
+            | StorageError::TooLarge(_)
+    )
 }
 
 pub(super) fn get<'a, S: StorageDataPort>(
@@ -231,12 +234,31 @@ pub(super) fn set<'a, S: StorageDataPort>(
                     route,
                     reservation,
                 );
-                match rollback {
-                    Ok(()) => domain_success(OperationStatus::NotStored, OperationBody::Empty),
-                    Err(_) => OperationOutcome::abandoned(),
+                if rollback.is_err() {
+                    return OperationOutcome::abandoned();
                 }
+                // An IF_PRESENT miss can only be caused by an absent or
+                // expired value at storage's serialized mutation boundary.
+                // Prune the conservative membership marker so namespace
+                // emptiness and later lifecycle operations observe that state.
+                if matches!(effective_options.condition, SetCondition::IfPresent)
+                    && state
+                        .membership
+                        .prune_item(namespace_id, storage_key)
+                        .is_err()
+                {
+                    return OperationOutcome::abandoned();
+                }
+                domain_success(OperationStatus::NotStored, OperationBody::Empty)
             }
             Err(error) => {
+                // A timeout, worker disconnect, or backend error may have
+                // crossed the storage mutation point. Keep the reservation
+                // conservative and suppress the response until an explicit
+                // reconciliation operation can establish the final state.
+                if !mutation_is_definitively_absent(&error) {
+                    return OperationOutcome::abandoned();
+                }
                 let response = mutation_domain_error(true, error);
                 let rollback = state.membership.rollback_set_reservation(
                     namespace_id,
