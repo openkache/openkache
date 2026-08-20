@@ -446,23 +446,6 @@ struct RequestFailure {
     invalidates_connection: bool,
 }
 
-/// Returns whether a request can change durable cache or namespace state.
-///
-/// Retry policy and side-effect classification are separate contracts.  In
-/// particular, experimental SYNC is non-replayable because it is a visibility
-/// barrier, but it is not a mutation and therefore must not be surfaced as an
-/// `UnknownMutation` result when cancellation races its completion.
-const fn operation_is_mutating(operation: Operation) -> bool {
-    matches!(
-        operation,
-        Operation::Set
-            | Operation::Delete
-            | Operation::NamespaceOpen
-            | Operation::NamespaceUpdatePolicy
-            | Operation::NamespaceDelete
-    )
-}
-
 /// Returns whether losing the response can leave the operation's outcome
 /// unknown after transmission.
 ///
@@ -470,8 +453,8 @@ const fn operation_is_mutating(operation: Operation) -> bool {
 /// its barrier may have linearized before a terminal transport failure.  Keep
 /// that transport boundary distinct from cancellation, where only actual
 /// mutating operations are surfaced as `UnknownMutation`.
-const fn operation_has_unknown_outcome(operation: Operation) -> bool {
-    operation_is_mutating(operation) || matches!(operation, Operation::Sync)
+const fn operation_has_unknown_outcome(context: RequestContext) -> bool {
+    context.mutation || matches!(context.operation, Operation::Sync)
 }
 
 impl RequestFailure {
@@ -780,7 +763,7 @@ impl<C: ClientConnection> Core<C> {
         let context = request.context();
         let response_safe = context.retry_policy.is_safe();
         let request_id = self
-            .reserve_request_id(context.operation, operation_is_mutating(context.operation))
+            .reserve_request_id(context.operation, context.mutation)
             .await?;
         let (success_statuses, error_statuses) = {
             let wire = operation_wire_spec(context.opcode);
@@ -834,7 +817,7 @@ impl<C: ClientConnection> Core<C> {
                     }
                     let transmitted = self.pending_was_transmitted(request_id).await;
                     self.complete_request(request_id).await;
-                    if operation_has_unknown_outcome(context.operation)
+                    if operation_has_unknown_outcome(context)
                         && (failure.may_have_reached_server || transmitted)
                     {
                         return Err(Error::AmbiguousOutcome {

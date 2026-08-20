@@ -26,6 +26,12 @@ impl RequestRetryPolicy {
 pub(crate) struct RequestContext {
     pub(crate) opcode: Opcode,
     pub(crate) operation: Operation,
+    /// Whether transmission can change durable cache or namespace state.
+    ///
+    /// This is request-specific rather than operation-wide: a
+    /// `NAMESPACE_OPEN` resolve (`create_if_missing = false`) is read-only,
+    /// while the create form is a mutation.
+    pub(crate) mutation: bool,
     pub(crate) retry_policy: RequestRetryPolicy,
 }
 
