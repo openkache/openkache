@@ -13,6 +13,7 @@ const VALUE_ENVELOPE_ENCODING_PATTERN = new RegExp(
   `^[a-z][a-z0-9.-]{0,${SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES - 1}}$`,
 )
 const JSON_ENCODING = SMITHY_VALUE_ENVELOPE_JSON_ENCODING
+const MAX_JSON_DEPTH = 128
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
@@ -262,6 +263,7 @@ function validate_json_value(
   path: string,
   ancestors: WeakSet<object>,
   omit_undefined_properties = false,
+  depth = 0,
 ): void {
   if (
     value === null ||
@@ -277,12 +279,15 @@ function validate_json_value(
     return
   }
   if (Array.isArray(value)) {
+    if (depth >= MAX_JSON_DEPTH) {
+      throw new Error(`${path} exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}`)
+    }
     validate_json_container(value, path, ancestors, (): void => {
       for (let index = 0; index < value.length; index += 1) {
         if (!(index in value)) {
           throw new Error(`${path}[${index}] must not be a sparse array entry`)
         }
-        validate_json_value(value[index], `${path}[${index}]`, ancestors)
+        validate_json_value(value[index], `${path}[${index}]`, ancestors, false, depth + 1)
       }
       for (const key of Object.keys(value)) {
         if (
@@ -301,6 +306,9 @@ function validate_json_value(
     return
   }
   if (is_regular_object(value)) {
+    if (depth >= MAX_JSON_DEPTH) {
+      throw new Error(`${path} exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}`)
+    }
     validate_json_container(value, path, ancestors, (): void => {
       for (const [key, property_value] of Object.entries(value)) {
         if (property_value === undefined) {
@@ -312,6 +320,7 @@ function validate_json_value(
           property_path(path, key),
           ancestors,
           omit_undefined_properties,
+          depth + 1,
         )
       }
       for (const symbol of Object.getOwnPropertySymbols(value)) {

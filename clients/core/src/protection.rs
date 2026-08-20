@@ -241,13 +241,13 @@ impl DataProtection {
     ///
     /// The `TypedKey` variant is inferred by the operation. The compatibility
     /// `key_spec` setting is not a namespace policy and is not applied here.
-    #[cfg(feature = "ffi")]
-    pub(crate) fn value_limits(&self) -> crate::value::ValueLimits {
+    /// Returns the configured value resource limits.
+    pub fn value_limits(&self) -> crate::value::ValueLimits {
         self.codec.limits()
     }
 
-    #[cfg(feature = "ffi")]
-    pub(crate) fn request_budget(&self) -> RequestBudget {
+    /// Returns the aggregate byte budget shared by transport and value work.
+    pub fn request_budget(&self) -> RequestBudget {
         self.codec.budget().clone()
     }
 

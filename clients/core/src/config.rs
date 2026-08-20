@@ -20,9 +20,7 @@ pub(crate) const PQ_GROUP: rustls::NamedGroup = rustls::NamedGroup::X25519MLKEM7
 /// group so no backend can silently fall back to classical-only TLS.
 pub(crate) fn strict_pq_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-    provider
-        .kx_groups
-        .retain(|group| group.name() == PQ_GROUP);
+    provider.kx_groups.retain(|group| group.name() == PQ_GROUP);
     debug_assert_eq!(provider.kx_groups.len(), 1);
     provider.into()
 }

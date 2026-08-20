@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::io::{self, Write};
 use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
@@ -32,8 +33,8 @@ use zstd_pure_rs::prelude::{
 use crate::contract::{
     DEFAULT_ZSTANDARD_LEVEL, DEFAULT_ZSTANDARD_LEVEL_MAX, DEFAULT_ZSTANDARD_LEVEL_MIN,
 };
-use crate::transport::{BytePermit, RequestBudget};
-use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
+use crate::transport::RequestBudget;
+use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId, ValueBytePermit as BytePermit};
 
 /// The one OpenKache-defined envelope grammar implemented by this module.
 pub const VERSION: u128 = 1;
@@ -402,6 +403,28 @@ impl JsonParseState<'_> {
         Ok(())
     }
 
+    fn reserve_vec<T>(&mut self, length: usize) -> Result<Vec<T>> {
+        let bytes = length
+            .checked_mul(size_of::<T>())
+            .ok_or_else(|| structured_resource(self.limits.max_in_flight_bytes, usize::MAX))?;
+        self.reserve(bytes)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(length)
+            .map_err(|_| Error::Allocation { size: bytes })?;
+        Ok(values)
+    }
+
+    fn reserve_hash_set<T: Eq + std::hash::Hash>(&mut self, length: usize) -> Result<HashSet<T>> {
+        let bytes = hash_set_allocation_bytes::<T>(length)?;
+        self.reserve(bytes)?;
+        let mut values = HashSet::new();
+        values
+            .try_reserve(length)
+            .map_err(|_| Error::Allocation { size: bytes })?;
+        Ok(values)
+    }
+
     fn clone_string(&mut self, value: &str) -> Result<String> {
         self.reserve(value.len())?;
         let mut owned = String::new();
@@ -635,12 +658,10 @@ impl<'de> Visitor<'de> for JsonBudgetVisitor<'_, '_> {
         if let Err(error) = self.state.admit_children(length) {
             return Err(self.state.reject(error));
         }
-        let mut values = Vec::new();
-        if values.try_reserve_exact(length).is_err() {
-            return Err(self.state.reject(Error::Allocation {
-                size: length.saturating_mul(size_of::<JsonValue>()),
-            }));
-        }
+        let mut values = self
+            .state
+            .reserve_vec::<JsonValue>(length)
+            .map_err(|error| self.state.reject(error))?;
         while let Some(value) = {
             let seed = JsonBudgetSeed {
                 state: &mut *self.state,
@@ -648,6 +669,16 @@ impl<'de> Visitor<'de> for JsonBudgetVisitor<'_, '_> {
             };
             sequence.next_element_seed(seed)
         }? {
+            if values.len() == values.capacity() {
+                self.state
+                    .reserve(size_of::<JsonValue>())
+                    .map_err(|error| self.state.reject(error))?;
+                values.try_reserve_exact(1).map_err(|_| {
+                    self.state.reject(Error::Allocation {
+                        size: size_of::<JsonValue>(),
+                    })
+                })?;
+            }
             values.push(value);
         }
         Ok(JsonValue::Array(values))
@@ -671,12 +702,10 @@ impl<'de> Visitor<'de> for JsonBudgetVisitor<'_, '_> {
         if let Err(error) = self.state.admit_children(child_count) {
             return Err(self.state.reject(error));
         }
-        let mut entries = Vec::new();
-        if entries.try_reserve_exact(length).is_err() {
-            return Err(self.state.reject(Error::Allocation {
-                size: length.saturating_mul(size_of::<(String, JsonValue)>()),
-            }));
-        }
+        let mut entries = self
+            .state
+            .reserve_vec::<(String, JsonValue)>(length)
+            .map_err(|error| self.state.reject(error))?;
         while let Some(key) = {
             let seed = JsonStringSeed {
                 state: &mut *self.state,
@@ -690,14 +719,22 @@ impl<'de> Visitor<'de> for JsonBudgetVisitor<'_, '_> {
                 };
                 map.next_value_seed(seed)
             }?;
+            if entries.len() == entries.capacity() {
+                self.state
+                    .reserve(size_of::<(String, JsonValue)>())
+                    .map_err(|error| self.state.reject(error))?;
+                entries.try_reserve_exact(1).map_err(|_| {
+                    self.state.reject(Error::Allocation {
+                        size: size_of::<(String, JsonValue)>(),
+                    })
+                })?;
+            }
             entries.push((key, value));
         }
-        let mut keys = HashSet::<&str>::new();
-        if keys.try_reserve(entries.len()).is_err() {
-            return Err(self.state.reject(Error::Allocation {
-                size: entries.len().saturating_mul(size_of::<&str>()),
-            }));
-        }
+        let mut keys = self
+            .state
+            .reserve_hash_set::<&str>(entries.len())
+            .map_err(|error| self.state.reject(error))?;
         for (key, _) in &entries {
             if !keys.insert(key.as_str()) {
                 return Err(self
@@ -2011,7 +2048,7 @@ pub fn parse_json_input_for_test(
 
 /// Parse one complete JSON input while retaining permits for the caller's
 /// subsequent bounded conversion.
-pub(crate) fn parse_json_input_with_budget(
+pub fn parse_json_input_with_budget(
     payload: &[u8],
     limits: ValueLimits,
     budget: &RequestBudget,
@@ -2036,6 +2073,168 @@ pub(crate) fn parse_json_input_with_budget(
         .end()
         .map_err(|error| state.finish_error(error))?;
     Ok((value, state.permits))
+}
+
+/// Canonically serializes one logical JSON value while charging output
+/// backing storage and emitted bytes to the caller's aggregate budget.
+///
+/// The returned permits must remain live while the output buffer is exposed to
+/// another API boundary. Dropping them releases every reservation made by the
+/// writer.
+pub fn encode_json_output_with_budget(
+    value: &mut JsonValue,
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(Vec<u8>, Vec<BytePermit>)> {
+    fn write_value(
+        value: &mut JsonValue,
+        depth: usize,
+        limits: ValueLimits,
+        writer: &mut JsonBudgetWriter<'_>,
+    ) -> Result<()> {
+        if depth > limits.max_depth {
+            return Err(structured_depth(limits.max_depth, depth));
+        }
+        match value {
+            JsonValue::Null
+            | JsonValue::Boolean(_)
+            | JsonValue::Number(_)
+            | JsonValue::String(_) => {
+                serde_json_canonicalizer::to_writer(value, writer).map_err(|error| {
+                    writer
+                        .failure
+                        .take()
+                        .unwrap_or_else(|| Error::InvalidJson(error.to_string()))
+                })?;
+            }
+            JsonValue::Array(values) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                writer
+                    .write_all(b"[")
+                    .map_err(|error| writer.io_error(error))?;
+                for (index, value) in values.iter_mut().enumerate() {
+                    if index != 0 {
+                        writer
+                            .write_all(b",")
+                            .map_err(|error| writer.io_error(error))?;
+                    }
+                    write_value(value, depth + 1, limits, writer)?;
+                }
+                writer
+                    .write_all(b"]")
+                    .map_err(|error| writer.io_error(error))?;
+            }
+            JsonValue::Object(entries) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                entries.sort_unstable_by(|(left, _), (right, _)| {
+                    left.encode_utf16().cmp(right.encode_utf16())
+                });
+                writer
+                    .write_all(b"{")
+                    .map_err(|error| writer.io_error(error))?;
+                for (index, (key, value)) in entries.iter_mut().enumerate() {
+                    if index != 0 {
+                        writer
+                            .write_all(b",")
+                            .map_err(|error| writer.io_error(error))?;
+                    }
+                    serde_json_canonicalizer::to_writer(key, writer)
+                        .map_err(|error| writer.io_error(io::Error::other(error)))?;
+                    writer
+                        .write_all(b":")
+                        .map_err(|error| writer.io_error(error))?;
+                    write_value(value, depth + 1, limits, writer)?;
+                }
+                writer
+                    .write_all(b"}")
+                    .map_err(|error| writer.io_error(error))?;
+            }
+        }
+        Ok(())
+    }
+
+    struct JsonBudgetWriter<'a> {
+        budget: &'a RequestBudget,
+        limits: ValueLimits,
+        payload: Vec<u8>,
+        permits: Vec<BytePermit>,
+        failure: Option<Error>,
+    }
+
+    impl JsonBudgetWriter<'_> {
+        fn io_error(&mut self, error: io::Error) -> Error {
+            self.failure
+                .take()
+                .unwrap_or_else(|| Error::InvalidJson(error.to_string()))
+        }
+    }
+
+    impl Write for JsonBudgetWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let next = self
+                .written()
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("canonical JSON output length overflow"))?;
+            if next > self.limits.max_expanded_payload_bytes {
+                let error = Error::ResourceLimit {
+                    resource: Resource::ExpandedPayloadBytes,
+                    limit: self.limits.max_expanded_payload_bytes,
+                    actual: next,
+                };
+                if self.failure.is_none() {
+                    self.failure = Some(error);
+                }
+                return Err(io::Error::other("canonical JSON output exceeds its limit"));
+            }
+            let permit = reserve_budget(
+                self.budget,
+                bytes.len(),
+                &self.limits,
+                Resource::ExpandedPayloadBytes,
+            )
+            .map_err(|error| {
+                if self.failure.is_none() {
+                    self.failure = Some(error);
+                }
+                io::Error::other("canonical JSON output exceeds its budget")
+            })?;
+            self.payload.try_reserve_exact(bytes.len()).map_err(|_| {
+                if self.failure.is_none() {
+                    self.failure = Some(Error::Allocation { size: bytes.len() });
+                }
+                io::Error::other("failed to allocate canonical JSON output")
+            })?;
+            self.payload.extend_from_slice(bytes);
+            self.permits.push(permit);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl JsonBudgetWriter<'_> {
+        fn written(&self) -> usize {
+            self.payload.len()
+        }
+    }
+
+    let mut writer = JsonBudgetWriter {
+        budget,
+        limits,
+        payload: Vec::new(),
+        permits: Vec::new(),
+        failure: None,
+    };
+    if let Err(error) = write_value(value, 0, limits, &mut writer) {
+        return Err(writer.failure.take().unwrap_or(error));
+    }
+    Ok((writer.payload, writer.permits))
 }
 
 fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
@@ -2176,21 +2375,11 @@ fn validate_json_object_with_budget(
     limits: ValueLimits,
     budget: &RequestBudget,
 ) -> Result<()> {
-    let capacity = entries
-        .len()
-        .checked_mul(2)
-        .ok_or_else(|| structured_resource(limits.max_in_flight_bytes, usize::MAX))?;
-    let _permit = reserve_budget(
-        budget,
-        capacity
-            .checked_mul(size_of::<&str>())
-            .ok_or_else(|| structured_resource(limits.max_in_flight_bytes, usize::MAX))?,
-        &limits,
-        Resource::StructuredValue,
-    )?;
+    let bytes = hash_set_allocation_bytes::<&str>(entries.len())?;
+    let _permit = reserve_budget(budget, bytes, &limits, Resource::StructuredValue)?;
     let mut keys = HashSet::new();
-    keys.try_reserve(capacity)
-        .map_err(|_| Error::Allocation { size: capacity })?;
+    keys.try_reserve(entries.len())
+        .map_err(|_| Error::Allocation { size: bytes })?;
     for (key, _) in entries {
         if !keys.insert(key.as_str()) {
             return Err(Error::InvalidJson(
@@ -2469,6 +2658,22 @@ fn structured_resource(limit: usize, actual: usize) -> Error {
         limit,
         actual,
     }
+}
+
+fn hash_set_allocation_bytes<T>(length: usize) -> Result<usize> {
+    if length == 0 {
+        return Ok(0);
+    }
+    // `HashSet` keeps a spare bucket for an empty slot and grows at roughly a
+    // 7/8 load factor. Charge the next power-of-two bucket table plus one
+    // control byte per bucket before asking the allocator for it.
+    let buckets = length
+        .checked_mul(2)
+        .and_then(|length| length.checked_next_power_of_two())
+        .ok_or_else(|| structured_resource(usize::MAX, usize::MAX))?;
+    buckets
+        .checked_mul(size_of::<T>().saturating_add(1))
+        .ok_or_else(|| structured_resource(usize::MAX, usize::MAX))
 }
 
 fn structured_depth(limit: usize, actual: usize) -> Error {

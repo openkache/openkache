@@ -662,9 +662,13 @@ export class OpenKache_Client {
     validate_set_options(options)
     try {
       assert_json_value(value)
+      const encoded = JSON.stringify(value)
+      if (encoded === undefined) {
+        throw new Error("value cannot be represented as JSON")
+      }
       const outcome = await this.#native_client.set_json(
         owned_key_bytes(key, this.#key_spec),
-        value,
+        encoded,
         options.condition,
         options.expiration_mode,
         options.eviction_mode,
