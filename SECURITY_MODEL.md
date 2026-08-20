@@ -16,12 +16,11 @@ cryptographic details that connect those formats.
 
 ## At a glance
 
-**Zero-trust server, end-to-end encrypted values.** For protected values,
-encryption happens in the client before data reaches OpenKache and decryption
-happens in a client after data leaves the server. The server stores and returns
-ciphertext and does not receive the value keys. TLS protects the connection;
-the client-side encryption keeps the value plaintext outside the server's
-trust boundary.
+**Zero-trust server, end-to-end encrypted data.** When encryption is enabled,
+the client encrypts data before sending it to OpenKache and decrypts it after
+receiving it. The server stores and returns ciphertext and never receives the
+encryption keys. TLS protects the connection; client-side encryption keeps the
+plaintext outside the server's trust boundary.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -31,17 +30,13 @@ uppercase.
 
 ## Security goals
 
-For protected values, OpenKache aims to provide:
+For encrypted cache data, OpenKache aims to provide:
 
-- **End-to-end encrypted cache values:** values remain unreadable to the
-  cache service because they are encrypted before leaving the client and
-  decrypted only by a client with the corresponding secret.
-- **Private application cache keys:** the names your application uses for
-  cached data can remain private when that option is enabled.
-- **Tamper detection:** a client detects when protected data was changed,
-  corrupted, or returned for a different cache entry.
-- **Safe key rotation:** changing protection secrets does not make existing
-  values ambiguous.
+- **End-to-end encrypted data:** data remains unreadable to the cache service
+  because it is encrypted before leaving the client and decrypted only by a
+  client with the corresponding secret.
+- **Tamper detection:** clients can detect when encrypted data has been changed
+  or corrupted.
 
 The non-goals, threat model, and key assumptions below define when these
 properties apply. The remaining sections define the mechanisms used to provide
