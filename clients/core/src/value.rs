@@ -833,8 +833,7 @@ impl ValueCodec {
                     self.decode_structured_payload(&decoded.payload)?;
                 let (json, _json_permits) =
                     structured_to_json(&structured, self.limits, self.budget())?;
-                json
-                    .map(Value::Json)
+                json.map(Value::Json)
                     .ok_or_else(|| Error::UnsupportedStructuredValue)
             }
             _ => Err(Error::UnsupportedPayloadFormat(decoded.format)),
@@ -1872,21 +1871,9 @@ fn validate_json_limits(
                 if depth >= limits.max_depth {
                     return Err(structured_depth(limits.max_depth, depth + 1));
                 }
-                add_json_pending_items(
-                    pending_items,
-                    values.len(),
-                    *item_count,
-                    limits.max_items,
-                )?;
+                add_json_pending_items(pending_items, values.len(), *item_count, limits.max_items)?;
                 for value in values {
-                    visit(
-                        value,
-                        depth + 1,
-                        item_count,
-                        pending_items,
-                        limits,
-                        budget,
-                    )?;
+                    visit(value, depth + 1, item_count, pending_items, limits, budget)?;
                 }
             }
             JsonValue::Object(entries) => {
@@ -1898,12 +1885,7 @@ fn validate_json_limits(
                     .len()
                     .checked_mul(2)
                     .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
-                add_json_pending_items(
-                    pending_items,
-                    child_count,
-                    *item_count,
-                    limits.max_items,
-                )?;
+                add_json_pending_items(pending_items, child_count, *item_count, limits.max_items)?;
                 for (_, value) in entries {
                     *pending_items = pending_items
                         .checked_sub(1)
@@ -1968,12 +1950,7 @@ impl JsonAllocation<'_> {
         self.permits
             .try_reserve(1)
             .map_err(|_| Error::Allocation { size: 1 })?;
-        let permit = reserve_budget(
-            self.budget,
-            size,
-            &self.limits,
-            Resource::StructuredValue,
-        )?;
+        let permit = reserve_budget(self.budget, size, &self.limits, Resource::StructuredValue)?;
         self.permits.push(permit);
         Ok(())
     }
@@ -1995,9 +1972,7 @@ impl JsonAllocation<'_> {
         let mut owned = String::new();
         owned
             .try_reserve_exact(value.len())
-            .map_err(|_| Error::Allocation {
-                size: value.len(),
-            })?;
+            .map_err(|_| Error::Allocation { size: value.len() })?;
         owned.push_str(value);
         Ok(owned)
     }
@@ -2034,13 +2009,7 @@ fn json_to_structured(
                 }
                 let mut converted = allocation.reserve_vec(values.len())?;
                 for value in values {
-                    converted.push(convert(
-                        value,
-                        depth + 1,
-                        item_count,
-                        limits,
-                        allocation,
-                    )?);
+                    converted.push(convert(value, depth + 1, item_count, limits, allocation)?);
                 }
                 StructuredValue::Array(converted)
             }
@@ -2051,13 +2020,7 @@ fn json_to_structured(
                 let mut converted = allocation.reserve_vec(entries.len())?;
                 for (key, value) in entries {
                     let key = allocation.clone_string(key)?;
-                    let value = convert(
-                        value,
-                        depth + 1,
-                        item_count,
-                        limits,
-                        allocation,
-                    )?;
+                    let value = convert(value, depth + 1, item_count, limits, allocation)?;
                     converted.push((StructuredValue::TextString(key), value));
                 }
                 StructuredValue::Map(converted)
@@ -2094,9 +2057,7 @@ fn structured_to_json(
             StructuredValue::Float32(bits) => {
                 Some(JsonValue::number(f32::from_bits(*bits) as f64)?)
             }
-            StructuredValue::Float64(bits) => {
-                Some(JsonValue::number(f64::from_bits(*bits))?)
-            }
+            StructuredValue::Float64(bits) => Some(JsonValue::number(f64::from_bits(*bits))?),
             StructuredValue::Integer(integer) => {
                 Some(JsonValue::number(integer_to_binary64(integer)?)?)
             }
@@ -2434,7 +2395,7 @@ fn compress_owned(
             // Existing structured payload or request permits may leave less
             // capacity than the temporary compression bound. Compression is
             // an optimization; retry the raw form while it still fits.
-            return raw_payload(payload, limits, budget, max_body_bytes);
+            return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
         }
         Err(error) => return Err(error),
     };
