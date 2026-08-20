@@ -235,14 +235,26 @@ pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
     /// Client-selected correlation token echoed by the response writer.
     pub(super) request_id: u64,
+    /// Whether the transport had already delivered bytes beyond this frame.
+    ///
+    /// QUIC stream reads may coalesce multiple client writes. If the backend
+    /// exposes those trailing bytes, the lane must be retired after the
+    /// current response because the peer violated request/response lockstep.
+    pub(super) has_trailing_bytes: bool,
     _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
-    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit, request_id: u64) -> Self {
+    fn with_trailing_bytes(
+        bytes: Vec<u8>,
+        permit: RequestBudgetPermit,
+        request_id: u64,
+        has_trailing_bytes: bool,
+    ) -> Self {
         Self {
             bytes,
             request_id,
+            has_trailing_bytes,
             _permit: permit,
         }
     }
@@ -489,12 +501,17 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     // request remains available to the next read instead of being dropped.
     // The zero-duration timeout is non-blocking: when no byte is buffered the
     // receive future is cancelled and the lane remains reusable.
-    let _ = match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await
-    {
-        Err(_) => false,
-        Ok(result) => result.map_err(StreamReadError::Transport)?,
-    };
-    Ok(Ok(RequestFrame::new(body, permit, header.request_id())))
+    let has_trailing_bytes =
+        match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await {
+            Err(_) => false,
+            Ok(result) => result.map_err(StreamReadError::Transport)?,
+        };
+    Ok(Ok(RequestFrame::with_trailing_bytes(
+        body,
+        permit,
+        header.request_id(),
+        has_trailing_bytes,
+    )))
 }
 
 /// Stable transport failure with backend and operation context.

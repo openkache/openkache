@@ -39,6 +39,11 @@ alias(
 )
 
 alias(
+    name = "tokio-rustls",
+    actual = "@crates//:tokio-rustls",
+)
+
+alias(
     name = "openkache_value",
     actual = "//clients/value:openkache_value",
 )
