@@ -493,7 +493,10 @@ async fn run_quic_role(
             stop,
         )
         .await;
-        let _ = tcp_stop_signal_for_quic.send(());
+        // The external shutdown path may already have filled this
+        // single-slot channel. Cross-signalling must never block the
+        // completed endpoint while retiring its sibling.
+        let _ = tcp_stop_signal_for_quic.try_send(());
         result
     };
     let tcp = run_tcp_worker(
@@ -534,6 +537,7 @@ async fn run_tcp_worker(
     } = limits;
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
     let mut connections = FuturesUnordered::new();
+    let mut stop_requested = false;
     let result = async {
         loop {
             if connections.is_empty() {
@@ -559,7 +563,10 @@ async fn run_tcp_worker(
                             Arc::clone(&runtime),
                         ));
                     }
-                    _ = stopping => break,
+                    _ = stopping => {
+                        stop_requested = true;
+                        break;
+                    }
                 }
             } else {
                 let incoming = listener.accept().fuse();
@@ -585,16 +592,27 @@ async fn run_tcp_worker(
                             Arc::clone(&runtime),
                         ));
                     }
-                    _ = stopping => break,
+                    _ = stopping => {
+                        stop_requested = true;
+                        break;
+                    }
                     _ = completed => {}
                 }
             }
         }
-        while connections.next().await.is_some() {}
+        if !stop_requested {
+            while connections.next().await.is_some() {}
+        }
+        // Dropping active connection futures closes their runtime-owned TCP
+        // streams. A server shutdown must not wait for an idle peer to send
+        // EOF after the worker stop signal has already been delivered.
+        drop(connections);
         Ok::<(), TransportError>(())
     }
     .await;
-    let _ = quic_stop_signal.send(());
+    // Shutdown may have queued the stop value before this endpoint finished.
+    // A non-blocking send preserves the worker completion path in that case.
+    let _ = quic_stop_signal.try_send(());
     result
 }
 
@@ -607,6 +625,7 @@ async fn serve_tcp_connection(
     request_budget: RequestBudget,
     runtime: Arc<operation_execution_state::OperationRuntime>,
 ) -> std::result::Result<(), TransportError> {
+    let _connection_guard = ActiveTcpConnection { network_shard };
     let max_frame = crate::protocol::max_request_frame_bytes();
     let lane = TlsTcpLane::new(
         stream,
@@ -618,7 +637,6 @@ async fn serve_tcp_connection(
     if lane.handshake(request_timeout).await.is_err() {
         network_shard.handshake_failed();
         lane.close().await;
-        network_shard.connection_finished();
         return Ok(());
     }
     network_shard.handshake_succeeded();
@@ -629,6 +647,7 @@ async fn serve_tcp_connection(
         operation_authorization::AuthorizationContext::public()
     };
     network_shard.stream_started();
+    let _stream_guard = ActiveTcpStream { network_shard };
     let (send, receive) = lane.split();
     let malformed = serve_stream(
         send,
@@ -644,9 +663,27 @@ async fn serve_tcp_connection(
         network_shard.protocol_error();
     }
     lane.close().await;
-    network_shard.stream_finished();
-    network_shard.connection_finished();
     Ok(())
+}
+
+struct ActiveTcpStream<'a> {
+    network_shard: NetworkShard<'a>,
+}
+
+impl Drop for ActiveTcpStream<'_> {
+    fn drop(&mut self) {
+        self.network_shard.stream_finished();
+    }
+}
+
+struct ActiveTcpConnection<'a> {
+    network_shard: NetworkShard<'a>,
+}
+
+impl Drop for ActiveTcpConnection<'_> {
+    fn drop(&mut self) {
+        self.network_shard.connection_finished();
+    }
 }
 
 fn bind_reuse_port_sockets(

@@ -1,10 +1,9 @@
 //! TLS 1.3 over TCP, one request lane per connection.
 //!
-//! This module deliberately stops at the provider-neutral connection
-//! boundary. Runtime adapters feed complete TLS records into
-//! [`OneLaneConnection::receive_record`] and write records returned by
-//! [`OneLaneConnection::take_records`]. No adapter may expose a plaintext
-//! socket or bypass the bounded record/frame checks below.
+//! [`OneLaneConnection`] owns the provider-neutral TLS and framing state
+//! machine. [`TlsTcpLane`] adapts it to the selected runtime's TCP stream;
+//! no caller may expose a plaintext socket or bypass the bounded record/frame
+//! checks below.
 
 use std::collections::VecDeque;
 use std::future::Future;
