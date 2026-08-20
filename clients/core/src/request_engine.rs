@@ -474,6 +474,13 @@ impl Registry {
             .map(|entry| entry.metadata)
     }
 
+    fn contains(&self, id: u64) -> bool {
+        self.entries
+            .lock()
+            .expect("request registry lock is not poisoned")
+            .contains_key(&id)
+    }
+
     fn started(&self, id: u64) -> bool {
         self.entries
             .lock()
@@ -718,11 +725,9 @@ fn request_prefix(request: &RequestBytes) -> Result<(u8, u64), EngineError> {
         prefix[length..length + take].copy_from_slice(&segment[..take]);
         length += take;
         if length >= 2 {
-            if let Some((request_id, _)) = openkache_protocol::decode_varuint(
-                &prefix[1..length],
-                "request ID",
-            )
-            .map_err(|error| EngineError::Protocol(error.to_string()))?
+            if let Some((request_id, _)) =
+                openkache_protocol::decode_varuint(&prefix[1..length], "request ID")
+                    .map_err(|error| EngineError::Local(error.to_string()))?
             {
                 return Ok((prefix[0], request_id));
             }
@@ -734,7 +739,9 @@ fn request_prefix(request: &RequestBytes) -> Result<(u8, u64), EngineError> {
     if length == 1 {
         return Err(EngineError::Local("request frame has no request ID".into()));
     }
-    Err(EngineError::Local("request frame has no complete request ID".into()))
+    Err(EngineError::Local(
+        "request frame has no complete request ID".into(),
+    ))
 }
 
 /// A caller-owned request completion. Dropping it cancels the registry entry
@@ -903,6 +910,15 @@ impl RequestEngine {
                 .lock()
                 .expect("request reservation lock is not poisoned");
             if reserved.insert(candidate) {
+                drop(reserved);
+                if self.inner.registry.contains(candidate) {
+                    self.inner
+                        .reserved
+                        .lock()
+                        .expect("request reservation lock is not poisoned")
+                        .remove(&candidate);
+                    continue;
+                }
                 break candidate;
             }
         };
@@ -961,11 +977,7 @@ impl RequestEngine {
             // writer. Do not let that stale lane-local ID start a response
             // read, or count it as an outstanding protocol request.
             active.retain(|id| self.inner.registry.metadata(*id).is_some());
-            if reads.is_empty()
-                && active
-                    .iter()
-                    .any(|id| self.inner.registry.started(*id))
-            {
+            if reads.is_empty() && active.iter().any(|id| self.inner.registry.started(*id)) {
                 let lane = Arc::clone(&lane);
                 let maximum = active
                     .iter()
