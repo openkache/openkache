@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-
+use futures_util::{select_biased};
 use crate::protocol::Response;
 
 #[derive(Clone)]
@@ -171,9 +171,14 @@ async fn serve_connection<C: TransportConnection>(
     loop {
         if streams.is_empty() {
             let incoming_bi = connection.accept_bi().fuse();
-            if accept_uni {
-                let incoming_uni = connection.accept_uni().fuse();
-                pin_mut!(incoming_bi, incoming_uni);
+            let incoming_uni = if accept_uni {
+                Some(connection.accept_uni().fuse())
+            } else {
+                None
+            };
+            pin_mut!(incoming_bi);
+            if let Some(incoming_uni) = incoming_uni {
+                pin_mut!(incoming_uni);
                 select! {
                     incoming = incoming_bi => match incoming {
                         Ok((send, receive)) => {
@@ -322,6 +327,14 @@ pub(super) enum LaneOutcome {
     Unknown,
 }
 
+fn response_write_failure_outcome(unknown_on_write: bool) -> LaneOutcome {
+    if unknown_on_write {
+        LaneOutcome::Unknown
+    } else {
+        LaneOutcome::Cancelled
+    }
+}
+
 enum LaneRequest {
     Frame(RequestFrame),
     Rejected {
@@ -367,11 +380,13 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 let _ = send.finish();
                 return LaneOutcome::Finished;
             }
+            let progress = std::sync::atomic::AtomicBool::new(false);
             let result = receive
                 .read_request(
                     crate::protocol::max_request_frame_bytes(),
                     request_timeout,
                     &request_budget,
+                    &progress,
                     |header, prefix| {
                         operation_dispatch::admit_request_header(header, prefix, runtime.as_ref())
                     },
@@ -407,11 +422,17 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
         pin_mut!(execute);
         loop {
             if request_direction_open && queue.len() < MAX_ADMITTED_REQUESTS {
+                // Once a read has delivered bytes, its local frame buffer owns
+                // the only copy. Finish that read before writing the response
+                // if execution wins the race; otherwise dropping it would
+                // lose a partial pipelined frame and desynchronize framing.
+                let progress = std::sync::atomic::AtomicBool::new(false);
                 let read = receive
                     .read_request(
                         crate::protocol::max_request_frame_bytes(),
                         request_timeout,
                         &request_budget,
+                        &progress,
                         |header, prefix| {
                             operation_dispatch::admit_request_header(
                                 header,
@@ -422,7 +443,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     )
                     .fuse();
                 pin_mut!(read);
-                select! {
+                select_biased! {
                     result = read => {
                         match enqueue_read_result(
                             result,
@@ -437,6 +458,21 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         }
                     }
                     result = execute => {
+                        if progress.load(std::sync::atomic::Ordering::Relaxed) {
+                            match read.await {
+                                result => match enqueue_read_result(
+                                    result,
+                                    &mut queue,
+                                    &mut request_direction_open,
+                                    network_shard,
+                                ) {
+                                    ReadDisposition::Malformed => return LaneOutcome::Malformed,
+                                    ReadDisposition::Transport => return LaneOutcome::Transport,
+                                    ReadDisposition::Stop => stop_receive = true,
+                                    ReadDisposition::Continue => {}
+                                },
+                            }
+                        }
                         match result {
                             ExecutionResult::Unknown => return LaneOutcome::Unknown,
                             ExecutionResult::Response(response) => {
@@ -460,11 +496,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                     send.reset();
                                     drop(permit);
                                     drop(request_permit);
-                                    return if unknown_on_write {
-                                        LaneOutcome::Unknown
-                                    } else {
-                                        LaneOutcome::Cancelled
-                                    };
+                                    return response_write_failure_outcome(unknown_on_write);
                                 }
                                 drop(permit);
                                 drop(request_permit);
@@ -476,7 +508,6 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         break;
                     }
                 }
-                drop(read);
             } else {
                 match execute.await {
                     ExecutionResult::Unknown => return LaneOutcome::Unknown,
@@ -494,11 +525,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             send.reset();
                             drop(permit);
                             drop(request_permit);
-                            return if unknown_on_write {
-                                LaneOutcome::Unknown
-                            } else {
-                                LaneOutcome::Cancelled
-                            };
+                            return response_write_failure_outcome(unknown_on_write);
                         }
                         drop(permit);
                         drop(request_permit);

@@ -19,6 +19,21 @@ const STREAM_CHUNK_BACKLOG: usize = 1;
 
 pub(super) type ConnectionId = Arc<[u8]>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StreamRecvClassification {
+    Cancelled,
+    Transport(quiche::Error),
+}
+
+pub(super) fn classify_stream_recv_error(error: quiche::Error) -> StreamRecvClassification {
+    match error {
+        quiche::Error::StreamReset(_) | quiche::Error::StreamStopped(_) => {
+            StreamRecvClassification::Cancelled
+        }
+        error => StreamRecvClassification::Transport(error),
+    }
+}
+
 pub(super) enum Command {
     Close {
         error_code: u64,
@@ -442,8 +457,15 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
     });
     if let Some(chunk) = request.pending.take() {
         let pending_finished = matches!(chunk, StreamChunk::Finished);
-        let pending_cancelled = matches!(chunk, StreamChunk::Cancelled);
+        let pending_terminal = matches!(
+            chunk,
+            StreamChunk::Finished | StreamChunk::Cancelled | StreamChunk::Error(_)
+        );
         match request.chunks.try_send(chunk) {
+            Ok(()) if pending_terminal => {
+                client.requests.remove(&stream_id);
+                return;
+            }
             Ok(()) if request.finished && !pending_finished => {
                 match request.chunks.try_send(StreamChunk::Finished) {
                     Ok(()) => {
@@ -458,10 +480,6 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
                 }
             }
             Ok(()) if pending_finished => {
-                client.requests.remove(&stream_id);
-                return;
-            }
-            Ok(()) if pending_cancelled => {
                 client.requests.remove(&stream_id);
                 return;
             }
@@ -521,20 +539,11 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
                 }
             }
             Err(quiche::Error::Done) => break,
-            Err(quiche::Error::StreamReset(_) | quiche::Error::StreamStopped(_)) => {
-                match request.chunks.try_send(StreamChunk::Cancelled) {
-                    Ok(()) => {
-                        client.requests.remove(&stream_id);
-                    }
-                    Err(TrySendError::Full(chunk)) => request.pending = Some(chunk),
-                    Err(TrySendError::Disconnected(_)) => {
-                        client.requests.remove(&stream_id);
-                    }
-                }
-                break;
-            }
             Err(error) => {
-                let chunk = StreamChunk::Transport(error.to_string());
+                let chunk = match classify_stream_recv_error(error) {
+                    StreamRecvClassification::Cancelled => StreamChunk::Cancelled,
+                    StreamRecvClassification::Transport(error) => StreamChunk::Error(error),
+                };
                 match request.chunks.try_send(chunk) {
                     Ok(()) => {
                         client.requests.remove(&stream_id);

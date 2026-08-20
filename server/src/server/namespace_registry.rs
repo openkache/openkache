@@ -289,6 +289,39 @@ impl NamespaceRegistry {
             .map(|entry| entry.descriptor.policy)
     }
 
+    pub(crate) fn update(
+        &mut self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> std::result::Result<NamespaceDescriptor, NamespaceError> {
+        namespace_metadata::encode_policy(policy).map_err(|_| NamespaceError::InvalidRequest)?;
+        let (previous, descriptor) = {
+            let entry = self
+                .by_id
+                .get_mut(&namespace_id)
+                .ok_or(NamespaceError::NotFound)?;
+            if entry.descriptor.revision != expected_revision {
+                return Err(NamespaceError::Conflict);
+            }
+            let previous = entry.descriptor;
+            entry.descriptor.revision = entry
+                .descriptor
+                .revision
+                .checked_add(1)
+                .ok_or(NamespaceError::Internal)?;
+            entry.descriptor.policy = policy;
+            (previous, entry.descriptor)
+        };
+        if self.persist().is_err() {
+            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                entry.descriptor = previous;
+            }
+            return Err(NamespaceError::Internal);
+        }
+        Ok(descriptor)
+    }
+
     pub(crate) fn delete(
         &mut self,
         namespace_id: u64,

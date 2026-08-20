@@ -169,6 +169,22 @@ impl ResourceLock {
         }
     }
 
+    /// Creates a lifecycle lock that is always active.
+    ///
+    /// Namespace creation is serialized by the registry's global lifecycle
+    /// mutex rather than by an individual namespace entry, so there is no
+    /// liveness flag to check after acquisition.
+    pub(super) fn unconditional(lock: Arc<AsyncMutex<()>>) -> Self {
+        Self {
+            lock,
+            active: None,
+            inactive_error: PrepareError::resource_unavailable(
+                OperationStatus::InternalError,
+                b"namespace metadata is unavailable",
+            ),
+        }
+    }
+
     pub(super) fn lock(&self) -> &Arc<AsyncMutex<()>> {
         &self.lock
     }

@@ -454,12 +454,6 @@ impl ThreadedKvkache {
         storage_keys::derive_storage_key(&self.storage_domain_key, identity)
     }
 
-    /// Returns the server-owned domain key used to migrate legacy namespace
-    /// membership identities during startup.
-    pub(crate) fn storage_domain_key(&self) -> [u8; 32] {
-        self.storage_domain_key
-    }
-
     /// Derives a server-owned storage address for an opaque protocol Item ID.
     ///
     /// Legacy maximum-width IDs retain their historical storage derivation so
@@ -479,6 +473,12 @@ impl ThreadedKvkache {
             storage_keys::ITEM_ID_STORAGE_SCOPE,
             item_id.as_bytes(),
         )
+    }
+
+    /// Returns the server-owned domain key used to migrate legacy namespace
+    /// membership identities during startup.
+    pub(crate) fn storage_domain_key(&self) -> [u8; 32] {
+        self.storage_domain_key
     }
 
     /// Sends one worker request using a reusable completion slot and bounded timeouts.

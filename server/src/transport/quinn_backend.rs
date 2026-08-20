@@ -138,9 +138,10 @@ impl super::ReceiveStream for ReceiveStream {
         maximum: usize,
         timeout: Duration,
         budget: &RequestBudget,
+        progress: &std::sync::atomic::AtomicBool,
         admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
     ) -> Result<RequestRead<T>, StreamReadError> {
-        read_buffered_request(self, NAME, maximum, timeout, budget, admit).await
+        read_buffered_request(self, NAME, maximum, timeout, budget, progress, admit).await
     }
 
     fn stop(&mut self) {
