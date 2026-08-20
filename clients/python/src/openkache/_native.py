@@ -174,7 +174,7 @@ class _NativeApi:
             ),
             _RESULT_POINTER,
         )
-        self.get_structured = self._function(
+        self.get_structured = self._optional_function(
             "openkache_client_get_structured",
             (
                 _CLIENT_POINTER,
@@ -183,7 +183,7 @@ class _NativeApi:
             ),
             _RESULT_POINTER,
         )
-        self.set_structured = self._function(
+        self.set_structured = self._optional_function(
             "openkache_client_set_structured",
             (
                 _CLIENT_POINTER,
@@ -551,7 +551,15 @@ class NativeClient:
             handle = self._handle
             self._active_calls += 1
         try:
-            result = self._api.get_structured(handle, key_pointer, len(key))
+            if self._api.get_structured is not None:
+                result = self._api.get_structured(handle, key_pointer, len(key))
+            else:
+                function = self._api.execute_unary
+                if function is None:
+                    raise NativeError(
+                        "native client does not support the StructuredValue-CBOR-v1 ABI"
+                    )
+                result = function(handle, 1, key_pointer, len(key))
             kind, payload, _ = self._api.read_result(result)
             return kind, payload
         finally:
@@ -577,15 +585,30 @@ class NativeClient:
             handle = self._handle
             self._active_calls += 1
         try:
-            result = self._api.set_structured(
-                handle,
-                key_pointer,
-                len(key),
-                value_pointer,
-                len(value),
-                set_flags,
-                ttl_ms,
-            )
+            if self._api.set_structured is not None:
+                result = self._api.set_structured(
+                    handle,
+                    key_pointer,
+                    len(key),
+                    value_pointer,
+                    len(value),
+                    set_flags,
+                    ttl_ms,
+                )
+            else:
+                function = self._api.execute_fields
+                if function is None:
+                    raise NativeError(
+                        "native client does not support the StructuredValue-CBOR-v1 ABI"
+                    )
+                fields = (SmithyNativeOperationField * 2)()
+                fields[0].data = key_pointer
+                fields[0].length = len(key)
+                fields[0].present = 1
+                fields[1].data = value_pointer
+                fields[1].length = len(value)
+                fields[1].present = 1
+                result = function(handle, 2, fields, 2)
             kind, payload, _ = self._api.read_result(result)
             return kind, payload
         finally:
