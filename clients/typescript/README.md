@@ -22,6 +22,12 @@ or Raw operations. The native boundary preserves an unknown mutation as
 ``OpenKache_Unknown_Mutation_Error`` and local cancellation as
 ``OpenKache_Cancelled_Error``.
 
+The package also exposes canonical-JSON mapped-key operations and exact
+`0..=32`-byte Item ID operations. Native keys are converted to canonical CBOR
+at the adapter boundary and the shared core applies the default `NamespaceHash`
+profile; `PublicKeyOrHash` remains an explicit core-only profile until binding
+options are finalized.
+
 ## Purpose
 
 The package converts JavaScript values and configuration into shared-core

@@ -57,7 +57,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
     SMITHY_FFI_RESULT_CREATED,
-    SMITHY_FFI_RESULT_CANCELLED,
+    SMITHY_FFI_RESULT_CANCELED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
     SMITHY_FFI_RESULT_NOT_FOUND,
@@ -154,6 +154,11 @@ class OpenKacheCancelledError(OpenKacheError):
     """The native boundary cancelled the operation before a definitive result."""
 
     kind = "cancelled"
+
+
+# Compatibility spelling retained for adapters that predate the generated
+# CANCELED discriminator.
+UnknownMutationError = OpenKacheUnknownMutationError
 
 
 class ConnectionState(StrEnum):
@@ -424,7 +429,7 @@ class OpenKacheClient:
     schedules blocking ctypes calls on worker threads.
     """
 
-    def __init__(self, native: _NativeClient, key_spec: KeySpec) -> None:
+    def __init__(self, native: _NativeClient, key_spec: KeySpec | None) -> None:
         self._native = native
         self._key_spec = key_spec
         self._closed = False
@@ -437,7 +442,7 @@ class OpenKacheClient:
         *,
         certificate: bytes | bytearray | memoryview | str | PathLike[str],
         data_protection_key: bytes | bytearray | memoryview | None = None,
-        key_spec: KeySpec | str = KeySpec.TEXT,
+        key_spec: KeySpec | str | None = None,
         server_name: str | None = None,
         identity: ClientIdentity | None = None,
         compression: CompressionOptions | None = None,
@@ -447,7 +452,9 @@ class OpenKacheClient:
         retry_max_attempts: int = SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
-        selected_key_spec = _normalize_key_spec(key_spec)
+        selected_key_spec = (
+            None if key_spec is None else _normalize_key_spec(key_spec)
+        )
         try:
             settings = await asyncio.to_thread(
                 _connection_settings,
@@ -802,7 +809,7 @@ class RawClient(SmithyOpenKacheApi):
     async def ping(self, input: SmithyPingInput | None = None) -> SmithyPingOutput:
         del input
         await self._owner.ping()
-        return SmithyPingOutput()
+        return SmithyPingOutput(payload=b"")
 
     async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
         item_id = _item_id(input.item_id)
@@ -955,7 +962,7 @@ def _raise_native_error(error: NativeError) -> NoReturn:
 
     if error.result_kind == SMITHY_FFI_RESULT_UNKNOWN_MUTATION:
         raise OpenKacheUnknownMutationError(str(error)) from error
-    if error.result_kind == SMITHY_FFI_RESULT_CANCELLED:
+    if error.result_kind == SMITHY_FFI_RESULT_CANCELED:
         raise OpenKacheCancelledError(str(error)) from error
     raise OpenKacheError(str(error)) from error
 
@@ -1117,33 +1124,28 @@ def _normalize_key_spec(value: KeySpec | str) -> KeySpec:
 
 def _key_bytes(
     value: str | int | bytes | bytearray | memoryview,
-    key_spec: KeySpec,
+    key_spec: KeySpec | None = None,
 ) -> bytes:
-    if key_spec is KeySpec.TEXT:
+    # `key_spec` remains accepted for source compatibility, but the v1
+    # canonical-key contract infers the discriminator from each value.
+    del key_spec
+    if isinstance(value, str):
         if not isinstance(value, str):
-            raise OpenKacheValueError("key must be a string for the text key spec")
+            raise OpenKacheValueError("key must be a string")
         try:
             payload = value.encode("utf-8")
         except UnicodeEncodeError as error:
             raise OpenKacheValueError("key must contain valid UTF-8 text") from error
         return _canonical_cbor_string(3, payload)
-    if key_spec is KeySpec.BYTES:
-        if isinstance(value, (str, int)) or not isinstance(
-            value, (bytes, bytearray, memoryview)
-        ):
-            raise OpenKacheValueError(
-                "key must be bytes-like for the bytes key spec"
-            )
+    if isinstance(value, (bytes, bytearray, memoryview)):
         return _canonical_cbor_string(2, _as_bytes(value, "key"))
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise OpenKacheValueError(
-            "key must be an integer for the integer key spec"
-        )
-    if not _I64_MIN <= value <= _I64_MAX:
-        raise OpenKacheValueError(
-            "integer keys must fit the signed 64-bit range"
-        )
-    return _canonical_cbor_integer(value)
+    if isinstance(value, bool):
+        raise OpenKacheValueError("boolean keys are not supported")
+    if isinstance(value, int):
+        return _canonical_cbor_integer(value)
+    raise OpenKacheValueError(
+        "key must be a signed-i64 integer, UTF-8 string, or bytes-like value"
+    )
 
 
 def _canonical_cbor_string(major: int, payload: bytes) -> bytes:
@@ -1459,6 +1461,7 @@ __all__ = [
     "OpenKacheError",
     "OpenKacheUnknownMutationError",
     "OpenKacheValueError",
+    "UnknownMutationError",
     "RawClient",
     "ServerStats",
     "SetCondition",

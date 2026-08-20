@@ -64,8 +64,6 @@ pub struct NativeClientOptions {
     pub retry_max_attempts: Option<f64>,
     #[napi(js_name = "max_in_flight")]
     pub max_in_flight: Option<f64>,
-    #[napi(js_name = "max_in_flight_bytes")]
-    pub max_in_flight_bytes: Option<f64>,
     pub encryption: Option<String>,
     #[napi(js_name = "key_spec")]
     pub key_spec: Option<String>,
@@ -147,7 +145,7 @@ impl NativeClient {
     }
 
     /// Retrieves one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "get_structured")]
     pub async fn get_structured(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
         let outcome = self
             .active_client()?
@@ -238,7 +236,7 @@ impl NativeClient {
     }
 
     /// Stores one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "set_structured")]
     pub async fn set_structured(
         &self,
         key: Uint8Array,
@@ -400,7 +398,7 @@ impl NativeClient {
             .map_err(native_core_error)
     }
 
-    /// Retrieves exact bytes for a fixed-size protocol item ID.
+    /// Retrieves exact bytes for a `0..=32`-byte protocol item ID.
     #[napi(js_name = "raw_get")]
     pub async fn raw_get(&self, item_id: Uint8Array) -> Result<Option<Uint8Array>> {
         let item_id = parse_item_id(item_id.as_ref())?;
@@ -437,7 +435,7 @@ impl NativeClient {
             .map_err(native_core_error)
     }
 
-    /// Stores exact bytes for a fixed-size protocol item ID.
+    /// Stores exact bytes for a `0..=32`-byte protocol item ID.
     #[napi(js_name = "raw_set")]
     pub async fn raw_set(
         &self,
@@ -496,7 +494,7 @@ impl NativeClient {
             .map_err(native_core_error)
     }
 
-    /// Deletes a fixed-size protocol item ID.
+    /// Deletes a `0..=32`-byte protocol item ID.
     #[napi(js_name = "raw_delete")]
     pub async fn raw_delete(&self, item_id: Uint8Array) -> Result<bool> {
         let item_id = parse_item_id(item_id.as_ref())?;
@@ -712,16 +710,15 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .map(|value| parse_usize(value, "max_in_flight", false))
         .transpose()?
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
-    let max_in_flight_bytes = options
-        .max_in_flight_bytes
-        .map(|value| parse_usize(value, "max_in_flight_bytes", false))
-        .transpose()?;
     let encryption = options
         .encryption
         .as_deref()
         .map(parse_encryption)
         .transpose()?;
-    let key_spec = parse_key_spec(options.key_spec.as_deref())?;
+    // Validate the deprecated compatibility option, but do not apply a
+    // namespace-level key policy. Mapped operations infer `TypedKey` from
+    // each native input before crossing the core boundary.
+    let _key_spec = parse_key_spec(options.key_spec.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
     let mut builder = match data_protection_key {
@@ -732,11 +729,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     .compression(compression)
     .timeouts(timeouts)
     .retry_policy(retry)
-    .max_in_flight(max_in_flight)
-    .key_spec(key_spec);
-    if let Some(maximum) = max_in_flight_bytes {
-        builder = builder.max_in_flight_bytes(maximum);
-    }
+    .max_in_flight(max_in_flight);
     if let Some(encryption) = encryption {
         builder = builder.encryption(encryption);
     }
@@ -750,11 +743,12 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
 }
 
 fn parse_key_spec(value: Option<&str>) -> Result<KeySpec> {
-    match value.unwrap_or("text") {
-        "integer" => Ok(KeySpec::Integer),
-        "text" => Ok(KeySpec::Text),
-        "bytes" => Ok(KeySpec::Bytes),
-        other => Err(invalid_argument(format!(
+    match value {
+        None => Ok(KeySpec::Text),
+        Some("integer") => Ok(KeySpec::Integer),
+        Some("text") => Ok(KeySpec::Text),
+        Some("bytes") => Ok(KeySpec::Bytes),
+        Some(other) => Err(invalid_argument(format!(
             "key_spec must be integer, text, or bytes, got {other}"
         ))),
     }
@@ -1102,7 +1096,15 @@ fn map_set_outcome(outcome: SetOutcome) -> String {
 }
 
 fn native_error(error: impl std::fmt::Display) -> Error {
-    Error::new(Status::GenericFailure, error.to_string())
+    let message = error.to_string();
+    let message = if message.contains("result is unknown after request transmission")
+        || message.contains("unknown outcome after transmission")
+    {
+        format!("unknown_mutation: {message}")
+    } else {
+        message
+    };
+    Error::new(Status::GenericFailure, message)
 }
 
 fn native_core_error(error: openkache_client_core::Error) -> Error {

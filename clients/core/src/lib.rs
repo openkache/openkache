@@ -8,6 +8,8 @@ pub mod contract {
 
 mod config;
 #[cfg(feature = "ffi")]
+mod ffi_admission;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 mod key;
 mod protected;
@@ -37,9 +39,12 @@ pub use config::{
     ServerTrust, SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
+#[allow(deprecated)]
 pub use key::{
     CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
-    KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey, canonical_key_bytes,
+    KeyError, KeyFormat, KeySpace, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
+    MAX_KEY_INPUT_BYTES, PortableInteger, PortableKey, ResolvedKey, TypedInteger, TypedKey,
+    canonical_key_bytes,
 };
 pub use openkache_protocol::ITEM_ID_BYTES;
 pub use openkache_value::{
@@ -441,6 +446,34 @@ struct RequestFailure {
     invalidates_connection: bool,
 }
 
+/// Returns whether a request can change durable cache or namespace state.
+///
+/// Retry policy and side-effect classification are separate contracts.  In
+/// particular, experimental SYNC is non-replayable because it is a visibility
+/// barrier, but it is not a mutation and therefore must not be surfaced as an
+/// `UnknownMutation` result when cancellation races its completion.
+const fn operation_is_mutating(operation: Operation) -> bool {
+    matches!(
+        operation,
+        Operation::Set
+            | Operation::Delete
+            | Operation::NamespaceOpen
+            | Operation::NamespaceUpdatePolicy
+            | Operation::NamespaceDelete
+    )
+}
+
+/// Returns whether losing the response can leave the operation's outcome
+/// unknown after transmission.
+///
+/// `SYNC` is an experimental maintenance barrier rather than a mutation, but
+/// its barrier may have linearized before a terminal transport failure.  Keep
+/// that transport boundary distinct from cancellation, where only actual
+/// mutating operations are surfaced as `UnknownMutation`.
+const fn operation_has_unknown_outcome(operation: Operation) -> bool {
+    operation_is_mutating(operation) || matches!(operation, Operation::Sync)
+}
+
 impl RequestFailure {
     fn before_send(error: Error) -> Self {
         let invalidates_connection = error.invalidates_connection_before_send();
@@ -747,7 +780,7 @@ impl<C: ClientConnection> Core<C> {
         let context = request.context();
         let response_safe = context.retry_policy.is_safe();
         let request_id = self
-            .reserve_request_id(context.operation, !response_safe)
+            .reserve_request_id(context.operation, operation_is_mutating(context.operation))
             .await?;
         let (success_statuses, error_statuses) = {
             let wire = operation_wire_spec(context.opcode);
@@ -801,7 +834,9 @@ impl<C: ClientConnection> Core<C> {
                     }
                     let transmitted = self.pending_was_transmitted(request_id).await;
                     self.complete_request(request_id).await;
-                    if !response_safe && (failure.may_have_reached_server || transmitted) {
+                    if operation_has_unknown_outcome(context.operation)
+                        && (failure.may_have_reached_server || transmitted)
+                    {
                         return Err(Error::AmbiguousOutcome {
                             operation: context.operation,
                             cause: Box::new(failure.error),
@@ -1498,7 +1533,7 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Retrieves exact encoded bytes for a fixed-size item ID.
+            /// Retrieves exact encoded bytes for a `0..=32`-byte item ID.
             pub async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
                 self.0.get(item_id).await
             }
@@ -1545,12 +1580,12 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Deletes a fixed-size item ID.
+            /// Deletes a `0..=32`-byte item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
             }
 
-            /// Deletes a fixed-size item ID in an explicitly supplied namespace.
+            /// Deletes a `0..=32`-byte item ID in an explicitly supplied namespace.
             pub async fn delete_in_namespace(
                 &self,
                 namespace_id: u64,

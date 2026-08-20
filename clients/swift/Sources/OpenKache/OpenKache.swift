@@ -1159,7 +1159,7 @@ public actor OpenKacheRawClient {
         }
     }
 
-    /// Retrieves exact bytes for a 32-byte protocol item ID.
+    /// Retrieves exact bytes for a `0...32`-byte protocol item ID.
     public func get(_ itemID: Data) async throws -> Data? {
         try validateItemID(itemID)
         return try await perform { handle in
@@ -1174,7 +1174,7 @@ public actor OpenKacheRawClient {
         }
     }
 
-    /// Stores exact bytes for a 32-byte protocol item ID.
+    /// Stores exact bytes for a `0...32`-byte protocol item ID.
     public func set(
         _ itemID: Data,
         value: Data,
@@ -1197,7 +1197,7 @@ public actor OpenKacheRawClient {
         }
     }
 
-    /// Deletes a 32-byte protocol item ID.
+    /// Deletes a `0...32`-byte protocol item ID.
     public func delete(_ itemID: Data) async throws -> OpenKacheDeleteOutcome {
         try validateItemID(itemID)
         return try await perform { handle in
@@ -1289,9 +1289,9 @@ public actor OpenKacheRawClient {
     }
 
     private func validateItemID(_ itemID: Data) throws {
-        guard itemID.count == Smithy_Value_Format.itemIdBytes else {
+        guard itemID.count <= Smithy_Value_Format.itemIdBytes else {
             throw OpenKacheError(
-                "itemID must contain exactly \(Smithy_Value_Format.itemIdBytes) bytes"
+                "itemID must contain at most \(Smithy_Value_Format.itemIdBytes) bytes"
             )
         }
     }
@@ -1301,7 +1301,7 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
     public func ping(_ input: Smithy_Ping_Input) async throws -> Smithy_Ping_Output {
         _ = input
         try await ping()
-        return Smithy_Ping_Output()
+        return Smithy_Ping_Output(payload: Data())
     }
 
     public func get(_ input: Smithy_Get_Input) async throws -> Smithy_Get_Output {

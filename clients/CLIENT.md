@@ -18,11 +18,8 @@ here. A client that claims compatibility with a wire, key, or value profile
 must still implement that profile exactly.
 
 The format specifications in this draft describe the target contract. The
-generated Smithy models and `clients/core` implementation may still describe
-the previous pre-freeze contract (for example, fixed-width Item IDs and the
-legacy value container). Until the implementation migration is complete, the
-draft documents are design sources of truth and the generated/core artifacts
-are current-implementation references, not evidence of conformance.
+key and Item ID boundary is implemented in `clients/core`; the generated value
+model and envelope remain transitional until their respective migrations land.
 
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.

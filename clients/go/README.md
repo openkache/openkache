@@ -80,6 +80,7 @@ and `ConnectionState` returns a best-effort lifecycle snapshot.
 the shared core; they accept and return complete JSON documents as bytes.
 `NewItemID`, `GetItem`, `SetItem`, and `DeleteItem` expose the exact wire
 item-ID/raw-value layer when an application already owns protocol IDs.
+`ItemID` preserves the exact `0..=32` opaque bytes supplied by the caller.
 Use `client.Smithy()` when an application needs the generated
 `SmithyOpenKacheAPI` operation structures shared with other bindings.
 

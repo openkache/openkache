@@ -49,11 +49,13 @@ for the v1 contract.
 
 ## What exists today
 
-The current code describes only the transitional implementation; the draft
-documents are the target source of truth. Some current
-Rust and legacy adapter paths still use fixed-width Item IDs or a legacy value
-container. They MUST NOT be treated as evidence that the draft variable-length
-wire, key, or value profiles are already implemented.
+The current core implements the draft key boundary: `TypedKey` produces one
+canonical deterministic-CBOR item, `NamespaceHash` is the default
+root/namespace-bound profile, and `PublicKeyOrHash` is explicit. `ItemId`
+accepts exact `0..=32` bytes; raw clients preserve those bytes without
+derivation or value protection. The deprecated `Hash` and `ByteKeyOrHash`
+profiles remain explicit compatibility paths with their historical framing;
+they are never selected by the v1 default.
 
 ## Commands
 
@@ -92,12 +94,11 @@ let outcome = client
     .await?;
 ```
 
-`ItemId::from_bytes` preserves the current fixed-array API. `ItemId::from_slice`
-validates and copies a dynamic input according to the current implementation.
-Neither hashes the supplied bytes. The key-format specification defines the
-target empty, short, and 32-byte Exact Item IDs and formatted-key behavior;
-this example describes the current Rust API surface until that migration is
-complete.
+`ItemId::from_bytes` preserves the maximum-width compatibility constructor.
+`ItemId::from_slice` and `ItemId::exact` validate and copy exact `0..=32`-byte
+inputs; neither hashes or pads the supplied bytes. Use the raw client for
+Exact Item ID operations and the protected client for mapped `TypedKey`
+operations.
 
 `ValueCodec` composes the value model with the formatted-value envelope. The
 value model owns structured-value semantics, the value format owns envelope

@@ -30,14 +30,31 @@ export type Api_Type_Kind =
  */
 export type Operation_Field_Role = string
 
+/** Retry policies exposed by the client compatibility adapters. */
+export const OPERATION_RETRY_MODES = [
+  "always",
+  "never",
+  "when_not_creating",
+] as const
+
+export type Api_Operation_Retry_Mode = (typeof OPERATION_RETRY_MODES)[number]
+
 /**
- * Neutral operation metadata shared by every renderer.
+ * Client-owned operation semantics layered over the generic wire contract.
  *
- * Client retry policy, scope, and ergonomic result labels are intentionally
- * not part of this type. They belong to an optional client projection and
- * must not leak into the language-neutral operation plan.
+ * These labels are deliberately absent from `Wire_Operation_Contract`: server
+ * framing and codec infrastructure must not acquire client retry policy,
+ * scope vocabulary, or ergonomic result names merely because one client
+ * adapter uses them.
  */
-export interface Api_Operation_Contract extends Wire_Operation_Contract {}
+export interface Api_Operation_Contract extends Wire_Operation_Contract {
+  /** Open result label interpreted by an optional client adapter. */
+  readonly response_semantics?: string
+  /** Retry policy interpreted by a client invocation adapter. */
+  readonly retry_mode: Api_Operation_Retry_Mode
+  /** API-owned invocation scope label. */
+  readonly scope: string
+}
 
 /** One resolved Smithy API field type. */
 export interface Api_Type {

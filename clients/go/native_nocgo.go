@@ -23,6 +23,22 @@ func (unavailableNativeClient) execute(
 	return nativeResult{}, &Error{Operation: "execute", Message: "native client unavailable"}
 }
 
+func (unavailableNativeClient) executeStructuredUnary(
+	context.Context,
+	uint32,
+	[]byte,
+) (nativeResult, error) {
+	return nativeResult{}, &Error{Operation: "execute structured", Message: "native client unavailable"}
+}
+
+func (unavailableNativeClient) executeStructuredFields(
+	context.Context,
+	uint32,
+	[][]byte,
+) (nativeResult, error) {
+	return nativeResult{}, &Error{Operation: "execute structured", Message: "native client unavailable"}
+}
+
 func (unavailableNativeClient) executeRaw(
 	context.Context,
 	uint32,
