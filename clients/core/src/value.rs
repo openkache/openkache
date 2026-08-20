@@ -20,7 +20,7 @@ use openkache_value::{
     Limits as StructuredLimits, Value as StructuredValue, decode_with_limits_and_budget,
     encode_with_limits_and_budget,
 };
-use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use zeroize::{Zeroize, Zeroizing};
 use zstd_pure_rs::prelude::{
@@ -360,6 +360,350 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
                 .try_reserve(1)
                 .map_err(|_| serde::de::Error::custom("failed to grow JSON object"))?;
             entries.push((key, map.next_value()?));
+        }
+        Ok(JsonValue::Object(entries))
+    }
+}
+
+/// State retained while a compatibility JSON document is decoded.
+///
+/// `serde_json` normally allocates the complete `JsonValue` recursively before
+/// the value codec can apply its aggregate budget.  The FFI adapters cannot
+/// afford that unbounded admission path: native callers can supply arbitrary
+/// documents and the parser is itself part of the request.  This state tracks
+/// the caller-selected structural limits and retains permits for every
+/// allocation made by the parser until the caller has finished with the
+/// resulting model.
+struct JsonParseState<'a> {
+    budget: &'a RequestBudget,
+    limits: ValueLimits,
+    permits: Vec<BytePermit>,
+    item_count: usize,
+    failure: Option<Error>,
+}
+
+impl JsonParseState<'_> {
+    fn new(budget: &RequestBudget, limits: ValueLimits) -> JsonParseState<'_> {
+        JsonParseState {
+            budget,
+            limits,
+            permits: Vec::new(),
+            item_count: 0,
+            failure: None,
+        }
+    }
+
+    fn reserve(&mut self, size: usize) -> Result<()> {
+        let permit = reserve_budget(self.budget, size, &self.limits, Resource::StructuredValue)?;
+        self.permits
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        self.permits.push(permit);
+        Ok(())
+    }
+
+    fn clone_string(&mut self, value: &str) -> Result<String> {
+        self.reserve(value.len())?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| Error::Allocation { size: value.len() })?;
+        owned.push_str(value);
+        Ok(owned)
+    }
+
+    fn admit_item(&mut self) -> Result<()> {
+        self.item_count = self
+            .item_count
+            .checked_add(1)
+            .ok_or_else(|| structured_resource(self.limits.max_items, usize::MAX))?;
+        if self.item_count > self.limits.max_items {
+            return Err(structured_resource(self.limits.max_items, self.item_count));
+        }
+        Ok(())
+    }
+
+    fn admit_children(&mut self, count: usize) -> Result<()> {
+        let total = self
+            .item_count
+            .checked_add(count)
+            .ok_or_else(|| structured_resource(self.limits.max_items, usize::MAX))?;
+        if total > self.limits.max_items {
+            return Err(structured_resource(self.limits.max_items, total));
+        }
+        Ok(())
+    }
+
+    fn reject<E: serde::de::Error>(&mut self, error: Error) -> E {
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+        E::custom("bounded JSON parser rejected input")
+    }
+
+    fn finish_error(&mut self, error: impl fmt::Display) -> Error {
+        self.failure
+            .take()
+            .unwrap_or_else(|| Error::InvalidJson(error.to_string()))
+    }
+}
+
+struct JsonBudgetSeed<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+    depth: usize,
+}
+
+impl<'de, 'a, 'b> DeserializeSeed<'de> for JsonBudgetSeed<'a, 'b> {
+    type Value = JsonValue;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.state
+            .admit_item()
+            .map_err(|error| self.state.reject(error))?;
+        self.state
+            .reserve(size_of::<JsonValue>())
+            .map_err(|error| self.state.reject(error))?;
+        deserializer.deserialize_any(JsonBudgetVisitor {
+            state: self.state,
+            depth: self.depth,
+        })
+    }
+}
+
+struct JsonStringSeed<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+}
+
+impl<'de, 'a, 'b> DeserializeSeed<'de> for JsonStringSeed<'a, 'b> {
+    type Value = String;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.state
+            .admit_item()
+            .map_err(|error| self.state.reject(error))?;
+        self.state
+            .reserve(size_of::<(String, JsonValue)>())
+            .and_then(|()| self.state.reserve(size_of::<&str>()))
+            .map_err(|error| self.state.reject(error))?;
+        deserializer.deserialize_string(JsonStringVisitor { state: self.state })
+    }
+}
+
+struct JsonStringVisitor<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+}
+
+impl<'de> Visitor<'de> for JsonStringVisitor<'_, '_> {
+    type Value = String;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object property name")
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .clone_string(value)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(value)
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .reserve(value.len())
+            .map(|()| value)
+            .map_err(|error| self.state.reject(error))
+    }
+}
+
+struct JsonBudgetVisitor<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+    depth: usize,
+}
+
+impl<'de> Visitor<'de> for JsonBudgetVisitor<'_, '_> {
+    type Value = JsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a finite JSON value")
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Null)
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Null)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Boolean(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value.unsigned_abs() as u128, value as f64)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_i128<E>(self, value: i128) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value.unsigned_abs(), value as f64)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value as u128, value as f64).map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value, value as f64).map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        JsonValue::number(value).map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .clone_string(value)
+            .map(JsonValue::String)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(value)
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .reserve(value.len())
+            .map(|()| JsonValue::String(value))
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if self.depth >= self.state.limits.max_depth {
+            return Err(self.state.reject(structured_depth(
+                self.state.limits.max_depth,
+                self.depth + 1,
+            )));
+        }
+        let length = sequence.size_hint().unwrap_or(0);
+        if let Err(error) = self.state.admit_children(length) {
+            return Err(self.state.reject(error));
+        }
+        let mut values = Vec::new();
+        if values.try_reserve_exact(length).is_err() {
+            return Err(self.state.reject(Error::Allocation {
+                size: length.saturating_mul(size_of::<JsonValue>()),
+            }));
+        }
+        while let Some(value) = {
+            let seed = JsonBudgetSeed {
+                state: &mut *self.state,
+                depth: self.depth + 1,
+            };
+            sequence.next_element_seed(seed)
+        }? {
+            values.push(value);
+        }
+        Ok(JsonValue::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if self.depth >= self.state.limits.max_depth {
+            return Err(self.state.reject(structured_depth(
+                self.state.limits.max_depth,
+                self.depth + 1,
+            )));
+        }
+        let length = map.size_hint().unwrap_or(0);
+        let child_count = length
+            .checked_mul(2)
+            .ok_or_else(|| structured_resource(self.state.limits.max_items, usize::MAX))
+            .map_err(|error| self.state.reject(error))?;
+        if let Err(error) = self.state.admit_children(child_count) {
+            return Err(self.state.reject(error));
+        }
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(length).is_err() {
+            return Err(self.state.reject(Error::Allocation {
+                size: length.saturating_mul(size_of::<(String, JsonValue)>()),
+            }));
+        }
+        while let Some(key) = {
+            let seed = JsonStringSeed {
+                state: &mut *self.state,
+            };
+            map.next_key_seed(seed)
+        }? {
+            let value = {
+                let seed = JsonBudgetSeed {
+                    state: &mut *self.state,
+                    depth: self.depth + 1,
+                };
+                map.next_value_seed(seed)
+            }?;
+            entries.push((key, value));
+        }
+        let mut keys = HashSet::<&str>::new();
+        if keys.try_reserve(entries.len()).is_err() {
+            return Err(self.state.reject(Error::Allocation {
+                size: entries.len().saturating_mul(size_of::<&str>()),
+            }));
+        }
+        for (key, _) in &entries {
+            if !keys.insert(key.as_str()) {
+                return Err(self
+                    .state
+                    .reject(Error::InvalidJson("duplicate JSON object property".into())));
+            }
         }
         Ok(JsonValue::Object(entries))
     }
@@ -1412,7 +1756,7 @@ impl ValueCodec {
         reserve_budget(self.budget(), size, &self.limits, resource)
     }
 
-    fn budget(&self) -> &RequestBudget {
+    pub(crate) fn budget(&self) -> &RequestBudget {
         self.budget.as_ref().unwrap_or_else(|| {
             self.default_budget
                 .get_or_init(|| RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES))
@@ -1420,7 +1764,7 @@ impl ValueCodec {
     }
 }
 
-fn reserve_budget(
+pub(crate) fn reserve_budget(
     budget: &RequestBudget,
     size: usize,
     limits: &ValueLimits,
@@ -1647,22 +1991,51 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Parse one complete JSON input for compatibility adapters.
 #[allow(dead_code)]
 pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
-    if payload.len() > MAX_EXPANDED_PAYLOAD_BYTES {
+    let budget = RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES);
+    let (value, _permits) = parse_json_input_with_budget(payload, ValueLimits::default(), &budget)?;
+    Ok(value)
+}
+
+/// Parse one complete JSON input while charging parser allocations to the
+/// caller's aggregate request budget. Temporary parser permits are released
+/// when this regression helper returns.
+#[doc(hidden)]
+pub fn parse_json_input_for_test(
+    payload: &[u8],
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<JsonValue> {
+    let (value, _permits) = parse_json_input_with_budget(payload, limits, budget)?;
+    Ok(value)
+}
+
+/// Parse one complete JSON input while retaining permits for the caller's
+/// subsequent bounded conversion.
+pub(crate) fn parse_json_input_with_budget(
+    payload: &[u8],
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(JsonValue, Vec<BytePermit>)> {
+    if payload.len() > limits.max_expanded_payload_bytes {
         return Err(Error::ResourceLimit {
             resource: Resource::ExpandedPayloadBytes,
-            limit: MAX_EXPANDED_PAYLOAD_BYTES,
+            limit: limits.max_expanded_payload_bytes,
             actual: payload.len(),
         });
     }
     validate_json_integer_tokens(payload)?;
     let mut deserializer = serde_json::Deserializer::from_slice(payload);
-    let value = JsonValue::deserialize(&mut deserializer)
-        .map_err(|error| Error::InvalidJson(error.to_string()))?;
+    let mut state = JsonParseState::new(budget, limits);
+    let value = JsonBudgetSeed {
+        state: &mut state,
+        depth: 0,
+    }
+    .deserialize(&mut deserializer)
+    .map_err(|error| state.finish_error(error))?;
     deserializer
         .end()
-        .map_err(|error| Error::InvalidJson(error.to_string()))?;
-    validate_json(&value)?;
-    Ok(value)
+        .map_err(|error| state.finish_error(error))?;
+    Ok((value, state.permits))
 }
 
 fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
@@ -1732,11 +2105,7 @@ fn validate_json_number_token(token: &[u8]) -> Result<()> {
             "JSON numbers must be finite IEEE-754 values".into(),
         ));
     }
-    let Some(expected) = integer_token(token) else {
-        return Ok(());
-    };
-    let actual = normalize_integer_string(&format!("{value:.0}"));
-    if actual != expected {
+    if !same_integer_value(token, &format!("{value:.0}")) {
         return Err(Error::InvalidJson(
             "JSON integers must be exactly representable as IEEE-754 binary64 values".into(),
         ));
@@ -1744,35 +2113,23 @@ fn validate_json_number_token(token: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn integer_token(token: &str) -> Option<String> {
-    let (negative, token) = token
+fn same_integer_value(input: &str, rendered: &str) -> bool {
+    let (input_negative, input_digits) = input
         .strip_prefix('-')
-        .map_or((false, token), |token| (true, token));
-    if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let digits = token.trim_start_matches('0');
-    if digits.is_empty() {
-        return Some("0".to_owned());
-    }
-    let mut normalized = digits.to_owned();
-    if negative {
-        normalized.insert(0, '-');
-    }
-    Some(normalized)
-}
-
-fn normalize_integer_string(value: &str) -> String {
-    let negative = value.starts_with('-');
-    let digits = value.strip_prefix('-').unwrap_or(value);
-    let digits = digits.trim_start_matches('0');
-    if digits.is_empty() {
-        "0".to_owned()
-    } else if negative {
-        format!("-{digits}")
-    } else {
-        digits.to_owned()
-    }
+        .map_or((false, input), |digits| (true, digits));
+    let (rendered_negative, rendered_digits) = rendered
+        .strip_prefix('-')
+        .map_or((false, rendered), |digits| (true, digits));
+    let input_digits = input_digits.trim_start_matches('0');
+    let rendered_digits = rendered_digits.trim_start_matches('0');
+    let input_zero = input_digits.is_empty();
+    let rendered_zero = rendered_digits.is_empty();
+    (input_zero && rendered_zero || input_negative == rendered_negative)
+        && if input_zero {
+            rendered_zero
+        } else {
+            input_digits == rendered_digits
+        }
 }
 
 #[allow(dead_code)]

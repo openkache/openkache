@@ -4,6 +4,7 @@
 //! other native bindings only marshal buffers and interpret result discriminators; connection
 //! management, retries, protocol framing, and value protection remain in this crate.
 
+use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
@@ -37,7 +38,10 @@ use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 use crate::ffi_admission::{AdmissionState, FfiAdmission};
-use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
+use crate::transport::BytePermit;
+use crate::value::{
+    Compression, Encryption, JsonValue, Resource, Value, ValueLimits, ZstandardOptions,
+};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
     Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpace, KeyType,
@@ -52,6 +56,7 @@ pub struct FfiResult {
     status: FfiStatusCategory,
     error_category: FfiErrorCategory,
     payload: Vec<u8>,
+    _payload_permits: Vec<BytePermit>,
     client: Option<Box<FfiClient>>,
 }
 
@@ -218,6 +223,7 @@ impl FfiResult {
             },
             error_category,
             payload: message.into().into_bytes(),
+            _payload_permits: Vec::new(),
             client: None,
         }
     }
@@ -241,6 +247,7 @@ impl FfiResult {
             status,
             error_category: FfiErrorCategory::None,
             payload,
+            _payload_permits: Vec::new(),
             client: None,
         }
     }
@@ -256,6 +263,20 @@ impl FfiResult {
             status,
             error_category,
             payload,
+            _payload_permits: Vec::new(),
+            client: None,
+        }
+    }
+
+    fn success_with_permits(
+        kind: FfiResultKind,
+        payload: Vec<u8>,
+        payload_permits: Vec<BytePermit>,
+    ) -> Self {
+        Self {
+            kind,
+            payload,
+            _payload_permits: payload_permits,
             client: None,
         }
     }
@@ -314,6 +335,7 @@ impl FfiResult {
             status: FfiStatusCategory::Success,
             error_category: FfiErrorCategory::None,
             payload: Vec::new(),
+            _payload_permits: Vec::new(),
             client: Some(Box::new(client)),
         }
     }
@@ -1155,22 +1177,42 @@ async fn execute_protected(
         FfiOperation::GetJson => client
             .get_canonical_key_unchecked(canonical_key.as_slice())
             .await
-            .and_then(json_result),
+            .and_then(|outcome| {
+                json_result(outcome, client.request_budget(), client.value_limits())
+            }),
+        FfiOperation::GetStructured => client
+            .get_structured_canonical_key_unchecked(canonical_key.as_slice())
+            .await
+            .and_then(structured_result),
         FfiOperation::Set => client
             .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
             .map(set_result),
-        FfiOperation::SetJson => match parse_json(&value) {
-            Ok(json) => client
+        FfiOperation::SetJson => {
+            let budget = client.request_budget();
+            let limits = client.value_limits();
+            let (json, _json_permits) =
+                crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
+            client
                 .set_canonical_key_unchecked(
                     canonical_key.as_slice(),
                     Value::Json(json),
                     set_options,
                 )
                 .await
-                .map(set_result),
-            Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
-        },
+                .map(set_result)
+        }
+        FfiOperation::SetStructured => {
+            let structured = decode(&value).map_err(crate::value::Error::Structured)?;
+            client
+                .set_structured_canonical_key_unchecked(
+                    canonical_key.as_slice(),
+                    structured,
+                    set_options,
+                )
+                .await
+                .map(set_result)
+        }
         FfiOperation::Delete => client
             .delete_canonical_key_unchecked(canonical_key.as_slice())
             .await
@@ -1431,18 +1473,190 @@ fn set_result(outcome: SetOutcome) -> FfiResult {
     )
 }
 
-fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, crate::Error> {
+#[doc(hidden)]
+pub fn json_result(
+    outcome: GetOutcome<Value>,
+    budget: crate::RequestBudget,
+    limits: ValueLimits,
+) -> std::result::Result<FfiResult, crate::Error> {
     match outcome {
-        GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
+        GetOutcome::Found(Value::Json(mut value)) => {
+            let mut writer = BudgetJsonWriter::new(&budget, limits);
+            if let Err(error) = write_json_canonical(&mut value, 0, limits, &mut writer) {
+                return Err(writer.take_failure().unwrap_or(error).into());
+            }
+            let (payload, permits) = writer.finish();
+            Ok(FfiResult::success_with_permits(
+                FfiResultKind::Value,
+                payload,
+                permits,
+            ))
+        }
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
-fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
-    crate::value::parse_json_input(bytes).map_err(|error| error.to_string())
+fn write_json_canonical(
+    value: &mut JsonValue,
+    depth: usize,
+    limits: ValueLimits,
+    writer: &mut BudgetJsonWriter<'_>,
+) -> std::result::Result<(), crate::value::Error> {
+    match value {
+        JsonValue::Null | JsonValue::Boolean(_) | JsonValue::Number(_) | JsonValue::String(_) => {
+            serde_json_canonicalizer::to_writer(value, writer).map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })
+        }
+        JsonValue::Array(values) => {
+            if depth >= limits.max_depth {
+                return Err(crate::value::Error::ResourceLimit {
+                    resource: Resource::StructuredValue,
+                    limit: limits.max_depth,
+                    actual: depth + 1,
+                });
+            }
+            writer.write_all(b"[").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })?;
+            for (index, value) in values.iter_mut().enumerate() {
+                if index != 0 {
+                    writer.write_all(b",").map_err(|error| {
+                        writer
+                            .take_failure()
+                            .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                    })?;
+                }
+                write_json_canonical(value, depth + 1, limits, writer)?;
+            }
+            writer.write_all(b"]").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })
+        }
+        JsonValue::Object(entries) => {
+            if depth >= limits.max_depth {
+                return Err(crate::value::Error::ResourceLimit {
+                    resource: Resource::StructuredValue,
+                    limit: limits.max_depth,
+                    actual: depth + 1,
+                });
+            }
+            entries.sort_unstable_by(|(left, _), (right, _)| {
+                left.encode_utf16().cmp(right.encode_utf16())
+            });
+            writer.write_all(b"{").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })?;
+            for (index, (key, value)) in entries.iter_mut().enumerate() {
+                if index != 0 {
+                    writer.write_all(b",").map_err(|error| {
+                        writer
+                            .take_failure()
+                            .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                    })?;
+                }
+                serde_json_canonicalizer::to_writer(key, writer).map_err(|error| {
+                    writer
+                        .take_failure()
+                        .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                })?;
+                writer.write_all(b":").map_err(|error| {
+                    writer
+                        .take_failure()
+                        .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                })?;
+                write_json_canonical(value, depth + 1, limits, writer)?;
+            }
+            writer.write_all(b"}").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })
+        }
+    }
+}
+
+struct BudgetJsonWriter<'a> {
+    budget: &'a crate::RequestBudget,
+    limits: ValueLimits,
+    payload: Vec<u8>,
+    permits: Vec<BytePermit>,
+    written: usize,
+    failure: Option<crate::value::Error>,
+}
+
+impl<'a> BudgetJsonWriter<'a> {
+    fn new(budget: &'a crate::RequestBudget, limits: ValueLimits) -> Self {
+        Self {
+            budget,
+            limits,
+            payload: Vec::new(),
+            permits: Vec::new(),
+            written: 0,
+            failure: None,
+        }
+    }
+
+    fn take_failure(&mut self) -> Option<crate::value::Error> {
+        self.failure.take()
+    }
+
+    fn fail(&mut self, error: crate::value::Error) -> io::Error {
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+        io::Error::new(io::ErrorKind::Other, "bounded JSON output rejected")
+    }
+
+    fn finish(self) -> (Vec<u8>, Vec<BytePermit>) {
+        (self.payload, self.permits)
+    }
+}
+
+impl Write for BudgetJsonWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next = self.written.checked_add(bytes.len()).ok_or_else(|| {
+            self.fail(crate::value::Error::ResourceLimit {
+                resource: Resource::ExpandedPayloadBytes,
+                limit: self.limits.max_expanded_payload_bytes,
+                actual: usize::MAX,
+            })
+        })?;
+        if next > self.limits.max_expanded_payload_bytes {
+            return Err(self.fail(crate::value::Error::ResourceLimit {
+                resource: Resource::ExpandedPayloadBytes,
+                limit: self.limits.max_expanded_payload_bytes,
+                actual: next,
+            }));
+        }
+        let permit = crate::value::reserve_budget(
+            self.budget,
+            bytes.len(),
+            &self.limits,
+            Resource::ExpandedPayloadBytes,
+        )
+        .map_err(|error| self.fail(error))?;
+        self.payload
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| self.fail(crate::value::Error::Allocation { size: bytes.len() }))?;
+        self.payload.extend_from_slice(bytes);
+        self.permits.push(permit);
+        self.written = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Returns the native ABI version implemented by this library.
@@ -2886,4 +3100,19 @@ fn copy_bytes(
         return Err(format!("{name} pointer is null for {length} bytes"));
     }
     Ok(unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec())
+}
+
+/// Copies one FFI input buffer for white-box adapter regressions.
+///
+/// # Safety
+///
+/// When `length` is non-zero, `pointer` must identify readable memory for
+/// `length` bytes for the duration of this call.
+#[doc(hidden)]
+pub unsafe fn copy_bytes_for_test(
+    pointer: *const u8,
+    length: usize,
+    name: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    copy_bytes(pointer, length, name)
 }

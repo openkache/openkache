@@ -623,6 +623,16 @@ macro_rules! protected_client_methods {
         pub async fn close(&self) -> Result<()> {
             self.raw.close().await
         }
+
+        #[cfg(feature = "ffi")]
+        pub(crate) fn request_budget(&self) -> crate::RequestBudget {
+            self.protection.request_budget()
+        }
+
+        #[cfg(feature = "ffi")]
+        pub(crate) fn value_limits(&self) -> crate::value::ValueLimits {
+            self.protection.value_limits()
+        }
     };
 }
 
