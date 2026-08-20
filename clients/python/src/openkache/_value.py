@@ -492,6 +492,7 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
     cursor = 0
     frames: list[list[Any]] = []
     missing = object()
+    pending_key = object()
     root: Value | object = missing
     item_count = 0
 
@@ -505,12 +506,12 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
             if frame[0] == "array":
                 frame[2].append(value)
             else:
-                if frame[3] is None:
+                if frame[3] is pending_key:
                     _validate_map_key(value, len(frame[2]), frame[2])
                     frame[3] = value
                 else:
                     frame[2].append((frame[3], value))
-                    frame[3] = None
+                    frame[3] = pending_key
             frame[1] -= 1
             if frame[1] != 0:
                 return
@@ -569,7 +570,7 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
             else:
                 if len(frames) >= budget.max_depth:
                     _resource("depth", budget.max_depth, len(frames) + 1)
-                frames.append(["map", length * 2, [], None])
+                frames.append(["map", length * 2, [], pending_key])
         elif major == 6:
             # Tags 2 and 3 are the only profile tags.  Their payload must be a
             # definite byte string, handled directly so it cannot become a
