@@ -263,9 +263,9 @@ impl FfiResult {
             crate::Error::Server { code, .. } => {
                 if matches!(
                     code.as_u8(),
-                    openkache_protocol::Status::TooLarge as u8
-                        | openkache_protocol::Status::Overloaded as u8
-                        | openkache_protocol::Status::NoCapacity as u8
+                    value if value == openkache_protocol::Status::TooLarge as u8
+                        || value == openkache_protocol::Status::Overloaded as u8
+                        || value == openkache_protocol::Status::NoCapacity as u8
                 ) {
                     FfiErrorCategory::ResourceExhausted
                 } else {
