@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::{wire_request_layout, Opcode};
 
 #[derive(Clone)]
 pub(super) struct NetworkWorkerLimits {
@@ -244,12 +245,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         {
             Ok(Ok(frame)) => frame,
             Ok(Err(rejection)) => {
+                let request_id = rejection.request_id();
                 network_shard.record_request(
                     operation_contract::telemetry_operation(rejection.opcode()),
                     rejection.status(),
                     rejection.elapsed(),
                 );
-                let request_id = rejection.request_id();
                 if !write_response(
                     &mut send,
                     rejection.into_response(),
@@ -279,6 +280,20 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(StreamReadError::Transport(_)) => break,
         };
+        let request_id = frame
+            .bytes
+            .first()
+            .copied()
+            .and_then(|opcode| Opcode::try_from(opcode).ok())
+            .and_then(|opcode| {
+                openkache_protocol::OpaqueRequestFrame::decode(
+                    &frame.bytes,
+                    wire_request_layout(opcode),
+                )
+                .ok()
+                .map(|request| request.request_id())
+            })
+            .unwrap_or(0);
         let request_bytes = std::mem::take(&mut frame.bytes);
         let request_id = frame.request_id;
         let terminal_after_response = frame.has_trailing_bytes;
