@@ -8,8 +8,8 @@ use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
     DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
-    NamespaceDescriptor, NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust, TypedKey,
-    SetOptions, SetOutcome,
+    NamespaceDescriptor, NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust,
+    SetOptions, SetOutcome, TypedKey,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -622,6 +622,16 @@ macro_rules! protected_client_methods {
         /// Permanently and idempotently closes this client instance.
         pub async fn close(&self) -> Result<()> {
             self.raw.close().await
+        }
+
+        /// Returns the aggregate byte budget shared by transport and value work.
+        pub fn request_budget(&self) -> crate::RequestBudget {
+            self.protection.request_budget()
+        }
+
+        /// Returns the configured value resource limits.
+        pub fn value_limits(&self) -> crate::value::ValueLimits {
+            self.protection.value_limits()
         }
     };
 }

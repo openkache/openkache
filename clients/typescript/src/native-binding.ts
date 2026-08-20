@@ -85,7 +85,7 @@ export interface Native_Client {
   ): Promise<Smithy_Set_Outcome>
   set_json(
     key: Uint8Array,
-    value: unknown,
+    value: string,
     condition?: Smithy_Set_Condition,
     expiration_mode?: Smithy_Expiration_Mode,
     eviction_mode?: Smithy_Eviction_Mode,

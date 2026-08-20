@@ -5,9 +5,10 @@
 //! one bounded, definite-length CBOR payload profile.
 
 use std::cmp::Ordering;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::mem::size_of;
 use std::str::FromStr;
 
 /// Maximum payload size used by the default codec limits.
@@ -89,6 +90,23 @@ impl Integer {
         Self {
             negative,
             magnitude: bytes[first..].to_vec(),
+        }
+    }
+
+    fn from_owned_sign_and_magnitude(negative: bool, mut magnitude: Vec<u8>) -> Self {
+        let first = magnitude
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(magnitude.len());
+        if first == magnitude.len() {
+            return Self::zero();
+        }
+        if first != 0 {
+            magnitude.drain(..first);
+        }
+        Self {
+            negative,
+            magnitude,
         }
     }
 
@@ -375,6 +393,46 @@ pub enum Value {
     Map(Vec<(Value, Value)>),
 }
 
+impl Drop for Value {
+    fn drop(&mut self) {
+        // Move the root out of `self` and consume nested containers through an
+        // explicit worklist. This preserves caller-selected depth limits
+        // while preventing a deeply nested value from recursively unwinding
+        // the native stack during destruction.
+        let root = std::mem::replace(self, Self::Undefined);
+        let mut pending = vec![root];
+        while let Some(value) = pending.pop() {
+            let mut value = std::mem::ManuallyDrop::new(value);
+            // A type with a custom destructor cannot move fields out through
+            // a by-value pattern. Borrow the owned container, take its
+            // children, then explicitly drop scalar payloads. Forget the
+            // now-empty shell so this destructor does not recursively invoke
+            // itself.
+            unsafe {
+                match &mut *value {
+                    Self::Array(values) => pending.extend(std::mem::take(values)),
+                    Self::Map(entries) => {
+                        for (key, value) in std::mem::take(entries) {
+                            pending.push(key);
+                            pending.push(value);
+                        }
+                    }
+                    Self::Integer(integer) => std::ptr::drop_in_place(integer),
+                    Self::TextString(text) => std::ptr::drop_in_place(text),
+                    Self::Bytes(bytes) => std::ptr::drop_in_place(bytes),
+                    Self::Undefined
+                    | Self::Null
+                    | Self::Boolean(_)
+                    | Self::Float16(_)
+                    | Self::Float32(_)
+                    | Self::Float64(_) => {}
+                }
+                std::mem::forget(value);
+            }
+        }
+    }
+}
+
 impl Value {
     /// Constructs an exact arbitrary integer value.
     pub fn integer(value: impl Into<Integer>) -> Self {
@@ -618,12 +676,37 @@ pub fn encode(value: &Value) -> Result<Vec<u8>> {
 
 /// Encodes one value with explicit resource limits.
 pub fn encode_with_limits(value: &Value, limits: Limits) -> Result<Vec<u8>> {
+    encode_with_limits_and_budget(value, limits, usize::MAX, &mut |_| true)
+}
+
+/// Encodes one value while charging bounded allocations through a caller-owned
+/// budget callback.
+///
+/// The callback is invoked before every bounded allocation. Returning `false`
+/// rejects the operation before the allocation is attempted. The cumulative
+/// amount charged to this operation is also checked against
+/// `max_allocation_bytes`; callers that share a transport budget should retain
+/// the permits acquired by the callback until the returned bytes are no longer
+/// needed.
+pub fn encode_with_limits_and_budget(
+    value: &Value,
+    limits: Limits,
+    max_allocation_bytes: usize,
+    reserve: &mut impl FnMut(usize) -> bool,
+) -> Result<Vec<u8>> {
     validate_limits(limits)?;
+    let mut allocation = AllocationState {
+        used: 0,
+        maximum: max_allocation_bytes,
+        reserve,
+    };
     let mut output = Vec::new();
     let mut tasks = Vec::new();
     let mut item_count = 0usize;
+    let mut pending_items = 1usize;
+    charge_allocation(&mut allocation, size_of::<(&Value, usize)>())?;
     tasks
-        .try_reserve(1)
+        .try_reserve_exact(1)
         .map_err(|_| Error::Allocation { size: 1 })?;
     tasks.push((value, 0usize));
     while let Some((current, depth)) = tasks.pop() {
@@ -633,40 +716,60 @@ pub fn encode_with_limits(value: &Value, limits: Limits) -> Result<Vec<u8>> {
         if item_count > limits.max_items {
             return Err(resource(Resource::Items, limits.max_items, item_count));
         }
+        pending_items = pending_items
+            .checked_sub(1)
+            .expect("the root or a declared child is always pending");
         match current {
-            Value::Undefined => push_bytes(&mut output, &[0xf7], limits)?,
-            Value::Null => push_bytes(&mut output, &[0xf6], limits)?,
-            Value::Boolean(false) => push_bytes(&mut output, &[0xf4], limits)?,
-            Value::Boolean(true) => push_bytes(&mut output, &[0xf5], limits)?,
-            Value::Integer(integer) => encode_integer(integer, &mut output, limits)?,
+            Value::Undefined => push_bytes(&mut output, &[0xf7], limits, &mut allocation)?,
+            Value::Null => push_bytes(&mut output, &[0xf6], limits, &mut allocation)?,
+            Value::Boolean(false) => push_bytes(&mut output, &[0xf4], limits, &mut allocation)?,
+            Value::Boolean(true) => push_bytes(&mut output, &[0xf5], limits, &mut allocation)?,
+            Value::Integer(integer) => {
+                encode_integer(integer, &mut output, limits, &mut allocation)?
+            }
             Value::Float16(bits) => {
-                push_bytes(&mut output, &[0xf9], limits)?;
-                push_bytes(&mut output, &bits.to_be_bytes(), limits)?;
+                push_bytes(&mut output, &[0xf9], limits, &mut allocation)?;
+                push_bytes(&mut output, &bits.to_be_bytes(), limits, &mut allocation)?;
             }
             Value::Float32(bits) => {
-                push_bytes(&mut output, &[0xfa], limits)?;
-                push_bytes(&mut output, &bits.to_be_bytes(), limits)?;
+                push_bytes(&mut output, &[0xfa], limits, &mut allocation)?;
+                push_bytes(&mut output, &bits.to_be_bytes(), limits, &mut allocation)?;
             }
             Value::Float64(bits) => {
-                push_bytes(&mut output, &[0xfb], limits)?;
-                push_bytes(&mut output, &bits.to_be_bytes(), limits)?;
+                push_bytes(&mut output, &[0xfb], limits, &mut allocation)?;
+                push_bytes(&mut output, &bits.to_be_bytes(), limits, &mut allocation)?;
             }
             Value::TextString(text) => {
-                append_head(3, text.len(), &mut output, limits)?;
-                push_bytes(&mut output, text.as_bytes(), limits)?;
+                append_head(3, text.len(), &mut output, limits, &mut allocation)?;
+                push_bytes(&mut output, text.as_bytes(), limits, &mut allocation)?;
             }
             Value::Bytes(bytes) => {
-                append_head(2, bytes.len(), &mut output, limits)?;
-                push_bytes(&mut output, bytes, limits)?;
+                append_head(2, bytes.len(), &mut output, limits, &mut allocation)?;
+                push_bytes(&mut output, bytes, limits, &mut allocation)?;
             }
             Value::Array(values) => {
                 if depth >= limits.max_depth {
                     return Err(resource(Resource::Depth, limits.max_depth, depth + 1));
                 }
-                append_head(4, values.len(), &mut output, limits)?;
                 validate_count(values.len(), limits.max_items)?;
+                add_pending_items(
+                    &mut pending_items,
+                    values.len(),
+                    item_count,
+                    limits.max_items,
+                )?;
+                append_head(4, values.len(), &mut output, limits, &mut allocation)?;
+                charge_allocation(
+                    &mut allocation,
+                    values
+                        .len()
+                        .checked_mul(size_of::<(&Value, usize)>())
+                        .ok_or_else(|| {
+                            resource(Resource::Bytes, max_allocation_bytes, usize::MAX)
+                        })?,
+                )?;
                 tasks
-                    .try_reserve(values.len())
+                    .try_reserve_exact(values.len())
                     .map_err(|_| Error::Allocation {
                         size: tasks.len().saturating_add(values.len()),
                     })?;
@@ -683,10 +786,19 @@ pub fn encode_with_limits(value: &Value, limits: Limits) -> Result<Vec<u8>> {
                     .checked_mul(2)
                     .ok_or_else(|| resource(Resource::Items, limits.max_items, usize::MAX))?;
                 validate_count(task_count, limits.max_items)?;
-                validate_map_entries(entries)?;
-                append_head(5, entries.len(), &mut output, limits)?;
+                add_pending_items(&mut pending_items, task_count, item_count, limits.max_items)?;
+                validate_map_entries_with_budget(entries, &mut allocation)?;
+                append_head(5, entries.len(), &mut output, limits, &mut allocation)?;
+                charge_allocation(
+                    &mut allocation,
+                    task_count
+                        .checked_mul(size_of::<(&Value, usize)>())
+                        .ok_or_else(|| {
+                            resource(Resource::Bytes, max_allocation_bytes, usize::MAX)
+                        })?,
+                )?;
                 tasks
-                    .try_reserve(task_count)
+                    .try_reserve_exact(task_count)
                     .map_err(|_| Error::Allocation {
                         size: tasks.len().saturating_add(task_count),
                     })?;
@@ -707,6 +819,20 @@ pub fn decode(bytes: &[u8]) -> Result<Value> {
 
 /// Decodes one complete definite-length value with explicit resource limits.
 pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
+    decode_with_limits_and_budget(bytes, limits, usize::MAX, &mut |_| true)
+}
+
+/// Decodes one complete value while charging bounded allocations through a
+/// caller-owned budget callback.
+///
+/// The callback is invoked before every decoder frame, container-slot,
+/// duplicate-key index, and owned byte/string/integer clone allocation.
+pub fn decode_with_limits_and_budget(
+    bytes: &[u8],
+    limits: Limits,
+    max_allocation_bytes: usize,
+    reserve: &mut impl FnMut(usize) -> bool,
+) -> Result<Value> {
     validate_limits(limits)?;
     if bytes.len() > limits.max_bytes {
         return Err(resource(Resource::Bytes, limits.max_bytes, bytes.len()));
@@ -719,12 +845,12 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
     let mut frames = Vec::new();
     let mut root = None;
     let mut item_count = 0usize;
-    // Keep a lower bound on the number of model nodes still required by
-    // declared container lengths. Without this accounting, each nested
-    // container could reserve `max_items` entries before the parser reached
-    // the item-count limit, allowing a tiny input to trigger unbounded
-    // aggregate allocations.
     let mut pending_items = 1usize;
+    let mut allocation = AllocationState {
+        used: 0,
+        maximum: max_allocation_bytes,
+        reserve,
+    };
     loop {
         if let Some(value) = root {
             if cursor != bytes.len() {
@@ -742,8 +868,10 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
         pending_items = pending_items
             .checked_sub(1)
             .expect("the root or a declared child is always pending");
-        match parse_item(bytes, &mut cursor, limits)? {
-            ParsedItem::Value(value) => accept_value(value, &mut frames, &mut root)?,
+        match parse_item(bytes, &mut cursor, limits, &mut allocation)? {
+            ParsedItem::Value(value) => {
+                accept_value(value, &mut frames, &mut root, &mut allocation)?
+            }
             ParsedItem::Array(count) => {
                 add_pending_items(&mut pending_items, count, item_count, limits.max_items)?;
                 begin_frame(
@@ -753,9 +881,15 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
                     },
                     &mut frames,
                     limits,
+                    &mut allocation,
                 )?;
                 if count == 0 {
-                    accept_value(Value::Array(Vec::new()), &mut frames, &mut root)?;
+                    accept_value(
+                        Value::Array(Vec::new()),
+                        &mut frames,
+                        &mut root,
+                        &mut allocation,
+                    )?;
                 }
             }
             ParsedItem::Map(count) => {
@@ -777,9 +911,15 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
                     },
                     &mut frames,
                     limits,
+                    &mut allocation,
                 )?;
                 if count == 0 {
-                    accept_value(Value::Map(Vec::new()), &mut frames, &mut root)?;
+                    accept_value(
+                        Value::Map(Vec::new()),
+                        &mut frames,
+                        &mut root,
+                        &mut allocation,
+                    )?;
                 }
             }
         }
@@ -817,8 +957,9 @@ pub fn from_cbor(bytes: &[u8]) -> Result<Value> {
 /// Re-exports the codec under a profile-oriented module name.
 pub mod cbor {
     pub use super::{
-        decode, decode_with_limits, encode, encode_with_limits, from_cbor, to_cbor, Error,
-        ErrorKind, Limits, Resource, Result,
+        Error, ErrorKind, Limits, Resource, Result, decode, decode_with_limits,
+        decode_with_limits_and_budget, encode, encode_with_limits, encode_with_limits_and_budget,
+        from_cbor, to_cbor,
     };
 }
 
@@ -832,6 +973,24 @@ fn validate_limits(limits: Limits) -> Result<()> {
     if limits.max_items == 0 {
         return Err(resource(Resource::Items, 1, 0));
     }
+    Ok(())
+}
+
+struct AllocationState<'a> {
+    used: usize,
+    maximum: usize,
+    reserve: &'a mut dyn FnMut(usize) -> bool,
+}
+
+fn charge_allocation(state: &mut AllocationState<'_>, size: usize) -> Result<()> {
+    let next = state
+        .used
+        .checked_add(size)
+        .ok_or_else(|| resource(Resource::Bytes, state.maximum, usize::MAX))?;
+    if next > state.maximum || !(state.reserve)(size) {
+        return Err(resource(Resource::Bytes, state.maximum, next));
+    }
+    state.used = next;
     Ok(())
 }
 
@@ -851,7 +1010,12 @@ fn validate_count(count: usize, maximum: usize) -> Result<()> {
     }
 }
 
-fn push_bytes(output: &mut Vec<u8>, bytes: &[u8], limits: Limits) -> Result<()> {
+fn push_bytes(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    limits: Limits,
+    allocation: &mut AllocationState<'_>,
+) -> Result<()> {
     let length = output
         .len()
         .checked_add(bytes.len())
@@ -859,14 +1023,21 @@ fn push_bytes(output: &mut Vec<u8>, bytes: &[u8], limits: Limits) -> Result<()> 
     if length > limits.max_bytes {
         return Err(resource(Resource::Bytes, limits.max_bytes, length));
     }
+    charge_allocation(allocation, bytes.len())?;
     output
-        .try_reserve(bytes.len())
+        .try_reserve_exact(bytes.len())
         .map_err(|_| Error::Allocation { size: length })?;
     output.extend_from_slice(bytes);
     Ok(())
 }
 
-fn append_head(major: u8, length: usize, output: &mut Vec<u8>, limits: Limits) -> Result<()> {
+fn append_head(
+    major: u8,
+    length: usize,
+    output: &mut Vec<u8>,
+    limits: Limits,
+    allocation: &mut AllocationState<'_>,
+) -> Result<()> {
     let length = u64::try_from(length)
         .map_err(|_| resource(Resource::Bytes, limits.max_bytes, usize::MAX))?;
     let mut head = [0u8; 9];
@@ -890,11 +1061,21 @@ fn append_head(major: u8, length: usize, output: &mut Vec<u8>, limits: Limits) -
         head[1..9].copy_from_slice(&length.to_be_bytes());
         9
     };
-    push_bytes(output, &head[..size], limits)
+    push_bytes(output, &head[..size], limits, allocation)
 }
 
-fn encode_integer(integer: &Integer, output: &mut Vec<u8>, limits: Limits) -> Result<()> {
+fn encode_integer(
+    integer: &Integer,
+    output: &mut Vec<u8>,
+    limits: Limits,
+    allocation: &mut AllocationState<'_>,
+) -> Result<()> {
     validate_integer_magnitude(integer, limits)?;
+    // Negative CBOR integers use `-1-n`; deriving that magnitude clones the
+    // model bytes even when leading zeroes are removed from the temporary.
+    // Charge the source-sized clone before constructing the derived value so
+    // small values such as `-1` cannot bypass the aggregate budget.
+    charge_allocation(allocation, integer.magnitude.len())?;
     let magnitude = if integer.negative {
         integer.negative_cbor_magnitude()
     } else {
@@ -911,11 +1092,18 @@ fn encode_integer(integer: &Integer, output: &mut Vec<u8>, limits: Limits) -> Re
                 .map_err(|_| resource(Resource::Bytes, limits.max_bytes, usize::MAX))?,
             output,
             limits,
+            allocation,
         )?;
     } else {
-        append_head(6, if integer.negative { 3 } else { 2 }, output, limits)?;
-        append_head(2, magnitude.len(), output, limits)?;
-        push_bytes(output, &magnitude, limits)?;
+        append_head(
+            6,
+            if integer.negative { 3 } else { 2 },
+            output,
+            limits,
+            allocation,
+        )?;
+        append_head(2, magnitude.len(), output, limits, allocation)?;
+        push_bytes(output, &magnitude, limits, allocation)?;
     }
     Ok(())
 }
@@ -945,6 +1133,29 @@ fn validate_map_entries(entries: &[(Value, Value)]) -> Result<()> {
     Ok(())
 }
 
+fn validate_map_entries_with_budget(
+    entries: &[(Value, Value)],
+    allocation: &mut AllocationState<'_>,
+) -> Result<()> {
+    let mut key_index = ScalarKeyIndex::with_capacity_and_budget(entries.len(), allocation)?;
+    for (index, (key, _)) in entries.iter().enumerate() {
+        if !key.is_scalar_key() {
+            return Err(Error::NonScalarKey { index });
+        }
+        if key_index.contains(entries, key) {
+            return Err(Error::DuplicateKey { index });
+        }
+        key_index.insert_with_budget(key, index, allocation)?;
+    }
+    Ok(())
+}
+
+fn hash_map_allocation_size(capacity: usize) -> Result<usize> {
+    capacity
+        .checked_mul(size_of::<(u64, Vec<usize>)>())
+        .ok_or_else(|| resource(Resource::Bytes, usize::MAX, usize::MAX))
+}
+
 struct ScalarKeyIndex {
     buckets: HashMap<u64, Vec<usize>>,
 }
@@ -962,10 +1173,35 @@ impl ScalarKeyIndex {
         Ok(index)
     }
 
+    fn with_capacity_and_budget(
+        capacity: usize,
+        allocation: &mut AllocationState<'_>,
+    ) -> Result<Self> {
+        let mut index = Self::new();
+        index.reserve_with_budget(capacity, allocation)?;
+        Ok(index)
+    }
+
     fn reserve(&mut self, additional: usize) -> Result<()> {
         self.buckets
             .try_reserve(additional)
             .map_err(|_| Error::Allocation { size: additional })
+    }
+
+    fn reserve_with_budget(
+        &mut self,
+        additional: usize,
+        allocation: &mut AllocationState<'_>,
+    ) -> Result<()> {
+        // HashMap's table keeps control slots in addition to entries and may
+        // round a request up to its next growth class. Reserve twice the
+        // logical entry count up front so subsequent inserts cannot grow the
+        // table without a separately charged reservation.
+        let table_capacity = additional
+            .checked_mul(2)
+            .ok_or_else(|| resource(Resource::Bytes, allocation.maximum, usize::MAX))?;
+        charge_allocation(allocation, hash_map_allocation_size(table_capacity)?)?;
+        self.reserve(table_capacity)
     }
 
     fn contains(&self, entries: &[(Value, Value)], key: &Value) -> bool {
@@ -987,6 +1223,41 @@ impl ScalarKeyIndex {
             return Ok(());
         }
 
+        self.buckets
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        let mut bucket = Vec::new();
+        bucket
+            .try_reserve_exact(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        bucket.push(index);
+        self.buckets.insert(hash, bucket);
+        Ok(())
+    }
+
+    fn insert_with_budget(
+        &mut self,
+        key: &Value,
+        index: usize,
+        allocation: &mut AllocationState<'_>,
+    ) -> Result<()> {
+        let hash = scalar_key_hash(key);
+        if let Some(bucket) = self.buckets.get_mut(&hash) {
+            charge_allocation(allocation, size_of::<usize>())?;
+            bucket
+                .try_reserve_exact(1)
+                .map_err(|_| Error::Allocation { size: 1 })?;
+            bucket.push(index);
+            return Ok(());
+        }
+
+        // The table is reserved to the complete entry count up front, so
+        // inserting a new hash cannot grow the table. Each bucket still owns
+        // one index slot and must be charged before its allocation.
+        charge_allocation(allocation, size_of::<usize>())?;
+        if self.buckets.len() >= self.buckets.capacity() {
+            charge_allocation(allocation, hash_map_allocation_size(1)?)?;
+        }
         self.buckets
             .try_reserve(1)
             .map_err(|_| Error::Allocation { size: 1 })?;
@@ -1112,7 +1383,12 @@ enum Frame {
     },
 }
 
-fn begin_frame(mut frame: Frame, frames: &mut Vec<Frame>, limits: Limits) -> Result<()> {
+fn begin_frame(
+    mut frame: Frame,
+    frames: &mut Vec<Frame>,
+    limits: Limits,
+    allocation: &mut AllocationState<'_>,
+) -> Result<()> {
     if frames.len() >= limits.max_depth {
         return Err(resource(
             Resource::Depth,
@@ -1120,18 +1396,24 @@ fn begin_frame(mut frame: Frame, frames: &mut Vec<Frame>, limits: Limits) -> Res
             frames.len() + 1,
         ));
     }
-    // Empty containers do not need a frame, but they still consume one depth
-    // level. Keep the depth check above their early return so decoding agrees
-    // with encoding without allocating an otherwise unnecessary stack entry.
+    // Empty containers still consume a depth level, but do not need a frame or
+    // slot allocation.
     if frame_remaining(&frame) == 0 {
         return Ok(());
     }
-    frames.try_reserve(1).map_err(|_| Error::Allocation {
+    charge_allocation(allocation, size_of::<Frame>())?;
+    frames.try_reserve_exact(1).map_err(|_| Error::Allocation {
         size: frames.len() + 1,
     })?;
     match &mut frame {
         Frame::Array { remaining, values } => {
             validate_count(*remaining, limits.max_items)?;
+            charge_allocation(
+                allocation,
+                remaining
+                    .checked_mul(size_of::<Value>())
+                    .ok_or_else(|| resource(Resource::Bytes, allocation.maximum, usize::MAX))?,
+            )?;
             values
                 .try_reserve_exact(*remaining)
                 .map_err(|_| Error::Allocation { size: *remaining })?;
@@ -1143,19 +1425,29 @@ fn begin_frame(mut frame: Frame, frames: &mut Vec<Frame>, limits: Limits) -> Res
             ..
         } => {
             validate_count(*remaining, limits.max_items)?;
+            let entry_count = *remaining / 2;
+            charge_allocation(
+                allocation,
+                entry_count
+                    .checked_mul(size_of::<(Value, Value)>())
+                    .ok_or_else(|| resource(Resource::Bytes, allocation.maximum, usize::MAX))?,
+            )?;
             entries
-                .try_reserve_exact(*remaining / 2)
-                .map_err(|_| Error::Allocation {
-                    size: *remaining / 2,
-                })?;
-            key_index.reserve(*remaining / 2)?;
+                .try_reserve_exact(entry_count)
+                .map_err(|_| Error::Allocation { size: entry_count })?;
+            key_index.reserve_with_budget(entry_count, allocation)?;
         }
     }
     frames.push(frame);
     Ok(())
 }
 
-fn accept_value(mut value: Value, frames: &mut Vec<Frame>, root: &mut Option<Value>) -> Result<()> {
+fn accept_value(
+    mut value: Value,
+    frames: &mut Vec<Frame>,
+    root: &mut Option<Value>,
+    allocation: &mut AllocationState<'_>,
+) -> Result<()> {
     loop {
         let Some(frame) = frames.last_mut() else {
             *root = Some(value);
@@ -1180,7 +1472,7 @@ fn accept_value(mut value: Value, frames: &mut Vec<Frame>, root: &mut Option<Val
                     if key_index.contains(entries, &value) {
                         return Err(Error::DuplicateKey { index });
                     }
-                    key_index.insert(&value, index)?;
+                    key_index.insert_with_budget(&value, index, allocation)?;
                     *pending_key = Some(value);
                 } else {
                     let key = pending_key.take().expect("map key was checked above");
@@ -1206,12 +1498,30 @@ fn frame_remaining(frame: &Frame) -> usize {
     }
 }
 
-fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<ParsedItem> {
+fn parse_item(
+    bytes: &[u8],
+    cursor: &mut usize,
+    limits: Limits,
+    allocation: &mut AllocationState<'_>,
+) -> Result<ParsedItem> {
     let offset = *cursor;
     let (major, additional) = read_head(bytes, cursor)?;
     match major {
         0 | 1 => {
             let argument = read_argument(bytes, cursor, additional, offset)?;
+            let magnitude = if major == 0 {
+                argument as u128
+            } else {
+                (argument as u128) + 1
+            };
+            charge_allocation(
+                allocation,
+                if magnitude == 0 {
+                    0
+                } else {
+                    (u128::BITS as usize - magnitude.leading_zeros() as usize).div_ceil(8)
+                },
+            )?;
             let integer = if major == 0 {
                 Integer::from_u128(argument as u128)
             } else {
@@ -1222,7 +1532,7 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
             Ok(ParsedItem::Value(Value::Integer(integer)))
         }
         2 | 3 => {
-            let length = read_length(bytes, cursor, additional, offset, limits)?;
+            let length = read_length(bytes, cursor, additional, offset, limits, Resource::Bytes)?;
             let end = cursor
                 .checked_add(length)
                 .ok_or_else(|| resource(Resource::Bytes, limits.max_bytes, usize::MAX))?;
@@ -1232,30 +1542,32 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
             let content = &bytes[*cursor..end];
             *cursor = end;
             if major == 2 {
-                let mut owned = Vec::new();
+                Ok(ParsedItem::Value(Value::Bytes(clone_bytes(
+                    content, allocation,
+                )?)))
+            } else {
+                let text =
+                    std::str::from_utf8(content).map_err(|_| Error::InvalidUtf8 { offset })?;
+                charge_allocation(allocation, content.len())?;
+                let mut owned = String::new();
                 owned
                     .try_reserve_exact(content.len())
                     .map_err(|_| Error::Allocation {
                         size: content.len(),
                     })?;
-                owned.extend_from_slice(content);
-                Ok(ParsedItem::Value(Value::Bytes(owned)))
-            } else {
-                let text = std::str::from_utf8(content)
-                    .map_err(|_| Error::InvalidUtf8 { offset })?
-                    .to_owned();
-                Ok(ParsedItem::Value(Value::TextString(text)))
+                owned.push_str(text);
+                Ok(ParsedItem::Value(Value::TextString(owned)))
             }
         }
         4 => {
-            let length = read_length(bytes, cursor, additional, offset, limits)?;
+            let length = read_length(bytes, cursor, additional, offset, limits, Resource::Items)?;
             if length > limits.max_items {
                 return Err(resource(Resource::Items, limits.max_items, length));
             }
             Ok(ParsedItem::Array(length))
         }
         5 => {
-            let length = read_length(bytes, cursor, additional, offset, limits)?;
+            let length = read_length(bytes, cursor, additional, offset, limits, Resource::Items)?;
             if length > limits.max_items {
                 return Err(resource(Resource::Items, limits.max_items, length));
             }
@@ -1278,7 +1590,14 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
                     reason: "bignum tag must wrap a byte string",
                 });
             }
-            let length = read_length(bytes, cursor, bignum_additional, bignum_offset, limits)?;
+            let length = read_length(
+                bytes,
+                cursor,
+                bignum_additional,
+                bignum_offset,
+                limits,
+                Resource::IntegerBytes,
+            )?;
             if length == 0 {
                 return Err(Error::InvalidInteger {
                     offset,
@@ -1307,12 +1626,12 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
                 });
             }
             let model_magnitude = if tag == 3 {
-                add_one_be(magnitude, limits.max_integer_bytes)?
+                add_one_be(magnitude, limits.max_integer_bytes, allocation)?
             } else {
-                magnitude.to_vec()
+                clone_bytes(magnitude, allocation)?
             };
             Ok(ParsedItem::Value(Value::Integer(
-                Integer::from_sign_and_magnitude(tag == 3, model_magnitude),
+                Integer::from_owned_sign_and_magnitude(tag == 3, model_magnitude),
             )))
         }
         7 => match additional {
@@ -1353,7 +1672,21 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
     }
 }
 
-fn add_one_be(bytes: &[u8], maximum: usize) -> Result<Vec<u8>> {
+fn clone_bytes(bytes: &[u8], allocation: &mut AllocationState<'_>) -> Result<Vec<u8>> {
+    charge_allocation(allocation, bytes.len())?;
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| Error::Allocation { size: bytes.len() })?;
+    owned.extend_from_slice(bytes);
+    Ok(owned)
+}
+
+fn add_one_be(
+    bytes: &[u8],
+    maximum: usize,
+    allocation: &mut AllocationState<'_>,
+) -> Result<Vec<u8>> {
     let result_length = if bytes.iter().all(|byte| *byte == u8::MAX) {
         bytes
             .len()
@@ -1365,6 +1698,7 @@ fn add_one_be(bytes: &[u8], maximum: usize) -> Result<Vec<u8>> {
     if result_length > maximum {
         return Err(resource(Resource::IntegerBytes, maximum, result_length));
     }
+    charge_allocation(allocation, result_length)?;
     let mut result = Vec::new();
     result
         .try_reserve_exact(result_length)
@@ -1426,12 +1760,19 @@ fn read_length(
     additional: u8,
     offset: usize,
     limits: Limits,
+    resource_kind: Resource,
 ) -> Result<usize> {
     let argument = read_argument(bytes, cursor, additional, offset)?;
-    let length = usize::try_from(argument)
-        .map_err(|_| resource(Resource::Bytes, limits.max_bytes, usize::MAX))?;
-    if length > limits.max_bytes {
-        return Err(resource(Resource::Bytes, limits.max_bytes, length));
+    let maximum = match resource_kind {
+        Resource::Bytes => limits.max_bytes,
+        Resource::Depth => limits.max_depth,
+        Resource::Items => limits.max_items,
+        Resource::IntegerBytes => limits.max_integer_bytes,
+    };
+    let length =
+        usize::try_from(argument).map_err(|_| resource(resource_kind, maximum, usize::MAX))?;
+    if length > maximum {
+        return Err(resource(resource_kind, maximum, length));
     }
     Ok(length)
 }

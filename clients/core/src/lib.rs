@@ -8,9 +8,9 @@ pub mod contract {
 
 mod config;
 #[cfg(feature = "ffi")]
-mod ffi_admission;
-#[cfg(feature = "ffi")]
 pub mod ffi;
+#[cfg(feature = "ffi")]
+mod ffi_admission;
 mod key;
 mod protected;
 mod protection;
@@ -64,7 +64,7 @@ pub use request_engine::{
     RequestHandle, RequestKind, RequestMetadata, ResponseBytes, TransportConnection,
     TransportError, TransportKind, TransportLane,
 };
-pub use transport::RequestBudget;
+pub use transport::{BytePermit as ValueBytePermit, RequestBudget};
 #[cfg(feature = "quic-quinn")]
 pub use transport::{QuinnTransportConnection, QuinnTransportLane};
 #[cfg(feature = "tls-tcp")]

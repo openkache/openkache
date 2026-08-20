@@ -9,6 +9,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::io::{self, Write};
+use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
@@ -16,9 +18,10 @@ use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
 use openkache_protocol::ITEM_ID_BYTES;
 use openkache_value::{
-    Limits as StructuredLimits, Value as StructuredValue, decode_with_limits, encode_with_limits,
+    Limits as StructuredLimits, Value as StructuredValue, decode_with_limits_and_budget,
+    encode_with_limits_and_budget,
 };
-use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use zeroize::{Zeroize, Zeroizing};
 use zstd_pure_rs::prelude::{
@@ -30,8 +33,8 @@ use zstd_pure_rs::prelude::{
 use crate::contract::{
     DEFAULT_ZSTANDARD_LEVEL, DEFAULT_ZSTANDARD_LEVEL_MAX, DEFAULT_ZSTANDARD_LEVEL_MIN,
 };
-use crate::transport::{BytePermit, RequestBudget};
-use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
+use crate::transport::RequestBudget;
+use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId, ValueBytePermit as BytePermit};
 
 /// The one OpenKache-defined envelope grammar implemented by this module.
 pub const VERSION: u128 = 1;
@@ -295,8 +298,16 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
         JsonValue::number(value).map_err(E::custom)
     }
 
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
-        Ok(JsonValue::String(value.to_owned()))
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| E::custom("failed to allocate JSON string"))?;
+        owned.push_str(value);
+        Ok(JsonValue::String(owned))
     }
 
     fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
@@ -308,7 +319,15 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
         A: SeqAccess<'de>,
     {
         let mut values = Vec::new();
+        if let Some(length) = sequence.size_hint() {
+            values
+                .try_reserve_exact(length)
+                .map_err(|_| serde::de::Error::custom("failed to allocate JSON array"))?;
+        }
         while let Some(value) = sequence.next_element()? {
+            values
+                .try_reserve(1)
+                .map_err(|_| serde::de::Error::custom("failed to grow JSON array"))?;
             values.push(value);
         }
         Ok(JsonValue::Array(values))
@@ -319,12 +338,409 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
         A: MapAccess<'de>,
     {
         let mut entries = Vec::new();
-        let mut keys = HashSet::new();
+        let mut keys = HashSet::<String>::new();
+        if let Some(length) = map.size_hint() {
+            entries
+                .try_reserve_exact(length)
+                .map_err(|_| serde::de::Error::custom("failed to allocate JSON object"))?;
+            keys.try_reserve(length)
+                .map_err(|_| serde::de::Error::custom("failed to allocate JSON keys"))?;
+        }
         while let Some(key) = map.next_key::<String>()? {
-            if !keys.insert(key.clone()) {
+            keys.try_reserve(1)
+                .map_err(|_| serde::de::Error::custom("failed to grow JSON keys"))?;
+            let mut key_copy = String::new();
+            key_copy
+                .try_reserve_exact(key.len())
+                .map_err(|_| serde::de::Error::custom("failed to allocate JSON key"))?;
+            key_copy.push_str(&key);
+            if !keys.insert(key_copy) {
                 return Err(serde::de::Error::custom("duplicate JSON object property"));
             }
+            entries
+                .try_reserve(1)
+                .map_err(|_| serde::de::Error::custom("failed to grow JSON object"))?;
             entries.push((key, map.next_value()?));
+        }
+        Ok(JsonValue::Object(entries))
+    }
+}
+
+/// State retained while a compatibility JSON document is decoded.
+///
+/// `serde_json` normally allocates the complete `JsonValue` recursively before
+/// the value codec can apply its aggregate budget.  The FFI adapters cannot
+/// afford that unbounded admission path: native callers can supply arbitrary
+/// documents and the parser is itself part of the request.  This state tracks
+/// the caller-selected structural limits and retains permits for every
+/// allocation made by the parser until the caller has finished with the
+/// resulting model.
+struct JsonParseState<'a> {
+    budget: &'a RequestBudget,
+    limits: ValueLimits,
+    permits: Vec<BytePermit>,
+    item_count: usize,
+    failure: Option<Error>,
+}
+
+impl JsonParseState<'_> {
+    fn new(budget: &RequestBudget, limits: ValueLimits) -> JsonParseState<'_> {
+        JsonParseState {
+            budget,
+            limits,
+            permits: Vec::new(),
+            item_count: 0,
+            failure: None,
+        }
+    }
+
+    fn reserve(&mut self, size: usize) -> Result<()> {
+        let permit = reserve_budget(self.budget, size, &self.limits, Resource::StructuredValue)?;
+        self.permits
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        self.permits.push(permit);
+        Ok(())
+    }
+
+    fn reserve_vec<T>(&mut self, length: usize) -> Result<Vec<T>> {
+        let bytes = length
+            .checked_mul(size_of::<T>())
+            .ok_or_else(|| structured_resource(self.limits.max_in_flight_bytes, usize::MAX))?;
+        self.reserve(bytes)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(length)
+            .map_err(|_| Error::Allocation { size: bytes })?;
+        Ok(values)
+    }
+
+    fn reserve_hash_set<T: Eq + std::hash::Hash>(&mut self, length: usize) -> Result<HashSet<T>> {
+        let bytes = hash_set_allocation_bytes::<T>(length)?;
+        self.reserve(bytes)?;
+        let mut values = HashSet::new();
+        values
+            .try_reserve(length)
+            .map_err(|_| Error::Allocation { size: bytes })?;
+        Ok(values)
+    }
+
+    fn clone_string(&mut self, value: &str) -> Result<String> {
+        self.reserve(value.len())?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| Error::Allocation { size: value.len() })?;
+        owned.push_str(value);
+        Ok(owned)
+    }
+
+    fn admit_item(&mut self) -> Result<()> {
+        self.item_count = self
+            .item_count
+            .checked_add(1)
+            .ok_or_else(|| structured_resource(self.limits.max_items, usize::MAX))?;
+        if self.item_count > self.limits.max_items {
+            return Err(structured_resource(self.limits.max_items, self.item_count));
+        }
+        Ok(())
+    }
+
+    fn admit_children(&mut self, count: usize) -> Result<()> {
+        let total = self
+            .item_count
+            .checked_add(count)
+            .ok_or_else(|| structured_resource(self.limits.max_items, usize::MAX))?;
+        if total > self.limits.max_items {
+            return Err(structured_resource(self.limits.max_items, total));
+        }
+        Ok(())
+    }
+
+    fn reject<E: serde::de::Error>(&mut self, error: Error) -> E {
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+        E::custom("bounded JSON parser rejected input")
+    }
+
+    fn finish_error(&mut self, error: impl fmt::Display) -> Error {
+        self.failure
+            .take()
+            .unwrap_or_else(|| Error::InvalidJson(error.to_string()))
+    }
+}
+
+struct JsonBudgetSeed<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+    depth: usize,
+}
+
+impl<'de, 'a, 'b> DeserializeSeed<'de> for JsonBudgetSeed<'a, 'b> {
+    type Value = JsonValue;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.state
+            .admit_item()
+            .map_err(|error| self.state.reject(error))?;
+        self.state
+            .reserve(size_of::<JsonValue>())
+            .map_err(|error| self.state.reject(error))?;
+        deserializer.deserialize_any(JsonBudgetVisitor {
+            state: self.state,
+            depth: self.depth,
+        })
+    }
+}
+
+struct JsonStringSeed<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+}
+
+impl<'de, 'a, 'b> DeserializeSeed<'de> for JsonStringSeed<'a, 'b> {
+    type Value = String;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.state
+            .admit_item()
+            .map_err(|error| self.state.reject(error))?;
+        self.state
+            .reserve(size_of::<(String, JsonValue)>())
+            .and_then(|()| self.state.reserve(size_of::<&str>()))
+            .map_err(|error| self.state.reject(error))?;
+        deserializer.deserialize_string(JsonStringVisitor { state: self.state })
+    }
+}
+
+struct JsonStringVisitor<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+}
+
+impl<'de> Visitor<'de> for JsonStringVisitor<'_, '_> {
+    type Value = String;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object property name")
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .clone_string(value)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(value)
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .reserve(value.len())
+            .map(|()| value)
+            .map_err(|error| self.state.reject(error))
+    }
+}
+
+struct JsonBudgetVisitor<'a, 'b> {
+    state: &'a mut JsonParseState<'b>,
+    depth: usize,
+}
+
+impl<'de> Visitor<'de> for JsonBudgetVisitor<'_, '_> {
+    type Value = JsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a finite JSON value")
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Null)
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Null)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(JsonValue::Boolean(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value.unsigned_abs() as u128, value as f64)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_i128<E>(self, value: i128) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value.unsigned_abs(), value as f64)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value as u128, value as f64).map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value, value as f64).map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        JsonValue::number(value).map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .clone_string(value)
+            .map(JsonValue::String)
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(value)
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state
+            .reserve(value.len())
+            .map(|()| JsonValue::String(value))
+            .map_err(|error| self.state.reject(error))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if self.depth >= self.state.limits.max_depth {
+            return Err(self.state.reject(structured_depth(
+                self.state.limits.max_depth,
+                self.depth + 1,
+            )));
+        }
+        let length = sequence.size_hint().unwrap_or(0);
+        if let Err(error) = self.state.admit_children(length) {
+            return Err(self.state.reject(error));
+        }
+        let mut values = self
+            .state
+            .reserve_vec::<JsonValue>(length)
+            .map_err(|error| self.state.reject(error))?;
+        while let Some(value) = {
+            let seed = JsonBudgetSeed {
+                state: &mut *self.state,
+                depth: self.depth + 1,
+            };
+            sequence.next_element_seed(seed)
+        }? {
+            if values.len() == values.capacity() {
+                self.state
+                    .reserve(size_of::<JsonValue>())
+                    .map_err(|error| self.state.reject(error))?;
+                values.try_reserve_exact(1).map_err(|_| {
+                    self.state.reject(Error::Allocation {
+                        size: size_of::<JsonValue>(),
+                    })
+                })?;
+            }
+            values.push(value);
+        }
+        Ok(JsonValue::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if self.depth >= self.state.limits.max_depth {
+            return Err(self.state.reject(structured_depth(
+                self.state.limits.max_depth,
+                self.depth + 1,
+            )));
+        }
+        let length = map.size_hint().unwrap_or(0);
+        let child_count = length
+            .checked_mul(2)
+            .ok_or_else(|| structured_resource(self.state.limits.max_items, usize::MAX))
+            .map_err(|error| self.state.reject(error))?;
+        if let Err(error) = self.state.admit_children(child_count) {
+            return Err(self.state.reject(error));
+        }
+        let mut entries = self
+            .state
+            .reserve_vec::<(String, JsonValue)>(length)
+            .map_err(|error| self.state.reject(error))?;
+        while let Some(key) = {
+            let seed = JsonStringSeed {
+                state: &mut *self.state,
+            };
+            map.next_key_seed(seed)
+        }? {
+            let value = {
+                let seed = JsonBudgetSeed {
+                    state: &mut *self.state,
+                    depth: self.depth + 1,
+                };
+                map.next_value_seed(seed)
+            }?;
+            if entries.len() == entries.capacity() {
+                self.state
+                    .reserve(size_of::<(String, JsonValue)>())
+                    .map_err(|error| self.state.reject(error))?;
+                entries.try_reserve_exact(1).map_err(|_| {
+                    self.state.reject(Error::Allocation {
+                        size: size_of::<(String, JsonValue)>(),
+                    })
+                })?;
+            }
+            entries.push((key, value));
+        }
+        let mut keys = self
+            .state
+            .reserve_hash_set::<&str>(entries.len())
+            .map_err(|error| self.state.reject(error))?;
+        for (key, _) in &entries {
+            if !keys.insert(key.as_str()) {
+                return Err(self
+                    .state
+                    .reject(Error::InvalidJson("duplicate JSON object property".into())));
+            }
         }
         Ok(JsonValue::Object(entries))
     }
@@ -667,8 +1083,9 @@ impl ValueCodec {
         match value {
             Value::Raw(bytes) => self.seal_opaque_in_namespace(namespace_id, item_id, &bytes),
             Value::Json(value) => {
-                validate_json(&value)?;
-                let structured = json_to_structured(&value)?;
+                validate_json_limits(&value, self.limits, self.budget())?;
+                let (structured, _json_permits) =
+                    json_to_structured(&value, self.limits, self.budget())?;
                 self.seal_structured_in_namespace(namespace_id, item_id, &structured)
             }
         }
@@ -750,13 +1167,13 @@ impl ValueCodec {
         item_id: ItemId,
         value: &StructuredValue,
     ) -> Result<ItemValue> {
-        let payload =
-            encode_with_limits(value, structured_limits(self.limits)).map_err(Error::Structured)?;
-        self.encode_payload(
+        let (payload, payload_permit) = self.encode_structured_payload(value)?;
+        self.encode_payload_owned(
             namespace_id,
             item_id.as_bytes(),
             PAYLOAD_STRUCTURED_CBOR_V1,
-            &payload,
+            payload,
+            payload_permit,
         )
     }
 
@@ -767,9 +1184,14 @@ impl ValueCodec {
         item_id: &[u8],
         value: &StructuredValue,
     ) -> Result<ItemValue> {
-        let payload =
-            encode_with_limits(value, structured_limits(self.limits)).map_err(Error::Structured)?;
-        self.encode_payload(namespace_id, item_id, PAYLOAD_STRUCTURED_CBOR_V1, &payload)
+        let (payload, payload_permit) = self.encode_structured_payload(value)?;
+        self.encode_payload_owned(
+            namespace_id,
+            item_id,
+            PAYLOAD_STRUCTURED_CBOR_V1,
+            payload,
+            payload_permit,
+        )
     }
 
     /// Decode a compatibility logical value.
@@ -788,14 +1210,12 @@ impl ValueCodec {
         match decoded.format {
             PAYLOAD_OPAQUE_BYTES => Ok(Value::Raw(decoded.payload)),
             PAYLOAD_STRUCTURED_CBOR_V1 => {
-                let _codec_permit =
-                    self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
-                structured_to_json(
-                    &decode_with_limits(&decoded.payload, structured_limits(self.limits))
-                        .map_err(Error::Structured)?,
-                )?
-                .map(Value::Json)
-                .ok_or_else(|| Error::UnsupportedStructuredValue)
+                let (structured, _structured_permits) =
+                    self.decode_structured_payload(&decoded.payload)?;
+                let (json, _json_permits) =
+                    structured_to_json(&structured, self.limits, self.budget())?;
+                json.map(Value::Json)
+                    .ok_or_else(|| Error::UnsupportedStructuredValue)
             }
             _ => Err(Error::UnsupportedPayloadFormat(decoded.format)),
         }
@@ -865,9 +1285,8 @@ impl ValueCodec {
         if decoded.format != PAYLOAD_STRUCTURED_CBOR_V1 {
             return Err(Error::ExpectedStructuredValue);
         }
-        let _codec_permit = self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
-        decode_with_limits(&decoded.payload, structured_limits(self.limits))
-            .map_err(Error::Structured)
+        let (structured, _structured_permits) = self.decode_structured_payload(&decoded.payload)?;
+        Ok(structured)
     }
 
     /// Decode StructuredValue-CBOR-v1 for an exact wire Item ID byte slice.
@@ -881,9 +1300,55 @@ impl ValueCodec {
         if decoded.format != PAYLOAD_STRUCTURED_CBOR_V1 {
             return Err(Error::ExpectedStructuredValue);
         }
-        let _codec_permit = self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
-        decode_with_limits(&decoded.payload, structured_limits(self.limits))
-            .map_err(Error::Structured)
+        let (structured, _structured_permits) = self.decode_structured_payload(&decoded.payload)?;
+        Ok(structured)
+    }
+
+    fn encode_structured_payload(&self, value: &StructuredValue) -> Result<(Vec<u8>, BytePermit)> {
+        let mut temporary_permits = Vec::new();
+        let mut reserve = |size: usize| {
+            let Ok(permit) = self.reserve(size, Resource::StructuredValue) else {
+                return false;
+            };
+            temporary_permits.push(permit);
+            true
+        };
+        let payload = encode_with_limits_and_budget(
+            value,
+            structured_limits(self.limits),
+            self.limits.max_in_flight_bytes,
+            &mut reserve,
+        )
+        .map_err(Error::Structured)?;
+        // The callback accounts all temporary encoder work cumulatively. Once
+        // encoding has completed only the returned CBOR bytes remain live;
+        // retain one exact permit for that output rather than carrying every
+        // historical callback reservation into envelope encoding.
+        drop(temporary_permits);
+        let payload_permit = self.reserve(payload.len(), Resource::StructuredValue)?;
+        Ok((payload, payload_permit))
+    }
+
+    fn decode_structured_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<(StructuredValue, Vec<BytePermit>)> {
+        let mut permits = Vec::new();
+        let mut reserve = |size: usize| {
+            let Ok(permit) = self.reserve(size, Resource::StructuredValue) else {
+                return false;
+            };
+            permits.push(permit);
+            true
+        };
+        let structured = decode_with_limits_and_budget(
+            payload,
+            structured_limits(self.limits),
+            self.limits.max_in_flight_bytes,
+            &mut reserve,
+        )
+        .map_err(Error::Structured)?;
+        Ok((structured, permits))
     }
 
     /// Validate and pass through a caller-owned version-0 envelope.
@@ -912,22 +1377,53 @@ impl ValueCodec {
         payload_format: u8,
         payload: &[u8],
     ) -> Result<ItemValue> {
+        self.encode_payload_input(
+            namespace_id,
+            item_id,
+            payload_format,
+            PayloadInput::Borrowed(payload),
+        )
+    }
+
+    fn encode_payload_owned(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        payload_format: u8,
+        payload: Vec<u8>,
+        payload_permit: BytePermit,
+    ) -> Result<ItemValue> {
+        self.encode_payload_input(
+            namespace_id,
+            item_id,
+            payload_format,
+            PayloadInput::Owned {
+                bytes: payload,
+                permit: payload_permit,
+            },
+        )
+    }
+
+    fn encode_payload_input(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        payload_format: u8,
+        input: PayloadInput<'_>,
+    ) -> Result<ItemValue> {
         validate_namespace(namespace_id)?;
         validate_item_id(item_id)?;
-        if payload.len() > self.limits.max_expanded_payload_bytes {
+        let payload_len = match &input {
+            PayloadInput::Borrowed(payload) => payload.len(),
+            PayloadInput::Owned { bytes, .. } => bytes.len(),
+        };
+        if payload_len > self.limits.max_expanded_payload_bytes {
             return Err(Error::ResourceLimit {
                 resource: Resource::ExpandedPayloadBytes,
                 limit: self.limits.max_expanded_payload_bytes,
-                actual: payload.len(),
+                actual: payload_len,
             });
         }
-        let (transformed, compression_id, _transformed_permit) =
-            compress_if_beneficial(payload, self.compression, &self.limits, self.budget())?;
-        let selector = make_selector(
-            self.encryption.selector_id(),
-            compression_id,
-            payload_format,
-        )?;
         let key_id = if self.encryption == Encryption::Unprotected {
             None
         } else {
@@ -939,17 +1435,55 @@ impl ValueCodec {
             )
         };
         let key_id_bytes = key_id.map(encode_vu128).transpose()?.unwrap_or_default();
-        let aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
         let protection_overhead = match self.encryption {
             Encryption::Unprotected => 0,
             Encryption::Compact => SIV_SYNTHETIC_IV_BYTES,
             Encryption::Robust => GCM_SIV_NONCE_BYTES + AUTH_TAG_BYTES,
         };
-        let encoded_length = VERSION_BYTES
+        let envelope_prefix = VERSION_BYTES
             .len()
             .checked_add(1)
             .and_then(|length| length.checked_add(key_id_bytes.len()))
             .and_then(|length| length.checked_add(protection_overhead))
+            .ok_or(Error::ResourceLimit {
+                resource: Resource::EnvelopeBytes,
+                limit: self.limits.max_envelope_bytes,
+                actual: usize::MAX,
+            })?;
+        let max_body_bytes = self
+            .limits
+            .max_envelope_bytes
+            .checked_sub(envelope_prefix)
+            .ok_or(Error::EncodedValueTooLarge {
+                size: envelope_prefix,
+                maximum: self.limits.max_envelope_bytes,
+            })?;
+        let (transformed, compression_id, _transformed_permit) = match input {
+            PayloadInput::Borrowed(payload) => compress_if_beneficial(
+                payload,
+                self.compression,
+                &self.limits,
+                self.budget(),
+                max_body_bytes,
+            )?,
+            PayloadInput::Owned { bytes, permit } => compress_owned(
+                bytes,
+                permit,
+                self.compression,
+                &self.limits,
+                self.budget(),
+                max_body_bytes,
+            )?,
+        };
+        let selector = make_selector(
+            self.encryption.selector_id(),
+            compression_id,
+            payload_format,
+        )?;
+        let aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
+        let encoded_length = VERSION_BYTES
+            .len()
+            .checked_add(envelope_prefix - VERSION_BYTES.len())
             .and_then(|length| length.checked_add(transformed.len()))
             .ok_or(Error::ResourceLimit {
                 resource: Resource::EnvelopeBytes,
@@ -1006,6 +1540,13 @@ impl ValueCodec {
             return Err(Error::EncodedValueTooLarge {
                 size: encoded.len(),
                 maximum: self.limits.max_envelope_bytes,
+            });
+        }
+        if encoded.len() > self.limits.max_in_flight_bytes {
+            return Err(Error::ResourceLimit {
+                resource: Resource::EnvelopeBytes,
+                limit: self.limits.max_in_flight_bytes,
+                actual: encoded.len(),
             });
         }
         let envelope_permit = if response_permit.is_some() {
@@ -1069,20 +1610,6 @@ impl ValueCodec {
         }
         encoded.drain(..offset);
         let body = encoded;
-        let decrypted_permit = match protection {
-            Encryption::Unprotected => None,
-            Encryption::Compact => Some(self.reserve(
-                body.len().saturating_sub(SIV_SYNTHETIC_IV_BYTES),
-                Resource::ExpandedPayloadBytes,
-            )?),
-            Encryption::Robust => Some(
-                self.reserve(
-                    body.len()
-                        .saturating_sub(GCM_SIV_NONCE_BYTES + AUTH_TAG_BYTES),
-                    Resource::ExpandedPayloadBytes,
-                )?,
-            ),
-        };
         let transformed = match protection {
             Encryption::Unprotected => body,
             Encryption::Compact => {
@@ -1129,7 +1656,6 @@ impl ValueCodec {
             payload,
             _response_permit: response_permit,
             _envelope_permit: envelope_permit,
-            _decrypted_permit: decrypted_permit,
             _payload_permit: payload_permit,
         })
     }
@@ -1267,17 +1793,15 @@ impl ValueCodec {
         reserve_budget(self.budget(), size, &self.limits, resource)
     }
 
-    fn budget(&self) -> &RequestBudget {
-        self.budget
-            .as_ref()
-            .unwrap_or_else(|| {
-                self.default_budget
-                    .get_or_init(|| RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES))
-            })
+    pub(crate) fn budget(&self) -> &RequestBudget {
+        self.budget.as_ref().unwrap_or_else(|| {
+            self.default_budget
+                .get_or_init(|| RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES))
+        })
     }
 }
 
-fn reserve_budget(
+pub(crate) fn reserve_budget(
     budget: &RequestBudget,
     size: usize,
     limits: &ValueLimits,
@@ -1290,13 +1814,11 @@ fn reserve_budget(
             actual: size,
         });
     }
-    budget
-        .try_reserve(size)
-        .map_err(|_| Error::ResourceLimit {
-            resource,
-            limit: budget.capacity(),
-            actual: size,
-        })
+    budget.try_reserve(size).map_err(|_| Error::ResourceLimit {
+        resource,
+        limit: budget.capacity(),
+        actual: size,
+    })
 }
 
 struct DecodedPayload {
@@ -1304,8 +1826,12 @@ struct DecodedPayload {
     payload: Vec<u8>,
     _response_permit: Option<Arc<BytePermit>>,
     _envelope_permit: Option<BytePermit>,
-    _decrypted_permit: Option<BytePermit>,
     _payload_permit: Option<BytePermit>,
+}
+
+enum PayloadInput<'a> {
+    Borrowed(&'a [u8]),
+    Owned { bytes: Vec<u8>, permit: BytePermit },
 }
 
 /// Resource dimensions exposed by value errors.
@@ -1502,15 +2028,213 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Parse one complete JSON input for compatibility adapters.
 #[allow(dead_code)]
 pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
+    let budget = RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES);
+    let (value, _permits) = parse_json_input_with_budget(payload, ValueLimits::default(), &budget)?;
+    Ok(value)
+}
+
+/// Parse one complete JSON input while charging parser allocations to the
+/// caller's aggregate request budget. Temporary parser permits are released
+/// when this regression helper returns.
+#[doc(hidden)]
+pub fn parse_json_input_for_test(
+    payload: &[u8],
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<JsonValue> {
+    let (value, _permits) = parse_json_input_with_budget(payload, limits, budget)?;
+    Ok(value)
+}
+
+/// Parse one complete JSON input while retaining permits for the caller's
+/// subsequent bounded conversion.
+pub fn parse_json_input_with_budget(
+    payload: &[u8],
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(JsonValue, Vec<BytePermit>)> {
+    if payload.len() > limits.max_expanded_payload_bytes {
+        return Err(Error::ResourceLimit {
+            resource: Resource::ExpandedPayloadBytes,
+            limit: limits.max_expanded_payload_bytes,
+            actual: payload.len(),
+        });
+    }
     validate_json_integer_tokens(payload)?;
     let mut deserializer = serde_json::Deserializer::from_slice(payload);
-    let value = JsonValue::deserialize(&mut deserializer)
-        .map_err(|error| Error::InvalidJson(error.to_string()))?;
+    let mut state = JsonParseState::new(budget, limits);
+    let value = JsonBudgetSeed {
+        state: &mut state,
+        depth: 0,
+    }
+    .deserialize(&mut deserializer)
+    .map_err(|error| state.finish_error(error))?;
     deserializer
         .end()
-        .map_err(|error| Error::InvalidJson(error.to_string()))?;
-    validate_json(&value)?;
-    Ok(value)
+        .map_err(|error| state.finish_error(error))?;
+    Ok((value, state.permits))
+}
+
+/// Canonically serializes one logical JSON value while charging output
+/// backing storage and emitted bytes to the caller's aggregate budget.
+///
+/// The returned permits must remain live while the output buffer is exposed to
+/// another API boundary. Dropping them releases every reservation made by the
+/// writer.
+pub fn encode_json_output_with_budget(
+    value: &mut JsonValue,
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(Vec<u8>, Vec<BytePermit>)> {
+    fn write_value(
+        value: &mut JsonValue,
+        depth: usize,
+        limits: ValueLimits,
+        writer: &mut JsonBudgetWriter<'_>,
+    ) -> Result<()> {
+        if depth > limits.max_depth {
+            return Err(structured_depth(limits.max_depth, depth));
+        }
+        match value {
+            JsonValue::Null
+            | JsonValue::Boolean(_)
+            | JsonValue::Number(_)
+            | JsonValue::String(_) => {
+                serde_json_canonicalizer::to_writer(value, writer).map_err(|error| {
+                    writer
+                        .failure
+                        .take()
+                        .unwrap_or_else(|| Error::InvalidJson(error.to_string()))
+                })?;
+            }
+            JsonValue::Array(values) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                writer
+                    .write_all(b"[")
+                    .map_err(|error| writer.io_error(error))?;
+                for (index, value) in values.iter_mut().enumerate() {
+                    if index != 0 {
+                        writer
+                            .write_all(b",")
+                            .map_err(|error| writer.io_error(error))?;
+                    }
+                    write_value(value, depth + 1, limits, writer)?;
+                }
+                writer
+                    .write_all(b"]")
+                    .map_err(|error| writer.io_error(error))?;
+            }
+            JsonValue::Object(entries) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                entries.sort_unstable_by(|(left, _), (right, _)| {
+                    left.encode_utf16().cmp(right.encode_utf16())
+                });
+                writer
+                    .write_all(b"{")
+                    .map_err(|error| writer.io_error(error))?;
+                for (index, (key, value)) in entries.iter_mut().enumerate() {
+                    if index != 0 {
+                        writer
+                            .write_all(b",")
+                            .map_err(|error| writer.io_error(error))?;
+                    }
+                    serde_json_canonicalizer::to_writer(key, writer)
+                        .map_err(|error| writer.io_error(io::Error::other(error)))?;
+                    writer
+                        .write_all(b":")
+                        .map_err(|error| writer.io_error(error))?;
+                    write_value(value, depth + 1, limits, writer)?;
+                }
+                writer
+                    .write_all(b"}")
+                    .map_err(|error| writer.io_error(error))?;
+            }
+        }
+        Ok(())
+    }
+
+    struct JsonBudgetWriter<'a> {
+        budget: &'a RequestBudget,
+        limits: ValueLimits,
+        payload: Vec<u8>,
+        permits: Vec<BytePermit>,
+        failure: Option<Error>,
+    }
+
+    impl JsonBudgetWriter<'_> {
+        fn io_error(&mut self, error: io::Error) -> Error {
+            self.failure
+                .take()
+                .unwrap_or_else(|| Error::InvalidJson(error.to_string()))
+        }
+    }
+
+    impl Write for JsonBudgetWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let next = self
+                .written()
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("canonical JSON output length overflow"))?;
+            if next > self.limits.max_expanded_payload_bytes {
+                let error = Error::ResourceLimit {
+                    resource: Resource::ExpandedPayloadBytes,
+                    limit: self.limits.max_expanded_payload_bytes,
+                    actual: next,
+                };
+                if self.failure.is_none() {
+                    self.failure = Some(error);
+                }
+                return Err(io::Error::other("canonical JSON output exceeds its limit"));
+            }
+            let permit = reserve_budget(
+                self.budget,
+                bytes.len(),
+                &self.limits,
+                Resource::ExpandedPayloadBytes,
+            )
+            .map_err(|error| {
+                if self.failure.is_none() {
+                    self.failure = Some(error);
+                }
+                io::Error::other("canonical JSON output exceeds its budget")
+            })?;
+            self.payload.try_reserve_exact(bytes.len()).map_err(|_| {
+                if self.failure.is_none() {
+                    self.failure = Some(Error::Allocation { size: bytes.len() });
+                }
+                io::Error::other("failed to allocate canonical JSON output")
+            })?;
+            self.payload.extend_from_slice(bytes);
+            self.permits.push(permit);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl JsonBudgetWriter<'_> {
+        fn written(&self) -> usize {
+            self.payload.len()
+        }
+    }
+
+    let mut writer = JsonBudgetWriter {
+        budget,
+        limits,
+        payload: Vec::new(),
+        permits: Vec::new(),
+        failure: None,
+    };
+    if let Err(error) = write_value(value, 0, limits, &mut writer) {
+        return Err(writer.failure.take().unwrap_or(error));
+    }
+    Ok((writer.payload, writer.permits))
 }
 
 fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
@@ -1580,11 +2304,7 @@ fn validate_json_number_token(token: &[u8]) -> Result<()> {
             "JSON numbers must be finite IEEE-754 values".into(),
         ));
     }
-    let Some(expected) = integer_token(token) else {
-        return Ok(());
-    };
-    let actual = normalize_integer_string(&format!("{value:.0}"));
-    if actual != expected {
+    if !same_integer_value(token, &format!("{value:.0}")) {
         return Err(Error::InvalidJson(
             "JSON integers must be exactly representable as IEEE-754 binary64 values".into(),
         ));
@@ -1592,56 +2312,54 @@ fn validate_json_number_token(token: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn integer_token(token: &str) -> Option<String> {
-    let (negative, token) = token
+fn same_integer_value(input: &str, rendered: &str) -> bool {
+    let (input_negative, input_digits) = input
         .strip_prefix('-')
-        .map_or((false, token), |token| (true, token));
-    if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let digits = token.trim_start_matches('0');
-    if digits.is_empty() {
-        return Some("0".to_owned());
-    }
-    let mut normalized = digits.to_owned();
-    if negative {
-        normalized.insert(0, '-');
-    }
-    Some(normalized)
-}
-
-fn normalize_integer_string(value: &str) -> String {
-    let negative = value.starts_with('-');
-    let digits = value.strip_prefix('-').unwrap_or(value);
-    let digits = digits.trim_start_matches('0');
-    if digits.is_empty() {
-        "0".to_owned()
-    } else if negative {
-        format!("-{digits}")
-    } else {
-        digits.to_owned()
-    }
+        .map_or((false, input), |digits| (true, digits));
+    let (rendered_negative, rendered_digits) = rendered
+        .strip_prefix('-')
+        .map_or((false, rendered), |digits| (true, digits));
+    let input_digits = input_digits.trim_start_matches('0');
+    let rendered_digits = rendered_digits.trim_start_matches('0');
+    let input_zero = input_digits.is_empty();
+    let rendered_zero = rendered_digits.is_empty();
+    (input_zero && rendered_zero || input_negative == rendered_negative)
+        && if input_zero {
+            rendered_zero
+        } else {
+            input_digits == rendered_digits
+        }
 }
 
 #[allow(dead_code)]
 fn validate_json(value: &JsonValue) -> Result<()> {
-    match value {
-        JsonValue::Number(number) if !number.is_finite() => Err(Error::InvalidJson(
-            "JSON numbers must be finite IEEE-754 values".into(),
-        )),
-        JsonValue::Array(values) => values.iter().try_for_each(validate_json),
-        JsonValue::Object(entries) => {
-            validate_json_object(entries)?;
-            entries
-                .iter()
-                .try_for_each(|(_, value)| validate_json(value))
+    let mut work = vec![value];
+    while let Some(value) = work.pop() {
+        match value {
+            JsonValue::Number(number) if !number.is_finite() => {
+                return Err(Error::InvalidJson(
+                    "JSON numbers must be finite IEEE-754 values".into(),
+                ));
+            }
+            JsonValue::Array(values) => {
+                work.extend(values.iter().rev());
+            }
+            JsonValue::Object(entries) => {
+                validate_json_object(entries)?;
+                work.extend(entries.iter().rev().map(|(_, value)| value));
+            }
+            _ => {}
         }
-        _ => Ok(()),
     }
+    Ok(())
 }
 
 fn validate_json_object(entries: &[(String, JsonValue)]) -> Result<()> {
-    let mut keys = HashSet::with_capacity(entries.len());
+    let mut keys = HashSet::new();
+    keys.try_reserve(entries.len())
+        .map_err(|_| Error::Allocation {
+            size: entries.len(),
+        })?;
     for (key, _) in entries {
         if !keys.insert(key) {
             return Err(Error::InvalidJson(
@@ -1652,66 +2370,314 @@ fn validate_json_object(entries: &[(String, JsonValue)]) -> Result<()> {
     Ok(())
 }
 
-fn json_to_structured(value: &JsonValue) -> Result<StructuredValue> {
-    Ok(match value {
-        JsonValue::Null => StructuredValue::Null,
-        JsonValue::Boolean(value) => StructuredValue::Boolean(*value),
-        JsonValue::Number(value) => StructuredValue::Float64(value.to_bits()),
-        JsonValue::String(value) => StructuredValue::TextString(value.clone()),
-        JsonValue::Array(values) => StructuredValue::Array(
-            values
-                .iter()
-                .map(json_to_structured)
-                .collect::<Result<Vec<_>>>()?,
-        ),
-        JsonValue::Object(entries) => StructuredValue::map(
-            entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        StructuredValue::TextString(key.clone()),
-                        json_to_structured(value)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )
-        .map_err(Error::Structured)?,
-    })
+fn validate_json_object_with_budget(
+    entries: &[(String, JsonValue)],
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<()> {
+    let bytes = hash_set_allocation_bytes::<&str>(entries.len())?;
+    let _permit = reserve_budget(budget, bytes, &limits, Resource::StructuredValue)?;
+    let mut keys = HashSet::new();
+    keys.try_reserve(entries.len())
+        .map_err(|_| Error::Allocation { size: bytes })?;
+    for (key, _) in entries {
+        if !keys.insert(key.as_str()) {
+            return Err(Error::InvalidJson(
+                "JSON object property names must be unique".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
-fn structured_to_json(value: &StructuredValue) -> Result<Option<JsonValue>> {
-    Ok(match value {
-        StructuredValue::Undefined => None,
-        StructuredValue::Null => Some(JsonValue::Null),
-        StructuredValue::Boolean(value) => Some(JsonValue::Boolean(*value)),
-        StructuredValue::Float16(bits) => Some(JsonValue::number(f16_to_f64(*bits))?),
-        StructuredValue::Float32(bits) => Some(JsonValue::number(f32::from_bits(*bits) as f64)?),
-        StructuredValue::Float64(bits) => Some(JsonValue::number(f64::from_bits(*bits))?),
-        StructuredValue::Integer(integer) => {
-            Some(JsonValue::number(integer_to_binary64(integer)?)?)
+fn validate_json_limits(
+    value: &JsonValue,
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<()> {
+    fn visit(
+        value: &JsonValue,
+        depth: usize,
+        item_count: &mut usize,
+        pending_items: &mut usize,
+        limits: ValueLimits,
+        budget: &RequestBudget,
+    ) -> Result<()> {
+        *pending_items = pending_items
+            .checked_sub(1)
+            .expect("the root or a declared child is always pending");
+        *item_count = item_count
+            .checked_add(1)
+            .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
+        if *item_count > limits.max_items {
+            return Err(structured_resource(limits.max_items, *item_count));
         }
-        StructuredValue::TextString(value) => Some(JsonValue::String(value.clone())),
-        StructuredValue::Bytes(_) => None,
-        StructuredValue::Array(values) => Some(JsonValue::Array(
-            values
-                .iter()
-                .map(|value| structured_to_json(value)?.ok_or(Error::UnsupportedStructuredValue))
-                .collect::<Result<Vec<_>>>()?,
-        )),
-        StructuredValue::Map(entries) => {
-            let mut object = Vec::with_capacity(entries.len());
-            for (key, value) in entries {
-                let StructuredValue::TextString(key) = key else {
-                    return Ok(None);
-                };
-                object.push((
-                    key.clone(),
-                    structured_to_json(value)?.ok_or(Error::UnsupportedStructuredValue)?,
+        match value {
+            JsonValue::Array(values) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                add_json_pending_items(pending_items, values.len(), *item_count, limits.max_items)?;
+                for value in values {
+                    visit(value, depth + 1, item_count, pending_items, limits, budget)?;
+                }
+            }
+            JsonValue::Object(entries) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                validate_json_object_with_budget(entries, limits, budget)?;
+                let child_count = entries
+                    .len()
+                    .checked_mul(2)
+                    .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
+                add_json_pending_items(pending_items, child_count, *item_count, limits.max_items)?;
+                for (_, value) in entries {
+                    *pending_items = pending_items
+                        .checked_sub(1)
+                        .expect("the declared object key is always pending");
+                    *item_count = item_count
+                        .checked_add(1)
+                        .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
+                    if *item_count > limits.max_items {
+                        return Err(structured_resource(limits.max_items, *item_count));
+                    }
+                    visit(value, depth + 1, item_count, pending_items, limits, budget)?;
+                }
+            }
+            JsonValue::Number(number) if !number.is_finite() => {
+                return Err(Error::InvalidJson(
+                    "JSON numbers must be finite IEEE-754 values".into(),
                 ));
             }
-            Some(JsonValue::Object(object))
+            _ => {}
         }
-    })
+        Ok(())
+    }
+
+    let mut item_count = 0usize;
+    let mut pending_items = 1usize;
+    visit(
+        value,
+        0,
+        &mut item_count,
+        &mut pending_items,
+        limits,
+        budget,
+    )
+}
+
+fn add_json_pending_items(
+    pending_items: &mut usize,
+    child_count: usize,
+    item_count: usize,
+    maximum: usize,
+) -> Result<()> {
+    *pending_items = pending_items
+        .checked_add(child_count)
+        .ok_or_else(|| structured_resource(maximum, usize::MAX))?;
+    let minimum_total = item_count
+        .checked_add(*pending_items)
+        .ok_or_else(|| structured_resource(maximum, usize::MAX))?;
+    if minimum_total > maximum {
+        return Err(structured_resource(maximum, minimum_total));
+    }
+    Ok(())
+}
+
+struct JsonAllocation<'a> {
+    budget: &'a RequestBudget,
+    limits: ValueLimits,
+    permits: Vec<BytePermit>,
+}
+
+impl JsonAllocation<'_> {
+    fn reserve(&mut self, size: usize) -> Result<()> {
+        self.permits
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        let permit = reserve_budget(self.budget, size, &self.limits, Resource::StructuredValue)?;
+        self.permits.push(permit);
+        Ok(())
+    }
+
+    fn reserve_vec<T>(&mut self, length: usize) -> Result<Vec<T>> {
+        let bytes = length
+            .checked_mul(size_of::<T>())
+            .ok_or_else(|| structured_resource(self.limits.max_in_flight_bytes, usize::MAX))?;
+        self.reserve(bytes)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(length)
+            .map_err(|_| Error::Allocation { size: bytes })?;
+        Ok(values)
+    }
+
+    fn clone_string(&mut self, value: &str) -> Result<String> {
+        self.reserve(value.len())?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| Error::Allocation { size: value.len() })?;
+        owned.push_str(value);
+        Ok(owned)
+    }
+}
+
+fn json_to_structured(
+    value: &JsonValue,
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(StructuredValue, Vec<BytePermit>)> {
+    fn convert(
+        value: &JsonValue,
+        depth: usize,
+        item_count: &mut usize,
+        limits: ValueLimits,
+        allocation: &mut JsonAllocation<'_>,
+    ) -> Result<StructuredValue> {
+        *item_count = item_count
+            .checked_add(1)
+            .ok_or_else(|| structured_resource(limits.max_items, usize::MAX))?;
+        if *item_count > limits.max_items {
+            return Err(structured_resource(limits.max_items, *item_count));
+        }
+        Ok(match value {
+            JsonValue::Null => StructuredValue::Null,
+            JsonValue::Boolean(value) => StructuredValue::Boolean(*value),
+            JsonValue::Number(value) => StructuredValue::Float64(value.to_bits()),
+            JsonValue::String(value) => {
+                StructuredValue::TextString(allocation.clone_string(value)?)
+            }
+            JsonValue::Array(values) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                let mut converted = allocation.reserve_vec(values.len())?;
+                for value in values {
+                    converted.push(convert(value, depth + 1, item_count, limits, allocation)?);
+                }
+                StructuredValue::Array(converted)
+            }
+            JsonValue::Object(entries) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                let mut converted = allocation.reserve_vec(entries.len())?;
+                for (key, value) in entries {
+                    let key = allocation.clone_string(key)?;
+                    let value = convert(value, depth + 1, item_count, limits, allocation)?;
+                    converted.push((StructuredValue::TextString(key), value));
+                }
+                StructuredValue::Map(converted)
+            }
+        })
+    }
+
+    let mut allocation = JsonAllocation {
+        budget,
+        limits,
+        permits: Vec::new(),
+    };
+    let mut item_count = 0usize;
+    let value = convert(value, 0, &mut item_count, limits, &mut allocation)?;
+    Ok((value, allocation.permits))
+}
+
+fn structured_to_json(
+    value: &StructuredValue,
+    limits: ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(Option<JsonValue>, Vec<BytePermit>)> {
+    fn convert(
+        value: &StructuredValue,
+        depth: usize,
+        limits: ValueLimits,
+        allocation: &mut JsonAllocation<'_>,
+    ) -> Result<Option<JsonValue>> {
+        Ok(match value {
+            StructuredValue::Undefined => None,
+            StructuredValue::Null => Some(JsonValue::Null),
+            StructuredValue::Boolean(value) => Some(JsonValue::Boolean(*value)),
+            StructuredValue::Float16(bits) => Some(JsonValue::number(f16_to_f64(*bits))?),
+            StructuredValue::Float32(bits) => {
+                Some(JsonValue::number(f32::from_bits(*bits) as f64)?)
+            }
+            StructuredValue::Float64(bits) => Some(JsonValue::number(f64::from_bits(*bits))?),
+            StructuredValue::Integer(integer) => {
+                Some(JsonValue::number(integer_to_binary64(integer)?)?)
+            }
+            StructuredValue::TextString(value) => {
+                Some(JsonValue::String(allocation.clone_string(value)?))
+            }
+            StructuredValue::Bytes(_) => None,
+            StructuredValue::Array(values) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                let mut converted = allocation.reserve_vec(values.len())?;
+                for value in values {
+                    converted.push(
+                        convert(value, depth + 1, limits, allocation)?
+                            .ok_or(Error::UnsupportedStructuredValue)?,
+                    );
+                }
+                Some(JsonValue::Array(converted))
+            }
+            StructuredValue::Map(entries) => {
+                if depth >= limits.max_depth {
+                    return Err(structured_depth(limits.max_depth, depth + 1));
+                }
+                let mut converted = allocation.reserve_vec(entries.len())?;
+                for (key, value) in entries {
+                    let StructuredValue::TextString(key) = key else {
+                        return Ok(None);
+                    };
+                    let key = allocation.clone_string(key)?;
+                    let value = convert(value, depth + 1, limits, allocation)?
+                        .ok_or(Error::UnsupportedStructuredValue)?;
+                    converted.push((key, value));
+                }
+                Some(JsonValue::Object(converted))
+            }
+        })
+    }
+
+    let mut allocation = JsonAllocation {
+        budget,
+        limits,
+        permits: Vec::new(),
+    };
+    let value = convert(value, 0, limits, &mut allocation)?;
+    Ok((value, allocation.permits))
+}
+
+fn structured_resource(limit: usize, actual: usize) -> Error {
+    Error::ResourceLimit {
+        resource: Resource::StructuredValue,
+        limit,
+        actual,
+    }
+}
+
+fn hash_set_allocation_bytes<T>(length: usize) -> Result<usize> {
+    if length == 0 {
+        return Ok(0);
+    }
+    // `HashSet` keeps a spare bucket for an empty slot and grows at roughly a
+    // 7/8 load factor. Charge the next power-of-two bucket table plus one
+    // control byte per bucket before asking the allocator for it.
+    let buckets = length
+        .checked_mul(2)
+        .and_then(|length| length.checked_next_power_of_two())
+        .ok_or_else(|| structured_resource(usize::MAX, usize::MAX))?;
+    buckets
+        .checked_mul(size_of::<T>().saturating_add(1))
+        .ok_or_else(|| structured_resource(usize::MAX, usize::MAX))
+}
+
+fn structured_depth(limit: usize, actual: usize) -> Error {
+    structured_resource(limit, actual)
 }
 
 /// Converts an arbitrary-precision integer only when its mathematical value
@@ -1887,63 +2853,198 @@ fn compress_if_beneficial(
     compression: Compression,
     limits: &ValueLimits,
     budget: &RequestBudget,
+    max_body_bytes: usize,
 ) -> Result<(Vec<u8>, u8, Option<BytePermit>)> {
     let Compression::Zstandard(options) = compression else {
-        let permit = reserve_budget(
-            budget,
-            payload.len(),
-            limits,
-            Resource::ExpandedPayloadBytes,
-        )?;
-        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+        return raw_payload(payload, limits, budget, max_body_bytes);
     };
     if payload.len() < options.minimum_input_size {
-        let permit = reserve_budget(
-            budget,
-            payload.len(),
-            limits,
-            Resource::ExpandedPayloadBytes,
-        )?;
-        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+        return raw_payload(payload, limits, budget, max_body_bytes);
     }
     let bound = ZSTD_compressBound(payload.len());
-    if bound > limits.max_envelope_bytes {
-        return Err(Error::ResourceLimit {
-            resource: Resource::EnvelopeBytes,
-            limit: limits.max_envelope_bytes,
-            actual: bound,
-        });
-    }
     if bound > limits.max_in_flight_bytes {
-        return Err(Error::ResourceLimit {
-            resource: Resource::EnvelopeBytes,
-            limit: limits.max_in_flight_bytes,
-            actual: bound,
-        });
+        // A compression bound is a temporary allocation requirement. If it
+        // cannot fit the operation's in-flight limit, retain the v1 raw
+        // envelope whenever its complete body still fits.  Do not apply the
+        // envelope-body limit to the bound itself: a payload may be too large
+        // to store raw while its actual compressed frame still fits.
+        return raw_payload(payload, limits, budget, max_body_bytes);
     }
-    let compression_permit =
-        reserve_budget(budget, bound, limits, Resource::EnvelopeBytes)?;
+    let compression_permit = match reserve_budget(budget, bound, limits, Resource::EnvelopeBytes) {
+        Ok(permit) => permit,
+        Err(_error) if payload.len() <= max_body_bytes => {
+            // A competing operation may consume the temporary compression
+            // capacity even though the raw envelope remains valid.
+            return raw_payload(payload, limits, budget, max_body_bytes);
+        }
+        Err(error) => return Err(error),
+    };
     let mut compressed = Vec::new();
     compressed
         .try_reserve_exact(bound)
         .map_err(|_| Error::Allocation { size: bound })?;
     compressed.resize(bound, 0);
     let compressed_length = ZSTD_compress(&mut compressed, payload, options.level);
-    check_zstandard("compression", compressed_length)?;
+    if let Err(error) = check_zstandard("compression", compressed_length) {
+        drop(compression_permit);
+        return Err(error);
+    }
     if compressed_length >= payload.len()
         || payload.len() - compressed_length < options.minimum_savings
     {
         drop(compression_permit);
-        let permit = reserve_budget(
-            budget,
-            payload.len(),
-            limits,
-            Resource::ExpandedPayloadBytes,
-        )?;
-        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+        return raw_payload(payload, limits, budget, max_body_bytes);
+    }
+    if compressed_length > max_body_bytes {
+        drop(compression_permit);
+        if payload.len() <= max_body_bytes {
+            return raw_payload(payload, limits, budget, max_body_bytes);
+        }
+        let size = limits
+            .max_envelope_bytes
+            .saturating_sub(max_body_bytes)
+            .saturating_add(compressed_length);
+        return Err(Error::EncodedValueTooLarge {
+            size,
+            maximum: limits.max_envelope_bytes,
+        });
     }
     compressed.truncate(compressed_length);
-    Ok((compressed, COMPRESSION_ZSTANDARD, Some(compression_permit)))
+    // The bound is only a scratch allocation. Copy the frame into an exact
+    // output-sized buffer so the permit retained by the caller reflects the
+    // bytes that remain live after compression.
+    let output_permit = reserve_budget(budget, compressed_length, limits, Resource::EnvelopeBytes)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(compressed_length)
+        .map_err(|_| Error::Allocation {
+            size: compressed_length,
+        })?;
+    output.extend_from_slice(&compressed);
+    drop(compressed);
+    drop(compression_permit);
+    Ok((output, COMPRESSION_ZSTANDARD, Some(output_permit)))
+}
+
+fn compress_owned(
+    payload: Vec<u8>,
+    payload_permit: BytePermit,
+    compression: Compression,
+    limits: &ValueLimits,
+    budget: &RequestBudget,
+    max_body_bytes: usize,
+) -> Result<(Vec<u8>, u8, Option<BytePermit>)> {
+    let Compression::Zstandard(options) = compression else {
+        return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+    };
+    if payload.len() < options.minimum_input_size {
+        return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+    }
+    let bound = ZSTD_compressBound(payload.len());
+    if bound > limits.max_in_flight_bytes {
+        if payload.len() <= max_body_bytes {
+            return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+        }
+        return Err(encoded_body_too_large(
+            payload.len(),
+            limits.max_envelope_bytes,
+            max_body_bytes,
+        ));
+    }
+    let compression_permit = match reserve_budget(budget, bound, limits, Resource::EnvelopeBytes) {
+        Ok(permit) => permit,
+        Err(_error) if payload.len() <= max_body_bytes => {
+            // Existing structured payload or request permits may leave less
+            // capacity than the temporary compression bound. Compression is
+            // an optimization; retry the raw form while it still fits.
+            return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut compressed = Vec::new();
+    compressed
+        .try_reserve_exact(bound)
+        .map_err(|_| Error::Allocation { size: bound })?;
+    compressed.resize(bound, 0);
+    let compressed_length = ZSTD_compress(&mut compressed, &payload, options.level);
+    if let Err(error) = check_zstandard("compression", compressed_length) {
+        drop(compression_permit);
+        return Err(error);
+    }
+    if compressed_length >= payload.len()
+        || payload.len() - compressed_length < options.minimum_savings
+    {
+        drop(compression_permit);
+        return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+    }
+    if compressed_length > max_body_bytes {
+        drop(compression_permit);
+        if payload.len() <= max_body_bytes {
+            return Ok((payload, COMPRESSION_NONE, Some(payload_permit)));
+        }
+        return Err(encoded_body_too_large(
+            compressed_length,
+            limits.max_envelope_bytes,
+            max_body_bytes,
+        ));
+    }
+    compressed.truncate(compressed_length);
+    let output_permit = reserve_budget(budget, compressed_length, limits, Resource::EnvelopeBytes)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(compressed_length)
+        .map_err(|_| Error::Allocation {
+            size: compressed_length,
+        })?;
+    output.extend_from_slice(&compressed);
+    drop(compressed);
+    drop(compression_permit);
+    drop(payload);
+    drop(payload_permit);
+    Ok((output, COMPRESSION_ZSTANDARD, Some(output_permit)))
+}
+
+fn encoded_body_too_large(
+    body_length: usize,
+    max_envelope_bytes: usize,
+    max_body_bytes: usize,
+) -> Error {
+    let size = max_envelope_bytes
+        .saturating_sub(max_body_bytes)
+        .saturating_add(body_length);
+    Error::EncodedValueTooLarge {
+        size,
+        maximum: max_envelope_bytes,
+    }
+}
+
+fn raw_payload(
+    payload: &[u8],
+    limits: &ValueLimits,
+    budget: &RequestBudget,
+    max_body_bytes: usize,
+) -> Result<(Vec<u8>, u8, Option<BytePermit>)> {
+    if payload.len() > max_body_bytes {
+        let prefix = limits.max_envelope_bytes.saturating_sub(max_body_bytes);
+        let size = payload.len().saturating_add(prefix);
+        return Err(Error::EncodedValueTooLarge {
+            size,
+            maximum: limits.max_envelope_bytes,
+        });
+    }
+    let permit = reserve_budget(
+        budget,
+        payload.len(),
+        limits,
+        Resource::ExpandedPayloadBytes,
+    )?;
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(payload.len())
+        .map_err(|_| Error::Allocation {
+            size: payload.len(),
+        })?;
+    raw.extend_from_slice(payload);
+    Ok((raw, COMPRESSION_NONE, Some(permit)))
 }
 
 fn decompress_zstandard(

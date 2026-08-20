@@ -4,6 +4,7 @@
 //! other native bindings only marshal buffers and interpret result discriminators; connection
 //! management, retries, protocol framing, and value protection remain in this crate.
 
+use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
@@ -12,6 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use openkache_value::{Value as StructuredValue, decode, encode};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::FfiNamespaceDescriptor;
@@ -37,7 +40,10 @@ use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 use crate::ffi_admission::{AdmissionState, FfiAdmission};
-use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
+use crate::transport::BytePermit;
+use crate::value::{
+    Compression, Encryption, JsonValue, Resource, Value, ValueLimits, ZstandardOptions,
+};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
     Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpace, KeyType,
@@ -52,6 +58,7 @@ pub struct FfiResult {
     status: FfiStatusCategory,
     error_category: FfiErrorCategory,
     payload: Vec<u8>,
+    _payload_permits: Vec<BytePermit>,
     client: Option<Box<FfiClient>>,
 }
 
@@ -125,6 +132,7 @@ pub struct FfiConnectOptions {
 pub struct FfiClient {
     commands: CommandSender,
     request_timeout: Duration,
+    request_budget: crate::RequestBudget,
     shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -135,6 +143,7 @@ enum Command {
         operation: FfiOperation,
         application_key: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
         raw: bool,
         response: SyncSender<FfiResult>,
@@ -151,6 +160,7 @@ enum Command {
         namespace_id: u64,
         item_id: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
         response: SyncSender<FfiResult>,
     },
@@ -158,6 +168,7 @@ enum Command {
         operation: FfiOperation,
         application_key: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
         raw: bool,
         request: Arc<FfiRequestControl>,
@@ -218,6 +229,7 @@ impl FfiResult {
             },
             error_category,
             payload: message.into().into_bytes(),
+            _payload_permits: Vec::new(),
             client: None,
         }
     }
@@ -241,6 +253,7 @@ impl FfiResult {
             status,
             error_category: FfiErrorCategory::None,
             payload,
+            _payload_permits: Vec::new(),
             client: None,
         }
     }
@@ -256,6 +269,35 @@ impl FfiResult {
             status,
             error_category,
             payload,
+            _payload_permits: Vec::new(),
+            client: None,
+        }
+    }
+
+    fn success_with_permits(
+        kind: FfiResultKind,
+        payload: Vec<u8>,
+        payload_permits: Vec<BytePermit>,
+    ) -> Self {
+        let status = match kind {
+            FfiResultKind::NotFound => FfiStatusCategory::NotFound,
+            FfiResultKind::Created
+            | FfiResultKind::Replaced
+            | FfiResultKind::Deleted
+            | FfiResultKind::NotDeleted
+            | FfiResultKind::NotStored => FfiStatusCategory::Mutation,
+            FfiResultKind::Canceled => FfiStatusCategory::Canceled,
+            FfiResultKind::UnknownMutation => FfiStatusCategory::UnknownMutation,
+            FfiResultKind::ResourceExhausted => FfiStatusCategory::ResourceExhausted,
+            FfiResultKind::Error => FfiStatusCategory::Error,
+            _ => FfiStatusCategory::Success,
+        };
+        Self {
+            kind,
+            status,
+            error_category: FfiErrorCategory::None,
+            payload,
+            _payload_permits: payload_permits,
             client: None,
         }
     }
@@ -314,6 +356,7 @@ impl FfiResult {
             status: FfiStatusCategory::Success,
             error_category: FfiErrorCategory::None,
             payload: Vec::new(),
+            _payload_permits: Vec::new(),
             client: Some(Box::new(client)),
         }
     }
@@ -368,9 +411,10 @@ impl FfiClient {
             .map_err(|error| format!("failed to start client worker: {error}"))?;
 
         match ready_receiver.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(request_budget)) => Ok(Self {
                 commands,
                 request_timeout: timeouts.request,
+                request_budget,
                 shutdown,
                 state,
                 worker: Mutex::new(Some(worker)),
@@ -393,6 +437,7 @@ impl FfiClient {
         operation: FfiOperation,
         application_key: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
         raw: bool,
     ) -> FfiResult {
@@ -407,6 +452,7 @@ impl FfiClient {
             operation,
             application_key,
             value,
+            input_permit,
             set_options,
             raw,
             response,
@@ -448,6 +494,7 @@ impl FfiClient {
         operation: FfiOperation,
         application_key: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
         raw: bool,
     ) -> FfiRequest {
@@ -483,6 +530,7 @@ impl FfiClient {
             operation,
             application_key,
             value,
+            input_permit,
             set_options,
             raw,
             request: control,
@@ -511,6 +559,7 @@ impl FfiClient {
         namespace_id: u64,
         item_id: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
     ) -> FfiResult {
         self.send_command_with_response(|response| Command::ExecuteScoped {
@@ -518,6 +567,7 @@ impl FfiClient {
             namespace_id,
             item_id,
             value,
+            input_permit,
             set_options,
             response,
         })
@@ -589,6 +639,10 @@ impl FfiClient {
 
     fn connection_state(&self) -> u32 {
         self.state.load(Ordering::Acquire)
+    }
+
+    fn request_budget(&self) -> crate::RequestBudget {
+        self.request_budget.clone()
     }
 }
 
@@ -793,7 +847,7 @@ impl Drop for FfiClient {
 
 fn run_worker(
     commands: CommandReceiver,
-    ready: SyncSender<std::result::Result<(), String>>,
+    ready: SyncSender<std::result::Result<crate::RequestBudget, String>>,
     options: WorkerOptions,
     shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
@@ -881,7 +935,7 @@ fn run_worker(
         connection_state_value(client.connection_state()),
         Ordering::Release,
     );
-    if ready.send(Ok(())).is_err() {
+    if ready.send(Ok(client.request_budget())).is_err() {
         return;
     }
 
@@ -894,6 +948,7 @@ fn run_worker(
                 operation,
                 application_key,
                 value,
+                input_permit,
                 set_options,
                 raw,
                 response,
@@ -904,6 +959,7 @@ fn run_worker(
                         operation,
                         application_key,
                         value,
+                        input_permit,
                         set_options,
                         raw,
                     ))
@@ -943,6 +999,7 @@ fn run_worker(
                 namespace_id,
                 item_id,
                 value,
+                input_permit,
                 set_options,
                 response,
             } => {
@@ -953,6 +1010,7 @@ fn run_worker(
                         namespace_id,
                         item_id,
                         value,
+                        input_permit,
                         set_options,
                     ))
                 }))
@@ -973,6 +1031,7 @@ fn run_worker(
                 operation,
                 application_key,
                 value,
+                input_permit,
                 set_options,
                 raw,
                 request,
@@ -993,6 +1052,7 @@ fn run_worker(
                         operation,
                         application_key,
                         value,
+                        input_permit,
                         set_options,
                         raw,
                     )
@@ -1087,9 +1147,11 @@ async fn execute(
     operation: FfiOperation,
     application_key: Vec<u8>,
     value: Vec<u8>,
+    input_permit: BytePermit,
     set_options: SetOptions,
     raw: bool,
 ) -> FfiResult {
+    let _input_permit = input_permit;
     let result = if raw {
         execute_raw(client, operation, application_key, value, set_options).await
     } else {
@@ -1116,12 +1178,10 @@ async fn execute_structured(
             .get_structured_canonical_key_cbor(canonical_key)
             .await
             .and_then(structured_get_result),
-        FfiOperation::Set => {
-            client
-                .set_structured_canonical_key_cbor(canonical_key, value, set_options)
-                .await
-                .map(set_result)
-        }
+        FfiOperation::Set => client
+            .set_structured_canonical_key_cbor(canonical_key, value, set_options)
+            .await
+            .map(set_result),
         _ => Err(crate::Error::configuration(
             "operation",
             "structured native ABI supports only GET and SET",
@@ -1136,6 +1196,17 @@ fn structured_get_result(
     match outcome {
         GetOutcome::NotFound => Ok(not_found_result()),
         GetOutcome::Found(payload) => Ok(FfiResult::success(FfiResultKind::Value, payload)),
+    }
+}
+
+fn structured_result(
+    outcome: GetOutcome<StructuredValue>,
+) -> std::result::Result<FfiResult, crate::Error> {
+    match outcome {
+        GetOutcome::Found(value) => encode(&value)
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
+            .map_err(|error| crate::value::Error::Structured(error).into()),
+        GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
@@ -1155,22 +1226,42 @@ async fn execute_protected(
         FfiOperation::GetJson => client
             .get_canonical_key_unchecked(canonical_key.as_slice())
             .await
-            .and_then(json_result),
+            .and_then(|outcome| {
+                json_result(outcome, client.request_budget(), client.value_limits())
+            }),
+        FfiOperation::GetStructured => client
+            .get_structured_canonical_key_unchecked(canonical_key.as_slice())
+            .await
+            .and_then(structured_result),
         FfiOperation::Set => client
             .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
             .map(set_result),
-        FfiOperation::SetJson => match parse_json(&value) {
-            Ok(json) => client
+        FfiOperation::SetJson => {
+            let budget = client.request_budget();
+            let limits = client.value_limits();
+            let (json, _json_permits) =
+                crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
+            client
                 .set_canonical_key_unchecked(
                     canonical_key.as_slice(),
                     Value::Json(json),
                     set_options,
                 )
                 .await
-                .map(set_result),
-            Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
-        },
+                .map(set_result)
+        }
+        FfiOperation::SetStructured => {
+            let structured = decode(&value).map_err(crate::value::Error::Structured)?;
+            client
+                .set_structured_canonical_key_unchecked(
+                    canonical_key.as_slice(),
+                    structured,
+                    set_options,
+                )
+                .await
+                .map(set_result)
+        }
         FfiOperation::Delete => client
             .delete_canonical_key_unchecked(canonical_key.as_slice())
             .await
@@ -1241,8 +1332,10 @@ async fn execute_scoped(
     namespace_id: u64,
     item_id: Vec<u8>,
     value: Vec<u8>,
+    input_permit: BytePermit,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
+    let _input_permit = input_permit;
     match operation {
         FfiOperation::Get => {
             let item_id = ItemId::from_slice(&item_id)?;
@@ -1305,10 +1398,9 @@ async fn namespace_open(
                 },
                 payload,
             ),
-            Err(error) => FfiResult::from_error(crate::Error::configuration(
-                "namespace_descriptor",
-                error,
-            )),
+            Err(error) => {
+                FfiResult::from_error(crate::Error::configuration("namespace_descriptor", error))
+            }
         },
         Err(error) => FfiResult::from_error(error),
     }
@@ -1327,10 +1419,9 @@ async fn namespace_update_policy(
     {
         Ok(descriptor) => match ffi_namespace_descriptor(descriptor) {
             Ok(payload) => FfiResult::success(FfiResultKind::Value, payload),
-            Err(error) => FfiResult::from_error(crate::Error::configuration(
-                "namespace_descriptor",
-                error,
-            )),
+            Err(error) => {
+                FfiResult::from_error(crate::Error::configuration("namespace_descriptor", error))
+            }
         },
         Err(error) => FfiResult::from_error(error),
     }
@@ -1431,18 +1522,190 @@ fn set_result(outcome: SetOutcome) -> FfiResult {
     )
 }
 
-fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, crate::Error> {
+#[doc(hidden)]
+pub fn json_result(
+    outcome: GetOutcome<Value>,
+    budget: crate::RequestBudget,
+    limits: ValueLimits,
+) -> std::result::Result<FfiResult, crate::Error> {
     match outcome {
-        GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
+        GetOutcome::Found(Value::Json(mut value)) => {
+            let mut writer = BudgetJsonWriter::new(&budget, limits);
+            if let Err(error) = write_json_canonical(&mut value, 0, limits, &mut writer) {
+                return Err(writer.take_failure().unwrap_or(error).into());
+            }
+            let (payload, permits) = writer.finish();
+            Ok(FfiResult::success_with_permits(
+                FfiResultKind::Value,
+                payload,
+                permits,
+            ))
+        }
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
-fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
-    crate::value::parse_json_input(bytes).map_err(|error| error.to_string())
+fn write_json_canonical(
+    value: &mut JsonValue,
+    depth: usize,
+    limits: ValueLimits,
+    writer: &mut BudgetJsonWriter<'_>,
+) -> std::result::Result<(), crate::value::Error> {
+    match value {
+        JsonValue::Null | JsonValue::Boolean(_) | JsonValue::Number(_) | JsonValue::String(_) => {
+            serde_json_canonicalizer::to_writer(value, writer).map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })
+        }
+        JsonValue::Array(values) => {
+            if depth >= limits.max_depth {
+                return Err(crate::value::Error::ResourceLimit {
+                    resource: Resource::StructuredValue,
+                    limit: limits.max_depth,
+                    actual: depth + 1,
+                });
+            }
+            writer.write_all(b"[").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })?;
+            for (index, value) in values.iter_mut().enumerate() {
+                if index != 0 {
+                    writer.write_all(b",").map_err(|error| {
+                        writer
+                            .take_failure()
+                            .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                    })?;
+                }
+                write_json_canonical(value, depth + 1, limits, writer)?;
+            }
+            writer.write_all(b"]").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })
+        }
+        JsonValue::Object(entries) => {
+            if depth >= limits.max_depth {
+                return Err(crate::value::Error::ResourceLimit {
+                    resource: Resource::StructuredValue,
+                    limit: limits.max_depth,
+                    actual: depth + 1,
+                });
+            }
+            entries.sort_unstable_by(|(left, _), (right, _)| {
+                left.encode_utf16().cmp(right.encode_utf16())
+            });
+            writer.write_all(b"{").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })?;
+            for (index, (key, value)) in entries.iter_mut().enumerate() {
+                if index != 0 {
+                    writer.write_all(b",").map_err(|error| {
+                        writer
+                            .take_failure()
+                            .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                    })?;
+                }
+                serde_json_canonicalizer::to_writer(key, writer).map_err(|error| {
+                    writer
+                        .take_failure()
+                        .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                })?;
+                writer.write_all(b":").map_err(|error| {
+                    writer
+                        .take_failure()
+                        .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+                })?;
+                write_json_canonical(value, depth + 1, limits, writer)?;
+            }
+            writer.write_all(b"}").map_err(|error| {
+                writer
+                    .take_failure()
+                    .unwrap_or_else(|| crate::value::Error::InvalidJson(error.to_string()))
+            })
+        }
+    }
+}
+
+struct BudgetJsonWriter<'a> {
+    budget: &'a crate::RequestBudget,
+    limits: ValueLimits,
+    payload: Vec<u8>,
+    permits: Vec<BytePermit>,
+    written: usize,
+    failure: Option<crate::value::Error>,
+}
+
+impl<'a> BudgetJsonWriter<'a> {
+    fn new(budget: &'a crate::RequestBudget, limits: ValueLimits) -> Self {
+        Self {
+            budget,
+            limits,
+            payload: Vec::new(),
+            permits: Vec::new(),
+            written: 0,
+            failure: None,
+        }
+    }
+
+    fn take_failure(&mut self) -> Option<crate::value::Error> {
+        self.failure.take()
+    }
+
+    fn fail(&mut self, error: crate::value::Error) -> io::Error {
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+        io::Error::new(io::ErrorKind::Other, "bounded JSON output rejected")
+    }
+
+    fn finish(self) -> (Vec<u8>, Vec<BytePermit>) {
+        (self.payload, self.permits)
+    }
+}
+
+impl Write for BudgetJsonWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next = self.written.checked_add(bytes.len()).ok_or_else(|| {
+            self.fail(crate::value::Error::ResourceLimit {
+                resource: Resource::ExpandedPayloadBytes,
+                limit: self.limits.max_expanded_payload_bytes,
+                actual: usize::MAX,
+            })
+        })?;
+        if next > self.limits.max_expanded_payload_bytes {
+            return Err(self.fail(crate::value::Error::ResourceLimit {
+                resource: Resource::ExpandedPayloadBytes,
+                limit: self.limits.max_expanded_payload_bytes,
+                actual: next,
+            }));
+        }
+        let permit = crate::value::reserve_budget(
+            self.budget,
+            bytes.len(),
+            &self.limits,
+            Resource::ExpandedPayloadBytes,
+        )
+        .map_err(|error| self.fail(error))?;
+        self.payload
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| self.fail(crate::value::Error::Allocation { size: bytes.len() }))?;
+        self.payload.extend_from_slice(bytes);
+        self.permits.push(permit);
+        self.written = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Returns the native ABI version implemented by this library.
@@ -1869,12 +2132,7 @@ pub unsafe extern "C" fn openkache_client_execute_unary(
             );
         }
         let body = copy_bytes(body, body_length, "structured canonical key")?;
-        Ok(client.execute_structured(
-            operation,
-            body,
-            Vec::new(),
-            SetOptions::new(),
-        ))
+        Ok(client.execute_structured(operation, body, Vec::new(), SetOptions::new()))
     }))
 }
 
@@ -1916,9 +2174,7 @@ pub unsafe extern "C" fn openkache_client_execute_fields(
             FfiOperation::Get => 1,
             FfiOperation::Set => 2,
             _ => {
-                return Err(
-                    "structured fields ABI currently accepts only GET and SET".to_owned()
-                );
+                return Err("structured fields ABI currently accepts only GET and SET".to_owned());
             }
         };
         if fields.len() != required {
@@ -1927,25 +2183,21 @@ pub unsafe extern "C" fn openkache_client_execute_fields(
                 fields.len()
             ));
         }
-        let copy_field = |index: usize, name: &'static str| -> std::result::Result<Vec<u8>, String> {
-            let field = fields[index];
-            if field.present == 0 {
-                return Err(format!("structured {name} field must be present"));
-            }
-            copy_bytes(field.data, field.length, name)
-        };
+        let copy_field =
+            |index: usize, name: &'static str| -> std::result::Result<Vec<u8>, String> {
+                let field = fields[index];
+                if field.present == 0 {
+                    return Err(format!("structured {name} field must be present"));
+                }
+                copy_bytes(field.data, field.length, name)
+            };
         let canonical_key = copy_field(0, "canonical key")?;
         let value = if operation == FfiOperation::Set {
             copy_field(1, "structured value")?
         } else {
             Vec::new()
         };
-        Ok(client.execute_structured(
-            operation,
-            canonical_key,
-            value,
-            SetOptions::new(),
-        ))
+        Ok(client.execute_structured(operation, canonical_key, value, SetOptions::new()))
     }))
 }
 
@@ -2106,10 +2358,16 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
         if namespace_id == 0 {
             return Err("namespace_id must be a positive server-assigned ID".to_owned());
         }
-        let item_id = copy_bytes(item_id, item_id_length, "item_id")?;
-        let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
+        validate_scoped_input_lengths(operation, item_id_length, value_length)?;
+        let (item_id, value, input_permit) = copy_input_bytes(
+            item_id,
+            item_id_length,
+            value,
+            value_length,
+            &client.request_budget(),
+        )?;
         let set_options = if operation == FfiOperation::Set {
             set_options_from_flags(set_flags, ttl_ms)?
         } else {
@@ -2146,7 +2404,14 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             | FfiOperation::Reconnect => {
                 Err("namespace management and reconnect use dedicated native ABI calls".to_owned())
             }
-            _ => Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options)),
+            _ => Ok(client.execute_scoped(
+                operation,
+                namespace_id,
+                item_id,
+                value,
+                input_permit,
+                set_options,
+            )),
         }
     }))
 }
@@ -2450,15 +2715,26 @@ fn typed_execute_entry(
                 .as_ref()
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
-        let key = ffi_key_bytes(
-            key_spec,
-            copy_bytes(application_key, application_key_length, "application_key")?,
-            false,
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        validate_input_lengths(operation, false, application_key_length, value_length)?;
+        let (key_input, value, input_permit) = copy_input_bytes(
+            application_key,
+            application_key_length,
+            value,
+            value_length,
+            &client.request_budget(),
         )?;
-        let value = copy_bytes(value, value_length, "value")?;
-        let (operation, key, value, set_options) =
-            validated_execute(operation, key, value, false, legacy_options, complete_flags)?;
-        Ok(client.execute(operation, key, value, set_options, false))
+        let key = ffi_key_bytes(key_spec, key_input, false)?;
+        let (operation, key, value, set_options) = validated_execute(
+            operation.code(),
+            key,
+            value,
+            false,
+            legacy_options,
+            complete_flags,
+        )?;
+        Ok(client.execute(operation, key, value, input_permit, set_options, false))
     }))
 }
 
@@ -2481,15 +2757,33 @@ fn typed_async_entry(
                 .as_ref()
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
-        let key = ffi_key_bytes(
-            key_spec,
-            copy_bytes(application_key, application_key_length, "application_key")?,
-            raw,
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        validate_input_lengths(operation, raw, application_key_length, value_length)?;
+        let (key_input, value, input_permit) = copy_input_bytes(
+            application_key,
+            application_key_length,
+            value,
+            value_length,
+            &client.request_budget(),
         )?;
-        let value = copy_bytes(value, value_length, "value")?;
-        let (operation, key, value, set_options) =
-            validated_execute(operation, key, value, raw, legacy_options, complete_flags)?;
-        Ok::<FfiRequest, String>(client.execute_async(operation, key, value, set_options, raw))
+        let key = ffi_key_bytes(key_spec, key_input, raw)?;
+        let (operation, key, value, set_options) = validated_execute(
+            operation.code(),
+            key,
+            value,
+            raw,
+            legacy_options,
+            complete_flags,
+        )?;
+        Ok::<FfiRequest, String>(client.execute_async(
+            operation,
+            key,
+            value,
+            input_permit,
+            set_options,
+            raw,
+        ))
     }));
     match request {
         Ok(Ok(request)) => Box::into_raw(Box::new(request)),
@@ -2548,14 +2842,19 @@ fn execute_entry_inner(
                 .as_ref()
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
-        let application_key =
-            copy_bytes(application_key, application_key_length, "application_key")?;
-        let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
         if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
             return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
         }
+        validate_input_lengths(operation, raw, application_key_length, value_length)?;
+        let (application_key, value, input_permit) = copy_input_bytes(
+            application_key,
+            application_key_length,
+            value,
+            value_length,
+            &client.request_budget(),
+        )?;
         if raw
             && matches!(
                 operation,
@@ -2626,7 +2925,14 @@ fn execute_entry_inner(
             {
                 Err("SET options require a SET operation".to_owned())
             }
-            _ => Ok(client.execute(operation, application_key, value, set_options, raw)),
+            _ => Ok(client.execute(
+                operation,
+                application_key,
+                value,
+                input_permit,
+                set_options,
+                raw,
+            )),
         }
     }))
 }
@@ -2844,10 +3150,10 @@ fn boxed_result(result: FfiResult) -> *mut FfiResult {
 fn catch_result(operation: impl FnOnce() -> std::result::Result<FfiResult, String>) -> FfiResult {
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
-            FfiResult::error_with_category(error, FfiErrorCategory::InvalidInput)
+        Ok(Err(error)) => FfiResult::error_with_category(error, FfiErrorCategory::InvalidInput),
+        Err(_) => {
+            FfiResult::error_with_category("native client panicked", FfiErrorCategory::Internal)
         }
-        Err(_) => FfiResult::error_with_category("native client panicked", FfiErrorCategory::Internal),
     }
 }
 
@@ -2874,6 +3180,113 @@ fn copy_data_protection_key(
         .map_err(|error| error.to_string())
 }
 
+fn validate_input_lengths(
+    operation: FfiOperation,
+    raw: bool,
+    application_key_length: usize,
+    value_length: usize,
+) -> std::result::Result<(), String> {
+    if raw
+        && matches!(
+            operation,
+            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+        )
+        && application_key_length != crate::ITEM_ID_BYTES
+    {
+        return Err(format!(
+            "item_id must contain exactly {} bytes, got {}",
+            crate::ITEM_ID_BYTES,
+            application_key_length
+        ));
+    }
+    if matches!(
+        operation,
+        FfiOperation::Ping
+            | FfiOperation::Get
+            | FfiOperation::GetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::Delete
+            | FfiOperation::Stats
+            | FfiOperation::Sync
+            | FfiOperation::Reconnect
+    ) && value_length != 0
+    {
+        return Err("operation does not accept a value".to_owned());
+    }
+    if matches!(
+        operation,
+        FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync | FfiOperation::Reconnect
+    ) && application_key_length != 0
+    {
+        return Err("operation does not accept an application key".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_scoped_input_lengths(
+    operation: FfiOperation,
+    item_id_length: usize,
+    value_length: usize,
+) -> std::result::Result<(), String> {
+    if matches!(
+        operation,
+        FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+    ) && item_id_length != crate::ITEM_ID_BYTES
+    {
+        return Err(format!(
+            "item_id must contain exactly {} bytes, got {}",
+            crate::ITEM_ID_BYTES,
+            item_id_length
+        ));
+    }
+    if matches!(operation, FfiOperation::Get | FfiOperation::Delete) && value_length != 0 {
+        return Err("operation does not accept a value".to_owned());
+    }
+    if matches!(operation, FfiOperation::Stats | FfiOperation::Sync)
+        && (item_id_length != 0 || value_length != 0)
+    {
+        return Err("operation does not accept item_id or value".to_owned());
+    }
+    Ok(())
+}
+
+fn copy_input_bytes(
+    key_pointer: *const u8,
+    key_length: usize,
+    value_pointer: *const u8,
+    value_length: usize,
+    budget: &crate::RequestBudget,
+) -> std::result::Result<(Vec<u8>, Vec<u8>, BytePermit), String> {
+    if key_length != 0 && key_pointer.is_null() {
+        return Err(format!(
+            "application_key pointer is null for {key_length} bytes"
+        ));
+    }
+    if value_length != 0 && value_pointer.is_null() {
+        return Err(format!("value pointer is null for {value_length} bytes"));
+    }
+    let total = key_length
+        .checked_add(value_length)
+        .ok_or_else(|| "FFI input length exceeds the platform address space".to_owned())?;
+    let permit = budget
+        .try_reserve(total)
+        .map_err(|error| format!("FFI input admission failed: {error}"))?;
+    let mut key = Vec::new();
+    key.try_reserve_exact(key_length)
+        .map_err(|_| format!("failed to allocate {key_length} bytes for application_key"))?;
+    if key_length != 0 {
+        key.extend_from_slice(unsafe { std::slice::from_raw_parts(key_pointer, key_length) });
+    }
+    let mut value = Vec::new();
+    value
+        .try_reserve_exact(value_length)
+        .map_err(|_| format!("failed to allocate {value_length} bytes for value"))?;
+    if value_length != 0 {
+        value.extend_from_slice(unsafe { std::slice::from_raw_parts(value_pointer, value_length) });
+    }
+    Ok((key, value, permit))
+}
+
 fn copy_bytes(
     pointer: *const u8,
     length: usize,
@@ -2886,4 +3299,19 @@ fn copy_bytes(
         return Err(format!("{name} pointer is null for {length} bytes"));
     }
     Ok(unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec())
+}
+
+/// Copies one FFI input buffer for white-box adapter regressions.
+///
+/// # Safety
+///
+/// When `length` is non-zero, `pointer` must identify readable memory for
+/// `length` bytes for the duration of this call.
+#[doc(hidden)]
+pub unsafe fn copy_bytes_for_test(
+    pointer: *const u8,
+    length: usize,
+    name: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    copy_bytes(pointer, length, name)
 }

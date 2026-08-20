@@ -241,6 +241,17 @@ impl DataProtection {
     ///
     /// The `TypedKey` variant is inferred by the operation. The compatibility
     /// `key_spec` setting is not a namespace policy and is not applied here.
+    /// Returns the configured value resource limits.
+    pub fn value_limits(&self) -> crate::value::ValueLimits {
+        self.codec.limits()
+    }
+
+    /// Returns the aggregate byte budget shared by transport and value work.
+    pub fn request_budget(&self) -> RequestBudget {
+        self.codec.budget().clone()
+    }
+
+    /// Derives a namespace-bound Item ID for a typed portable key.
     pub fn item_id_in_namespace(
         &self,
         namespace_id: u64,

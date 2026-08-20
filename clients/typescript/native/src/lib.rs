@@ -6,7 +6,10 @@ use std::time::Duration;
 use napi::bindgen_prelude::{BigInt, Uint8Array};
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
+use openkache_client_core::value::{
+    Compression, Encryption, Value, ZstandardOptions, encode_json_output_with_budget,
+    parse_json_input_with_budget,
+};
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DeleteOutcome, Endpoint,
     EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpec,
@@ -199,16 +202,24 @@ impl NativeClient {
     /// Raw-formatted values are rejected instead of being silently coerced.
     #[napi(js_name = "get_json")]
     pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
-        let outcome = self
-            .active_client()?
+        let client = self.active_client()?;
+        let outcome = client
             .get_canonical_key(key.as_ref())
             .await
             .map_err(native_core_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Json(value)) => serde_json::to_string(&value)
-                .map(Some)
-                .map_err(native_error),
+            GetOutcome::Found(Value::Json(mut value)) => {
+                let (payload, _permits) = encode_json_output_with_budget(
+                    &mut value,
+                    client.value_limits(),
+                    &client.request_budget(),
+                )
+                .map_err(native_error)?;
+                String::from_utf8(payload)
+                    .map(Some)
+                    .map_err(|error| native_error(error.to_string()))
+            }
             GetOutcome::Found(Value::Raw(_)) => Err(native_error(
                 "stored value uses raw serialization, expected canonical JSON",
             )),
@@ -311,20 +322,26 @@ impl NativeClient {
     pub async fn set_json(
         &self,
         key: Uint8Array,
-        value: serde_json::Value,
+        value: String,
         condition: Option<String>,
         expiration_mode: Option<String>,
         eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
-        let value = parse_json_value(value)?;
+        let client = self.active_client()?;
+        let budget = client.request_budget();
+        let input_permit = budget.try_reserve(value.len()).map_err(native_error)?;
+        let (value, _permits) =
+            parse_json_input_with_budget(value.as_bytes(), client.value_limits(), &budget)
+                .map_err(native_error)?;
         let options = parse_set_options(
             condition.as_deref(),
             expiration_mode.as_deref(),
             eviction_mode.as_deref(),
             ttl_ms,
         )?;
-        self.active_client()?
+        let _input_permit = input_permit;
+        client
             .set_canonical_key(key.as_ref(), Value::Json(value), options)
             .await
             .map(map_set_outcome)
@@ -1010,52 +1027,6 @@ fn parse_wire_set_options(
 
 fn parse_item_id(bytes: &[u8]) -> Result<ItemId> {
     ItemId::from_slice(bytes).map_err(native_error)
-}
-
-fn parse_json_value(value: serde_json::Value) -> Result<JsonValue> {
-    match value {
-        serde_json::Value::Null => Ok(JsonValue::Null),
-        serde_json::Value::Bool(value) => Ok(JsonValue::Boolean(value)),
-        serde_json::Value::Number(value) => parse_json_number(value),
-        serde_json::Value::String(value) => Ok(JsonValue::String(value)),
-        serde_json::Value::Array(values) => values
-            .into_iter()
-            .map(parse_json_value)
-            .collect::<Result<Vec<_>>>()
-            .map(JsonValue::Array),
-        serde_json::Value::Object(values) => values
-            .into_iter()
-            .map(|(key, value)| parse_json_value(value).map(|value| (key, value)))
-            .collect::<Result<Vec<_>>>()
-            .map(JsonValue::Object),
-    }
-}
-
-fn parse_json_number(value: serde_json::Number) -> Result<JsonValue> {
-    let number = value
-        .as_f64()
-        .ok_or_else(|| invalid_argument("JSON number must fit in finite f64"))?;
-    if let Some(integer) = value.as_i64() {
-        validate_exact_json_integer(integer.unsigned_abs() as u128, number)?;
-    } else if let Some(integer) = value.as_u64() {
-        validate_exact_json_integer(integer as u128, number)?;
-    }
-    JsonValue::number(number).map_err(native_error)
-}
-
-fn validate_exact_json_integer(magnitude: u128, value: f64) -> Result<()> {
-    let bit_length = u128::BITS - magnitude.leading_zeros();
-    let exactly_representable =
-        bit_length <= 53 || (magnitude & ((1_u128 << (bit_length - 53)) - 1) == 0);
-    if !exactly_representable {
-        return Err(invalid_argument(
-            "JSON integers must be exactly representable as IEEE-754 binary64 values",
-        ));
-    }
-    if !value.is_finite() {
-        return Err(invalid_argument("JSON number must fit in finite f64"));
-    }
-    Ok(())
 }
 
 fn parse_endpoint(address: &str, server_name: &str) -> Result<Endpoint> {
