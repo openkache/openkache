@@ -1,5 +1,5 @@
 {
-  "checksum": "bf0dca9ab1bfbfdffdaaff3435ff24ab0b5c1e5e046a578ae75088e65b6dce5d",
+  "checksum": "33f215f38a5c5b82acc79aba4e7aad48c3926c9ef084564ca3b59dac24c149c1",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -17638,6 +17638,48 @@
       ],
       "license_file": null
     },
+    "openkache-value 0.1.0": {
+      "name": "openkache-value",
+      "version": "0.1.0",
+      "package_url": null,
+      "repository": null,
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "openkache_value",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "openkache_value",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "thiserror 2.0.19",
+              "target": "thiserror"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.1.0"
+      },
+      "license": "Apache-2.0",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "license_file": null
+    },
     "openssl-macros 0.1.1": {
       "name": "openssl-macros",
       "version": "0.1.1",
@@ -31776,7 +31818,8 @@
     "openkache-client 0.1.0": "clients/rust",
     "openkache-client-core 0.1.0": "clients/core",
     "openkache-client-napi 0.1.0": "clients/typescript/native",
-    "openkache-protocol 0.1.0": "protocol"
+    "openkache-protocol 0.1.0": "protocol",
+    "openkache-value 0.1.0": "clients/value"
   },
   "conditions": {
     "aarch64-apple-darwin": [
