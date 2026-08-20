@@ -1083,7 +1083,6 @@ fn native_error(error: impl std::fmt::Display) -> Error {
 fn native_core_error(error: openkache_client_core::Error) -> Error {
     let category = match &error {
         openkache_client_core::Error::AmbiguousOutcome { .. } => Some("unknown_mutation"),
-        openkache_client_core::Error::Timeout { .. } => Some("cancelled"),
         _ => None,
     };
     let message = error.to_string();
