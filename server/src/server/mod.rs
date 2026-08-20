@@ -1,6 +1,5 @@
 //! QUIC server backed by the sharded SSD-first cache runtime.
 
-use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +17,7 @@ use crate::observability::{
     Operation,
 };
 use crate::platform::StorageDeviceKind;
-use crate::protocol::{NamespaceDescriptor, NamespacePolicy, Response};
+use crate::protocol::{NamespaceDescriptor, NamespacePolicy};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,

@@ -25,11 +25,8 @@ impl OperationResponse {
         self.status
     }
 
-    /// Rewrites the echoed request ID while preserving response ownership.
-    ///
-    /// Operation handlers intentionally build responses without transport
-    /// metadata. The stream boundary applies the request's correlation token
-    /// exactly once immediately before writing.
+    /// Rewrites the response correlation token while retaining all payload
+    /// ownership and segment boundaries.
     pub(super) fn with_request_id(mut self, request_id: u64) -> Self {
         self.parts = self
             .parts
@@ -40,21 +37,6 @@ impl OperationResponse {
 
     pub(super) fn into_parts(self) -> ResponseParts {
         self.parts
-    }
-
-    /// Rewrites the response correlation token at the transport boundary.
-    ///
-    /// Operation adapters deliberately build responses without request
-    /// context; the stream lane owns that context and applies it immediately
-    /// before writing. All operation response parts have already passed the
-    /// protocol size checks, so changing only the compact request-ID field
-    /// cannot fail.
-    pub(super) fn with_request_id(mut self, request_id: u64) -> Self {
-        self.parts = self
-            .parts
-            .with_request_id(request_id)
-            .expect("validated operation response remains encodable");
-        self
     }
 }
 

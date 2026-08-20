@@ -211,7 +211,7 @@ async fn serve_connection<C: TransportConnection>(
     while streams.next().await.is_some() {}
 }
 
-/// Reuses one QUIC stream as a sequential request lane until either peer closes it.
+/// Reuses one QUIC stream as a request lane until either peer closes it.
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
@@ -249,64 +249,39 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if !write_response(
                     &mut send,
                     rejection.into_response(),
-                    Some(request_id),
+                    request_id,
                     request_timeout,
                 )
                 .await
                 {
                     network_shard.response_write_failure();
                 }
-                break;
+                // Header admission has already consumed the bounded request
+                // body before returning this rejection. The lane remains
+                // reusable for the next complete request.
+                continue;
             }
             Err(StreamReadError::Timeout) => {
                 network_shard.request_read_timeout();
-                if !write_response(
-                    &mut send,
-                    response_bytes(Status::Timeout, b"request read timed out"),
-                    None,
-                    request_timeout,
-                )
-                .await
-                {
-                    network_shard.response_write_failure();
-                }
                 break;
             }
             Err(StreamReadError::TooLarge) => {
                 network_shard.protocol_error();
-                if !write_response(
-                    &mut send,
-                    response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
-                    None,
-                    request_timeout,
-                )
-                .await
-                {
-                    network_shard.response_write_failure();
-                }
                 break;
             }
             Err(StreamReadError::Protocol(error)) => {
                 network_shard.protocol_error();
-                if !write_response(
-                    &mut send,
-                    wire_protocol_error_response(error),
-                    None,
-                    request_timeout,
-                )
-                .await
-                {
-                    network_shard.response_write_failure();
-                }
+                let _ = error;
                 break;
             }
             Err(StreamReadError::Transport(_)) => break,
         };
         let request_bytes = std::mem::take(&mut frame.bytes);
-        let request_id = frame.request_id;
+        let terminal_after_response = frame.has_trailing_bytes;
         let response_result = match request_projection::project_owned_request(request_bytes) {
             Ok(input) => {
                 let operation_id = input.operation_id();
+                let request_id = input.request_id();
                 let operation: Operation = operation_contract::telemetry_operation_id(operation_id);
                 let request_started = std::time::Instant::now();
                 let may_mutate = operation_dispatch::may_mutate(runtime.as_ref(), operation_id);
@@ -328,13 +303,8 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Timeout,
                                 request_started.elapsed(),
                             );
-                            if !write_response(
-                                &mut send,
-                                response,
-                                Some(request_id),
-                                request_timeout,
-                            )
-                            .await
+                            if !write_response(&mut send, response, request_id, request_timeout)
+                                .await
                             {
                                 network_shard.response_write_failure();
                                 break;
@@ -353,13 +323,8 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Overloaded,
                                 request_started.elapsed(),
                             );
-                            if !write_response(
-                                &mut send,
-                                response,
-                                Some(request_id),
-                                request_timeout,
-                            )
-                            .await
+                            if !write_response(&mut send, response, request_id, request_timeout)
+                                .await
                             {
                                 network_shard.response_write_failure();
                                 break;
@@ -387,7 +352,11 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             response.status(),
                             request_started.elapsed(),
                         );
-                        (response, response_permit)
+                        (
+                            response.with_request_id(request_id),
+                            response_permit,
+                            request_id,
+                        )
                     }
                     Ok(None) => {
                         // A mutating storage failure may have crossed its
@@ -414,26 +383,25 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             operation_dispatch::timeout_response(
                                 operation_id,
                                 b"request execution timed out",
-                            ),
+                            )
+                            .with_request_id(request_id),
                             response_permit,
+                            request_id,
                         )
                     }
                 }
             }
-            Err(error) => {
+            Err(_error) => {
                 network_shard.protocol_error();
-                (wire_protocol_error_response(error).into(), None)
+                return;
             }
         };
-        if !write_response(
-            &mut send,
-            response_result.0,
-            Some(request_id),
-            request_timeout,
-        )
-        .await
-        {
+        let (response, _response_permit, request_id) = response_result;
+        if !write_response(&mut send, response, request_id, request_timeout).await {
             network_shard.response_write_failure();
+            break;
+        }
+        if terminal_after_response {
             break;
         }
     }
@@ -452,47 +420,13 @@ impl Drop for ActiveStream<'_> {
 async fn write_response<S: SendStream>(
     send: &mut S,
     response: impl Into<operation_transport::OperationResponse>,
-    request_id: Option<u64>,
+    request_id: u64,
     request_timeout: Duration,
 ) -> bool {
-    let response = response.into();
-    let response = match request_id {
-        Some(request_id) => response.with_request_id(request_id),
-        None => response,
-    };
-    send.write_response(response.into_parts(), request_timeout)
-        .await
-        .is_ok()
-}
-
-fn wire_protocol_error_response(error: openkache_protocol::ProtocolError) -> Response {
-    let status = match error {
-        openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
-        openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
-        _ => Status::InvalidRequest,
-    };
-    response_display(status, error)
-}
-
-fn response_display(status: Status, value: impl std::fmt::Display) -> Response {
-    let mut payload = String::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES + openkache_protocol::MAX_VARUINT_BYTES + 64,
-    );
-    write!(payload, "{value}").expect("writing to a String cannot fail");
-    response(status, payload.into_bytes())
-}
-
-/// Constructs a protocol response whose payload is known to fit protocol limits.
-fn response(status: Status, payload: Vec<u8>) -> Response {
-    Response::new(status, payload).expect("server responses stay within protocol limits")
-}
-
-fn response_bytes(status: Status, payload: &[u8]) -> Response {
-    let mut owned = Vec::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES
-            + openkache_protocol::MAX_VARUINT_BYTES
-            + payload.len(),
-    );
-    owned.extend_from_slice(payload);
-    response(status, owned)
+    send.write_response(
+        response.into().with_request_id(request_id).into_parts(),
+        request_timeout,
+    )
+    .await
+    .is_ok()
 }
