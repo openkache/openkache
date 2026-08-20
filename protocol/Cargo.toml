@@ -7,6 +7,6 @@ license = "Apache-2.0"
 
 [dependencies]
 crossbeam-queue = "*"
-smallvec = "*"
+smallvec = { version = "*", features = ["const_new"] }
 thiserror = "*"
 vu128 = "*"

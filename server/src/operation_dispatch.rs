@@ -42,10 +42,6 @@ impl HeaderAdmissionRejection {
         self.response.status()
     }
 
-    pub(super) const fn request_id(&self) -> u64 {
-        self.request_id
-    }
-
     pub(super) const fn elapsed(&self) -> std::time::Duration {
         self.elapsed
     }

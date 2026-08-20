@@ -205,9 +205,6 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
                 Self::InvalidFieldSequence(message)
             }
-            openkache_protocol::ProtocolError::InvalidItemIdLength { .. } => {
-                Self::InvalidFieldSequence("opaque Item ID exceeds the protocol limit")
-            }
         }
     }
 }

@@ -13,9 +13,19 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use crate::QuicBackend;
 use crate::network_runtime;
 use crate::protocol::RequestFrame as ProtocolRequestFrame;
-use openkache_protocol::{RequestFrameHeader, ResponseParts};
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use openkache_protocol::ResponseSegment;
+use openkache_protocol::{RequestFrameHeader, ResponseParts};
+
+#[path = "transport/tls.rs"]
+mod tls;
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+use tls::strict_server_config;
+#[path = "transport/tcp.rs"]
+mod tcp;
+
+/// QUIC application error for connection-fatal malformed framing.
+pub(super) const QUIC_MALFORMED_FRAME_ERROR_CODE: u64 = 0x01;
 
 /// Parsed TLS material shared by every reuse-port endpoint.
 pub(super) struct ServerTlsConfig {
@@ -35,8 +45,23 @@ pub(super) enum ServerEndpoint {
 }
 
 impl ServerEndpoint {
+    /// Reports whether a compiled provider can enforce the transport profile.
+    pub(super) fn conformance(backend: QuicBackend) -> tls::Conformance {
+        match backend {
+            QuicBackend::Quinn | QuicBackend::Noq | QuicBackend::Quiche => {
+                tls::Conformance::Conforming
+            }
+            QuicBackend::Neqo => tls::Conformance::Unsupported(
+                "neqo's NSS adapter cannot yet require X25519MLKEM768",
+            ),
+        }
+    }
+
     /// Rejects backend selections that this binary cannot initialize.
     pub(super) fn validate_backend(backend: QuicBackend) -> Result<(), TransportError> {
+        if let Some(reason) = Self::conformance(backend).reason() {
+            return Err(TransportError::unavailable(backend, reason));
+        }
         match backend {
             QuicBackend::Quinn => {
                 #[cfg(feature = "quic-quinn")]
@@ -68,10 +93,7 @@ impl ServerEndpoint {
                     Err(TransportError::not_compiled(backend, "quic-quiche"))
                 }
             }
-            QuicBackend::Neqo => Err(TransportError::unavailable(
-                backend,
-                "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
-            )),
+            QuicBackend::Neqo => unreachable!("non-conforming backends return above"),
         }
     }
 
@@ -120,10 +142,7 @@ impl ServerEndpoint {
                     Err(TransportError::not_compiled(backend, "quic-quiche"))
                 }
             }
-            QuicBackend::Neqo => Err(TransportError::unavailable(
-                backend,
-                "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
-            )),
+            QuicBackend::Neqo => unreachable!("non-conforming backends return above"),
         }
     }
 }
@@ -153,6 +172,9 @@ pub(super) trait Connection {
 
     /// Takes the authenticated peer's leaf certificate, when client authentication is enabled.
     fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>>;
+
+    /// Closes the QUIC connection with an application error code.
+    fn close(&self, error_code: u64, reason: &[u8]);
 
     fn accept_bi(
         &self,
@@ -518,29 +540,6 @@ impl TransportError {
             message: format!("backend is unavailable: {reason}"),
         }
     }
-}
-
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-fn tls_config(material: &ServerTlsConfig) -> Result<rustls::ServerConfig, rustls::Error> {
-    let builder = rustls::ServerConfig::builder();
-    let mut tls = if material.client_ca.is_empty() {
-        builder.with_no_client_auth()
-    } else {
-        let mut roots = rustls::RootCertStore::empty();
-        for certificate in &material.client_ca {
-            roots.add(certificate.clone())?;
-        }
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|error| rustls::Error::General(error.to_string()))?;
-        builder.with_client_cert_verifier(verifier)
-    }
-    .with_single_cert(
-        material.certificate_chain.clone(),
-        material.private_key.clone_key(),
-    )?;
-    tls.alpn_protocols = vec![openkache_protocol::ALPN.to_vec()];
-    Ok(tls)
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]

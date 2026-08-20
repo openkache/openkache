@@ -165,7 +165,13 @@ async fn serve_connection<C: TransportConnection>(
     let mut streams = FuturesUnordered::new();
     loop {
         if streams.len() >= max_stream_lanes {
-            let _ = streams.next().await;
+            if streams.next().await.is_some_and(|malformed| malformed) {
+                connection.close(
+                    crate::transport::QUIC_MALFORMED_FRAME_ERROR_CODE,
+                    b"malformed request frame",
+                );
+                break;
+            }
             continue;
         }
         if streams.is_empty() {
@@ -204,14 +210,22 @@ async fn serve_connection<C: TransportConnection>(
                     }
                     Err(_) => break,
                 },
-                _ = completed => {}
+                malformed = completed => {
+                    if malformed.is_some_and(|malformed| malformed) {
+                        connection.close(
+                            crate::transport::QUIC_MALFORMED_FRAME_ERROR_CODE,
+                            b"malformed request frame",
+                        );
+                        break;
+                    }
+                }
             }
         }
     }
     while streams.next().await.is_some() {}
 }
 
-/// Reuses one QUIC stream as a request lane until either peer closes it.
+/// Reuses one QUIC stream as a sequential request lane until either peer closes it.
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
@@ -220,7 +234,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_timeout: Duration,
     request_budget: RequestBudget,
     runtime: Arc<operation_execution_state::OperationRuntime>,
-) {
+) -> bool {
     let _stream_guard = ActiveStream { network_shard };
     let mut task_storage = operation_registry::OperationTaskStorage::new();
     loop {
@@ -243,7 +257,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     rejection.elapsed(),
                 );
                 if rejection.silently_close() {
-                    break;
+                    return true;
                 }
                 let request_id = rejection.request_id();
                 if !write_response(
@@ -255,6 +269,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 .await
                 {
                     network_shard.response_write_failure();
+                    break;
                 }
                 // Header admission has already consumed the bounded request
                 // body before returning this rejection. The lane remains
@@ -267,12 +282,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(StreamReadError::TooLarge) => {
                 network_shard.protocol_error();
-                break;
+                return true;
             }
             Err(StreamReadError::Protocol(error)) => {
                 network_shard.protocol_error();
                 let _ = error;
-                break;
+                return true;
             }
             Err(StreamReadError::Transport(_)) => break,
         };
@@ -364,14 +379,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         // that would falsely guarantee that no mutation took
                         // effect.
                         network_shard.abandoned_request();
-                        return;
+                        return false;
                     }
                     Err(_) if may_mutate => {
                         // The worker request may already have crossed its mutation
                         // linearization point when this wait expires. An error response
                         // would falsely guarantee that it did not take effect.
                         network_shard.abandoned_request();
-                        return;
+                        return false;
                     }
                     Err(_) => {
                         network_shard.record_request(
@@ -391,9 +406,10 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     }
                 }
             }
-            Err(_error) => {
+            Err(error) => {
                 network_shard.protocol_error();
-                return;
+                let _ = error;
+                return true;
             }
         };
         let (response, _response_permit, request_id) = response_result;
@@ -402,9 +418,10 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             break;
         }
         if terminal_after_response {
-            break;
+            return true;
         }
     }
+    false
 }
 
 struct ActiveStream<'a> {
