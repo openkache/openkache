@@ -93,18 +93,6 @@ If the client host, client process, application, value keyring, Item ID root
 key, or TLS trust configuration is compromised, these profiles provide no
 guarantee for data handled by that compromised boundary.
 
-### Chosen-input attacker
-
-This models an attacker who can submit chosen data through an application API,
-such as a user of a multi-tenant service, but cannot access client secrets or
-execute code on the client. This attacker does not control or share another
-client's TCP or QUIC connection. Whether an application reuses one OpenKache
-connection for multiple callers is an implementation choice, not an attacker
-privilege. On its own, choosing input does not break encryption. It matters
-when the application compresses attacker-chosen data together with secret data
-and a server-side or network observer can compare ciphertext lengths across
-repeated requests; that combination can create a compression side channel.
-
 ## Trust and key assumptions
 
 - A value key is a 32-byte secret known to the clients that are allowed to
@@ -262,9 +250,19 @@ failure or trigger key probing.
 
 ## Compression and side channels
 
-Compression can leak information when an attacker controls part of the
-plaintext and can repeatedly observe resulting envelope lengths. Merely
-storing one protected, compressed value does not by itself create a
+Compression can leak information only in a specific application composition:
+
+1. an attacker can submit chosen data through an application endpoint, such as
+   an HTTP or RPC request;
+2. the application compresses that input together with secret data in one
+   payload; and
+3. the attacker, or an observer cooperating with them, can compare the
+   resulting ciphertext lengths across repeated requests.
+
+This does not give the attacker OpenKache credentials, client secrets, or
+another client's TCP or QUIC connection. Reusing one connection for multiple
+application callers is an implementation choice, not an attacker privilege.
+Merely storing one protected, compressed value does not by itself create a
 compression oracle.
 
 When secret data is compressed together with attacker-influenced data,
