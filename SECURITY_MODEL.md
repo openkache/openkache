@@ -51,8 +51,7 @@ These profiles do not provide:
 - integrity of server-side TTL, eviction, ordering, or mutation semantics;
 - confidentiality of namespace IDs, Item IDs, value-key IDs, envelope lengths,
   compression choices, or access patterns;
-- protection after the client host or keyring has been compromised; or
-- confidentiality or integrity for an `Unprotected` value.
+- protection after the client host or keyring has been compromised.
 
 The server may therefore retain an older valid envelope, return it later, or
 refuse to return a value. A successful authentication proves that the
@@ -98,30 +97,13 @@ guarantee for data handled by that compromised boundary.
 
 This models an attacker who can submit chosen data through an application API,
 such as a user of a multi-tenant service, but cannot access client secrets or
-execute code on the client. On its own, choosing input does not break
-encryption. It matters when the application compresses attacker-chosen data
-together with secret data and a server-side or network observer can compare
-ciphertext lengths across repeated requests; that combination can create a
-compression side channel.
-
-## Protection matrix
-
-The table describes the intended properties of common configurations. “No”
-means that the configuration intentionally does not provide that property;
-“N/A” means that the configuration does not map an application key.
-
-| Configuration | Application-key privacy | Value confidentiality | Value integrity and association |
-|---|---:|---:|---:|
-| `NamespaceHash` + secret root + protected value | Yes | Yes | Yes |
-| `NamespaceHash` + public/default root + protected value | No | Yes | Yes |
-| `PublicKeyOrHash` + protected value | No | Yes | Yes |
-| Exact Item ID + protected value | N/A | Yes | Yes |
-| Any address + `Unprotected` value | Address-dependent | No | No |
-
-`PublicKeyOrHash` and Exact Item ID are deliberate escape hatches. They do not
-claim application-key privacy. A protected value still has value
-confidentiality and integrity when either address mode is used, provided the
-value-key assumptions hold.
+execute code on the client. This attacker does not control or share another
+client's TCP or QUIC connection. Whether an application reuses one OpenKache
+connection for multiple callers is an implementation choice, not an attacker
+privilege. On its own, choosing input does not break encryption. It matters
+when the application compresses attacker-chosen data together with secret data
+and a server-side or network observer can compare ciphertext lengths across
+repeated requests; that combination can create a compression side channel.
 
 ## Trust and key assumptions
 
@@ -129,8 +111,6 @@ value-key assumptions hold.
   read the corresponding values. The value key is not sent as part of the
   value envelope or wire operation.
 - An Item ID root key is secret when application-key privacy is required.
-  The all-zero root selects a publicly derivable mapping and does not provide
-  that privacy.
 - A positive `value_key_id` identifies one key mapping for its entire lifetime.
   It MUST NOT be rebound to different key material or reused after retirement.
 - Secret keys MUST be generated and stored using an application-controlled
@@ -139,20 +119,15 @@ value-key assumptions hold.
   Disabling it is an explicit insecure choice and does not change the
   client-side value guarantees.
 
-## Application-key protection
+## Application-key privacy
 
 Application-key mapping is defined by
-[clients/KEY_FORMAT.md](clients/KEY_FORMAT.md). Its
-security properties are:
+[clients/KEY_FORMAT.md](clients/KEY_FORMAT.md).
 
-- **`NamespaceHash`:** may provide application-key privacy when its root key
-  remains secret. The root key and namespace are part of the client-owned
-  identity derivation, but the server sees only the resulting Item ID.
-- **`PublicKeyOrHash`:** provides no application-key privacy. Short canonical
-  key encodings are exposed as Item IDs, and longer encodings use a public
-  unkeyed hash.
-- **Exact Item ID:** accepts a caller-owned identity and makes no application
-  key privacy claim.
+The protected mapping profile derives a server-visible Item ID from the
+application key using a secret root key and namespace. The server sees the
+derived Item ID, not the application key. The root key and namespace are part
+of the client-owned identity derivation.
 
 Changing an Item ID root changes the address of mapped data. It is an identity
 migration, not value-key rotation. Value-protection keys rotate independently.
@@ -165,7 +140,6 @@ The value envelope selects one of these profiles:
 |---|---|---|---:|
 | `AES-256-GCM-SIV` | RFC 8452 | `nonce[12] \| ciphertext \| tag[16]` | 28 bytes |
 | `AES-SIV-CMAC` | RFC 5297 with two independent AES-256 keys | `synthetic_iv[16] \| ciphertext` | 16 bytes |
-| `Unprotected` | no cryptographic transform | transformed body | 0 bytes |
 
 `AES-256-GCM-SIV` uses a fresh 12-byte OS-random nonce for every write;
 nonce-generation failure rejects the write. Because the encryption key is
