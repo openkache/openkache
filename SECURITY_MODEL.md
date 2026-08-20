@@ -65,10 +65,10 @@ This model considers every attacker category below. They may act independently
 or together. The positive guarantees apply while the client trust boundary
 remains uncompromised; client compromise is an explicit failure boundary.
 
-### Server operator or storage attacker
+### Server-side attacker
 
-This attacker may control the server process, server configuration, storage,
-logs, and response path. They may:
+This category includes a server operator and anyone who can control the server
+process, server configuration, storage, logs, or response path. They may:
 
 - read stored envelopes and visible metadata;
 - modify, delete, withhold, copy, or replay envelopes;
