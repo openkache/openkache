@@ -1960,7 +1960,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
 /// For `GET`, `SET`, and `DELETE`, `application_key` is exactly one canonical
 /// v1 key item from `KEY_FORMAT.md`. The CBOR item is the ABI's type
 /// discriminator (`Integer`, `Text`, or `Bytes`); it is not raw application
-/// bytes and is not a 32-byte Item ID. `SET` accepts an empty value and
+/// bytes and is not a wire Item ID. `SET` accepts an empty value and
 /// optional existence/TTL options. `PING`, `STATS`, and `SYNC` require empty
 /// key and value buffers.
 ///
@@ -3191,11 +3191,11 @@ fn validate_input_lengths(
             operation,
             FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
         )
-        && application_key_length != crate::ITEM_ID_BYTES
+        && application_key_length > crate::MAX_ITEM_ID_BYTES
     {
         return Err(format!(
-            "item_id must contain exactly {} bytes, got {}",
-            crate::ITEM_ID_BYTES,
+            "item_id must contain at most {} bytes, got {}",
+            crate::MAX_ITEM_ID_BYTES,
             application_key_length
         ));
     }
@@ -3231,11 +3231,11 @@ fn validate_scoped_input_lengths(
     if matches!(
         operation,
         FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-    ) && item_id_length != crate::ITEM_ID_BYTES
+    ) && item_id_length > crate::MAX_ITEM_ID_BYTES
     {
         return Err(format!(
-            "item_id must contain exactly {} bytes, got {}",
-            crate::ITEM_ID_BYTES,
+            "item_id must contain at most {} bytes, got {}",
+            crate::MAX_ITEM_ID_BYTES,
             item_id_length
         ));
     }

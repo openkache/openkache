@@ -21,12 +21,8 @@ const INVALID_NAMESPACE_NAME: &[u8] = b"namespace-open name is not UTF-8";
 
 impl OperationInputView {
     fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
-        match self.field_at_index(index) {
-            Some(value) if value.len() == openkache_protocol::ITEM_ID_BYTES => Some(ItemId::new(
-                value.try_into().expect("validated item ID width"),
-            )),
-            _ => None,
-        }
+        self.field_at_index(index)
+            .and_then(|value| ItemId::from_slice(value).ok())
     }
 
     fn unsigned_long_at_index(&self, index: usize) -> Option<u64> {

@@ -75,8 +75,7 @@ pub(super) fn admit_request_header(
     let operation_id = operation_contract::operation_id_for_opcode(header.opcode());
     let compatibility_lifecycle = matches!(
         operation_id,
-        OperationId::Sync
-            | OperationId::NamespaceOpen
+        OperationId::NamespaceOpen
             | OperationId::NamespaceUpdatePolicy
             | OperationId::NamespaceDelete
     );
