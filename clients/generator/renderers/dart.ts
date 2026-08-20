@@ -16,6 +16,7 @@ import {
   operation_composite_fields,
   operation_composite_value_count,
   operation_convenience_fields,
+  operation_empty_result_constant,
   operation_field_name,
   operation_fields,
   operation_is_global_empty,
@@ -54,6 +55,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
   const operation_label = managed_operation_label(operation)
   const result_constant = (kind: Operation_Result_Kind): string =>
     operation_result_constant(operation, kind, "dart")
+  const empty_result_constant = operation_empty_result_constant(operation, "dart")
   const method_name = lower_camel_case(operation.name)
   const {
     input_create_if_missing,
@@ -280,7 +282,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
         )
         if (invocation !== undefined) {
           return `${prefix}    final result = ${invocation};
-    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
+    _smithyRequireKind(result, ${empty_result_constant}, '${operation_label}');
     return const ${operation.output}();
   });`
         }
@@ -300,7 +302,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       const <int>[],
       ${request_payload},
     );
-    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
+    _smithyRequireKind(result, ${empty_result_constant}, '${operation_label}');
     return const ${operation.output}();
   });`
       }
@@ -319,7 +321,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       flags: flags.flags,
       ttlMilliseconds: flags.ttlMilliseconds,
     );
-    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
+    _smithyRequireKind(result, ${empty_result_constant}, '${operation_label}');
     return const ${operation.output}();
   });`
         }
@@ -329,7 +331,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       ${input_item_id_expression},
       ${request_value},
     );
-    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
+    _smithyRequireKind(result, ${empty_result_constant}, '${operation_label}');
     return const ${operation.output}();
   });`
       }
@@ -340,7 +342,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       const <int>[],
       const <int>[],
     );
-    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
+    _smithyRequireKind(result, ${empty_result_constant}, '${operation_label}');
     return const ${operation.output}();
   });`
       }
@@ -353,7 +355,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
         input.${input_expected_revision},
       ),
     );
-    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
+    _smithyRequireKind(result, ${empty_result_constant}, '${operation_label}');
     return const ${operation.output}();
   });`
       }

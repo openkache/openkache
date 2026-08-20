@@ -1196,6 +1196,15 @@ export function operation_result_constant(
   }
 }
 
+/** Resolves the first discriminator declared by an empty response projection. */
+export function operation_empty_result_constant(
+  operation: Managed_Api_Operation,
+  language: Operation_Render_Language,
+): string {
+  const kind = managed_result_projection(operation).result_kinds[0] ?? "raw"
+  return operation_result_constant(operation, kind, language)
+}
+
 export function operation_request_value_count(
   operation: Managed_Api_Operation,
 ): number {

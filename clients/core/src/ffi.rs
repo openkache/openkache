@@ -702,6 +702,13 @@ impl FfiRequest {
         // If Started wins first, the state records StartedCanceled and the
         // documented UnknownMutation boundary is preserved.
         let admission = self.control.admission.cancel();
+        // Completion is a terminal admission boundary. Do not publish a
+        // cancellation result after the worker has produced a definitive
+        // operation result; the completion sender owns that result.
+        if admission == AdmissionState::Completed {
+            return FfiRequestState::try_from(self.state.load(Ordering::Acquire))
+                .unwrap_or(FfiRequestState::Freed);
+        }
         if self
             .state
             .compare_exchange(
@@ -716,7 +723,12 @@ impl FfiRequest {
                 .ready
                 .lock()
                 .expect("request ready lock is not poisoned") = Some(
-                if self.control.mutating && admission == AdmissionState::StartedCanceled {
+                if self.control.mutating
+                    && matches!(
+                        admission,
+                        AdmissionState::StartedCanceled | AdmissionState::CompletedCanceled
+                    )
+                {
                     FfiResult::with_status(
                         FfiResultKind::UnknownMutation,
                         FfiStatusCategory::UnknownMutation,
@@ -938,7 +950,8 @@ fn run_worker(
                         raw,
                     )
                     .await;
-                    if task_request.admission.is_canceled() {
+                    let completion = task_request.admission.complete();
+                    if completion == AdmissionState::CompletedCanceled {
                         if task_request.mutating {
                             FfiResult::with_status(
                                 FfiResultKind::UnknownMutation,

@@ -15,6 +15,7 @@ import {
   operation_composite_fields,
   operation_composite_value_count,
   operation_convenience_fields,
+  operation_empty_result_constant,
   operation_field_name,
   operation_fields,
   operation_is_global_empty,
@@ -216,6 +217,7 @@ function render_rust_operation_method(
   const operation_label = managed_operation_label(operation)
   const result_constant = (kind: Operation_Result_Kind): string =>
     operation_result_constant(operation, kind, "rust")
+  const empty_result_constant = operation_empty_result_constant(operation, "rust")
   const {
     input_condition,
     input_create_if_missing,
@@ -568,7 +570,7 @@ ${output_values}
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[${result_constant("ok")}],
+                    &[${empty_result_constant}],
                     "${operation_label}",
                 )?;
                 Ok(smithy::${operation.output})
@@ -619,7 +621,7 @@ ${output_values}
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[${result_constant("ok")}],
+                    &[${empty_result_constant}],
                     "${operation_label}",
                 )?;
                 Ok(smithy::${operation.output})
@@ -640,7 +642,7 @@ ${output_values}
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[${result_constant("ok")}],
+                    &[${empty_result_constant}],
                     "${operation_label}",
                 )?;
                 Ok(smithy::${operation.output})
@@ -662,7 +664,7 @@ ${output_values}
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[${result_constant("ok")}],
+                    &[${empty_result_constant}],
                     "${operation_label}",
                 )?;
                 Ok(smithy::${operation.output})

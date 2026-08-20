@@ -20,6 +20,10 @@ pub(crate) enum AdmissionState {
     Canceled = 2,
     /// The worker claimed the request before cancellation won.
     StartedCanceled = 3,
+    /// The worker completed the operation without cancellation.
+    Completed = 4,
+    /// Cancellation won after worker admission and before completion.
+    CompletedCanceled = 5,
 }
 
 impl TryFrom<u8> for AdmissionState {
@@ -31,6 +35,8 @@ impl TryFrom<u8> for AdmissionState {
             1 => Ok(Self::Started),
             2 => Ok(Self::Canceled),
             3 => Ok(Self::StartedCanceled),
+            4 => Ok(Self::Completed),
+            5 => Ok(Self::CompletedCanceled),
             _ => Err(()),
         }
     }
@@ -73,7 +79,41 @@ impl FfiAdmission {
             let next = match current_state {
                 AdmissionState::Pending => AdmissionState::Canceled,
                 AdmissionState::Started => AdmissionState::StartedCanceled,
-                AdmissionState::Canceled | AdmissionState::StartedCanceled => return current_state,
+                AdmissionState::Canceled
+                | AdmissionState::StartedCanceled
+                | AdmissionState::Completed
+                | AdmissionState::CompletedCanceled => return current_state,
+            };
+            if self
+                .state
+                .compare_exchange(current, next as u8, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return next;
+            }
+        }
+    }
+
+    /// Publishes operation completion and returns the resulting boundary.
+    ///
+    /// Completion wins over a later cancellation, so a definitive operation
+    /// result cannot be replaced by a cancellation result after execution has
+    /// finished. Cancellation that wins before completion remains ambiguous
+    /// through [`AdmissionState::CompletedCanceled`].
+    pub(crate) fn complete(&self) -> AdmissionState {
+        loop {
+            let current = self.state.load(Ordering::Acquire);
+            let current_state = AdmissionState::try_from(current)
+                .expect("FFI request admission state must be a known discriminator");
+            let next = match current_state {
+                AdmissionState::Started => AdmissionState::Completed,
+                AdmissionState::StartedCanceled => AdmissionState::CompletedCanceled,
+                AdmissionState::Completed | AdmissionState::CompletedCanceled => {
+                    return current_state;
+                }
+                AdmissionState::Pending | AdmissionState::Canceled => {
+                    panic!("FFI request completion requires worker admission")
+                }
             };
             if self
                 .state
@@ -95,7 +135,9 @@ impl FfiAdmission {
     pub(crate) fn is_canceled(&self) -> bool {
         matches!(
             self.state(),
-            AdmissionState::Canceled | AdmissionState::StartedCanceled
+            AdmissionState::Canceled
+                | AdmissionState::StartedCanceled
+                | AdmissionState::CompletedCanceled
         )
     }
 }

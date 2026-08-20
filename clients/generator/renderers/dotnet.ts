@@ -23,6 +23,7 @@ import {
   operation_composite_fields,
   operation_composite_value_count,
   operation_convenience_fields,
+  operation_empty_result_constant,
   operation_field_name,
   operation_fields,
   operation_is_global_empty,
@@ -370,6 +371,7 @@ function render_csharp_operation_method_body(
   const label = managed_operation_label(operation)
   const result_constant = (kind: Operation_Result_Kind): string =>
     operation_result_constant(operation, kind, "csharp")
+  const empty_result_constant = operation_empty_result_constant(operation, "csharp")
   const {
     input_condition,
     input_create_if_missing,
@@ -669,7 +671,7 @@ ${output_values}
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, ${result_constant("ok")});
+        ExpectKind("${label}", result, ${empty_result_constant});
         return new Smithy.${operation.output}();
     }`
       }
@@ -694,7 +696,7 @@ ${output_values}
             ReadOnlyMemory<byte>.Empty,
             ${request_payload},
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, ${result_constant("ok")});
+        ExpectKind("${label}", result, ${empty_result_constant});
         return new Smithy.${operation.output}();
     }`
       }
@@ -719,7 +721,7 @@ ${output_values}
             setFlags,
             ttlMilliseconds,
             cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, ${result_constant("ok")});
+        ExpectKind("${label}", result, ${empty_result_constant});
         return new Smithy.${operation.output}();
     }`
         }
@@ -734,7 +736,7 @@ ${output_values}
             ${input_item_id_expression},
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, ${result_constant("ok")});
+        ExpectKind("${label}", result, ${empty_result_constant});
         return new Smithy.${operation.output}();
     }`
       }
@@ -750,7 +752,7 @@ ${output_values}
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, ${result_constant("ok")});
+        ExpectKind("${label}", result, ${empty_result_constant});
         return new Smithy.${operation.output}();
     }`
       }
@@ -766,7 +768,7 @@ ${output_values}
                 input.${input_namespace_id},
                 input.${input_expected_revision},
                 cancellationToken).ConfigureAwait(false);
-            ExpectKind("${label}", result, ${result_constant("ok")});
+            ExpectKind("${label}", result, ${empty_result_constant});
             return new Smithy.${operation.output}();
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)

@@ -17,6 +17,7 @@ import {
   operation_composite_fields,
   operation_composite_value_count,
   operation_convenience_fields,
+  operation_empty_result_constant,
   operation_field_name,
   operation_fields,
   operation_is_global_empty,
@@ -374,6 +375,7 @@ function render_swift_operation_method(
   const operation_label = managed_operation_label(operation)
   const result_constant = (kind: Operation_Result_Kind): string =>
     operation_result_constant(operation, kind, "swift")
+  const empty_result_constant = operation_empty_result_constant(operation, "swift")
   const {
     input_condition,
     input_create_if_missing,
@@ -643,7 +645,7 @@ function render_swift_operation_method(
       ${operation_constant},
       value: Data()
     )
-    guard result.kind == ${result_constant("ok")} else {
+    guard result.kind == ${empty_result_constant} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     return ${output}()
@@ -667,7 +669,7 @@ function render_swift_operation_method(
       ${operation_constant},
       value: ${request_payload}
     )
-    guard result.kind == ${result_constant("ok")} else {
+    guard result.kind == ${empty_result_constant} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     return ${output}()
@@ -689,7 +691,7 @@ function render_swift_operation_method(
       evictionMode: input.${input_eviction_mode},
       ttlMilliseconds: input.${input_ttl_milliseconds}
     )
-    guard result.kind == ${result_constant("ok")} else {
+    guard result.kind == ${empty_result_constant} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     return ${output}()
@@ -703,7 +705,7 @@ function render_swift_operation_method(
       namespaceID: input.${input_namespace_id},
       itemID: ${input_item_id_expression}
     )
-    guard result.kind == ${result_constant("ok")} else {
+    guard result.kind == ${empty_result_constant} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     return ${output}()
@@ -717,7 +719,7 @@ function render_swift_operation_method(
       ${operation_constant},
       namespaceID: input.${input_namespace_id}
     )
-    guard result.kind == ${result_constant("ok")} else {
+    guard result.kind == ${empty_result_constant} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     return ${output}()

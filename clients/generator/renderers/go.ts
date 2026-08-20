@@ -16,6 +16,7 @@ import {
   operation_composite_fields,
   operation_composite_value_count,
   operation_convenience_fields,
+  operation_empty_result_constant,
   operation_field_name,
   operation_fields,
   operation_is_global_empty,
@@ -400,6 +401,7 @@ function render_go_operation_method(
   const label = go_operation_label(operation)
   const result_constant = (kind: Operation_Result_Kind): string =>
     operation_result_constant(operation, kind, "go")
+  const empty_result_constant = operation_empty_result_constant(operation, "go")
   const {
     input_condition,
     input_create_if_missing,
@@ -756,7 +758,7 @@ ${decode_statements}
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != ${result_constant("ok")} {
+	if result.kind != ${empty_result_constant} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil
@@ -796,7 +798,7 @@ ${decode_statements}
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != ${result_constant("ok")} {
+	if result.kind != ${empty_result_constant} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil
@@ -838,7 +840,7 @@ ${decode_statements}
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != ${result_constant("ok")} {
+	if result.kind != ${empty_result_constant} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil
@@ -860,7 +862,7 @@ ${decode_statements}
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != ${result_constant("ok")} {
+	if result.kind != ${empty_result_constant} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil
@@ -879,7 +881,7 @@ ${decode_statements}
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != ${result_constant("ok")} {
+	if result.kind != ${empty_result_constant} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil

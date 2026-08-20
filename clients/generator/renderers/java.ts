@@ -16,6 +16,7 @@ import {
   operation_composite_fields,
   operation_composite_value_count,
   operation_convenience_fields,
+  operation_empty_result_constant,
   operation_field_name,
   operation_fields,
   operation_is_global_empty,
@@ -50,6 +51,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
   const operation_label = managed_operation_label(operation)
   const result_constant = (kind: Operation_Result_Kind): string =>
     operation_result_constant(operation, kind, "java")
+  const empty_result_constant = operation_empty_result_constant(operation, "java")
   const method_name = lower_camel_case(operation.name)
   const {
     input_create_if_missing,
@@ -311,7 +313,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         Objects.requireNonNull(input, "input");
         return smithySubmit(() -> {
             NativeResult result = ${invocation};
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}");
             return new ${operation.output}();
         });
     }`
@@ -334,7 +336,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 ${request_value},
                 flags.flags(),
                 flags.ttlMilliseconds());
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}");
             return new ${operation.output}();
         });
     }`
@@ -350,7 +352,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 ${request_value},
                 0,
                 0);
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}");
             return new ${operation.output}();
         });
     }`
@@ -367,7 +369,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 new byte[0],
                 0,
                 0);
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}");
             return new ${operation.output}();
         });
     }`
@@ -380,7 +382,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
             NativeResult result = smithyNamespaceDelete(
                 input.${input_namespace_id}(),
                 input.${input_expected_revision}());
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}");
             return new ${operation.output}();
         });
     }`

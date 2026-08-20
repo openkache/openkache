@@ -16,6 +16,7 @@ import {
   operation_composite_fields,
   operation_composite_value_count,
   operation_convenience_fields,
+  operation_empty_result_constant,
   operation_field_name,
   operation_fields,
   operation_is_global_empty,
@@ -50,6 +51,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
   const operation_label = managed_operation_label(operation)
   const result_constant = (kind: Operation_Result_Kind): string =>
     operation_result_constant(operation, kind, "kotlin")
+  const empty_result_constant = operation_empty_result_constant(operation, "kotlin")
   const method_name = lower_camel_case(operation.name)
   const {
     input_create_if_missing,
@@ -275,7 +277,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
         )
         if (invocation !== undefined) {
           return `${prefix}            val result = ${invocation}
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}")
             ${operation.output}()
         }`
         }
@@ -294,7 +296,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 flags.first,
                 flags.second,
             )
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}")
             ${operation.output}()
         }`
         }
@@ -304,7 +306,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 ${input_item_id_expression},
                 ${request_value},
             )
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}")
             ${operation.output}()
         }`
       }
@@ -315,7 +317,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 byteArrayOf(),
                 byteArrayOf(),
             )
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}")
             ${operation.output}()
         }`
       }
@@ -324,7 +326,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 input.${input_namespace_id},
                 input.${input_expected_revision},
             )
-            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
+            smithyRequireKind(result, ${empty_result_constant}, "${operation_label}")
             ${operation.output}()
         }`
       }

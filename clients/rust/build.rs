@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protocol_model = client_directory.join("../../protocol/model");
     let generated_output =
         PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?);
-    let (output, operations_output) = generated_output_paths(generated_output);
+    let (output, operations_output) = generated_output_paths(&generated_output);
 
     println!("cargo:rerun-if-changed={}", generator.display());
     println!("cargo:rerun-if-changed={}", generator_sources.display());
@@ -39,6 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new(bun)
         .arg(&generator)
         .env("OPENKACHE_GENERATION_TARGET", "rust-api")
+        // Keep every target selected by the Rust generator inside Cargo's
+        // build-owned output tree. The per-file overrides below preserve the
+        // include! paths while preventing a future rust-api output from
+        // falling back to the immutable source checkout.
+        .env("OPENKACHE_GENERATION_OUTPUT_ROOT", &generated_output)
         .env("OPENKACHE_RUST_API_OUTPUT", &output)
         .env("OPENKACHE_RUST_OPERATIONS_OUTPUT", &operations_output)
         .status()
