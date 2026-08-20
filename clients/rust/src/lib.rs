@@ -202,7 +202,9 @@ macro_rules! impl_smithy_api {
                 _input: smithy::PingInput,
             ) -> std::result::Result<smithy::PingOutput, Self::Error> {
                 $client::ping(self).await?;
-                Ok(smithy::PingOutput)
+                Ok(smithy::PingOutput {
+                    payload: Vec::new(),
+                })
             }
 
             async fn get(
