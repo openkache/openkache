@@ -173,6 +173,7 @@ enum StreamChunk {
     Bytes(Vec<u8>),
     Finished,
     Cancelled,
+    Transport(String),
 }
 
 pub(crate) struct ReceiveStream {
@@ -233,6 +234,9 @@ impl super::RequestByteStream for ReceiveStream {
             StreamChunk::Cancelled => {
                 self.cancelled = true;
                 Ok(super::ChunkRead::Cancelled)
+            }
+            StreamChunk::Transport(message) => {
+                Err(TransportError::backend(backend, "stream read", message))
             }
         }
     }

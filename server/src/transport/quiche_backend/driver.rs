@@ -521,8 +521,21 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
                 }
             }
             Err(quiche::Error::Done) => break,
-            Err(_) => {
+            Err(quiche::Error::StreamReset(_) | quiche::Error::StreamStopped(_)) => {
                 match request.chunks.try_send(StreamChunk::Cancelled) {
+                    Ok(()) => {
+                        client.requests.remove(&stream_id);
+                    }
+                    Err(TrySendError::Full(chunk)) => request.pending = Some(chunk),
+                    Err(TrySendError::Disconnected(_)) => {
+                        client.requests.remove(&stream_id);
+                    }
+                }
+                break;
+            }
+            Err(error) => {
+                let chunk = StreamChunk::Transport(error.to_string());
+                match request.chunks.try_send(chunk) {
                     Ok(()) => {
                         client.requests.remove(&stream_id);
                     }

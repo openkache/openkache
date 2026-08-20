@@ -23,8 +23,9 @@ impl Endpoint {
         let mut transport = comnoq::TransportConfig::default();
         transport
             .max_concurrent_bidi_streams(comnoq::VarInt::from_u32(max_concurrent_streams))
-            // Keep a bounded receive credit for invalid client uni streams so
-            // the server can reject them with STOP_SENDING.
+            // Client-initiated unidirectional streams are invalid for the
+            // application protocol, but must still be observable so the
+            // server can issue STOP_SENDING without consuming their body.
             .max_concurrent_uni_streams(comnoq::VarInt::from_u32(max_concurrent_streams));
         let mut server_config = comnoq::ServerConfig::with_crypto(Arc::new(crypto));
         server_config.transport_config(Arc::new(transport));

@@ -166,6 +166,51 @@ async fn serve_connection<C: TransportConnection>(
     let mut streams = FuturesUnordered::new();
     let mut accept_uni = true;
     loop {
+        if streams.is_empty() {
+            let incoming_bi = connection.accept_bi().fuse();
+            if accept_uni {
+                let incoming_uni = connection.accept_uni().fuse();
+                pin_mut!(incoming_bi, incoming_uni);
+                select! {
+                    incoming = incoming_bi => match incoming {
+                        Ok((send, receive)) => {
+                            network_shard.stream_started();
+                            streams.push(serve_stream(
+                                send,
+                                receive,
+                                network_shard,
+                                authorization.clone(),
+                                request_timeout,
+                                request_budget.clone(),
+                                Arc::clone(&runtime),
+                            ));
+                        }
+                        Err(_) => break,
+                    },
+                    uni = incoming_uni => match uni {
+                        Ok(mut receive) => receive.stop(),
+                        Err(_) => accept_uni = false,
+                    },
+                }
+            } else {
+                match incoming_bi.await {
+                    Ok((send, receive)) => {
+                        network_shard.stream_started();
+                        streams.push(serve_stream(
+                            send,
+                            receive,
+                            network_shard,
+                            authorization.clone(),
+                            request_timeout,
+                            request_budget.clone(),
+                            Arc::clone(&runtime),
+                        ));
+                    }
+                    Err(_) => break,
+                }
+            }
+            continue;
+        }
         if streams.len() >= max_stream_lanes {
             let completed = streams.next().fuse();
             if accept_uni {
