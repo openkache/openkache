@@ -57,7 +57,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
     SMITHY_FFI_RESULT_CREATED,
-    SMITHY_FFI_RESULT_CANCELLED,
+    SMITHY_FFI_RESULT_CANCELED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
     SMITHY_FFI_RESULT_NOT_FOUND,
@@ -962,7 +962,7 @@ def _raise_native_error(error: NativeError) -> NoReturn:
 
     if error.result_kind == SMITHY_FFI_RESULT_UNKNOWN_MUTATION:
         raise OpenKacheUnknownMutationError(str(error)) from error
-    if error.result_kind == SMITHY_FFI_RESULT_CANCELLED:
+    if error.result_kind == SMITHY_FFI_RESULT_CANCELED:
         raise OpenKacheCancelledError(str(error)) from error
     raise OpenKacheError(str(error)) from error
 
