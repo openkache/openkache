@@ -1,4 +1,8 @@
-//! QUIC backend boundary used by the OpenKache protocol server.
+//! Transport boundaries used by the OpenKache protocol server.
+//!
+//! QUIC remains a directional-cancellation transport with reusable
+//! bidirectional lanes.  The TLS-over-TCP profile lives beside it as a
+//! deliberately single-lane state machine; it never downgrades to plaintext.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -13,9 +17,19 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use crate::QuicBackend;
 use crate::network_runtime;
 use crate::protocol::RequestFrame as ProtocolRequestFrame;
-use openkache_protocol::{RequestFrameHeader, ResponseParts};
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use openkache_protocol::ResponseSegment;
+use openkache_protocol::{RequestFrameHeader, ResponseParts};
+
+#[path = "transport/tls.rs"]
+mod tls;
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+use tls::strict_server_config;
+#[path = "transport/tcp.rs"]
+mod tcp;
+
+/// QUIC application error for connection-fatal malformed framing.
+pub(super) const QUIC_MALFORMED_FRAME_ERROR_CODE: u64 = 0x01;
 
 /// Parsed TLS material shared by every reuse-port endpoint.
 pub(super) struct ServerTlsConfig {
@@ -35,8 +49,28 @@ pub(super) enum ServerEndpoint {
 }
 
 impl ServerEndpoint {
+    /// Reports whether a compiled provider can enforce the transport profile.
+    ///
+    /// Rustls-backed QUIC implementations share the singleton
+    /// X25519MLKEM768 provider.  Quiche applies the equivalent canonical
+    /// BoringSSL group name.  Neqo remains explicitly non-conforming until
+    /// its NSS integration can enforce the same requirement.
+    pub(super) fn conformance(backend: QuicBackend) -> tls::Conformance {
+        match backend {
+            QuicBackend::Quinn | QuicBackend::Noq | QuicBackend::Quiche => {
+                tls::Conformance::Conforming
+            }
+            QuicBackend::Neqo => tls::Conformance::Unsupported(
+                "neqo's NSS adapter cannot yet require X25519MLKEM768",
+            ),
+        }
+    }
+
     /// Rejects backend selections that this binary cannot initialize.
     pub(super) fn validate_backend(backend: QuicBackend) -> Result<(), TransportError> {
+        if let Some(reason) = Self::conformance(backend).reason() {
+            return Err(TransportError::unavailable(backend, reason));
+        }
         match backend {
             QuicBackend::Quinn => {
                 #[cfg(feature = "quic-quinn")]
@@ -68,10 +102,7 @@ impl ServerEndpoint {
                     Err(TransportError::not_compiled(backend, "quic-quiche"))
                 }
             }
-            QuicBackend::Neqo => Err(TransportError::unavailable(
-                backend,
-                "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
-            )),
+            QuicBackend::Neqo => unreachable!("non-conforming backends return above"),
         }
     }
 
@@ -120,10 +151,7 @@ impl ServerEndpoint {
                     Err(TransportError::not_compiled(backend, "quic-quiche"))
                 }
             }
-            QuicBackend::Neqo => Err(TransportError::unavailable(
-                backend,
-                "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
-            )),
+            QuicBackend::Neqo => unreachable!("non-conforming backends return above"),
         }
     }
 }
@@ -154,6 +182,12 @@ pub(super) trait Connection {
     /// Takes the authenticated peer's leaf certificate, when client authentication is enabled.
     fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>>;
 
+    /// Closes the QUIC connection with an application error code.
+    ///
+    /// Framing failures are connection-fatal; directional stream cancellation
+    /// remains separate and must not be promoted to this close path.
+    fn close(&self, error_code: u64, reason: &[u8]);
+
     fn accept_bi(
         &self,
     ) -> impl Future<Output = Result<(Self::SendStream, Self::ReceiveStream), TransportError>>;
@@ -182,6 +216,10 @@ pub(super) trait SendStream {
 /// Failure while receiving a request frame.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StreamReadError {
+    #[error("request stream ended at a frame boundary")]
+    EndOfStream,
+    #[error("request stream ended in the middle of a frame")]
+    Truncated,
     #[error("request read timed out")]
     Timeout,
     #[error("request exceeds the protocol limit")]
@@ -195,24 +233,16 @@ pub(super) enum StreamReadError {
 /// Request bytes paired with the server-wide memory-budget reservation they consume.
 pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
-    /// Whether the transport had already delivered bytes beyond this frame.
-    ///
-    /// QUIC stream reads may coalesce multiple client writes. If the backend
-    /// exposes those trailing bytes, the lane must be retired after the
-    /// current response because the peer violated request/response lockstep.
-    pub(super) has_trailing_bytes: bool,
+    /// Client-selected correlation token echoed by the response writer.
+    pub(super) request_id: u64,
     _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
-    fn with_trailing_bytes(
-        bytes: Vec<u8>,
-        permit: RequestBudgetPermit,
-        has_trailing_bytes: bool,
-    ) -> Self {
+    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit, request_id: u64) -> Self {
         Self {
             bytes,
-            has_trailing_bytes,
+            request_id,
             _permit: permit,
         }
     }
@@ -390,11 +420,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         .map_err(|_| StreamReadError::Timeout)?
         .map_err(StreamReadError::Transport)?;
     if first.is_empty() {
-        return Err(StreamReadError::Transport(TransportError::backend(
-            backend,
-            "stream header read",
-            "stream ended before a request frame",
-        )));
+        return Err(StreamReadError::EndOfStream);
     }
     let (frame, header) = network_runtime::timeout(timeout, async {
         let mut frame = first;
@@ -417,11 +443,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
                 .await
                 .map_err(StreamReadError::Transport)?;
             if frame.len() == previous_len {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream header read",
-                    "stream ended before request header completed",
-                )));
+                return Err(StreamReadError::Truncated);
             }
         }
     })
@@ -437,9 +459,11 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     if frame_len > maximum {
         return Err(StreamReadError::TooLarge);
     }
-    if let Err(rejection) = admit(header, &frame[..header.encoded_len()]) {
-        return Ok(Err(rejection));
-    }
+    // Header admission runs before body allocation, but a rejection still
+    // needs the declared body consumed before the lane can be reused. Keep
+    // the rejection until the frame boundary is complete so the response
+    // remains correlated and the next request cannot be misframed.
+    let rejection = admit(header, &frame[..header.encoded_len()]).err();
     let permit = budget.acquire(header.body_len(), timeout).await?;
     let body = network_runtime::timeout(timeout, async {
         while frame.len() < frame_len {
@@ -449,31 +473,28 @@ async fn read_buffered_request<S: RequestByteStream, T>(
                 .await
                 .map_err(StreamReadError::Transport)?;
             if frame.len() == previous_len {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream body read",
-                    "stream ended before request body completed",
-                )));
+                return Err(StreamReadError::Truncated);
             }
         }
         Ok::<_, StreamReadError>(frame)
     })
     .await
     .map_err(|_| StreamReadError::Timeout)??;
-    // Probe the backend's already-readable bytes once so a client that pipelined a second
-    // request cannot make us interpret that request after the first response.
+    if let Some(rejection) = rejection {
+        drop(permit);
+        return Ok(Err(rejection));
+    }
+    // Probe the backend's already-readable bytes once. The backends retain
+    // any byte observed by this non-consuming probe, so a pipelined second
+    // request remains available to the next read instead of being dropped.
     // The zero-duration timeout is non-blocking: when no byte is buffered the
     // receive future is cancelled and the lane remains reusable.
-    let has_trailing_bytes =
-        match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await {
-            Err(_) => false,
-            Ok(result) => result.map_err(StreamReadError::Transport)?,
-        };
-    Ok(Ok(RequestFrame::with_trailing_bytes(
-        body,
-        permit,
-        has_trailing_bytes,
-    )))
+    let _ = match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await
+    {
+        Err(_) => false,
+        Ok(result) => result.map_err(StreamReadError::Transport)?,
+    };
+    Ok(Ok(RequestFrame::new(body, permit, header.request_id())))
 }
 
 /// Stable transport failure with backend and operation context.
@@ -521,29 +542,6 @@ impl TransportError {
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-fn tls_config(material: &ServerTlsConfig) -> Result<rustls::ServerConfig, rustls::Error> {
-    let builder = rustls::ServerConfig::builder();
-    let mut tls = if material.client_ca.is_empty() {
-        builder.with_no_client_auth()
-    } else {
-        let mut roots = rustls::RootCertStore::empty();
-        for certificate in &material.client_ca {
-            roots.add(certificate.clone())?;
-        }
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|error| rustls::Error::General(error.to_string()))?;
-        builder.with_client_cert_verifier(verifier)
-    }
-    .with_single_cert(
-        material.certificate_chain.clone(),
-        material.private_key.clone_key(),
-    )?;
-    tls.alpn_protocols = vec![openkache_protocol::ALPN.to_vec()];
-    Ok(tls)
-}
-
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 struct ResponseWriteSegments(smallvec::SmallVec<[ResponseSegment; 8]>);
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
@@ -558,12 +556,12 @@ fn response_write_segments(parts: ResponseParts) -> ResponseWriteSegments {
     ResponseWriteSegments(parts.into_segments())
 }
 
-#[cfg(feature = "quic-quinn")]
-#[path = "transport/quinn_backend.rs"]
-mod quinn_backend;
 #[cfg(feature = "quic-noq")]
 #[path = "transport/noq_backend.rs"]
 mod noq_backend;
 #[cfg(feature = "quic-quiche")]
 #[path = "transport/quiche_backend.rs"]
 mod quiche_backend;
+#[cfg(feature = "quic-quinn")]
+#[path = "transport/quinn_backend.rs"]
+mod quinn_backend;

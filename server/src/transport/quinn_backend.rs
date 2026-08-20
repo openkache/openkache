@@ -12,16 +12,14 @@ impl Endpoint {
         material: Arc<ServerTlsConfig>,
         max_concurrent_streams: usize,
     ) -> Result<Self, TransportError> {
-        let tls = tls_config(&material)
+        let tls = strict_server_config(&material)
             .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
         let crypto = compio_quic::crypto::rustls::QuicServerConfig::try_from(tls)
             .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;
         let socket = compio::net::UdpSocket::from_std(socket)
             .map_err(|error| TransportError::backend(NAME, "socket initialization", error))?;
-        let max_concurrent_streams =
-            u32::try_from(max_concurrent_streams).map_err(|error| {
-                TransportError::backend(NAME, "stream limit configuration", error)
-            })?;
+        let max_concurrent_streams = u32::try_from(max_concurrent_streams)
+            .map_err(|error| TransportError::backend(NAME, "stream limit configuration", error))?;
         let mut transport = compio_quic::TransportConfig::default();
         transport
             .max_concurrent_bidi_streams(compio_quic::VarInt::from_u32(max_concurrent_streams))
@@ -83,18 +81,38 @@ impl super::Connection for Connection {
             .and_then(|certificates| (*certificates).into_iter().next())
     }
 
-    async fn accept_bi(
-        &self,
-    ) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
+    fn close(&self, error_code: u64, reason: &[u8]) {
+        let Ok(error_code) = u32::try_from(error_code) else {
+            self.0
+                .close(compio_quic::VarInt::from_u32(u32::MAX), reason);
+            return;
+        };
+        self.0
+            .close(compio_quic::VarInt::from_u32(error_code), reason);
+    }
+
+    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
         self.0
             .accept_bi()
             .await
-            .map(|(send, receive)| (SendStream(send), ReceiveStream(receive)))
+            .map(|(send, receive)| {
+                (
+                    SendStream(send),
+                    ReceiveStream {
+                        stream: receive,
+                        lookahead: None,
+                    },
+                )
+            })
             .map_err(|error| TransportError::backend(NAME, "stream accept", error))
     }
 }
 
-pub(crate) struct ReceiveStream(compio_quic::RecvStream);
+pub(crate) struct ReceiveStream {
+    stream: compio_quic::RecvStream,
+    /// Byte retained by the non-consuming trailing-byte probe.
+    lookahead: Option<u8>,
+}
 
 impl super::RequestByteStream for ReceiveStream {
     async fn append_chunk(
@@ -106,29 +124,38 @@ impl super::RequestByteStream for ReceiveStream {
         use compio::buf::{IntoInner, IoBuf};
         use compio::io::AsyncReadExt;
 
-        let capacity = capacity.max(1);
-        frame.try_reserve(capacity).map_err(|error| {
-            TransportError::backend(backend, "request buffer reserve", error)
-        })?;
+        let mut capacity = capacity.max(1);
+        if let Some(byte) = self.lookahead.take() {
+            frame.push(byte);
+            capacity = capacity.saturating_sub(1);
+        }
+        if capacity == 0 {
+            return Ok(frame);
+        }
+        frame
+            .try_reserve(capacity)
+            .map_err(|error| TransportError::backend(backend, "request buffer reserve", error))?;
         let end = frame.len().checked_add(capacity).ok_or_else(|| {
             TransportError::backend(backend, "request buffer reserve", "size overflow")
         })?;
-        let compio::BufResult(result, frame) = self.0.append(frame.slice(..end)).await;
+        let compio::BufResult(result, frame) = self.stream.append(frame.slice(..end)).await;
         let read =
             result.map_err(|error| TransportError::backend(backend, "stream read", error))?;
         debug_assert!(read <= capacity);
         Ok(frame.into_inner())
     }
 
-    async fn has_readable_byte(
-        &mut self,
-        backend: &'static str,
-    ) -> Result<bool, TransportError> {
+    async fn has_readable_byte(&mut self, backend: &'static str) -> Result<bool, TransportError> {
         use compio::io::AsyncRead;
 
-        let compio::BufResult(result, _) = self.0.read([0_u8; 1]).await;
+        let compio::BufResult(result, byte) = self.stream.read([0_u8; 1]).await;
         result
-            .map(|read| read != 0)
+            .map(|read| {
+                if read != 0 {
+                    self.lookahead = Some(byte[0]);
+                }
+                read != 0
+            })
             .map_err(|error| TransportError::backend(backend, "stream read", error))
     }
 }

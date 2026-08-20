@@ -71,7 +71,9 @@ owo-colors = "*"
 quiche = { version = "*", default-features = false, features = ["boringssl-boring-crate"], optional = true }
 rand = "*"
 rcgen = { version = "*", features = ["x509-parser"] }
-rustls = { version = "*", default-features = false, features = ["ring", "std"] }
+# The transport security profile requires the AWS-LC provider so every TLS
+# handshake can require the X25519MLKEM768 hybrid key exchange.
+rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
 rustix = { version = "*", default-features = false, features = ["io_uring"], optional = true }
 serde = { version = "*", features = ["derive"] }
 sha2 = "*"

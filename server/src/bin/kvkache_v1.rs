@@ -13,12 +13,7 @@ fn item_id(application_key: &[u8]) -> ItemId {
 
 fn storage_key(cache: &ThreadedKvkache, application_key: &[u8]) -> StorageKey {
     let item_id = item_id(application_key);
-    cache.storage_key_for_identity(
-        item_id
-            .as_bytes()
-            .try_into()
-            .expect("legacy item IDs are maximum-width digests"),
-    )
+    cache.storage_key_for_identity(&item_id.storage_bytes())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -38,13 +33,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut cache = ThreadedKvkache::start(config)?;
     let operation: Result<(), Box<dyn Error>> = async {
         match command {
-            Command::Get(application_key) => match cache
-                .get(storage_key(&cache, &application_key))
-                .await?
-            {
-                Some(value) => println!("{}", String::from_utf8_lossy(&value)),
-                None => println!("(nil)"),
-            },
+            Command::Get(application_key) => {
+                match cache.get(storage_key(&cache, &application_key)).await? {
+                    Some(value) => println!("{}", String::from_utf8_lossy(&value)),
+                    None => println!("(nil)"),
+                }
+            }
             Command::Set(application_key, value) => {
                 println!(
                     "{:?}",
@@ -56,10 +50,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Command::Delete(application_key) => {
                 println!(
                     "{}",
-                    if cache
-                        .delete(storage_key(&cache, &application_key))
-                        .await?
-                    {
+                    if cache.delete(storage_key(&cache, &application_key)).await? {
                         "Deleted"
                     } else {
                         "NotFound"

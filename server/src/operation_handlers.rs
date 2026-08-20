@@ -52,6 +52,7 @@ impl OwnedFieldProjection {
 /// fields, rather than exposing transport or frame details to API handlers.
 pub(super) struct OperationInputView {
     pub(super) operation_id: contract::OperationId,
+    request_id: u64,
     plan: &'static [contract::OperationFieldPlan],
     fields: SmallVec<[Option<OperationFieldRecord>; INLINE_OPERATION_FIELDS]>,
     projection: Option<OwnedFieldProjection>,
@@ -87,6 +88,11 @@ impl OperationInputView {
         self.operation_id
     }
 
+    /// Returns the client-selected correlation token carried by this request.
+    pub(super) const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
     /// Builds a view from generated numeric field records.
     pub(super) fn from_populated_parts<I>(
         operation_id: contract::OperationId,
@@ -105,6 +111,7 @@ impl OperationInputView {
         }
         OperationInputView {
             operation_id,
+            request_id: 0,
             plan,
             fields,
             projection: None,
@@ -116,6 +123,7 @@ impl OperationInputView {
     /// Field ranges are relative to the owner's visible bytes.
     pub(super) fn from_populated_projection<I>(
         operation_id: contract::OperationId,
+        request_id: u64,
         owner: OwnedRange,
         fields: I,
     ) -> OperationInputView
@@ -123,6 +131,7 @@ impl OperationInputView {
         I: IntoIterator<Item = Option<OperationFieldRecord>>,
     {
         let mut input = Self::from_populated_parts(operation_id, fields);
+        input.request_id = request_id;
         input.projection = Some(OwnedFieldProjection::new(owner));
         input
     }

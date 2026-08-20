@@ -69,6 +69,7 @@ pub(super) fn project_owned_request(frame: Vec<u8>) -> Result<OperationInputView
         });
     let input = OperationInputView::from_populated_projection(
         operation_id,
+        projected_header.request_id(),
         OwnedRange::whole(frame),
         fields,
     );

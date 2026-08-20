@@ -1723,8 +1723,7 @@ fn make_tls_config(
             }
         }
     }
-    let provider = rustls::crypto::ring::default_provider();
-    let builder = rustls::ClientConfig::builder_with_provider(provider.into())
+    let builder = rustls::ClientConfig::builder_with_provider(config::strict_pq_provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(Error::tls)?
         .with_root_certificates(roots);
@@ -1737,6 +1736,10 @@ fn make_tls_config(
         }
         None => builder.with_no_client_auth(),
     };
+    // A resumed TLS 1.3 PSK handshake has no negotiated key-exchange group to
+    // validate. Disable resumption so every connection performs the mandatory
+    // X25519MLKEM768 hybrid exchange.
+    config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = alpn.protocols().to_vec();
     Ok(config)
 }

@@ -1,5 +1,4 @@
 use super::*;
-use crate::protocol::{wire_request_layout, Opcode};
 
 #[derive(Clone)]
 pub(super) struct NetworkWorkerLimits {
@@ -159,7 +158,13 @@ async fn serve_connection<C: TransportConnection>(
     let mut streams = FuturesUnordered::new();
     loop {
         if streams.len() >= max_stream_lanes {
-            let _ = streams.next().await;
+            if streams.next().await.is_some_and(|malformed| malformed) {
+                connection.close(
+                    crate::transport::QUIC_MALFORMED_FRAME_ERROR_CODE,
+                    b"malformed request frame",
+                );
+                break;
+            }
             continue;
         }
         if streams.is_empty() {
@@ -198,7 +203,15 @@ async fn serve_connection<C: TransportConnection>(
                     }
                     Err(_) => break,
                 },
-                _ = completed => {}
+                malformed = completed => {
+                    if malformed.is_some_and(|malformed| malformed) {
+                        connection.close(
+                            crate::transport::QUIC_MALFORMED_FRAME_ERROR_CODE,
+                            b"malformed request frame",
+                        );
+                        break;
+                    }
+                }
             }
         }
     }
@@ -214,7 +227,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_timeout: Duration,
     request_budget: RequestBudget,
     runtime: Arc<operation_execution_state::OperationRuntime>,
-) {
+) -> bool {
     let _stream_guard = ActiveStream { network_shard };
     let mut task_storage = operation_registry::OperationTaskStorage::new();
     loop {
@@ -231,12 +244,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         {
             Ok(Ok(frame)) => frame,
             Ok(Err(rejection)) => {
-                let request_id = rejection.request_id();
                 network_shard.record_request(
                     operation_contract::telemetry_operation(rejection.opcode()),
                     rejection.status(),
                     rejection.elapsed(),
                 );
+                let request_id = rejection.request_id();
                 if !write_response(
                     &mut send,
                     rejection.into_response(),
@@ -246,72 +259,32 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 .await
                 {
                     network_shard.response_write_failure();
+                    break;
                 }
-                break;
+                continue;
             }
             Err(StreamReadError::Timeout) => {
                 network_shard.request_read_timeout();
-                if !write_response(
-                    &mut send,
-                    response_bytes(Status::Timeout, b"request read timed out"),
-                    0,
-                    request_timeout,
-                )
-                .await
-                {
-                    network_shard.response_write_failure();
-                }
                 break;
             }
-            Err(StreamReadError::TooLarge) => {
+            Err(StreamReadError::EndOfStream) => break,
+            Err(StreamReadError::TooLarge | StreamReadError::Truncated) => {
                 network_shard.protocol_error();
-                if !write_response(
-                    &mut send,
-                    response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
-                    0,
-                    request_timeout,
-                )
-                .await
-                {
-                    network_shard.response_write_failure();
-                }
-                break;
+                return true;
             }
             Err(StreamReadError::Protocol(error)) => {
                 network_shard.protocol_error();
-                if !write_response(
-                    &mut send,
-                    wire_protocol_error_response(error),
-                    0,
-                    request_timeout,
-                )
-                .await
-                {
-                    network_shard.response_write_failure();
-                }
-                break;
+                let _ = error;
+                return true;
             }
             Err(StreamReadError::Transport(_)) => break,
         };
-        let request_id = frame
-            .bytes
-            .first()
-            .copied()
-            .and_then(|opcode| Opcode::try_from(opcode).ok())
-            .and_then(|opcode| {
-                openkache_protocol::OpaqueRequestFrame::decode(
-                    &frame.bytes,
-                    wire_request_layout(opcode),
-                )
-                .ok()
-                .map(|request| request.request_id())
-            })
-            .unwrap_or(0);
         let request_bytes = std::mem::take(&mut frame.bytes);
-        let mut terminal_after_response = frame.has_trailing_bytes;
+        let request_id = frame.request_id;
         let response_result = match request_projection::project_owned_request(request_bytes) {
             Ok(input) => {
                 let operation_id = input.operation_id();
+                debug_assert_eq!(input.request_id(), request_id);
                 let operation: Operation = operation_contract::telemetry_operation_id(operation_id);
                 let request_started = std::time::Instant::now();
                 let may_mutate = operation_dispatch::may_mutate(runtime.as_ref(), operation_id);
@@ -333,13 +306,8 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Timeout,
                                 request_started.elapsed(),
                             );
-                            if !write_response(
-                                &mut send,
-                                response,
-                                request_id,
-                                request_timeout,
-                            )
-                            .await
+                            if !write_response(&mut send, response, request_id, request_timeout)
+                                .await
                             {
                                 network_shard.response_write_failure();
                                 break;
@@ -358,13 +326,8 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Overloaded,
                                 request_started.elapsed(),
                             );
-                            if !write_response(
-                                &mut send,
-                                response,
-                                request_id,
-                                request_timeout,
-                            )
-                            .await
+                            if !write_response(&mut send, response, request_id, request_timeout)
+                                .await
                             {
                                 network_shard.response_write_failure();
                                 break;
@@ -392,7 +355,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             response.status(),
                             request_started.elapsed(),
                         );
-                        (response, response_permit)
+                        (response.with_request_id(request_id), response_permit)
                     }
                     Ok(None) => {
                         // A mutating storage failure may have crossed its
@@ -400,14 +363,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         // that would falsely guarantee that no mutation took
                         // effect.
                         network_shard.abandoned_request();
-                        return;
+                        return false;
                     }
                     Err(_) if may_mutate => {
                         // The worker request may already have crossed its mutation
                         // linearization point when this wait expires. An error response
                         // would falsely guarantee that it did not take effect.
                         network_shard.abandoned_request();
-                        return;
+                        return false;
                     }
                     Err(_) => {
                         network_shard.record_request(
@@ -419,7 +382,8 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             operation_dispatch::timeout_response(
                                 operation_id,
                                 b"request execution timed out",
-                            ),
+                            )
+                            .with_request_id(request_id),
                             response_permit,
                         )
                     }
@@ -427,25 +391,16 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(error) => {
                 network_shard.protocol_error();
-                terminal_after_response = true;
-                (wire_protocol_error_response(error).into(), None)
+                let _ = error;
+                return true;
             }
         };
-        if !write_response(
-            &mut send,
-            response_result.0,
-            request_id,
-            request_timeout,
-        )
-        .await
-        {
+        if !write_response(&mut send, response_result.0, request_id, request_timeout).await {
             network_shard.response_write_failure();
             break;
         }
-        if terminal_after_response {
-            break;
-        }
     }
+    false
 }
 
 struct ActiveStream<'a> {
@@ -464,44 +419,10 @@ async fn write_response<S: SendStream>(
     request_id: u64,
     request_timeout: Duration,
 ) -> bool {
-    let parts = response
-        .into()
-        .into_parts()
-        .with_request_id(request_id)
-        .expect("server response framing remains canonical");
-    send.write_response(parts, request_timeout)
-        .await
-        .is_ok()
-}
-
-fn wire_protocol_error_response(error: openkache_protocol::ProtocolError) -> Response {
-    let status = match error {
-        openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
-        openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
-        _ => Status::InvalidRequest,
-    };
-    response_display(status, error)
-}
-
-fn response_display(status: Status, value: impl std::fmt::Display) -> Response {
-    let mut payload = String::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES + openkache_protocol::MAX_VARUINT_BYTES + 64,
-    );
-    write!(payload, "{value}").expect("writing to a String cannot fail");
-    response(status, payload.into_bytes())
-}
-
-/// Constructs a protocol response whose payload is known to fit protocol limits.
-fn response(status: Status, payload: Vec<u8>) -> Response {
-    Response::new(status, payload).expect("server responses stay within protocol limits")
-}
-
-fn response_bytes(status: Status, payload: &[u8]) -> Response {
-    let mut owned = Vec::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES
-            + openkache_protocol::MAX_VARUINT_BYTES
-            + payload.len(),
-    );
-    owned.extend_from_slice(payload);
-    response(status, owned)
+    send.write_response(
+        response.into().with_request_id(request_id).into_parts(),
+        request_timeout,
+    )
+    .await
+    .is_ok()
 }

@@ -30,11 +30,19 @@ The first production-grade Rust implementation of the state-of-the-art BCF53 Bre
 - **Compact bit packing**: 53 mini-buckets, 8-bit tags — 51 single-choice + 35 two-choice entries per cacheline.
 - **32+ million ops/sec per core** (AVX2).
 
-### 📡 Transport: QUIC, not TCP
+### 📡 Transport: QUIC and TLS-over-TCP
 
 - **Multiplexed, connection-oriented**: Hundreds of concurrent streams over a single connection. No connection pool needed, no head-of-line blocking.
 - **TLS 1.3 baked in**: Every connection is encrypted by default.
 - **Pluggable backends**: Choose between Quinn, Noq, or Quiche — swap with a feature flag.
+- **Strict hybrid key exchange**: Conforming profiles require
+  `X25519MLKEM768`; plaintext and classical-only fallback are rejected.
+
+The TLS-over-TCP profile is currently implemented as a provider-neutral
+one-lane boundary for private integration. The public server listener remains
+QUIC-only until the TCP listener task is completed. See the
+[transport security profile](docs/transport-security.md) for close handling,
+bounded reads, backend conformance, and deployment limitations.
 
 The server's network executor is selected at compile time. The four network
 runtime features are equal first-class options; `network-runtime-compio` is the
