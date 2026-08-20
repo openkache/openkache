@@ -498,7 +498,12 @@ impl Registry {
         if entry.canceled {
             return;
         }
-        let error = if entry.transmitted && entry.metadata.kind.is_mutating() {
+        // `started` is set immediately before entering the transport write
+        // future.  At that point a backend may already have crossed an
+        // unobservable write boundary, even when it later reports
+        // `transmitted = false` (for example, if cancellation races writer
+        // startup).  Treat both states conservatively for mutations.
+        let error = if (entry.transmitted || entry.started) && entry.metadata.kind.is_mutating() {
             EngineError::UnknownMutation {
                 operation: entry.metadata.operation,
                 request_id: id,
@@ -1042,7 +1047,7 @@ impl RequestEngine {
                                 lane.close();
                                 return Ok(());
                             };
-                            if !active.remove(&request_id) {
+                            if !active.contains(&request_id) {
                                 self.inner.registry.fail_lane(
                                     index,
                                     &active,
@@ -1062,8 +1067,22 @@ impl RequestEngine {
                                 lane.close();
                                 return Ok(());
                             };
-                            let response = ResponseBytes::decode(frame, metadata);
-                            self.inner.registry.complete(request_id, response);
+                            match ResponseBytes::decode(frame, metadata) {
+                                Ok(response) => {
+                                    active.remove(&request_id);
+                                    self.inner.registry.complete(request_id, Ok(response));
+                                }
+                                Err(error) => {
+                                    // A malformed or semantically
+                                    // inapplicable response poisons the lane.
+                                    // Keep the offending request in `active`
+                                    // so all in-flight requests fail together.
+                                    self.inner.registry.fail_lane(index, &active, error, true);
+                                    self.inner.lane_states[index].store(1, Ordering::Release);
+                                    lane.close();
+                                    return Ok(());
+                                }
+                            }
                         }
                         Err(error) => {
                             self.inner.registry.fail_lane(index, &active, error, true);
