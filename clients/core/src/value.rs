@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::io::{self, Write};
-use std::mem::size_of;
+use std::mem::{ManuallyDrop, size_of};
 use std::sync::{Arc, OnceLock};
 
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
@@ -46,6 +46,13 @@ pub const MAX_VALUE_ENVELOPE_BYTES: usize = 67_108_864;
 pub const MAX_EXPANDED_PAYLOAD_BYTES: usize = 67_108_864;
 /// Maximum Zstandard decoder window (64 MiB).
 pub const MAX_ZSTD_WINDOW_BYTES: usize = 67_108_864;
+/// Maximum compatibility-value nesting depth.
+///
+/// JSON parsing and compatibility conversion use bounded recursive adapters;
+/// keep their caller-selected depth below the public structured codec's much
+/// larger iterative policy so a configuration value cannot reintroduce native
+/// stack growth.
+pub const MAX_VALUE_DEPTH: usize = openkache_value::DEFAULT_MAX_DEPTH;
 /// Maximum canonical unsigned-64-bit `vu128` width used by this profile.
 pub const MAX_VU128_BYTES: usize = 9;
 /// Number of bytes in an AES-256-GCM-SIV nonce.
@@ -170,7 +177,7 @@ impl From<ItemValue> for Vec<u8> {
 }
 
 /// Common logical JSON value retained as a compatibility adapter.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum JsonValue {
     /// JSON `null`.
     Null,
@@ -184,6 +191,92 @@ pub enum JsonValue {
     Array(Vec<Self>),
     /// Object entries with unique names.
     Object(Vec<(String, Self)>),
+}
+
+impl Clone for JsonValue {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Visit(&'a JsonValue),
+            Array(usize),
+            Object(&'a [(String, JsonValue)]),
+        }
+
+        let mut tasks = Vec::new();
+        let mut values = Vec::new();
+        tasks.push(Task::Visit(self));
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(value) => match value {
+                    JsonValue::Null => values.push(JsonValue::Null),
+                    JsonValue::Boolean(value) => values.push(JsonValue::Boolean(*value)),
+                    JsonValue::Number(value) => values.push(JsonValue::Number(*value)),
+                    JsonValue::String(value) => values.push(JsonValue::String(value.clone())),
+                    JsonValue::Array(children) => {
+                        tasks.push(Task::Array(children.len()));
+                        for child in children.iter().rev() {
+                            tasks.push(Task::Visit(child));
+                        }
+                    }
+                    JsonValue::Object(entries) => {
+                        tasks.push(Task::Object(entries));
+                        for (_, child) in entries.iter().rev() {
+                            tasks.push(Task::Visit(child));
+                        }
+                    }
+                },
+                Task::Array(length) => {
+                    let start = values
+                        .len()
+                        .checked_sub(length)
+                        .expect("every array child was cloned before its parent");
+                    let children: Vec<_> = values.drain(start..).collect();
+                    values.push(JsonValue::Array(children));
+                }
+                Task::Object(entries) => {
+                    let start = values
+                        .len()
+                        .checked_sub(entries.len())
+                        .expect("every object child was cloned before its parent");
+                    let children: Vec<_> = values.drain(start..).collect();
+                    let entries = entries
+                        .iter()
+                        .zip(children)
+                        .map(|((key, _), value)| (key.clone(), value))
+                        .collect();
+                    values.push(JsonValue::Object(entries));
+                }
+            }
+        }
+        values
+            .pop()
+            .expect("the root JSON value always produces one clone")
+    }
+}
+
+impl Drop for JsonValue {
+    fn drop(&mut self) {
+        let root = std::mem::replace(self, Self::Null);
+        let mut pending = vec![root];
+        while let Some(value) = pending.pop() {
+            let mut value = ManuallyDrop::new(value);
+            // SAFETY: each container is emptied before its shell is forgotten,
+            // so no nested JsonValue destructor can recurse on this stack.
+            unsafe {
+                match &mut *value {
+                    Self::Array(children) => pending.extend(std::mem::take(children)),
+                    Self::Object(entries) => {
+                        for (key, child) in std::mem::take(entries) {
+                            drop(key);
+                            pending.push(child);
+                        }
+                    }
+                    Self::String(value) => std::ptr::drop_in_place(value),
+                    Self::Null | Self::Boolean(_) | Self::Number(_) => {}
+                }
+                std::mem::forget(value);
+            }
+        }
+    }
 }
 
 impl JsonValue {
@@ -2790,6 +2883,13 @@ fn validate_item_id(item_id: &[u8]) -> Result<()> {
 }
 
 fn validate_limits(limits: ValueLimits) -> Result<()> {
+    if limits.max_depth > MAX_VALUE_DEPTH {
+        return Err(Error::ResourceLimit {
+            resource: Resource::StructuredValue,
+            limit: MAX_VALUE_DEPTH,
+            actual: limits.max_depth,
+        });
+    }
     if limits.max_envelope_bytes == 0
         || limits.max_expanded_payload_bytes == 0
         || limits.max_zstd_window_bytes == 0
