@@ -23,6 +23,7 @@ use super::operation_transport;
 
 pub(super) struct HeaderAdmissionRejection {
     opcode: Opcode,
+    request_id: u64,
     response: operation_transport::OperationResponse,
     elapsed: std::time::Duration,
 }
@@ -34,6 +35,10 @@ impl HeaderAdmissionRejection {
 
     pub(super) const fn status(&self) -> openkache_protocol::Status {
         self.response.status()
+    }
+
+    pub(super) const fn request_id(&self) -> u64 {
+        self.request_id
     }
 
     pub(super) const fn elapsed(&self) -> std::time::Duration {
@@ -81,6 +86,7 @@ pub(super) fn admit_request_header(
         );
         HeaderAdmissionRejection {
             opcode: header.opcode(),
+            request_id: header.request_id(),
             response,
             elapsed: started.elapsed(),
         }

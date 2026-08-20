@@ -188,6 +188,9 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
             }
+            openkache_protocol::ProtocolError::InvalidItemIdLength { .. } => {
+                Self::InvalidFieldSequence("item ID length is outside the supported range")
+            }
             openkache_protocol::ProtocolError::InvalidRequestPackedBits { offset } => {
                 Self::InvalidRequestPackedBits { offset }
             }

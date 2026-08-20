@@ -1,7 +1,5 @@
 use boring::pkey::PKey;
-use boring::ssl::{
-    SslContextBuilder, SslMethod, SslOptions, SslSessionCacheMode, SslVerifyMode,
-};
+use boring::ssl::{SslContextBuilder, SslMethod, SslOptions, SslSessionCacheMode, SslVerifyMode};
 use boring::x509::X509;
 use boring::x509::store::X509StoreBuilder;
 

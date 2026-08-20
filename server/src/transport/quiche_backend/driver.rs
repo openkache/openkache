@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,14 +13,31 @@ use crate::channel::{self, AsyncReceiver, Sender, TrySendError};
 use crate::network_runtime;
 
 const MAX_DATAGRAM_BYTES: usize = 65_535;
-const REQUEST_CANCELLED_ERROR_CODE: u64 = 0;
+/// Directional request cancellation is distinct from the connection-fatal
+/// malformed-frame code. Peers use this value only for `STOP_SENDING` on a
+/// receive direction whose owner was dropped or timed out.
+const REQUEST_CANCELLED_ERROR_CODE: u64 = 0x02;
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 const STREAM_CHUNK_BACKLOG: usize = 1;
 
 pub(super) type ConnectionId = Arc<[u8]>;
 
+/// A receive event preserves QUIC's clean FIN and reset outcomes across the
+/// driver's bounded channel. An empty byte vector alone cannot distinguish a
+/// graceful stream close from a reset or a disconnected producer.
+#[derive(Debug)]
+pub(super) enum StreamChunk {
+    Data(Vec<u8>),
+    Fin,
+    Reset(u64),
+}
+
 pub(super) enum Command {
-    Close(Vec<u8>),
+    Close {
+        connection_id: Option<ConnectionId>,
+        error_code: u64,
+        reason: Vec<u8>,
+    },
     CancelRequest {
         connection_id: ConnectionId,
         stream_id: u64,
@@ -46,8 +63,8 @@ struct PendingResponse {
 }
 
 struct RequestChunks {
-    chunks: Sender<Vec<u8>>,
-    pending: Option<Vec<u8>>,
+    chunks: Sender<StreamChunk>,
+    pending: VecDeque<StreamChunk>,
     finished: bool,
 }
 
@@ -225,9 +242,19 @@ impl Driver {
 
     fn handle_command(&mut self, command: Command) -> bool {
         match command {
-            Command::Close(reason) => {
-                for client in self.clients.values_mut() {
-                    let _ = client.connection.close(true, 0, &reason);
+            Command::Close {
+                connection_id,
+                error_code,
+                reason,
+            } => {
+                if let Some(connection_id) = connection_id {
+                    if let Some(client) = self.clients.get_mut(&connection_id) {
+                        let _ = client.connection.close(true, error_code, &reason);
+                    }
+                } else {
+                    for client in self.clients.values_mut() {
+                        let _ = client.connection.close(true, error_code, &reason);
+                    }
                 }
                 false
             }
@@ -329,9 +356,7 @@ impl Driver {
                             .socket
                             .send_to(output, written, information.to)
                             .await
-                            .map_err(|error| {
-                                TransportError::backend(NAME, "packet send", error)
-                            })?;
+                            .map_err(|error| TransportError::backend(NAME, "packet send", error))?;
                         output = returned;
                         if output.len() < MAX_DATAGRAM_BYTES {
                             output.resize(MAX_DATAGRAM_BYTES, 0);
@@ -380,19 +405,19 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
         });
         RequestChunks {
             chunks,
-            pending: None,
+            pending: VecDeque::new(),
             finished: false,
         }
     });
-    if let Some(chunk) = request.pending.take() {
+    while let Some(chunk) = request.pending.pop_front() {
         match request.chunks.try_send(chunk) {
-            Ok(()) if request.finished => {
+            Ok(()) if request.finished && request.pending.is_empty() => {
                 client.requests.remove(&stream_id);
                 return;
             }
-            Ok(()) => {}
+            Ok(()) => continue,
             Err(TrySendError::Full(chunk)) => {
-                request.pending = Some(chunk);
+                request.pending.push_front(chunk);
                 return;
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -411,12 +436,38 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
             .stream_recv(stream_id, buffer.as_mut_slice())
         {
             Ok((read, finished)) => {
-                request.finished = finished;
                 buffer.truncate(read);
-                match request.chunks.try_send(buffer) {
+                if finished {
+                    request.finished = true;
+                }
+                let chunk = if read != 0 {
+                    StreamChunk::Data(buffer)
+                } else if finished {
+                    StreamChunk::Fin
+                } else {
+                    // quiche reports `Done` when no data is readable. Keep
+                    // this guard for a backend implementation that returns a
+                    // spurious empty, non-final read.
+                    break;
+                };
+                match request.chunks.try_send(chunk) {
+                    Ok(()) if finished && read != 0 => {
+                        // The data must be observed before its terminal FIN.
+                        // The bounded channel is resumed by the consumer after
+                        // it receives this chunk.
+                        request.pending.push_back(StreamChunk::Fin);
+                        break;
+                    }
+                    Ok(()) if finished => {
+                        client.requests.remove(&stream_id);
+                        break;
+                    }
                     Ok(()) => {}
                     Err(TrySendError::Full(chunk)) => {
-                        request.pending = Some(chunk);
+                        request.pending.push_back(chunk);
+                        if finished && read != 0 {
+                            request.pending.push_back(StreamChunk::Fin);
+                        }
                         break;
                     }
                     Err(TrySendError::Disconnected(_)) => {
@@ -424,12 +475,24 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
                         break;
                     }
                 }
-                if finished {
-                    client.requests.remove(&stream_id);
-                    break;
-                }
             }
             Err(quiche::Error::Done) => break,
+            Err(quiche::Error::StreamReset(error_code))
+            | Err(quiche::Error::StreamStopped(error_code)) => {
+                request.finished = true;
+                match request.chunks.try_send(StreamChunk::Reset(error_code)) {
+                    Ok(()) => {
+                        client.requests.remove(&stream_id);
+                    }
+                    Err(TrySendError::Full(chunk)) => {
+                        request.pending.push_back(chunk);
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        client.requests.remove(&stream_id);
+                    }
+                }
+                break;
+            }
             Err(_) => {
                 client.requests.remove(&stream_id);
                 break;

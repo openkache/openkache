@@ -207,17 +207,29 @@ impl OneLaneConnection {
             self.state = LaneState::Open;
         }
 
-        let mut bytes = Vec::new();
-        self.tls.reader().read_to_end(&mut bytes)?;
-        if !bytes.is_empty() {
-            let buffered_limit = self.max_in_flight_bytes.saturating_add(self.max_frame);
-            if bytes.len() > buffered_limit.saturating_sub(self.plaintext.len()) {
+        // `rustls::Reader::read_to_end` waits for EOF and reports
+        // `WouldBlock` while a handshake or application record is still
+        // in flight. Drain only the plaintext currently available so one
+        // bounded TLS record never turns a normal incremental read into an
+        // I/O failure.
+        let buffered_limit = self.max_in_flight_bytes.saturating_add(self.max_frame);
+        loop {
+            let mut bytes = [0_u8; 16 * 1024];
+            let read = match self.tls.reader().read(&mut bytes) {
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(TcpTransportError::Io(error)),
+            };
+            if read == 0 {
+                break;
+            }
+            if read > buffered_limit.saturating_sub(self.plaintext.len()) {
                 return Err(TcpTransportError::FrameTooLarge);
             }
             self.plaintext
-                .try_reserve(bytes.len())
+                .try_reserve(read)
                 .map_err(|_| TcpTransportError::FrameTooLarge)?;
-            self.plaintext.extend_from_slice(&bytes);
+            self.plaintext.extend_from_slice(&bytes[..read]);
         }
         if io_state.peer_has_closed() {
             self.peer_close_seen = true;
@@ -233,6 +245,9 @@ impl OneLaneConnection {
 
     /// Reports a TCP EOF. EOF is clean only after TLS `close_notify`.
     pub(crate) fn receive_eof(&mut self) -> Result<ReceiveEvent, TcpTransportError> {
+        if matches!(self.state, LaneState::Closed | LaneState::Unclean) {
+            return Err(TcpTransportError::Closed);
+        }
         if self.peer_close_seen {
             self.peer_close_seen = true;
             self.state = LaneState::Draining;

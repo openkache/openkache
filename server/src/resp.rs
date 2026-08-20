@@ -616,7 +616,7 @@ async fn execute_command(
         RespCommandKind::Get => match command {
             [_, application_key] => {
                 let item_id = resp_item_id(application_key);
-                let storage_key = cache.storage_key_for_identity(item_id.as_bytes());
+                let storage_key = cache.storage_key_for_identity(&item_id.storage_bytes());
                 match cache
                     .get_storage_key(storage_key, operation_for_opcode(Opcode::Get))
                     .await
@@ -631,7 +631,7 @@ async fn execute_command(
         RespCommandKind::Set => match command {
             [_, application_key, value] => {
                 let item_id = resp_item_id(application_key);
-                let storage_key = cache.storage_key_for_identity(item_id.as_bytes());
+                let storage_key = cache.storage_key_for_identity(&item_id.storage_bytes());
                 match cache
                     .set_storage_key(
                         storage_key,
@@ -655,7 +655,7 @@ async fn execute_command(
                 let mut deleted = 0;
                 for application_key in &command[1..] {
                     let item_id = resp_item_id(application_key);
-                    let storage_key = cache.storage_key_for_identity(item_id.as_bytes());
+                    let storage_key = cache.storage_key_for_identity(&item_id.storage_bytes());
                     match cache
                         .delete_storage_key(storage_key, operation_for_opcode(Opcode::Delete))
                         .await
