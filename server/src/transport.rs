@@ -235,26 +235,14 @@ pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
     /// Client-selected correlation token echoed by the response writer.
     pub(super) request_id: u64,
-    /// Whether the transport had already delivered bytes beyond this frame.
-    ///
-    /// QUIC stream reads may coalesce multiple client writes. If the backend
-    /// exposes those trailing bytes, the lane must be retired after the
-    /// current response because the peer violated request/response lockstep.
-    pub(super) has_trailing_bytes: bool,
     _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
-    fn with_trailing_bytes(
-        bytes: Vec<u8>,
-        permit: RequestBudgetPermit,
-        request_id: u64,
-        has_trailing_bytes: bool,
-    ) -> Self {
+    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit, request_id: u64) -> Self {
         Self {
             bytes,
             request_id,
-            has_trailing_bytes,
             _permit: permit,
         }
     }
@@ -411,11 +399,6 @@ trait RequestByteStream {
         capacity: usize,
         backend: &'static str,
     ) -> impl Future<Output = Result<Vec<u8>, TransportError>>;
-
-    fn has_readable_byte(
-        &mut self,
-        backend: &'static str,
-    ) -> impl Future<Output = Result<bool, TransportError>>;
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
@@ -496,22 +479,11 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         drop(permit);
         return Ok(Err(rejection));
     }
-    // Probe the backend's already-readable bytes once. The backends retain
-    // any byte observed by this non-consuming probe, so a pipelined second
-    // request remains available to the next read instead of being dropped.
-    // The zero-duration timeout is non-blocking: when no byte is buffered the
-    // receive future is cancelled and the lane remains reusable.
-    let has_trailing_bytes =
-        match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await {
-            Err(_) => false,
-            Ok(result) => result.map_err(StreamReadError::Transport)?,
-        };
-    Ok(Ok(RequestFrame::with_trailing_bytes(
-        body,
-        permit,
-        header.request_id(),
-        has_trailing_bytes,
-    )))
+    // Any bytes beyond this frame remain buffered by the transport and are
+    // consumed by the next iteration. Version 1 explicitly permits multiple
+    // complete requests on one lane, so a coalesced/pipelined frame must not
+    // retire the lane after this response.
+    Ok(Ok(RequestFrame::new(body, permit, header.request_id())))
 }
 
 /// Stable transport failure with backend and operation context.
