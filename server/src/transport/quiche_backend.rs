@@ -68,7 +68,6 @@ impl super::Endpoint for Endpoint {
 
     fn close(&self, reason: &[u8]) {
         let _ = self.commands.try_send(Command::Close {
-            connection_id: None,
             error_code: 0,
             reason: reason.to_vec(),
         });
@@ -109,41 +108,71 @@ impl super::Connection for Connection {
         self.peer_certificate.take()
     }
 
+    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
+        loop {
+            let stream = self
+                .streams
+                .recv_async_network()
+                .await
+                .map_err(|error| TransportError::backend(NAME, "stream accept", error))?;
+            if stream.kind != StreamKind::ClientBidirectional {
+                let _ = self.commands.try_send(Command::StopRequest {
+                    connection_id: self.connection_id.clone(),
+                    stream_id: stream.stream_id,
+                });
+                continue;
+            }
+            return Ok((
+                SendStream {
+                    connection_id: self.connection_id.clone(),
+                    stream_id: stream.stream_id,
+                    commands: self.commands.clone(),
+                },
+                ReceiveStream {
+                    connection_id: self.connection_id.clone(),
+                    stream_id: stream.stream_id,
+                    commands: self.commands.clone(),
+                    chunks: stream.chunks,
+                    buffered: Vec::new(),
+                    finished: false,
+                    cancelled: false,
+                },
+            ));
+        }
+    }
+
+    async fn accept_uni(&self) -> Result<Self::ReceiveStream, TransportError> {
+        Err(TransportError::backend(
+            NAME,
+            "unidirectional stream accept",
+            "quiche rejects invalid unidirectional streams in its driver",
+        ))
+    }
+
     fn close(&self, error_code: u64, reason: &[u8]) {
-        let _ = self.commands.try_send(Command::Close {
-            connection_id: Some(self.connection_id.clone()),
+        let _ = self.commands.try_send(Command::CloseConnection {
+            connection_id: self.connection_id.clone(),
             error_code,
             reason: reason.to_vec(),
         });
-    }
-
-    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
-        let stream = self
-            .streams
-            .recv_async_network()
-            .await
-            .map_err(|error| TransportError::backend(NAME, "stream accept", error))?;
-        Ok((
-            SendStream {
-                connection_id: self.connection_id.clone(),
-                stream_id: stream.stream_id,
-                commands: self.commands.clone(),
-            },
-            ReceiveStream {
-                connection_id: self.connection_id.clone(),
-                stream_id: stream.stream_id,
-                commands: self.commands.clone(),
-                chunks: stream.chunks,
-                buffered: Vec::new(),
-                ended: false,
-            },
-        ))
     }
 }
 
 struct Stream {
     stream_id: u64,
+    kind: StreamKind,
     chunks: AsyncReceiver<StreamChunk>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StreamKind {
+    ClientBidirectional,
+}
+
+enum StreamChunk {
+    Bytes(Vec<u8>),
+    Finished,
+    Cancelled,
 }
 
 pub(crate) struct ReceiveStream {
@@ -152,29 +181,60 @@ pub(crate) struct ReceiveStream {
     commands: Sender<Command>,
     chunks: AsyncReceiver<StreamChunk>,
     buffered: Vec<u8>,
-    ended: bool,
+    finished: bool,
+    cancelled: bool,
 }
 
-impl ReceiveStream {
-    async fn next_chunk(&mut self, operation: &'static str) -> Result<StreamChunk, TransportError> {
-        if self.ended {
-            return Ok(StreamChunk::Fin);
+impl super::RequestByteStream for ReceiveStream {
+    async fn append_chunk(
+        &mut self,
+        mut frame: Vec<u8>,
+        capacity: usize,
+        backend: &'static str,
+    ) -> Result<super::ChunkRead, TransportError> {
+        let capacity = capacity.max(1);
+        if !self.buffered.is_empty() {
+            let take = capacity.min(self.buffered.len());
+            frame.try_reserve(take).map_err(|error| {
+                TransportError::backend(backend, "request buffer reserve", error)
+            })?;
+            frame.extend(self.buffered.drain(..take));
+            return Ok(super::ChunkRead::Bytes(frame));
+        }
+        if self.cancelled {
+            return Ok(super::ChunkRead::Cancelled);
+        }
+        if self.finished {
+            return Ok(super::ChunkRead::Finished);
         }
         let chunk = self
             .chunks
             .recv_async_network()
             .await
-            .map_err(|error| TransportError::backend(NAME, operation, error))?;
-        if matches!(&chunk, StreamChunk::Data(_)) {
-            let _ = self.commands.try_send(Command::ResumeRequest {
-                connection_id: self.connection_id.clone(),
-                stream_id: self.stream_id,
-            });
+            .map_err(|error| TransportError::backend(backend, "stream read", error))?;
+        match chunk {
+            StreamChunk::Bytes(bytes) => {
+                self.buffered = bytes;
+                let _ = self.commands.try_send(Command::ResumeRequest {
+                    connection_id: self.connection_id.clone(),
+                    stream_id: self.stream_id,
+                });
+                let take = capacity.min(self.buffered.len());
+                frame.try_reserve(take).map_err(|error| {
+                    TransportError::backend(backend, "request buffer reserve", error)
+                })?;
+                frame.extend(self.buffered.drain(..take));
+                Ok(super::ChunkRead::Bytes(frame))
+            }
+            StreamChunk::Finished => {
+                self.finished = true;
+                Ok(super::ChunkRead::Finished)
+            }
+            StreamChunk::Cancelled => {
+                self.cancelled = true;
+                Ok(super::ChunkRead::Cancelled)
+            }
         }
-        if matches!(&chunk, StreamChunk::Fin) {
-            self.ended = true;
-        }
-        Ok(chunk)
     }
 }
 
@@ -185,114 +245,21 @@ impl super::ReceiveStream for ReceiveStream {
         timeout: Duration,
         budget: &RequestBudget,
         admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
-    ) -> Result<Result<RequestFrame, T>, StreamReadError> {
-        network_runtime::timeout(timeout, async {
-            while self.buffered.is_empty() {
-                match self.next_chunk("stream header read").await? {
-                    StreamChunk::Data(chunk) => self.buffered.extend_from_slice(&chunk),
-                    StreamChunk::Fin => {
-                        return Err(StreamReadError::Transport(TransportError::backend(
-                            NAME,
-                            "stream header read",
-                            "stream ended before a request frame",
-                        )));
-                    }
-                    StreamChunk::Reset(error_code) => {
-                        return Err(StreamReadError::Transport(TransportError::backend(
-                            NAME,
-                            "stream read",
-                            format!("stream reset with error code {error_code}"),
-                        )));
-                    }
-                }
-            }
-            Ok::<(), StreamReadError>(())
-        })
-        .await
-        .map_err(|_| StreamReadError::Timeout)??;
-        let header = network_runtime::timeout(timeout, async {
-            loop {
-                if let Some(header) = ProtocolRequestFrame::decode_header(&self.buffered)? {
-                    break Ok::<_, StreamReadError>(header);
-                }
-                if self.buffered.len() >= maximum {
-                    return Err(StreamReadError::TooLarge);
-                }
-                match self.next_chunk("stream header read").await? {
-                    StreamChunk::Data(chunk) => self.buffered.extend_from_slice(&chunk),
-                    StreamChunk::Fin => {
-                        return Err(StreamReadError::Transport(TransportError::backend(
-                            NAME,
-                            "stream header read",
-                            "stream ended before request header completed",
-                        )));
-                    }
-                    StreamChunk::Reset(error_code) => {
-                        return Err(StreamReadError::Transport(TransportError::backend(
-                            NAME,
-                            "stream read",
-                            format!("stream reset with error code {error_code}"),
-                        )));
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| StreamReadError::Timeout)??;
-        let frame_len = network_runtime::timeout(timeout, async {
-            let frame_len = header.frame_len()?;
-            Ok::<_, StreamReadError>(frame_len)
-        })
-        .await
-        .map_err(|_| StreamReadError::Timeout)??;
-        if frame_len > maximum {
-            return Err(StreamReadError::TooLarge);
-        }
-        // Admission may reject on bounded header metadata, but the lane must
-        // still consume the declared body before sending that correlated
-        // error and continuing at the next frame boundary.
-        let rejection = admit(header, &self.buffered[..header.encoded_len()]).err();
-        let permit = budget.acquire(header.body_len(), timeout).await?;
-        network_runtime::timeout(timeout, async {
-            while self.buffered.len() < frame_len {
-                match self.next_chunk("stream body read").await? {
-                    StreamChunk::Data(chunk) => self.buffered.extend_from_slice(&chunk),
-                    StreamChunk::Fin => {
-                        return Err(StreamReadError::Transport(TransportError::backend(
-                            NAME,
-                            "stream body read",
-                            "stream ended before request body completed",
-                        )));
-                    }
-                    StreamChunk::Reset(error_code) => {
-                        return Err(StreamReadError::Transport(TransportError::backend(
-                            NAME,
-                            "stream read",
-                            format!("stream reset with error code {error_code}"),
-                        )));
-                    }
-                }
-            }
-            Ok::<(), StreamReadError>(())
-        })
-        .await
-        .map_err(|_| StreamReadError::Timeout)??;
-        let frame = if self.buffered.len() == frame_len {
-            std::mem::take(&mut self.buffered)
-        } else {
-            self.buffered.drain(..frame_len).collect()
-        };
-        if let Some(rejection) = rejection {
-            drop(permit);
-            return Ok(Err(rejection));
-        }
-        Ok(Ok(RequestFrame::new(frame, permit)))
+    ) -> Result<RequestRead<T>, StreamReadError> {
+        read_buffered_request(self, NAME, maximum, timeout, budget, admit).await
+    }
+
+    fn stop(&mut self) {
+        let _ = self.commands.try_send(Command::StopRequest {
+            connection_id: self.connection_id.clone(),
+            stream_id: self.stream_id,
+        });
     }
 }
 
 impl Drop for ReceiveStream {
     fn drop(&mut self) {
-        let _ = self.commands.try_send(Command::CancelRequest {
+        let _ = self.commands.try_send(Command::StopRequest {
             connection_id: self.connection_id.clone(),
             stream_id: self.stream_id,
         });
@@ -326,6 +293,22 @@ impl super::SendStream for SendStream {
             .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?
             .map_err(|error| TransportError::backend(NAME, "stream write", error))?;
         result.map_err(|message| TransportError::backend(NAME, "stream write", message))
+    }
+
+    fn finish(&mut self) -> Result<(), TransportError> {
+        self.commands
+            .try_send(Command::FinishResponse {
+                connection_id: self.connection_id.clone(),
+                stream_id: self.stream_id,
+            })
+            .map_err(|error| TransportError::backend(NAME, "stream finish", error))
+    }
+
+    fn reset(&mut self) {
+        let _ = self.commands.try_send(Command::ResetResponse {
+            connection_id: self.connection_id.clone(),
+            stream_id: self.stream_id,
+        });
     }
 }
 

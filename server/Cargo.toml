@@ -78,7 +78,7 @@ rustix = { version = "*", default-features = false, features = ["io_uring"], opt
 serde = { version = "*", features = ["derive"] }
 sha2 = "*"
 signal-hook = { version = "*", optional = true }
-smallvec = "*"
+smallvec = { version = "*", features = ["const_new"] }
 snmalloc-rs = { version = "*", optional = true, default-features = false, features = ["build_cc", "usewait-on-address"] }
 socket2 = { version = "*", features = ["all"] }
 thiserror = "*"

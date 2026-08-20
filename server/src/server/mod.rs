@@ -17,7 +17,6 @@ use crate::network_runtime;
 use crate::network_runtime::{TcpListener, TcpStream};
 use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, ObservabilityStats,
-    Operation,
 };
 use crate::platform::StorageDeviceKind;
 use crate::protocol::{NamespaceDescriptor, NamespacePolicy};
@@ -25,7 +24,8 @@ use crate::transport::tcp::TlsTcpLane;
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
-    ServerTlsConfig, StreamReadError, TransportError, strict_server_config,
+    RequestBudgetPermit, RequestFrame, RequestRead, ServerTlsConfig, StreamReadError,
+    TransportError, strict_server_config,
 };
 use crate::{AppConfig, NetworkConfig, NetworkWorkerCache, QuicBackend, ThreadedKvkache};
 #[allow(unused_imports)]
@@ -109,13 +109,12 @@ use tls::{AccessPolicy, load_production_tls};
 mod errors;
 pub use errors::{Result, ServerError};
 
-
-#[path = "namespace_registry.rs"]
-mod namespace_registry;
-#[path = "namespace_metadata.rs"]
-pub(crate) mod namespace_metadata;
 #[path = "namespace_journal.rs"]
 mod namespace_journal;
+#[path = "namespace_metadata.rs"]
+pub(crate) mod namespace_metadata;
+#[path = "namespace_registry.rs"]
+mod namespace_registry;
 #[allow(unused_imports)]
 pub(crate) use namespace_journal::{JournalEvent, NamespaceJournal};
 pub(crate) use namespace_registry::{
