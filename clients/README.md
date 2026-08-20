@@ -28,6 +28,7 @@ formats or protocol behavior.
 | Package | Path | Implementation |
 |---|---|---|
 | Shared core | [`core/`](core/) | Transitional raw/protected engine; draft-contract migration pending |
+| Value model | [`value/`](value/) | Owned `Value` algebra and bounded StructuredValue-CBOR-v1 payload codec |
 | Rust | [`rust/`](rust/) | Transitional end-user SDK; byte APIs use the current Raw path |
 | CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Transitional Node-API SDK with typed keys, raw operations, and canonical JSON |

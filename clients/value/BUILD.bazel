@@ -1,0 +1,42 @@
+"""Bazel target for the owned cross-language value model."""
+
+load(
+    "@rules_rust//rust:defs.bzl",
+    "rust_library",
+)
+load(
+    "//bazel:openkache_defs.bzl",
+    "RUST_EDITION",
+    "cargo_deps",
+    "crate_aliases",
+    "rust_metadata",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "source_tree",
+    srcs = [
+        "Cargo.toml",
+        "README.md",
+        "SPEC.md",
+    ] + glob([
+        "src/**",
+    ]),
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = [":source_tree"],
+)
+
+rust_library(
+    name = "openkache_value",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = crate_aliases("clients/value"),
+    crate_name = "openkache_value",
+    crate_root = "src/lib.rs",
+    edition = RUST_EDITION,
+    rustc_env = rust_metadata("openkache-value"),
+    deps = cargo_deps("clients/value"),
+)
