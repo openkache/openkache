@@ -30,7 +30,7 @@ use compio::net::ToSocketAddrsAsync;
 use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Response, Status, operation_wire_spec};
 use protocol::OperationRequest;
 use request::{PendingRequest, RequestAttempt, RequestAttempts, RequestBuilder, RequestContext};
-use transport::{ClientConnection, ClientLane};
+use transport::{ClientConnection, ClientLane, RequestBudgetPermit};
 
 pub use config::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy,
@@ -56,6 +56,7 @@ pub use request_engine::{
     RequestHandle, RequestKind, RequestMetadata, ResponseBytes, TransportConnection,
     TransportError, TransportKind, TransportLane,
 };
+pub use transport::RequestBudget;
 pub use value::{
     ItemValue, MAX_EXPANDED_PAYLOAD_BYTES, MAX_VALUE_ENVELOPE_BYTES, MAX_ZSTD_WINDOW_BYTES,
     ValueKeyring, ValueLimits,
@@ -277,6 +278,14 @@ pub enum Error {
         /// Maximum accepted response bytes.
         maximum: usize,
     },
+    /// The shared client byte budget cannot admit another bounded allocation.
+    #[error("client in-flight byte budget {maximum} bytes exceeded by {requested}")]
+    ResourceLimit {
+        /// Bytes requested by the operation.
+        requested: usize,
+        /// Configured aggregate limit.
+        maximum: usize,
+    },
     /// TLS configuration or certificate validation failed.
     #[error("TLS configuration failed: {0}")]
     Tls(String),
@@ -403,6 +412,7 @@ struct Core<C: ClientConnection> {
     request_timeout: Duration,
     retry: RetryPolicy,
     max_in_flight: usize,
+    request_budget: RequestBudget,
     namespace_id: AtomicU64,
     namespace_name: Vec<u8>,
     namespace_policy: NamespacePolicy,
@@ -461,17 +471,20 @@ impl<C: ClientConnection> Core<C> {
         timeouts: ClientTimeouts,
         retry: RetryPolicy,
         max_in_flight: usize,
+        max_in_flight_bytes: usize,
         namespace_id: Option<u64>,
         namespace_name: Vec<u8>,
         namespace_policy: NamespacePolicy,
         deadline: transport::Deadline,
     ) -> Result<Self> {
+        let request_budget = RequestBudget::new(max_in_flight_bytes);
         let connection = C::connect(
             address,
             &server_name,
             tls.clone(),
             deadline.remaining(Operation::ConnectionSetup)?,
             max_in_flight,
+            request_budget.clone(),
         )
         .await?;
         if let Some(protocol) = connection.negotiated_alpn() {
@@ -497,6 +510,7 @@ impl<C: ClientConnection> Core<C> {
             request_timeout: timeouts.request,
             retry,
             max_in_flight,
+            request_budget,
             namespace_id: AtomicU64::new(namespace_id.unwrap_or(0)),
             namespace_name,
             namespace_policy,
@@ -510,6 +524,10 @@ impl<C: ClientConnection> Core<C> {
     fn connection_state(&self) -> ConnectionState {
         ConnectionState::try_from(self.state.load(Ordering::Acquire))
             .unwrap_or(ConnectionState::Unknown)
+    }
+
+    fn request_budget(&self) -> RequestBudget {
+        self.request_budget.clone()
     }
 
     async fn ping(&self) -> Result<Duration> {
@@ -544,6 +562,31 @@ impl<C: ClientConnection> Core<C> {
                 .map_err(Error::protocol)?,
             |response| match response.status {
                 Status::Ok => Ok(GetOutcome::Found(ItemValue::new(response.payload))),
+                Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
+                Status::NotFound => Err(Error::UnexpectedResponse {
+                    operation: Operation::Get,
+                    message: "NotFound response must have an empty payload".into(),
+                }),
+                status => Err(unexpected_status(Operation::Get, status)),
+            },
+        )
+        .await
+    }
+
+    async fn get_in_namespace_with_permit(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<GetOutcome<ItemValue>> {
+        validate_client_namespace_id(namespace_id)?;
+        self.request_with_permit(
+            OperationRequest::get(namespace_id, item_id.into_protocol())
+                .map_err(Error::protocol)?,
+            |response, permit| match response.status {
+                Status::Ok => Ok(GetOutcome::Found(ItemValue::with_response_permit(
+                    response.payload,
+                    permit,
+                ))),
                 Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
                 Status::NotFound => Err(Error::UnexpectedResponse {
                     operation: Operation::Get,
@@ -671,6 +714,18 @@ impl<C: ClientConnection> Core<C> {
         &self,
         request: R,
         mut decode: impl FnMut(Response) -> Result<T>,
+    ) -> Result<T>
+    where
+        R: RequestBuilder,
+    {
+        self.request_with_permit(request, |response, _permit| decode(response))
+            .await
+    }
+
+    async fn request_with_permit<R, T>(
+        &self,
+        request: R,
+        mut decode: impl FnMut(Response, Option<RequestBudgetPermit>) -> Result<T>,
     ) -> Result<T>
     where
         R: RequestBuilder,
@@ -962,7 +1017,7 @@ impl<C: ClientConnection> Core<C> {
         request_id: u64,
         success_statuses: &'static [Status],
         error_statuses: &'static [Status],
-        decode: &mut impl FnMut(Response) -> Result<T>,
+        decode: &mut impl FnMut(Response, Option<RequestBudgetPermit>) -> Result<T>,
         deadline: transport::Deadline,
     ) -> std::result::Result<Result<T>, RequestFailure>
     where
@@ -1019,7 +1074,8 @@ impl<C: ClientConnection> Core<C> {
                 response.status,
             )));
         }
-        let decoded = decode(response).map_err(RequestFailure::after_response)?;
+        let permit = stream.take_response_permit();
+        let decoded = decode(response, permit).map_err(RequestFailure::after_response)?;
         stream.release();
         Ok(Ok(decoded))
     }
@@ -1090,6 +1146,7 @@ impl<C: ClientConnection> Core<C> {
             self.tls.clone(),
             timeout,
             self.max_in_flight,
+            self.request_budget.clone(),
         )
         .await
         {
@@ -1170,6 +1227,7 @@ struct BuilderSettings {
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+    max_in_flight_bytes: usize,
     namespace_id: Option<u64>,
     namespace_name: Vec<u8>,
     namespace_policy: NamespacePolicy,
@@ -1185,6 +1243,7 @@ impl BuilderSettings {
             timeouts: ClientTimeouts::default(),
             retry: RetryPolicy::default(),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            max_in_flight_bytes: openkache_protocol::MAX_RESPONSE_FRAME_BYTES,
             namespace_id: None,
             namespace_name: Vec::new(),
             namespace_policy: NamespacePolicy::default(),
@@ -1227,6 +1286,17 @@ impl BuilderSettings {
                 "must not exceed u32::MAX",
             ));
         }
+        if self.max_in_flight_bytes == 0
+            || self.max_in_flight_bytes > openkache_protocol::MAX_RESPONSE_FRAME_BYTES
+        {
+            return Err(Error::configuration(
+                "max_in_flight_bytes",
+                format!(
+                    "must be between 1 and {} bytes",
+                    openkache_protocol::MAX_RESPONSE_FRAME_BYTES
+                ),
+            ));
+        }
         if self.namespace_id == Some(0) {
             return Err(Error::configuration(
                 "namespace_id",
@@ -1246,6 +1316,7 @@ impl BuilderSettings {
             timeouts: self.timeouts,
             retry: self.retry,
             max_in_flight: self.max_in_flight,
+            max_in_flight_bytes: self.max_in_flight_bytes,
             namespace_id: self.namespace_id,
             namespace_name: self.namespace_name,
             namespace_policy: self.namespace_policy,
@@ -1260,6 +1331,7 @@ struct ConnectionSettings {
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+    max_in_flight_bytes: usize,
     namespace_id: Option<u64>,
     namespace_name: Vec<u8>,
     namespace_policy: NamespacePolicy,
@@ -1308,6 +1380,16 @@ macro_rules! builder_methods {
             /// Bounds simultaneous request lanes on one QUIC connection.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.settings.max_in_flight = maximum;
+                self
+            }
+
+            /// Sets the aggregate bytes retained across network and value work.
+            ///
+            /// The limit is shared by response bodies, decrypted/decompressed
+            /// payloads, and codec allocations. It is independent of the
+            /// stream-lane count configured by [`Self::max_in_flight`].
+            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
+                self.settings.max_in_flight_bytes = maximum;
                 self
             }
 
@@ -1424,6 +1506,16 @@ macro_rules! raw_client_methods {
                 self.0.get_in_namespace(namespace_id, item_id).await
             }
 
+            pub(crate) async fn get_in_namespace_with_permit(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<ItemValue>> {
+                self.0
+                    .get_in_namespace_with_permit(namespace_id, item_id)
+                    .await
+            }
+
             /// Stores exact encoded bytes with explicit wire-level set options.
             pub async fn set(
                 &self,
@@ -1494,6 +1586,10 @@ macro_rules! raw_client_methods {
             /// Permanently and idempotently closes this client instance.
             pub async fn close(&self) -> Result<()> {
                 self.0.close().await
+            }
+
+            pub(crate) fn request_budget(&self) -> RequestBudget {
+                self.0.request_budget()
             }
         }
     };
@@ -1599,6 +1695,7 @@ async fn connect_quinn(
         settings.timeouts,
         settings.retry,
         settings.max_in_flight,
+        settings.max_in_flight_bytes,
         settings.namespace_id,
         settings.namespace_name,
         settings.namespace_policy,
@@ -1626,6 +1723,7 @@ async fn connect_compio(
         settings.timeouts,
         settings.retry,
         settings.max_in_flight,
+        settings.max_in_flight_bytes,
         settings.namespace_id,
         settings.namespace_name,
         settings.namespace_policy,

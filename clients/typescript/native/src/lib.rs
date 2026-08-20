@@ -63,6 +63,8 @@ pub struct NativeClientOptions {
     pub retry_max_attempts: Option<f64>,
     #[napi(js_name = "max_in_flight")]
     pub max_in_flight: Option<f64>,
+    #[napi(js_name = "max_in_flight_bytes")]
+    pub max_in_flight_bytes: Option<f64>,
     pub encryption: Option<String>,
     #[napi(js_name = "key_spec")]
     pub key_spec: Option<String>,
@@ -662,6 +664,10 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .map(|value| parse_usize(value, "max_in_flight", false))
         .transpose()?
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
+    let max_in_flight_bytes = options
+        .max_in_flight_bytes
+        .map(|value| parse_usize(value, "max_in_flight_bytes", false))
+        .transpose()?;
     let encryption = options
         .encryption
         .as_deref()
@@ -680,6 +686,9 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     .retry_policy(retry)
     .max_in_flight(max_in_flight)
     .key_spec(key_spec);
+    if let Some(maximum) = max_in_flight_bytes {
+        builder = builder.max_in_flight_bytes(maximum);
+    }
     if let Some(encryption) = encryption {
         builder = builder.encryption(encryption);
     }

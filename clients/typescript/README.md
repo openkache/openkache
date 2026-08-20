@@ -138,6 +138,8 @@ The runtime-neutral codec layer is available from
   request operations.
 - `retry.max_attempts` controls retries for response-safe operations.
 - `max_in_flight` bounds concurrent request lanes on one connection.
+- `max_in_flight_bytes` bounds aggregate bytes retained across transport and
+  value protection work.
 - `encryption` selects the shared core's `compact` or recommended `robust`
   authenticated-encryption profile.
 - `value_codecs` registers current package codecs.

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ValueKeyring;
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
@@ -19,6 +20,7 @@ struct ProtectionSettings {
     encryption: Encryption,
     encryption_explicit: bool,
     key: Option<DataProtectionKey>,
+    keyring: Option<ValueKeyring>,
     key_spec: KeySpec,
 }
 
@@ -37,19 +39,28 @@ impl ProtectionSettings {
             encryption: Encryption::Robust,
             encryption_explicit: false,
             key,
+            keyring: None,
             key_spec: KeySpec::Bytes,
         }
     }
 
-    fn finish(self) -> Result<Arc<DataProtection>> {
-        match self.key {
-            Some(key) => DataProtection::with_profile_and_key_spec(
-                key,
-                self.key_spec,
-                self.compression,
-                self.encryption,
-            )
-            .map(Arc::new),
+    fn finish_with_budget(self, budget: crate::RequestBudget) -> Result<Arc<DataProtection>> {
+        let protection = match self.key {
+            Some(key) => match self.keyring {
+                Some(keyring) => DataProtection::with_keyring_and_key_spec(
+                    key,
+                    keyring,
+                    self.key_spec,
+                    self.compression,
+                    self.encryption,
+                ),
+                None => DataProtection::with_profile_and_key_spec(
+                    key,
+                    self.key_spec,
+                    self.compression,
+                    self.encryption,
+                ),
+            },
             None => {
                 if self.encryption_explicit && self.encryption != Encryption::Unprotected {
                     return Err(crate::Error::configuration(
@@ -57,9 +68,10 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected(self.key_spec, self.compression).map(Arc::new)
+                DataProtection::unprotected(self.key_spec, self.compression)
             }
-        }
+        }?;
+        Ok(Arc::new(protection.with_budget(budget)))
     }
 }
 
@@ -108,6 +120,12 @@ macro_rules! protected_builder_methods {
                 self
             }
 
+            /// Sets the aggregate bytes retained across transport and value work.
+            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
+                self.raw = self.raw.max_in_flight_bytes(maximum);
+                self
+            }
+
             /// Selects a previously server-assigned namespace ID without resolving a name.
             pub fn namespace_id(mut self, namespace_id: u64) -> Self {
                 self.raw = self.raw.namespace_id(namespace_id);
@@ -150,6 +168,12 @@ macro_rules! protected_builder_methods {
             /// Selects the exact key type accepted by this formatted keyspace.
             pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
                 self.protection.key_spec = key_spec;
+                self
+            }
+
+            /// Configures immutable value-key IDs for read-old/write-new rotation.
+            pub fn value_keyring(mut self, keyring: ValueKeyring) -> Self {
+                self.protection.keyring = Some(keyring);
                 self
             }
         }
@@ -274,7 +298,11 @@ macro_rules! protected_client_methods {
             namespace_id: u64,
             item_id: crate::ItemId,
         ) -> Result<GetOutcome<Value>> {
-            match self.raw.get_in_namespace(namespace_id, item_id).await? {
+            match self
+                .raw
+                .get_in_namespace_with_permit(namespace_id, item_id)
+                .await?
+            {
                 GetOutcome::Found(value) => self
                     .protection
                     .decode_in_namespace(namespace_id, item_id, value)
@@ -447,8 +475,8 @@ protected_builder_methods!(ProtectedClientBuilder);
 impl ProtectedClientBuilder {
     /// Connects a client with mandatory application-key and value protection.
     pub async fn connect(self) -> Result<ProtectedClient> {
-        let protection = self.protection.finish()?;
         let raw = self.raw.connect().await?;
+        let protection = self.protection.finish_with_budget(raw.request_budget())?;
         Ok(ProtectedClient { raw, protection })
     }
 }
@@ -501,8 +529,8 @@ protected_builder_methods!(LocalProtectedClientBuilder);
 impl LocalProtectedClientBuilder {
     /// Connects a Compio client with mandatory application-key and value protection.
     pub async fn connect(self) -> Result<LocalProtectedClient> {
-        let protection = self.protection.finish()?;
         let raw = self.raw.connect().await?;
+        let protection = self.protection.finish_with_budget(raw.request_budget())?;
         Ok(LocalProtectedClient { raw, protection })
     }
 }

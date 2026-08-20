@@ -19,13 +19,15 @@ use std::time::Duration;
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
-    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
-    CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, ClientRootKey, DataProtection,
+    AlpnPolicy, Backend, BytePermit, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity,
+    ClientRootKey, ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
-    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, KeyError,
-    KeySpec, MAX_CANONICAL_KEY_BYTES, NamespaceDescriptor, NamespacePolicy, Operation,
-    OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result, RetryPolicy, ServerErrorCode,
-    ServerTrust, SetCondition, SetOptions, SetOutcome, canonical_key_bytes, value, value_envelope,
+    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
+    ItemValue, KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, NamespaceDescriptor, NamespacePolicy,
+    Operation, OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result, RetryPolicy,
+    RequestBudget, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome,
+    ValueKeyring,
+    canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -367,6 +369,12 @@ macro_rules! builder_methods {
                 self
             }
 
+            /// Sets the aggregate bytes retained across transport and value work.
+            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
+                self.inner = self.inner.max_in_flight_bytes(maximum);
+                self
+            }
+
             /// Selects a previously server-assigned namespace ID without resolving a name.
             pub fn namespace_id(mut self, namespace_id: u64) -> Self {
                 self.inner = self.inner.namespace_id(namespace_id);
@@ -408,6 +416,12 @@ macro_rules! builder_methods {
             /// Selects the exact key type accepted by this formatted keyspace.
             pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
                 self.inner = self.inner.key_spec(key_spec);
+                self
+            }
+
+            /// Configures immutable value-key IDs for read-old/write-new rotation.
+            pub fn value_keyring(mut self, keyring: ValueKeyring) -> Self {
+                self.inner = self.inner.value_keyring(keyring);
                 self
             }
         }
