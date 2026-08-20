@@ -1,8 +1,4 @@
-//! Transport boundaries used by the OpenKache protocol server.
-//!
-//! QUIC remains a directional-cancellation transport with reusable
-//! bidirectional lanes.  The TLS-over-TCP profile lives beside it as a
-//! deliberately single-lane state machine; it never downgrades to plaintext.
+//! QUIC backend boundary used by the OpenKache protocol server.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -23,10 +19,9 @@ use openkache_protocol::{RequestFrameHeader, ResponseParts};
 
 #[path = "transport/tls.rs"]
 mod tls;
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-use tls::strict_server_config;
+pub(super) use tls::strict_server_config;
 #[path = "transport/tcp.rs"]
-mod tcp;
+pub(super) mod tcp;
 
 /// QUIC application error for connection-fatal malformed framing.
 pub(super) const QUIC_MALFORMED_FRAME_ERROR_CODE: u64 = 0x01;
@@ -50,11 +45,6 @@ pub(super) enum ServerEndpoint {
 
 impl ServerEndpoint {
     /// Reports whether a compiled provider can enforce the transport profile.
-    ///
-    /// Rustls-backed QUIC implementations share the singleton
-    /// X25519MLKEM768 provider.  Quiche applies the equivalent canonical
-    /// BoringSSL group name.  Neqo remains explicitly non-conforming until
-    /// its NSS integration can enforce the same requirement.
     pub(super) fn conformance(backend: QuicBackend) -> tls::Conformance {
         match backend {
             QuicBackend::Quinn | QuicBackend::Noq | QuicBackend::Quiche => {
@@ -183,9 +173,6 @@ pub(super) trait Connection {
     fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>>;
 
     /// Closes the QUIC connection with an application error code.
-    ///
-    /// Framing failures are connection-fatal; directional stream cancellation
-    /// remains separate and must not be promoted to this close path.
     fn close(&self, error_code: u64, reason: &[u8]);
 
     fn accept_bi(
@@ -216,10 +203,6 @@ pub(super) trait SendStream {
 /// Failure while receiving a request frame.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StreamReadError {
-    #[error("request stream ended at a frame boundary")]
-    EndOfStream,
-    #[error("request stream ended in the middle of a frame")]
-    Truncated,
     #[error("request read timed out")]
     Timeout,
     #[error("request exceeds the protocol limit")]
@@ -233,16 +216,13 @@ pub(super) enum StreamReadError {
 /// Request bytes paired with the server-wide memory-budget reservation they consume.
 pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
-    /// Client-selected correlation token echoed by the response writer.
-    pub(super) request_id: u64,
     _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
-    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit, request_id: u64) -> Self {
+    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit) -> Self {
         Self {
             bytes,
-            request_id,
             _permit: permit,
         }
     }
@@ -415,7 +395,11 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         .map_err(|_| StreamReadError::Timeout)?
         .map_err(StreamReadError::Transport)?;
     if first.is_empty() {
-        return Err(StreamReadError::EndOfStream);
+        return Err(StreamReadError::Transport(TransportError::backend(
+            backend,
+            "stream header read",
+            "stream ended before a request frame",
+        )));
     }
     let (frame, header) = network_runtime::timeout(timeout, async {
         let mut frame = first;
@@ -438,7 +422,11 @@ async fn read_buffered_request<S: RequestByteStream, T>(
                 .await
                 .map_err(StreamReadError::Transport)?;
             if frame.len() == previous_len {
-                return Err(StreamReadError::Truncated);
+                return Err(StreamReadError::Transport(TransportError::backend(
+                    backend,
+                    "stream header read",
+                    "stream ended before request header completed",
+                )));
             }
         }
     })
@@ -454,10 +442,9 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     if frame_len > maximum {
         return Err(StreamReadError::TooLarge);
     }
-    // Header admission runs before body allocation, but a rejection still
-    // needs the declared body consumed before the lane can be reused. Keep
-    // the rejection until the frame boundary is complete so the response
-    // remains correlated and the next request cannot be misframed.
+    // Admission may reject on bounded header metadata, but the lane must
+    // still consume the declared body before sending that correlated error.
+    // This preserves the next frame boundary and allows the lane to continue.
     let rejection = admit(header, &frame[..header.encoded_len()]).err();
     let permit = budget.acquire(header.body_len(), timeout).await?;
     let body = network_runtime::timeout(timeout, async {
@@ -468,7 +455,11 @@ async fn read_buffered_request<S: RequestByteStream, T>(
                 .await
                 .map_err(StreamReadError::Transport)?;
             if frame.len() == previous_len {
-                return Err(StreamReadError::Truncated);
+                return Err(StreamReadError::Transport(TransportError::backend(
+                    backend,
+                    "stream body read",
+                    "stream ended before request body completed",
+                )));
             }
         }
         Ok::<_, StreamReadError>(frame)
@@ -479,11 +470,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         drop(permit);
         return Ok(Err(rejection));
     }
-    // Any bytes beyond this frame remain buffered by the transport and are
-    // consumed by the next iteration. Version 1 explicitly permits multiple
-    // complete requests on one lane, so a coalesced/pipelined frame must not
-    // retire the lane after this response.
-    Ok(Ok(RequestFrame::new(body, permit, header.request_id())))
+    Ok(Ok(RequestFrame::new(body, permit)))
 }
 
 /// Stable transport failure with backend and operation context.
@@ -496,7 +483,7 @@ pub struct TransportError {
 }
 
 impl TransportError {
-    fn backend(
+    pub(crate) fn backend(
         backend: &'static str,
         operation: &'static str,
         error: impl std::fmt::Display,

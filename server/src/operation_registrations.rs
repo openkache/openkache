@@ -10,7 +10,7 @@ use openkache_protocol::Opcode;
 
 use super::operation_composition::ServerComposition;
 use super::operation_contract::{self as contract, OperationId, operation_id_for_opcode};
-use super::operation_execution_state::OperationRuntime;
+use super::operation_execution_state::{ExperimentalApiGate, OperationRuntime};
 use super::operation_registration::ServerOperationRegistration;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
@@ -47,13 +47,14 @@ pub(super) fn build_operation_runtime(
     cache: Arc<NetworkWorkerCache>,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     observability: Arc<ObservabilityState>,
+    experimental_api: ExperimentalApiGate,
 ) -> Result<Arc<OperationRuntime>, &'static str> {
     let storage_port = super::storage_port::StoragePort::new(Arc::clone(&cache));
     let coordination_registry = Arc::clone(&namespaces);
     let catalog_registry = Arc::clone(&namespaces);
     let namespace_coordination_port: NamespaceCoordinationCapabilityHandle = coordination_registry;
     let namespace_catalog_port: NamespaceCatalogCapabilityHandle = catalog_registry;
-    let namespace_membership_port: NamespaceMembershipCapabilityHandle = namespaces;
+    let namespace_membership_port: NamespaceMembershipCapabilityHandle = namespaces.clone();
     let observability_port: ObservabilityCapabilityHandle = observability;
     let bootstrap_entries = [
         CapabilityEntry::new(super::storage_port::STORAGE_PORT, &storage_port),
@@ -63,7 +64,7 @@ pub(super) fn build_operation_runtime(
         CapabilityEntry::new(OBSERVABILITY_PORT, &observability_port),
     ];
     let bootstrap = CapabilityList::overlay(base, &bootstrap_entries);
-    let runtime = SERVER_COMPOSITION.initialize_modules(&bootstrap)?;
+    let runtime = SERVER_COMPOSITION.initialize_modules_with_gate(&bootstrap, experimental_api)?;
     Ok(Arc::new(runtime))
 }
 
@@ -81,6 +82,11 @@ pub(super) fn validate() -> Result<(), &'static str> {
         seen[index] = true;
     }
     for entry in contract::operation_registry() {
+        // Namespace lifecycle operations are modeled for the explicit
+        // out-of-band namespace gate, never for the data-plane registry.
+        if entry.wire.out_of_band {
+            continue;
+        }
         let Some(_registration) = server_operation(entry.opcode) else {
             return Err("modeled operation has no server registration");
         };
@@ -100,6 +106,9 @@ pub(super) fn validate() -> Result<(), &'static str> {
 
     super::operation_codecs::validate_contract_codecs()?;
     for entry in contract::operation_registry() {
+        if entry.wire.out_of_band {
+            continue;
+        }
         if server_operation(entry.opcode).is_none() {
             return Err("modeled operation has no registered server handler");
         }

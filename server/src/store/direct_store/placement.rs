@@ -130,6 +130,9 @@ impl Kvkache {
     ) -> Result<bool> {
         if replacement.in_place {
             debug_assert_eq!(previous, Some(replacement.table_location));
+            if let Some(index) = self.persistent_index.as_mut() {
+                index.insert(storage_key, replacement.table_location);
+            }
             return Ok(false);
         }
         let previous_disappeared = match previous {
@@ -170,6 +173,9 @@ impl Kvkache {
         };
         if let Some(previous) = previous {
             self.remove_previous_mutable_item(&storage_key, previous, previous_mutable_value);
+        }
+        if let Some(index) = self.persistent_index.as_mut() {
+            index.insert(storage_key, replacement.table_location);
         }
         Ok(previous_disappeared)
     }
@@ -219,6 +225,9 @@ impl Kvkache {
             ));
         }
         self.remove_previous_mutable_item(&storage_key, previous, previous_mutable_value);
+        if let Some(index) = self.persistent_index.as_mut() {
+            index.remove(&storage_key);
+        }
         Ok(())
     }
 }

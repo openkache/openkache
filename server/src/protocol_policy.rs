@@ -120,15 +120,6 @@ impl NamespaceDescriptor {
         Ok(payload)
     }
 
-    pub(crate) fn encode_inline(self) -> Result<openkache_protocol::InlineBytes> {
-        let mut payload = openkache_protocol::InlineBytes::new();
-        self.encode_into(|bytes| {
-            payload.try_extend_from_slice(bytes)?;
-            Ok(())
-        })?;
-        Ok(payload)
-    }
-
     fn encode_into(self, mut append: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
         if self.namespace_id == 0 {
             return Err(ProtocolError::InvalidNamespaceId);

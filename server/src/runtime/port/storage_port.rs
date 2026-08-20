@@ -5,6 +5,7 @@
 
 use openkache_protocol::{OwnedRange, StableBytes, StableOwnerPool};
 
+use crate::StorageKey;
 pub(crate) use crate::types::StorageWriteOptions;
 
 /// Borrowed API-owned storage scope whose bytes remain opaque to the port.
@@ -70,6 +71,11 @@ impl PreparedStorageAddress {
 
     pub(crate) const fn route(&self) -> StorageRoute {
         self.route
+    }
+
+    /// Returns the fixed storage identity resolved by address preparation.
+    pub(crate) const fn storage_key(&self) -> StorageKey {
+        StorageKey::new(self.key)
     }
 }
 

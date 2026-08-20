@@ -10,6 +10,31 @@ use std::sync::Arc;
 
 use super::operation_contract::OperationId;
 use super::operation_registration::ServerOperationRegistration;
+use crate::operation_contract::OperationWireSpec;
+
+/// Configuration selected once at bind time for operations outside stable v1.
+///
+/// The generated operation descriptor remains the source of truth for the
+/// exact revision string. Keeping the gate in the worker-owned runtime makes
+/// header admission and operation execution observe the same immutable choice.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ExperimentalApiGate {
+    pub(super) enabled: bool,
+    pub(super) revision: Option<Arc<str>>,
+}
+
+impl ExperimentalApiGate {
+    pub(super) fn new(enabled: bool, revision: Option<String>) -> Self {
+        Self {
+            enabled,
+            revision: revision.map(Arc::<str>::from),
+        }
+    }
+
+    pub(super) fn admits(&self, wire: OperationWireSpec) -> bool {
+        wire.enabled(self.enabled, self.revision.as_deref())
+    }
+}
 
 pub(super) type ErasedOperationState = dyn Any + Send + Sync;
 pub(super) type StateValidator = fn(Option<&ErasedOperationState>) -> bool;
@@ -70,10 +95,10 @@ impl OperationStateInstaller {
         }
     }
 
-    /// Validates all registrations and state slots before publishing runtime.
-    pub(super) fn freeze(
+    pub(super) fn freeze_with_gate(
         mut self,
         registrations: impl IntoIterator<Item = &'static ServerOperationRegistration>,
+        experimental_api: ExperimentalApiGate,
     ) -> Result<OperationRuntime, &'static str> {
         let mut operations = [const { None }; OperationId::COUNT];
         for registration in registrations {
@@ -99,7 +124,10 @@ impl OperationStateInstaller {
         if self.states.iter().any(Option::is_some) {
             return Err("operation state was bound for an unregistered opcode");
         }
-        Ok(OperationRuntime { operations })
+        Ok(OperationRuntime {
+            operations,
+            experimental_api,
+        })
     }
 }
 
@@ -136,6 +164,7 @@ impl OperationStateBindings<'_> {
 
 pub(super) struct OperationRuntime {
     operations: [Option<BoundOperation>; OperationId::COUNT],
+    experimental_api: ExperimentalApiGate,
 }
 
 impl OperationRuntime {
@@ -155,5 +184,11 @@ impl OperationRuntime {
         self.operations[operation_id.index()]
             .as_ref()
             .map(|operation| (operation.registration, operation.state()))
+    }
+
+    /// Returns whether the generated operation is assigned to this worker's
+    /// data-plane under the immutable experimental gate.
+    pub(super) fn admits_wire(&self, wire: OperationWireSpec) -> bool {
+        self.experimental_api.admits(wire)
     }
 }

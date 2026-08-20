@@ -16,29 +16,33 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crc32fast::hash;
-use openkache_protocol::ITEM_ID_BYTES;
+
+use crate::types::STORAGE_KEY_BYTES;
 
 const JOURNAL_MAGIC: &[u8; 8] = b"OKNJNL01";
 const JOURNAL_VERSION: u32 = 1;
 const JOURNAL_HEADER_BYTES: usize = JOURNAL_MAGIC.len() + std::mem::size_of::<u32>();
 const JOURNAL_RECORD_BYTES: usize = 56;
 const JOURNAL_BATCH_WINDOW: Duration = Duration::from_micros(50);
+// Bit 7 was reserved in the original record flags. New records use it to
+// identify payloads that are already derived StorageKeys; legacy records leave
+// it clear and therefore carry raw fixed-width Item IDs.
+const JOURNAL_STORAGE_KEY_FLAG: u8 = 0x80;
+const JOURNAL_EVENT_FLAGS_MASK: u8 = 0x7f;
 static NEXT_COMPACTION_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JournalEvent {
     ReserveItem {
         namespace_id: u64,
-        item_id: [u8; ITEM_ID_BYTES],
-        item_id_len: u8,
+        item_id: [u8; STORAGE_KEY_BYTES],
         route: u64,
         inserted_item: bool,
         inserted_worker: bool,
     },
     RollbackItem {
         namespace_id: u64,
-        item_id: [u8; ITEM_ID_BYTES],
-        item_id_len: u8,
+        item_id: [u8; STORAGE_KEY_BYTES],
         route: u64,
         remove_item: bool,
         remove_worker: bool,
@@ -52,14 +56,18 @@ pub(crate) enum JournalEvent {
     },
     MarkDelete {
         namespace_id: u64,
-        item_id: [u8; ITEM_ID_BYTES],
-        item_id_len: u8,
+        item_id: [u8; STORAGE_KEY_BYTES],
     },
     PruneItem {
         namespace_id: u64,
-        item_id: [u8; ITEM_ID_BYTES],
-        item_id_len: u8,
+        item_id: [u8; STORAGE_KEY_BYTES],
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct JournalRecord {
+    pub(crate) event: JournalEvent,
+    pub(crate) storage_key: bool,
 }
 
 enum Command {
@@ -83,7 +91,15 @@ pub(crate) struct NamespaceJournal {
 }
 
 impl NamespaceJournal {
+    #[allow(dead_code)]
     pub(crate) fn load_events(path: &Path) -> io::Result<Vec<JournalEvent>> {
+        Ok(Self::load_records(path)?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+
+    pub(crate) fn load_records(path: &Path) -> io::Result<Vec<JournalRecord>> {
         let mut file = match OpenOptions::new().read(true).write(true).open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
@@ -103,7 +119,12 @@ impl NamespaceJournal {
         Ok(events)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn start(path: &Path) -> io::Result<Self> {
+        Self::start_with_storage_keys(path, false)
+    }
+
+    pub(crate) fn start_with_storage_keys(path: &Path, storage_keys: bool) -> io::Result<Self> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -119,7 +140,7 @@ impl NamespaceJournal {
         let path = path.to_owned();
         let thread = thread::Builder::new()
             .name("openkache-namespace-journal".to_owned())
-            .spawn(move || run_writer(file, path, receiver))
+            .spawn(move || run_writer(file, path, receiver, storage_keys))
             .map_err(|error| io::Error::other(format!("namespace journal thread: {error}")))?;
         Ok(Self {
             sender,
@@ -160,7 +181,7 @@ impl Drop for NamespaceJournal {
     }
 }
 
-fn run_writer(mut file: File, path: PathBuf, receiver: Receiver<Command>) {
+fn run_writer(mut file: File, path: PathBuf, receiver: Receiver<Command>, storage_keys: bool) {
     while let Ok(command) = receiver.recv() {
         match command {
             Command::Append { event, ack } => {
@@ -177,7 +198,7 @@ fn run_writer(mut file: File, path: PathBuf, receiver: Receiver<Command>) {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                let result = append_batch(&mut file, &pending);
+                let result = append_batch(&mut file, &pending, storage_keys);
                 for (_, ack) in pending {
                     let ack_result = result
                         .as_ref()
@@ -209,9 +230,10 @@ fn run_writer(mut file: File, path: PathBuf, receiver: Receiver<Command>) {
 fn append_batch(
     file: &mut File,
     pending: &[(JournalEvent, SyncSender<io::Result<()>>)],
+    storage_keys: bool,
 ) -> io::Result<()> {
     for (event, _) in pending {
-        let record = encode_event(*event)?;
+        let record = encode_event(*event, storage_keys);
         file.write_all(&record)?;
     }
     file.sync_all()
@@ -293,7 +315,7 @@ fn validate_header(file: &mut File) -> io::Result<()> {
     Ok(())
 }
 
-fn decode_events(bytes: &[u8]) -> io::Result<(Vec<JournalEvent>, usize)> {
+fn decode_events(bytes: &[u8]) -> io::Result<(Vec<JournalRecord>, usize)> {
     if bytes.is_empty() {
         return Ok((Vec::new(), 0));
     }
@@ -331,20 +353,18 @@ fn decode_events(bytes: &[u8]) -> io::Result<(Vec<JournalEvent>, usize)> {
     Ok((events, JOURNAL_HEADER_BYTES + complete_len))
 }
 
-fn encode_event(event: JournalEvent) -> io::Result<[u8; JOURNAL_RECORD_BYTES]> {
+fn encode_event(event: JournalEvent, storage_keys: bool) -> [u8; JOURNAL_RECORD_BYTES] {
     let mut record = [0; JOURNAL_RECORD_BYTES];
-    let (tag, flags, item_id_len, namespace_id, item_id, route) = match event {
+    let (tag, flags, namespace_id, item_id, route) = match event {
         JournalEvent::ReserveItem {
             namespace_id,
             item_id,
-            item_id_len,
             route,
             inserted_item,
             inserted_worker,
         } => (
             0,
             u8::from(inserted_item) | (u8::from(inserted_worker) << 1),
-            item_id_len,
             namespace_id,
             item_id,
             route,
@@ -352,14 +372,12 @@ fn encode_event(event: JournalEvent) -> io::Result<[u8; JOURNAL_RECORD_BYTES]> {
         JournalEvent::RollbackItem {
             namespace_id,
             item_id,
-            item_id_len,
             route,
             remove_item,
             remove_worker,
         } => (
             1,
             u8::from(remove_item) | (u8::from(remove_worker) << 1),
-            item_id_len,
             namespace_id,
             item_id,
             route,
@@ -367,110 +385,85 @@ fn encode_event(event: JournalEvent) -> io::Result<[u8; JOURNAL_RECORD_BYTES]> {
         JournalEvent::ReserveWorker {
             namespace_id,
             route,
-        } => (2, 0, 0, namespace_id, [0; ITEM_ID_BYTES], route),
+        } => (2, 0, namespace_id, [0; STORAGE_KEY_BYTES], route),
         JournalEvent::MarkWorkersClean { namespace_id } => {
-            (3, 0, 0, namespace_id, [0; ITEM_ID_BYTES], 0)
+            (3, 0, namespace_id, [0; STORAGE_KEY_BYTES], 0)
         }
         JournalEvent::MarkDelete {
             namespace_id,
             item_id,
-            item_id_len,
-        } => (4, 0, item_id_len, namespace_id, item_id, 0),
+        } => (4, 0, namespace_id, item_id, 0),
         JournalEvent::PruneItem {
             namespace_id,
             item_id,
-            item_id_len,
-        } => (5, 0, item_id_len, namespace_id, item_id, 0),
+        } => (5, 0, namespace_id, item_id, 0),
     };
-    if item_id_len != 0 && usize::from(item_id_len) != ITEM_ID_BYTES {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "short item IDs must be persisted through metadata compaction",
-        ));
-    }
     record[0] = tag;
-    record[1] = flags;
-    record[2] = item_id_len;
+    record[1] = if storage_keys {
+        flags | JOURNAL_STORAGE_KEY_FLAG
+    } else {
+        flags
+    };
     record[4..12].copy_from_slice(&namespace_id.to_be_bytes());
-    record[12..12 + ITEM_ID_BYTES].copy_from_slice(&item_id);
+    record[12..12 + STORAGE_KEY_BYTES].copy_from_slice(&item_id);
     record[44..52].copy_from_slice(&route.to_be_bytes());
     let checksum = hash(&record[..52]).to_be_bytes();
     record[52..56].copy_from_slice(&checksum);
-    Ok(record)
+    record
 }
 
-fn decode_event(record: &[u8]) -> io::Result<JournalEvent> {
-    if record.len() != JOURNAL_RECORD_BYTES || record[3] != 0 {
+fn decode_event(record: &[u8]) -> io::Result<JournalRecord> {
+    if record.len() != JOURNAL_RECORD_BYTES || record[2..4] != [0, 0] {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             "namespace journal record is malformed",
         ));
     }
     let namespace_id = u64::from_be_bytes(record[4..12].try_into().expect("u64 width is fixed"));
-    let item_id = record[12..12 + ITEM_ID_BYTES]
+    let item_id = record[12..12 + STORAGE_KEY_BYTES]
         .try_into()
         .expect("item ID width is fixed");
-    let raw_item_id_len = record[2];
-    let item_id_len = match raw_item_id_len {
-        // Existing version-1 records left both reserved bytes zero.  They
-        // necessarily represented the legacy fixed-width item identity.
-        0 => ITEM_ID_BYTES as u8,
-        length if usize::from(length) == ITEM_ID_BYTES => length,
-        _ => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "namespace journal short item ID must be compacted",
-            ));
-        }
-    };
     let route = u64::from_be_bytes(record[44..52].try_into().expect("u64 width is fixed"));
-    let flags = record[1];
-    match record[0] {
-        0 => Ok(JournalEvent::ReserveItem {
+    let storage_key = record[1] & JOURNAL_STORAGE_KEY_FLAG != 0;
+    let flags = record[1] & JOURNAL_EVENT_FLAGS_MASK;
+    let event = match record[0] {
+        0 if flags & !0x03 == 0 => JournalEvent::ReserveItem {
             namespace_id,
             item_id,
-            item_id_len,
             route,
             inserted_item: flags & 1 != 0,
             inserted_worker: flags & 2 != 0,
-        }),
-        1 => Ok(JournalEvent::RollbackItem {
+        },
+        1 if flags & !0x03 == 0 => JournalEvent::RollbackItem {
             namespace_id,
             item_id,
-            item_id_len,
             route,
             remove_item: flags & 1 != 0,
             remove_worker: flags & 2 != 0,
-        }),
-        2 if flags == 0 && raw_item_id_len == 0 && item_id == [0; ITEM_ID_BYTES] => {
-            Ok(JournalEvent::ReserveWorker {
-                namespace_id,
-                route,
-            })
+        },
+        2 if flags == 0 => JournalEvent::ReserveWorker {
+            namespace_id,
+            route,
+        },
+        3 if flags == 0 && route == 0 && item_id == [0; STORAGE_KEY_BYTES] => {
+            JournalEvent::MarkWorkersClean { namespace_id }
         }
-        3 if flags == 0
-            && raw_item_id_len == 0
-            && item_id_len == ITEM_ID_BYTES as u8
-            && route == 0
-            && item_id == [0; ITEM_ID_BYTES] =>
-        {
-            Ok(JournalEvent::MarkWorkersClean { namespace_id })
-        }
-        4 if flags == 0 && route == 0 => Ok(JournalEvent::MarkDelete {
+        4 if flags == 0 && route == 0 => JournalEvent::MarkDelete {
             namespace_id,
             item_id,
-            item_id_len,
-        }),
-        5 if flags == 0 && route == 0 => Ok(JournalEvent::PruneItem {
+        },
+        5 if flags == 0 && route == 0 => JournalEvent::PruneItem {
             namespace_id,
             item_id,
-            item_id_len,
-        }),
-        _ => Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "namespace journal event is unknown",
-        )),
-    }
+        },
+        _ => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "namespace journal event is unknown",
+            ));
+        }
+    };
+    Ok(JournalRecord { event, storage_key })
 }
 
 fn clone_error(error: &io::Error) -> io::Error {

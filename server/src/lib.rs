@@ -189,8 +189,8 @@ pub use error::{KvError, Result};
 mod config;
 pub use config::{
     AppConfig, BucketSelectionPolicy, Config, IoUringConfig, NetworkConfig, ObservabilityConfig,
-    QuicBackend, QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, TlsConfig,
-    bits_for_count, expand_thread_pattern,
+    QuicBackend, QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TcpConfig, TimeoutConfig,
+    TlsConfig, bits_for_count, expand_thread_pattern,
 };
 pub use platform::allowed_cpu_ids;
 

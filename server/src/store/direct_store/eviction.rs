@@ -187,6 +187,9 @@ impl Kvkache {
             {
                 self.live_keys = self.live_keys.saturating_sub(1);
             }
+            if let Some(index) = self.persistent_index.as_mut() {
+                index.remove(&candidate.storage_key);
+            }
         }
 
         self.directory
@@ -259,7 +262,10 @@ impl Kvkache {
             evictable_items.push(EvictableLocation {
                 storage_key: item.storage_key,
                 table_location: location,
-                live: item.is_live_at(now_ms),
+                // `live_keys` counts non-tombstone table entries even after
+                // their TTL has elapsed. Removing an expired entry must
+                // decrement the counter just like removing a live value.
+                live: !item.is_tombstone,
             });
         }
         Ok(())

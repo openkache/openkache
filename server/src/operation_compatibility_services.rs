@@ -49,23 +49,6 @@ pub(super) struct SyncState<S = StoragePort> {
     pub(super) membership: NamespaceMembershipCapabilityHandle,
 }
 
-pub(super) struct NamespaceOpenState {
-    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
-    pub(super) catalog: NamespaceCatalogCapabilityHandle,
-}
-
-pub(super) struct NamespaceUpdateState {
-    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
-    pub(super) catalog: NamespaceCatalogCapabilityHandle,
-}
-
-pub(super) struct NamespaceDeleteState<S = StoragePort> {
-    pub(super) storage: S,
-    pub(super) coordination: NamespaceCoordinationCapabilityHandle,
-    pub(super) catalog: NamespaceCatalogCapabilityHandle,
-    pub(super) membership: NamespaceMembershipCapabilityHandle,
-}
-
 pub(crate) const fn storage_write_options(
     options: super::super::SetOptions,
 ) -> Result<StorageWriteOptions, &'static [u8]> {

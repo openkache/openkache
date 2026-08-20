@@ -1,17 +1,24 @@
 //! TLS 1.3 over TCP, one request lane per connection.
 //!
-//! This module deliberately stops at the provider-neutral connection
-//! boundary. Runtime adapters feed complete TLS records into
-//! [`OneLaneConnection::receive_record`] and write records returned by
-//! [`OneLaneConnection::take_records`]. No adapter may expose a plaintext
-//! socket or bypass the bounded record/frame checks below.
+//! [`OneLaneConnection`] owns the provider-neutral TLS and framing state
+//! machine. [`TlsTcpLane`] adapts it to the selected runtime's TCP stream;
+//! no caller may expose a plaintext socket or bypass the bounded record/frame
+//! checks below.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::tls::{self, ConformanceError};
+use crate::network_runtime::TcpStream;
 use crate::protocol::RequestFrame as ProtocolRequestFrame;
+use crate::transport::{
+    ReceiveStream, RequestBudget, RequestFrame, SendStream, StreamReadError, TransportError,
+};
+use futures_util::lock::Mutex;
+use openkache_protocol::ResponseParts;
 
 /// TLS record payloads are limited to 2^14 bytes by TLS 1.3. The extra
 /// allowance covers the record header and AEAD expansion without accepting an
@@ -24,6 +31,7 @@ pub(crate) const MAX_TLS_RECORD_BYTES: usize = (1 << 14) + 256 + 5;
 /// available, so this budget accounts for the request bytes that remain
 /// outstanding until the corresponding responses are finished. Callers that
 /// have a tighter memory budget should use [`OneLaneConnection::with_limits`].
+#[allow(dead_code)]
 const DEFAULT_MAX_IN_FLIGHT_BYTES_MULTIPLIER: usize = 64;
 
 /// One-lane connection state.
@@ -107,8 +115,352 @@ pub(crate) struct OneLaneConnection {
     read_paused: bool,
 }
 
+/// Runtime-owned TLS-over-TCP lane.
+///
+/// `OneLaneConnection` contains the provider-neutral TLS and frame state
+/// machine.  This wrapper adds the selected network runtime's TCP stream and
+/// exposes the same receive/send traits used by QUIC request dispatch.  The
+/// two halves share one mutex because rustls keeps record reads and writes in
+/// one connection object; request dispatch remains sequential on this lane,
+/// while complete pipelined frames stay buffered in `OneLaneConnection`.
+pub(crate) struct TlsTcpLane {
+    inner: Arc<Mutex<TlsTcpLaneInner>>,
+}
+
+struct TlsTcpLaneInner {
+    stream: TcpStream,
+    connection: OneLaneConnection,
+}
+
+pub(crate) struct TlsTcpReceiveStream {
+    lane: Arc<Mutex<TlsTcpLaneInner>>,
+}
+
+pub(crate) struct TlsTcpSendStream {
+    lane: Arc<Mutex<TlsTcpLaneInner>>,
+}
+
+impl TlsTcpLane {
+    pub(crate) fn new(
+        stream: TcpStream,
+        config: Arc<rustls::ServerConfig>,
+        max_frame: usize,
+        max_in_flight_bytes: usize,
+    ) -> Result<Self, rustls::Error> {
+        Ok(Self {
+            inner: Arc::new(Mutex::new(TlsTcpLaneInner {
+                stream,
+                connection: OneLaneConnection::with_limits(
+                    config,
+                    max_frame,
+                    max_in_flight_bytes,
+                )?,
+            })),
+        })
+    }
+
+    pub(crate) fn split(&self) -> (TlsTcpSendStream, TlsTcpReceiveStream) {
+        (
+            TlsTcpSendStream {
+                lane: Arc::clone(&self.inner),
+            },
+            TlsTcpReceiveStream {
+                lane: Arc::clone(&self.inner),
+            },
+        )
+    }
+
+    /// Completes the TLS handshake before request admission.
+    pub(crate) async fn handshake(&self, timeout: Duration) -> Result<(), TransportError> {
+        let result = crate::network_runtime::timeout(timeout, async {
+            loop {
+                let mut lane = self.inner.lock().await;
+                if lane.connection.state() != LaneState::Handshaking {
+                    return Ok::<_, TcpTransportError>(());
+                }
+                let record = read_record(&mut lane.stream).await?;
+                let Some(record) = record else {
+                    let _ = lane.connection.receive_eof()?;
+                    return Err(TcpTransportError::UncleanClose);
+                };
+                lane.connection.receive_record(&record)?;
+                flush_records(&mut lane).await?;
+            }
+        })
+        .await
+        .map_err(|_| TransportError::backend("tls-tcp", "handshake", "timed out"))?;
+        result.map_err(|error| tcp_error(error, "handshake"))
+    }
+
+    pub(crate) async fn peer_certificate(
+        &self,
+    ) -> Option<rustls::pki_types::CertificateDer<'static>> {
+        self.inner
+            .lock()
+            .await
+            .connection
+            .peer_certificate()
+    }
+
+    /// Sends a close notification and flushes the resulting TLS records.
+    pub(crate) async fn close(&self) {
+        let mut lane = self.inner.lock().await;
+        lane.connection.close();
+        let _ = flush_records(&mut lane).await;
+    }
+}
+
+impl OneLaneConnection {
+    fn peer_certificate(&self) -> Option<rustls::pki_types::CertificateDer<'static>> {
+        self.tls
+            .peer_certificates()
+            .and_then(|certificates| certificates.first().cloned())
+    }
+}
+
+impl ReceiveStream for TlsTcpReceiveStream {
+    fn read_request<T>(
+        &mut self,
+        maximum: usize,
+        timeout: Duration,
+        budget: &RequestBudget,
+        admit: impl FnOnce(
+            openkache_protocol::RequestFrameHeader,
+            &[u8],
+        ) -> Result<(), T>,
+    ) -> impl Future<Output = Result<Result<RequestFrame, T>, StreamReadError>> {
+        let lane = Arc::clone(&self.lane);
+        let budget = budget.clone();
+        async move {
+            crate::network_runtime::timeout(timeout, async {
+                let mut admit = Some(admit);
+                loop {
+                    let event = {
+                        let mut state = lane.lock().await;
+                        match state
+                            .connection
+                            .take_event()
+                            .map_err(map_stream_error)?
+                        {
+                            ReceiveEvent::NeedMore | ReceiveEvent::Ready => {
+                                let record = read_record(&mut state.stream)
+                                    .await
+                                    .map_err(|error| tcp_error(error, "read"))?;
+                                let Some(record) = record else {
+                                    match state.connection.receive_eof() {
+                                        Ok(ReceiveEvent::NeedMore)
+                                        | Ok(ReceiveEvent::PeerCloseNotify) => {
+                                            return Err(StreamReadError::Transport(
+                                                TransportError::backend(
+                                                    "tls-tcp",
+                                                    "read",
+                                                    "stream ended after TLS close_notify",
+                                                ),
+                                            ));
+                                        }
+                                        Ok(ReceiveEvent::Request(_)) => {
+                                            return Err(StreamReadError::Transport(
+                                                TransportError::backend(
+                                                    "tls-tcp",
+                                                    "read",
+                                                    "TLS close_notify interrupted a request frame",
+                                                ),
+                                            ));
+                                        }
+                                        Ok(ReceiveEvent::Backpressure)
+                                        | Ok(ReceiveEvent::Ready) => {
+                                            return Err(StreamReadError::Transport(
+                                                TransportError::backend(
+                                                    "tls-tcp",
+                                                    "read",
+                                                    "stream ended before a request frame",
+                                                ),
+                                            ));
+                                        }
+                                        Err(error) => return Err(map_stream_error(error)),
+                                    }
+                                };
+                                let event = state
+                                    .connection
+                                    .receive_record(&record)
+                                    .map_err(map_stream_error)?;
+                                flush_records(&mut state)
+                                    .await
+                                    .map_err(|error| tcp_error(error, "write"))?;
+                                event
+                            }
+                            event => event,
+                        }
+                    };
+
+                    match event {
+                        ReceiveEvent::Request(frame) => {
+                            if frame.len() > maximum {
+                                return Err(StreamReadError::TooLarge);
+                            }
+                            let header =
+                                ProtocolRequestFrame::decode_header(&frame)?.ok_or(
+                                    openkache_protocol::ProtocolError::FrameTooShort {
+                                        expected: 1,
+                                        actual: frame.len(),
+                                    },
+                                )?;
+                            let frame_len = header.frame_len()?;
+                            if frame_len != frame.len() {
+                                return Err(StreamReadError::Protocol(
+                                    openkache_protocol::ProtocolError::FrameLength {
+                                        expected: frame_len,
+                                        actual: frame.len(),
+                                    },
+                                ));
+                            }
+                            let rejection = admit
+                                .take()
+                                .expect("request admission callback is called once")(
+                                header,
+                                &frame[..header.encoded_len()],
+                            )
+                            .err();
+                            let permit = budget.acquire(header.body_len(), timeout).await?;
+                            if let Some(rejection) = rejection {
+                                drop(permit);
+                                return Ok(Err(rejection));
+                            }
+                            return Ok(Ok(RequestFrame::new(
+                                frame,
+                                permit,
+                            )));
+                        }
+                        ReceiveEvent::PeerCloseNotify => {
+                            let mut state = lane.lock().await;
+                            // Sequential request dispatch has no outstanding
+                            // response when the next read observes close_notify.
+                            state
+                                .connection
+                                .finish_response()
+                                .map_err(map_stream_error)?;
+                            flush_records(&mut state)
+                                .await
+                                .map_err(|error| tcp_error(error, "write"))?;
+                            return Err(StreamReadError::Transport(
+                                TransportError::backend(
+                                    "tls-tcp",
+                                    "read",
+                                    "stream ended after TLS close_notify",
+                                ),
+                            ));
+                        }
+                        ReceiveEvent::Backpressure => {
+                            return Err(StreamReadError::TooLarge);
+                        }
+                        ReceiveEvent::NeedMore | ReceiveEvent::Ready => continue,
+                    }
+                }
+            })
+            .await
+            .map_err(|_| StreamReadError::Timeout)?
+        }
+    }
+}
+
+impl SendStream for TlsTcpSendStream {
+    fn write_response(
+        &mut self,
+        parts: ResponseParts,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<(), TransportError>> {
+        let lane = Arc::clone(&self.lane);
+        async move {
+            let result = crate::network_runtime::timeout(timeout, async {
+                let mut state = lane.lock().await;
+                let segments = parts.into_segments();
+                let response_len = segments.iter().try_fold(0_usize, |length, segment| {
+                    length.checked_add(segment.as_slice().len())
+                });
+                if response_len
+                    .map(|length| length > openkache_protocol::MAX_RESPONSE_FRAME_BYTES)
+                    .unwrap_or(true)
+                {
+                    state.connection.state = LaneState::Unclean;
+                    return Err(TcpTransportError::FrameTooLarge);
+                }
+                for segment in segments {
+                    state.connection.write_response(segment.as_slice())?;
+                }
+                state.connection.finish_response()?;
+                flush_records(&mut state).await?;
+                Ok::<_, TcpTransportError>(())
+            })
+            .await
+            .map_err(|_| TransportError::backend("tls-tcp", "write response", "timed out"))?;
+            result.map_err(|error| tcp_error(error, "write response"))
+        }
+    }
+}
+
+async fn read_record(stream: &mut TcpStream) -> Result<Option<Vec<u8>>, TcpTransportError> {
+    let mut header = vec![0_u8; 5];
+    let read = read_exact(stream, &mut header).await?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if read != header.len() {
+        return Err(TcpTransportError::RecordTooShort);
+    }
+    let payload_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let record_len = payload_len
+        .checked_add(5)
+        .ok_or(TcpTransportError::RecordTooLarge)?;
+    if record_len > MAX_TLS_RECORD_BYTES {
+        return Err(TcpTransportError::RecordTooLarge);
+    }
+    let mut record = header;
+    record.resize(record_len, 0);
+    if read_exact(stream, &mut record[5..]).await? != payload_len {
+        return Err(TcpTransportError::RecordTooShort);
+    }
+    validate_record(&record)?;
+    Ok(Some(record))
+}
+
+async fn read_exact(stream: &mut TcpStream, buffer: &mut [u8]) -> Result<usize, TcpTransportError> {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let input = vec![0_u8; buffer.len() - offset];
+        let (read, input) = stream.read(input).await?;
+        if read == 0 {
+            return Ok(offset);
+        }
+        buffer[offset..offset + read].copy_from_slice(&input[..read]);
+        offset += read;
+    }
+    Ok(offset)
+}
+
+async fn flush_records(state: &mut TlsTcpLaneInner) -> Result<(), TcpTransportError> {
+    for record in state.connection.take_records()? {
+        state.stream.write_all(record).await?;
+    }
+    Ok(())
+}
+
+fn map_stream_error(error: TcpTransportError) -> StreamReadError {
+    match error {
+        TcpTransportError::Protocol(error) => StreamReadError::Protocol(error),
+        TcpTransportError::FrameTooLarge | TcpTransportError::RecordTooLarge => {
+            StreamReadError::TooLarge
+        }
+        error => StreamReadError::Transport(tcp_error(error, "read")),
+    }
+}
+
+fn tcp_error(error: impl std::fmt::Display, operation: &'static str) -> TransportError {
+    TransportError::backend("tls-tcp", operation, error)
+}
+
 impl OneLaneConnection {
     /// Creates a server-side TLS connection using a strict profile config.
+    #[allow(dead_code)]
     pub(crate) fn new(
         config: Arc<rustls::ServerConfig>,
         max_frame: usize,
@@ -157,6 +509,7 @@ impl OneLaneConnection {
     }
 
     /// Returns whether the adapter should read another encrypted record.
+    #[allow(dead_code)]
     pub(crate) fn wants_read(&self) -> bool {
         self.tls.wants_read()
             && !self.read_paused
@@ -164,6 +517,7 @@ impl OneLaneConnection {
     }
 
     /// Returns whether TLS has bytes the adapter must send.
+    #[allow(dead_code)]
     pub(crate) fn wants_write(&self) -> bool {
         self.tls.wants_write()
     }
@@ -342,7 +696,7 @@ impl OneLaneConnection {
         {
             return Err(TcpTransportError::Closed);
         }
-        if response.len() > self.max_frame {
+        if response.len() > openkache_protocol::MAX_RESPONSE_FRAME_BYTES {
             self.state = LaneState::Unclean;
             return Err(TcpTransportError::FrameTooLarge);
         }

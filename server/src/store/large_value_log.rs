@@ -91,6 +91,24 @@ impl LargeValueLog {
         Ok(oldest)
     }
 
+    pub(crate) fn restore(&mut self, location: LargeValueLocation) -> Result<()> {
+        let end = location
+            .record_start
+            .checked_add(u64::from(location.padded_len))
+            .ok_or_else(|| KvError::Worker("persisted large-value offset overflowed".into()))?;
+        if location.logical_len > location.padded_len
+            || !u64::from(location.padded_len).is_multiple_of(BUCKET_BYTES as u64)
+            || end > self.capacity
+        {
+            return Err(KvError::Worker(
+                "persisted large-value metadata does not match the configured geometry".into(),
+            ));
+        }
+        self.tail = if end == self.capacity { 0 } else { end };
+        self.records.push_back(location);
+        Ok(())
+    }
+
     fn next_record_start(&self, record_len: u64) -> Option<u64> {
         let Some(oldest) = self.records.front() else {
             return Some(0);

@@ -361,7 +361,15 @@ impl Config {
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u32,
+    /// Enables operations marked experimental in the generated wire contract.
+    ///
+    /// Experimental operations remain unassigned unless this switch is paired
+    /// with the exact draft revision below.
+    pub enable_experimental_api: bool,
+    /// Exact generated draft revision admitted by the experimental API gate.
+    pub experimental_api_revision: Option<String>,
     pub quic: QuicConfig,
+    pub tcp: TcpConfig,
     pub tls: TlsConfig,
     pub network: NetworkConfig,
     pub observability: ObservabilityConfig,
@@ -388,7 +396,10 @@ impl AppConfig {
         };
         Self {
             version: 1,
+            enable_experimental_api: false,
+            experimental_api_revision: None,
             quic: QuicConfig::default(),
+            tcp: TcpConfig::default(),
             tls: TlsConfig::default(),
             network: NetworkConfig::with_cpu_ids(cpu_ids),
             observability: ObservabilityConfig::default(),
@@ -399,6 +410,18 @@ impl AppConfig {
             table: TableConfig::default(),
         }
     }
+}
+
+/// TLS-over-TCP listener configuration.
+///
+/// The listener is enabled for every [`KacheServer`](crate::server::KacheServer)
+/// bind. When `listen` is omitted, the server reuses the QUIC bind address
+/// (TCP and UDP may share a port); an explicit address is useful when the two
+/// transport profiles must be exposed on different interfaces or ports.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TcpConfig {
+    pub listen: Option<SocketAddr>,
 }
 
 /// Low-cardinality management endpoint and request-latency settings.
@@ -684,9 +707,7 @@ impl StorageConfig {
         self.bucket_read_pool_capacity_per_thread
             .checked_mul(STORAGE_READ_OWNER_SOURCE_COUNT)
             .ok_or_else(|| {
-                KvError::InvalidConfig(
-                    "stable storage-read owner pool capacity overflows".into(),
-                )
+                KvError::InvalidConfig("stable storage-read owner pool capacity overflows".into())
             })
     }
 }
@@ -748,6 +769,20 @@ impl AppConfig {
                 "unsupported config version {}",
                 self.version
             )));
+        }
+        if self.enable_experimental_api && self.experimental_api_revision.is_none() {
+            return Err(KvError::InvalidConfig(
+                "experimental_api_revision is required when enable_experimental_api=true".into(),
+            ));
+        }
+        if self
+            .experimental_api_revision
+            .as_deref()
+            .is_some_and(str::is_empty)
+        {
+            return Err(KvError::InvalidConfig(
+                "experimental_api_revision must not be empty".into(),
+            ));
         }
         self.quic.selected_backend()?;
         self.tls.validate()?;

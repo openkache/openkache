@@ -103,6 +103,48 @@ impl SgDirectory {
         Ok(logical_sg_id)
     }
 
+    pub(crate) fn restore_stable(&mut self, state: CommittedGenerationState) -> Result<()> {
+        let logical_sg_id = state.location.logical_sg_id;
+        if !matches!(
+            self.entries.get(logical_sg_id as usize),
+            Some(DirectoryEntry::Free)
+        ) {
+            return Err(KvError::Worker(format!(
+                "persisted logical SG {logical_sg_id} is not free during recovery"
+            )));
+        }
+        let removed = self
+            .free_ids
+            .iter()
+            .position(|candidate| *candidate == logical_sg_id)
+            .map(|index| self.free_ids.swap_remove(index));
+        if removed.is_none() {
+            return Err(KvError::Worker(format!(
+                "persisted logical SG {logical_sg_id} is missing from the free directory"
+            )));
+        }
+        let entry = self.entry_mut(logical_sg_id)?;
+        *entry = DirectoryEntry::Stable {
+            backing: Rc::new(state),
+            readable: None,
+        };
+        Ok(())
+    }
+
+    pub(crate) fn stable_states(
+        &self,
+    ) -> impl Iterator<Item = (u32, &CommittedGenerationState)> + '_ {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(logical_sg_id, entry)| {
+                let DirectoryEntry::Stable { backing, .. } = entry else {
+                    return None;
+                };
+                Some((logical_sg_id as u32, backing.as_ref()))
+            })
+    }
+
     pub(crate) fn read_backing(&self, logical_sg_id: u32) -> Option<ReadBacking> {
         match self.entries.get(logical_sg_id as usize)? {
             DirectoryEntry::Mutable { lane, job_pins } => Some(ReadBacking::Mutable {

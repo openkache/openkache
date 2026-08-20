@@ -475,6 +475,12 @@ impl ThreadedKvkache {
         )
     }
 
+    /// Returns the server-owned domain key used to migrate legacy namespace
+    /// membership identities during startup.
+    pub(crate) fn storage_domain_key(&self) -> [u8; 32] {
+        self.storage_domain_key
+    }
+
     /// Sends one worker request using a reusable completion slot and bounded timeouts.
     async fn request(
         &self,

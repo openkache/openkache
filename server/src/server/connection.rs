@@ -9,6 +9,8 @@ pub(super) struct NetworkWorkerLimits {
     pub(super) namespaces: Arc<Mutex<NamespaceRegistry>>,
     pub(super) observability: Arc<ObservabilityState>,
     pub(super) capabilities: Arc<dyn CapabilityCatalog>,
+    pub(super) experimental_api_enabled: bool,
+    pub(super) experimental_api_revision: Option<String>,
 }
 
 pub(super) fn prepare_network_worker(
@@ -24,6 +26,10 @@ pub(super) fn prepare_network_worker(
         Arc::clone(&cache),
         Arc::clone(&limits.namespaces),
         Arc::clone(&limits.observability),
+        operation_execution_state::ExperimentalApiGate::new(
+            limits.experimental_api_enabled,
+            limits.experimental_api_revision.clone(),
+        ),
     )?;
     Ok(runtime)
 }
@@ -66,6 +72,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         namespaces: _,
         observability,
         capabilities: _,
+        ..
     } = limits;
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
     let mut connections = FuturesUnordered::new();
@@ -219,7 +226,7 @@ async fn serve_connection<C: TransportConnection>(
 }
 
 /// Reuses one QUIC stream as a sequential request lane until either peer closes it.
-async fn serve_stream<S: SendStream, R: ReceiveStream>(
+pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
     network_shard: NetworkShard<'_>,
@@ -244,12 +251,15 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         {
             Ok(Ok(frame)) => frame,
             Ok(Err(rejection)) => {
-                let request_id = rejection.request_id();
                 network_shard.record_request(
                     operation_contract::telemetry_operation(rejection.opcode()),
                     rejection.status(),
                     rejection.elapsed(),
                 );
+                if rejection.silently_close() {
+                    return true;
+                }
+                let request_id = rejection.request_id();
                 if !write_response(
                     &mut send,
                     rejection.into_response(),
@@ -261,14 +271,16 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     network_shard.response_write_failure();
                     break;
                 }
+                // Header admission has already consumed the bounded request
+                // body before returning this rejection. The lane remains
+                // reusable for the next complete request.
                 continue;
             }
             Err(StreamReadError::Timeout) => {
                 network_shard.request_read_timeout();
                 break;
             }
-            Err(StreamReadError::EndOfStream) => break,
-            Err(StreamReadError::TooLarge | StreamReadError::Truncated) => {
+            Err(StreamReadError::TooLarge) => {
                 network_shard.protocol_error();
                 return true;
             }
@@ -280,11 +292,10 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::Transport(_)) => break,
         };
         let request_bytes = std::mem::take(&mut frame.bytes);
-        let request_id = frame.request_id;
         let response_result = match request_projection::project_owned_request(request_bytes) {
             Ok(input) => {
                 let operation_id = input.operation_id();
-                debug_assert_eq!(input.request_id(), request_id);
+                let request_id = input.request_id();
                 let operation: Operation = operation_contract::telemetry_operation_id(operation_id);
                 let request_started = std::time::Instant::now();
                 let may_mutate = operation_dispatch::may_mutate(runtime.as_ref(), operation_id);
@@ -355,22 +366,29 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             response.status(),
                             request_started.elapsed(),
                         );
-                        (response.with_request_id(request_id), response_permit)
+                        (
+                            response.with_request_id(request_id),
+                            response_permit,
+                            request_id,
+                        )
                     }
                     Ok(None) => {
                         // A mutating storage failure may have crossed its
                         // linearization point. Do not send an error response
                         // that would falsely guarantee that no mutation took
-                        // effect.
+                        // effect. The protocol requires terminating the
+                        // affected connection when the mutation outcome is
+                        // unknown, so no later request can be mistaken for a
+                        // retry on the same lane.
                         network_shard.abandoned_request();
-                        return false;
+                        return true;
                     }
                     Err(_) if may_mutate => {
                         // The worker request may already have crossed its mutation
                         // linearization point when this wait expires. An error response
                         // would falsely guarantee that it did not take effect.
                         network_shard.abandoned_request();
-                        return false;
+                        return true;
                     }
                     Err(_) => {
                         network_shard.record_request(
@@ -385,6 +403,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             )
                             .with_request_id(request_id),
                             response_permit,
+                            request_id,
                         )
                     }
                 }
@@ -395,7 +414,8 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 return true;
             }
         };
-        if !write_response(&mut send, response_result.0, request_id, request_timeout).await {
+        let (response, _response_permit, request_id) = response_result;
+        if !write_response(&mut send, response, request_id, request_timeout).await {
             network_shard.response_write_failure();
             break;
         }

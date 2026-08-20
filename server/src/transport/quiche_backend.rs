@@ -190,7 +190,13 @@ impl super::ReceiveStream for ReceiveStream {
             while self.buffered.is_empty() {
                 match self.next_chunk("stream header read").await? {
                     StreamChunk::Data(chunk) => self.buffered.extend_from_slice(&chunk),
-                    StreamChunk::Fin => return Err(StreamReadError::EndOfStream),
+                    StreamChunk::Fin => {
+                        return Err(StreamReadError::Transport(TransportError::backend(
+                            NAME,
+                            "stream header read",
+                            "stream ended before a request frame",
+                        )));
+                    }
                     StreamChunk::Reset(error_code) => {
                         return Err(StreamReadError::Transport(TransportError::backend(
                             NAME,
@@ -214,7 +220,13 @@ impl super::ReceiveStream for ReceiveStream {
                 }
                 match self.next_chunk("stream header read").await? {
                     StreamChunk::Data(chunk) => self.buffered.extend_from_slice(&chunk),
-                    StreamChunk::Fin => return Err(StreamReadError::Truncated),
+                    StreamChunk::Fin => {
+                        return Err(StreamReadError::Transport(TransportError::backend(
+                            NAME,
+                            "stream header read",
+                            "stream ended before request header completed",
+                        )));
+                    }
                     StreamChunk::Reset(error_code) => {
                         return Err(StreamReadError::Transport(TransportError::backend(
                             NAME,
@@ -236,16 +248,22 @@ impl super::ReceiveStream for ReceiveStream {
         if frame_len > maximum {
             return Err(StreamReadError::TooLarge);
         }
-        // Consume the declared body before returning an admission rejection.
-        // This preserves the next frame boundary and keeps the response
-        // correlated with the request that was admitted by its header.
+        // Admission may reject on bounded header metadata, but the lane must
+        // still consume the declared body before sending that correlated
+        // error and continuing at the next frame boundary.
         let rejection = admit(header, &self.buffered[..header.encoded_len()]).err();
         let permit = budget.acquire(header.body_len(), timeout).await?;
         network_runtime::timeout(timeout, async {
             while self.buffered.len() < frame_len {
                 match self.next_chunk("stream body read").await? {
                     StreamChunk::Data(chunk) => self.buffered.extend_from_slice(&chunk),
-                    StreamChunk::Fin => return Err(StreamReadError::Truncated),
+                    StreamChunk::Fin => {
+                        return Err(StreamReadError::Transport(TransportError::backend(
+                            NAME,
+                            "stream body read",
+                            "stream ended before request body completed",
+                        )));
+                    }
                     StreamChunk::Reset(error_code) => {
                         return Err(StreamReadError::Transport(TransportError::backend(
                             NAME,
@@ -268,7 +286,7 @@ impl super::ReceiveStream for ReceiveStream {
             drop(permit);
             return Ok(Err(rejection));
         }
-        Ok(Ok(RequestFrame::new(frame, permit, header.request_id())))
+        Ok(Ok(RequestFrame::new(frame, permit)))
     }
 }
 

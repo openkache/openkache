@@ -3,7 +3,7 @@
 use super::operation_capabilities::CapabilityCatalog;
 use super::operation_contract::OperationId;
 use super::operation_execution_state::{
-    OperationRuntime, OperationStateBindings, OperationStateInstaller,
+    ExperimentalApiGate, OperationRuntime, OperationStateBindings, OperationStateInstaller,
 };
 use super::operation_registration::ServerOperationRegistration;
 
@@ -80,9 +80,10 @@ impl ServerComposition {
         self
     }
 
-    pub(super) fn initialize_modules(
+    pub(super) fn initialize_modules_with_gate(
         &'static self,
         bootstrap: &dyn CapabilityCatalog,
+        experimental_api: ExperimentalApiGate,
     ) -> Result<OperationRuntime, &'static str> {
         let mut states = OperationStateInstaller::new();
         let mut index = 0;
@@ -92,7 +93,7 @@ impl ServerComposition {
             module.install_state_into(&mut bindings, bootstrap)?;
             index += 1;
         }
-        states.freeze(self.operations())
+        states.freeze_with_gate(self.operations(), experimental_api)
     }
 
     pub(super) fn operation(
@@ -143,7 +144,10 @@ impl OperationCatalog {
         self.register(module.operations())
     }
 
-    fn get(&'static self, operation_id: OperationId) -> Option<&'static ServerOperationRegistration> {
+    fn get(
+        &'static self,
+        operation_id: OperationId,
+    ) -> Option<&'static ServerOperationRegistration> {
         self.entries[operation_id.index()].as_ref()
     }
 

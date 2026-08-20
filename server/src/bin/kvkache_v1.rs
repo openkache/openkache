@@ -12,8 +12,7 @@ fn item_id(application_key: &[u8]) -> ItemId {
 }
 
 fn storage_key(cache: &ThreadedKvkache, application_key: &[u8]) -> StorageKey {
-    let item_id = item_id(application_key);
-    cache.storage_key_for_item_id(item_id)
+    cache.storage_key_for_item_id(item_id(application_key))
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

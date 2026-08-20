@@ -2,8 +2,7 @@
 
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
-    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
-    SetState, StatsState, SyncState,
+    DeleteState, GetState, SetState, StatsState, SyncState,
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::OperationInputView;
@@ -68,18 +67,6 @@ fn operation_state<'a, T: 'static>(context: PrepareContext<'a>) -> Result<&'a T,
             OperationStatus::InternalError,
             b"compatibility module state is unavailable",
         ))
-}
-
-fn global_resource(
-    coordination: &dyn NamespaceCoordinationCapability,
-) -> Result<ResourceLock, PrepareError> {
-    let shared = coordination.lifecycle_lock().map_err(|_| {
-        PrepareError::resource_unavailable(
-            OperationStatus::InternalError,
-            b"namespace metadata is unavailable",
-        )
-    })?;
-    Ok(ResourceLock::unconditional(shared))
 }
 
 fn prepare_namespace_at(
@@ -154,63 +141,4 @@ pub(super) fn prepare_set(
         namespace_id,
         state.coordination.as_ref(),
     )?))
-}
-
-fn prepare_lifecycle(
-    coordination: &dyn NamespaceCoordinationCapability,
-) -> Result<PreparePlan, PrepareError> {
-    Ok(PreparePlan::resource(global_resource(coordination)?))
-}
-
-pub(super) fn prepare_namespace_open(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> Result<PreparePlan, PrepareError> {
-    decode::validate_namespace_open_name(input).map_err(PrepareError::invalid_request)?;
-    decode::validate_namespace_open_policy_ttl(input).map_err(PrepareError::invalid_request)?;
-    let state = operation_state::<NamespaceOpenState>(context)?;
-    prepare_lifecycle(state.coordination.as_ref())
-}
-
-pub(super) fn prepare_namespace_update(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> Result<PreparePlan, PrepareError> {
-    let namespace_id = decode::required_namespace_id(
-        input,
-        request_fields::op_namespace_update_policy::NAMESPACE_ID,
-    )
-    .map_err(PrepareError::invalid_request)?;
-    decode::required_expected_revision(
-        input,
-        request_fields::op_namespace_update_policy::EXPECTED_REVISION,
-    )
-    .map_err(PrepareError::invalid_request)?;
-    decode::validate_namespace_update_policy_ttl(input).map_err(PrepareError::invalid_request)?;
-    let state = operation_state::<NamespaceUpdateState>(context)?;
-    Ok(PreparePlan::resource(namespace_resource(
-        namespace_id,
-        state.coordination.as_ref(),
-    )?))
-}
-
-pub(super) fn prepare_namespace_delete(
-    input: &OperationInputView,
-    context: PrepareContext<'_>,
-) -> Result<PreparePlan, PrepareError> {
-    let namespace_id =
-        decode::required_namespace_id(input, request_fields::op_namespace_delete::NAMESPACE_ID)
-            .map_err(PrepareError::invalid_request)?;
-    decode::required_expected_revision(
-        input,
-        request_fields::op_namespace_delete::EXPECTED_REVISION,
-    )
-    .map_err(PrepareError::invalid_request)?;
-    let state = operation_state::<NamespaceDeleteState>(context)?;
-    let coordination = state.coordination.as_ref();
-    let resource = namespace_resource(namespace_id, coordination)?;
-    Ok(PreparePlan::from_resources([
-        global_resource(coordination)?,
-        resource,
-    ]))
 }

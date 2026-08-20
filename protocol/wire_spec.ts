@@ -22,14 +22,15 @@ function wire_name(identifier: string): string {
  * representation of opcode assignments and role-derived framing shape.
  */
 export function render_protocol_spec_operation_table(contract: Wire_Contract): string {
-  const operations = contract.operations.filter(
+  const modeled_operations = contract.operations
+  if (modeled_operations === undefined) {
+    throw new Error("protocol operation metadata is required for the specification table")
+  }
+  const operations = modeled_operations.filter(
     (operation) =>
       operation.contract.experimental !== true &&
       operation.contract.out_of_band !== true,
   )
-  if (operations === undefined) {
-    throw new Error("protocol operation metadata is required for the specification table")
-  }
   const request_layout = (operation: Wire_Operation): string => {
     const request_plan = operation.contract.request_plan ?? []
     const descriptor = derive_wire_operation_descriptor(operation.contract)

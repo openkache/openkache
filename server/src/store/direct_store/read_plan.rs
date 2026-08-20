@@ -27,7 +27,10 @@ pub(super) struct LocatedKeyState {
 }
 
 pub(super) enum KeyedObservation {
-    Value(Option<StoredItemValue>),
+    Value {
+        value: Option<StoredItemValue>,
+        expired: Option<LocatedKeyState>,
+    },
     State(Option<LocatedKeyState>),
     CompareExchange {
         state: Option<LocatedKeyState>,
@@ -117,7 +120,10 @@ impl DirectReadPlan {
         }
         let Some((candidate, item)) = newest else {
             return Ok(match purpose {
-                ReadPurpose::Value => KeyedObservation::Value(None),
+                ReadPurpose::Value => KeyedObservation::Value {
+                    value: None,
+                    expired: None,
+                },
                 ReadPurpose::State => KeyedObservation::State(None),
                 ReadPurpose::CompareExchange => KeyedObservation::CompareExchange {
                     state: None,
@@ -128,7 +134,16 @@ impl DirectReadPlan {
         match purpose {
             ReadPurpose::Value => {
                 if !item_state_is_live_now(item.state) {
-                    return Ok(KeyedObservation::Value(None));
+                    return Ok(KeyedObservation::Value {
+                        value: None,
+                        expired: (!item.state.is_tombstone && item.state.expires_at_ms != 0).then(
+                            || LocatedKeyState {
+                                table_location: candidate.table_location,
+                                item_state: item.state,
+                                mutable_value: candidate.mutable_value(),
+                            },
+                        ),
+                    });
                 }
                 candidate
                     .read_value(
@@ -139,7 +154,10 @@ impl DirectReadPlan {
                         &self.io,
                     )
                     .await
-                    .map(|value| KeyedObservation::Value(Some(value)))
+                    .map(|value| KeyedObservation::Value {
+                        value: Some(value),
+                        expired: None,
+                    })
             }
             ReadPurpose::State => Ok(KeyedObservation::State(Some(LocatedKeyState {
                 table_location: candidate.table_location,
