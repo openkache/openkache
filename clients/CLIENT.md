@@ -21,6 +21,11 @@ The format specifications in this draft describe the target contract. The
 key and Item ID boundary is implemented in `clients/core`; the generated value
 model and envelope remain transitional until their respective migrations land.
 
+Package READMEs may expose those generated/core artifacts for compatibility, but
+they must label legacy fixed-width-ID assumptions, legacy JSON envelopes,
+threshold-based compression, and QUIC-only transport as current transitional
+behavior.
+
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.
 
@@ -316,8 +321,11 @@ method with a typed input parameter when its language can express that
 contract without weakening type checking.
 
 A binding MAY offer JSON helpers as language API convenience. JSON has no v1
-payload selector: a helper serializes UTF-8 JSON and carries it as
-`OpaqueBytes`, with its JSON interpretation documented by that binding.
+payload selector: a target `set_json`/`get_json` helper serializes canonical
+UTF-8 JSON and carries it as `OpaqueBytes`, with its JSON interpretation
+documented by that binding. `StructuredValue-CBOR-v1` is a separate target
+operation family; a binding must not silently substitute the legacy JSON
+envelope or Raw bytes when exposing structured operations.
 
 ### 5.4 Runtime shape
 

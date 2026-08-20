@@ -3,6 +3,10 @@
 `openkache-client` provides the ergonomic Rust API over
 [`openkache-client-core`](../core).
 
+This README documents the current transitional Rust API. The target
+variable-width Item ID, structured-value, compression, and dual-transport
+contracts live in the shared draft documents linked by [`../README.md`](../README.md).
+
 ## Purpose
 
 Rust applications get high-level request builders while advanced callers can
@@ -89,9 +93,10 @@ it with a cryptographically secure random source and store its Base64 form in
 secret storage. Do not hash, truncate, or pad a human-readable password into a
 key.
 
-Clients must use the same data-protection key to share protected entries.
-Rotating it changes derived item IDs, so old entries become unreachable and
-must be repopulated.
+The client root key is also the Item ID identity key in this convenience API,
+so rotating it changes derived Item IDs; old entries become unreachable and
+must be repopulated. Value-key rotation is independent when callers configure a
+`ValueKeyring`; it does not change Item ID derivation.
 
 The [client status table](../README.md#sdk-status) identifies the format
 implemented by this release. The
@@ -127,8 +132,11 @@ pub enum SetOutcome { Created, Replaced, NotStored }
 pub enum DeleteOutcome { Deleted, NotFound }
 ```
 
-`Client::get_value` and `Client::set_value` expose the shared logical value
-model for canonical JSON in addition to the byte-oriented API:
+`Client::get_value` and `Client::set_value` expose the current transitional
+logical-value path, which is JSON-oriented in this package. The target
+`StructuredValue-CBOR-v1` selector and the legacy `set_json`/`get_json`
+compatibility boundary are defined by [`../CLIENT.md`](../CLIENT.md) and
+[`../VALUE_FORMAT.md`](../VALUE_FORMAT.md).
 
 ```rust
 use openkache_client::value::{JsonValue, Value};
@@ -187,9 +195,10 @@ for response-safe operations, `max_in_flight`, and compression.
 The optional `max_in_flight_bytes` setting bounds aggregate bytes retained
 across transport and value protection work.
 
-One client maintains one QUIC connection and lazily opens reusable bidirectional
-stream lanes up to `max_in_flight`. One request is active on each lane.
-Additional operations wait for a free lane.
+The current client maintains one QUIC connection and lazily opens reusable
+bidirectional stream lanes up to `max_in_flight`. One request is active on each
+lane. Additional operations wait for a free lane. The target maintained-client
+contract also supports TLS-over-TCP; QUIC-only is a current package limitation.
 
 ```rust
 let state = client.connection_state();
@@ -200,7 +209,7 @@ client.close().await?;
 `connection_state()` is a best-effort snapshot. `close()` is idempotent and
 permanent for that client. Automatic retry is a client policy; ambiguous
 mutation outcomes follow the
-[wire protocol rules](../../protocol/SPEC.md#outcome-and-replay-rules).
+[wire protocol rules](../../protocol/SPEC.md#unknown-outcomes).
 
 ## Core components
 

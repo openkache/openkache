@@ -1,30 +1,39 @@
 # Adding an API operation
 
-Protocol v1 is still an unpublished, evolving draft profile. Each API declares
-its compact wire contract in the shared model and implements its semantics
-behind operation-neutral protocol and server boundaries.
+Protocol v1 is still an unpublished, evolving draft profile. A stable operation
+first receives its registry decision in `SPEC.md`; only then does its
+transitional Smithy model metadata describe the compact wire contract. Each API
+implements its semantics behind operation-neutral protocol and server
+boundaries.
 
 ## Minimal path
 
-1. Add the operation, request and response shapes, field codecs, and opcode to
-   the Smithy model.
-2. For every non-empty request, declare `requestWire` with the neutral fixed,
+1. Decide the operation's lifecycle first. A stable-v1 operation MUST be
+   assigned an opcode, allowed statuses, and a complete frame layout in
+   [`SPEC.md`](SPEC.md), which is the normative registry. Do not treat a
+   Smithy enum member, generated status, or draft operation name as an
+   assignment. Experimental operations require an exact draft revision and
+   remain outside stable-v1 conformance; namespace-management operations are
+   `outOfBand` until a separate wire assignment is approved.
+2. Add the operation, request and response shapes, field codecs, and (only
+   after the registry decision) its transitional metadata to the Smithy model.
+3. For every non-empty request, declare `requestWire` with the neutral fixed,
    packed, conditional, length, constant, and trailing-field primitives.
    Empty requests are the only requests that omit a wire plan.
-3. Regenerate the contract. Generation emits:
+4. Regenerate the contract. Generation emits:
 
    - numeric request and response field modules;
    - operation framing, status, and codec metadata;
    - the shared request frame layout used by the encoder and projector.
 
-4. Add a typed API adapter. It maps domain values to canonical numeric fields
+5. Add a typed API adapter. It maps domain values to canonical numeric fields
    and uses the shared request encoder/projector instead of duplicating frame
    parsing or serialization.
-5. Add the API-owned server binding and handler registration. The binding
+6. Add the API-owned server binding and handler registration. The binding
    performs semantic decoding, capability and resource preparation,
    authorization, behavior, and response projection. The generic server owns
    admission, scheduling, lifecycle, dispatch, and transport writes.
-6. Add a client-facing method when the API has a client package. Keep retry
+7. Add a client-facing method when the API has a client package. Keep retry
    policy and semantic result mapping in the API adapter, outside the server
    lifecycle.
 

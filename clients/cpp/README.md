@@ -7,6 +7,8 @@ operations. CMake propagates the C++20 requirement only through the imported
 target; it does not change the consuming project's global standard.
 Projects using C++23 or newer can consume the same target; C++17 is not a
 supported minimum because the public API uses `std::span`.
+The current binding uses QUIC over TLS; TLS-over-TCP is part of the target
+maintained-client contract.
 
 ## Build
 
@@ -58,9 +60,15 @@ eviction-protected items; a non-empty `ttl_ms` without an explicit mode is
 accepted as the convenience `Explicit_Ttl` shorthand. `get_raw`, `set_raw`,
 and `remove_raw` expose exact `0..=32`-byte item-ID operations without value
 protection. `namespace_open`, `namespace_update_policy`, and
-`namespace_delete` expose the server-assigned namespace lifecycle and
-optimistic revisions. Transport and validation failures throw
-`openkache::Error`.
+`namespace_delete` expose the server-assigned namespace lifecycle as
+transitional out-of-band control-plane shapes with legacy, non-normative
+revision fields; they are not stable-v1 data-plane operations. `STATS` and
+`SYNC` are likewise transitional experimental maintenance operations and are
+disabled by default. Enable `enable_experimental_api = true` explicitly and
+coordinate exact revision `draft-2026-08-19.4` out of band as described in
+[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending
+them; the revision is not negotiated on the wire. Transport and validation
+failures throw `openkache::Error`.
 
 The C++ layer does not duplicate protocol or protection logic. Its operation
 and outcome values come from the C ABI, whose Smithy-derived constants live in

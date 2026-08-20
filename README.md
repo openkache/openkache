@@ -2,9 +2,7 @@
 
 # OpenKache ⚡
 
-**A next-generation Rust SSD cache server.**
-
-**10× cheaper and faster than Redis.**
+**An experimental Rust SSD-first cache server.**
 
 Open-source · Rust · QUIC/TLS-over-TCP · SIMD-accelerated · SSD-first
 
@@ -15,20 +13,27 @@ Open-source · Rust · QUIC/TLS-over-TCP · SIMD-accelerated · SSD-first
 
 </div>
 
+Unless a section is explicitly marked as a target or draft, this README
+describes the current public preview. The protocol, client-format, security,
+and storage design documents are target contracts; their implementations may
+temporarily lag during the migration.
 
 ## ✨ Features
 
 ### 💾 SSD-first architecture
 
-OpenKache uses **SSD as primary storage**, not a secondary tier. This eliminates the DRAM cost bottleneck while delivering higher throughput and lower latency than Redis.
+OpenKache is designed to use **SSD as primary storage**, not a secondary tier.
+The current server is a preview; restart recovery and publication-quality
+capacity/throughput comparisons are still pending.
 
 ### 🔍 Index: SIMD-accelerated BCF53 Breadcrumb Filter
 
-The first production-grade Rust implementation of the state-of-the-art BCF53 Breadcrumb Filter.
+The repository contains a Rust implementation of the BCF53 Breadcrumb Filter.
 
 - **Runtime SIMD dispatch**: Detects the best available ISA at startup — AVX-512BW → AVX2 → SVE2 → SVE → NEON → scalar fallback.
 - **Compact bit packing**: 53 mini-buckets, 8-bit tags — 51 single-choice + 35 two-choice entries per cacheline.
-- **32+ million ops/sec per core** (AVX2).
+- **Performance status**: no publication-ready cross-system performance claim
+  is made for the current preview.
 
 ### 📡 Transport: QUIC and TLS-over-TCP
 
@@ -64,19 +69,20 @@ therefore require `network-runtime-compio`. The existing `quic.backend`
 configuration (or `--quic-backend` selection) remains unchanged.
 
 Network and storage workers share a combined worker and its io_uring ring only
-when both selected runtimes have the same name and support combined roles
-(currently Compio, Monoio, and Kimojio). If the runtime kinds differ, startup
-rejects overlapping network/storage CPUs and uses separate runtime instances
-and rings instead.
+when the selected runtime names match and both runtimes support combined roles.
+Compio, Monoio, and Kimojio can share a worker when the same runtime is selected
+for both roles. Simulated storage uses its own runtime name, so overlapping
+network/storage CPUs are rejected rather than shared.
 
 ### 🔒 End-to-end encryption
 
 Secure clients may compress values and encrypt them with the v1
 AES-256-SIV-CMAC or AES-256-GCM-SIV profiles before transmission. The
-authenticated value is bound to its exact 32-byte wire Item ID and namespace,
+authenticated value is bound to its exact wire Item ID bytes and namespace,
 so moving ciphertext to another cache item or namespace fails authentication.
 Protected clients hide typed application keys behind namespace-bound BLAKE3
-item IDs. The server observes
+item IDs. Mapped `NamespaceHash` operations derive 32-byte Item IDs, while
+Exact operations preserve caller-supplied `0..=32`-byte IDs. The server observes
 deterministic item IDs and encoded sizes, but not application keys or value
 plaintext. The complete threat model and protection matrix are documented in
 [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
@@ -88,17 +94,20 @@ shared value codec to the packed layout described in
 
 ### 📦 Transparent compression
 
-Large values are automatically compressed with zstd before storage and decompressed on retrieval. Transparent to the client, algorithm is configurable.
+The current preview lets clients configure optional zstd compression before
+storage; the server stores the resulting value bytes opaquely. The target
+maintained-client policy enables automatic level-1 compression and keeps the
+compressed form only when it is smaller. See the [client implementation
+guide](clients/CLIENT.md).
 
 ### 📚 Multi-language SDKs
 
 Implemented client libraries are available for Rust, TypeScript and JavaScript
-on Node.js, Bun, and Deno, .NET, and the Bash-friendly `openkache-cli` binary.
-JavaScript runtimes share the TypeScript package, which calls the shared
-low-level client core through Node-API so transport, compression, and
-encryption behavior stay identical. Package scaffolds for Python, Go, Java,
-Kotlin, C, C++, Swift, and Dart are available under
-[`clients/`](./clients/README.md) for future Rust-backed bindings.
+on Node.js, Bun, and Deno, .NET, Python, Go, C, C++, Swift, and the
+Bash-friendly `openkache-cli` binary. These packages are transitional where
+noted in the [client status table](./clients/README.md); they share the
+low-level client core so transport, compression, and protection behavior stay
+aligned. Java, Kotlin, and Dart currently remain package scaffolds.
 
 ### 📦 Single binary distribution
 
@@ -109,20 +118,26 @@ One statically linked binary. No shared libraries, no runtime dependencies, no p
 ## 🚀 Quick start
 
 ```bash
-# Start the local SSD-backed QUIC server
+# Start the local QUIC and TLS-over-TCP preview server
 cargo run --manifest-path server/Cargo.toml --bin openkache-server
 ```
 
 The server listens on `127.0.0.1:4433`, stores shard files under
-`target/kvkache-v1`, and writes an ephemeral
-self-signed certificate to
-`target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
-`SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/1` QUIC
-protocol. `SET` accepts an optional millisecond TTL and atomic `if_absent` or
-`if_present` existence condition. Expired values are treated as absent
-immediately, while their SSD space is reclaimed when the containing Segment
-Group is reused. `SYNC` flushes each SSD worker before acknowledging the
-request. Pass `--port <port>` only when overriding the default port, or pass
+`target/kvkache-v1`, and writes an ephemeral self-signed certificate to
+`target/openkache-local/certificate.local.der`. By default it supports
+`PING`, `GET`, `SET`, and `DELETE` over the versioned `openkache/1` QUIC and
+TLS-over-TCP transport profiles. `SET` accepts an optional millisecond TTL and
+atomic `if_absent` or `if_present` existence condition. Expired values are
+treated as absent immediately, while their SSD space is reclaimed when the
+containing Segment Group is reused. `STATS` and `SYNC` are experimental
+administrative operations and are disabled by default. To enable them, set
+both `enable_experimental_api = true` and
+`experimental_api_revision = "draft-2026-08-19.4"` in the server
+configuration, then coordinate that exact revision with the client; the
+revision is not negotiated on the wire. When enabled, `SYNC` flushes each SSD
+worker for the current process. Clean shutdown checkpoint replay is supported,
+but crash recovery and broader durability guarantees remain outside the current
+preview. Pass `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
 The complete byte-level contract is the
 [wire protocol v1 specification](./protocol/SPEC.md).
@@ -230,10 +245,12 @@ the memory and storage stop/resume thresholds, `memory_stop_writes`,
 
 `--cpus` selects worker threads but does not impose a process CPU quota; use
 deployment affinity or cgroups for that boundary. `light` and `balanced` use
-1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that
-limit to 64 MiB. Reopen existing storage with the same automatically detected
-layout or explicit sizing overrides because worker count and Segment layout
-changes require cache recreation.
+1 MiB Blob Segments, so one encoded item cannot exceed 1 MiB; `heavy` uses
+64 MiB Blob Segments but caps one encoded item at 16 MiB. Reopen existing
+storage with the same automatically detected layout or explicit sizing
+overrides. Format-v1 permits a supported increase in bucket choice count;
+worker/Segment geometry changes and unsupported choice-count changes require
+cache recreation.
 
 For a resource-sized configuration without TOML, provide the worker CPU count,
 RAM limit, SSD limit, and storage directory. The default `balanced` profile
@@ -261,10 +278,11 @@ filesystem quotas or NVMe performance. Runtime Segment reservation and
 stop-writes thresholds protect the remaining headroom from concurrent resource
 use. `--cpus` selects worker threads but does not impose a process CPU quota;
 use deployment affinity or cgroups for that boundary. `light` and `balanced`
-use 1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that
-limit to 64 MiB. Reuse the same sizing arguments when reopening existing
-storage because worker count and Segment layout changes require cache
-recreation.
+use 1 MiB Blob Segments, so one encoded item cannot exceed 1 MiB; `heavy` uses
+64 MiB Blob Segments but caps one encoded item at 16 MiB. Reuse the same sizing
+arguments when reopening existing storage. Format-v1 permits a supported
+increase in bucket choice count; worker/Segment geometry changes and
+unsupported choice-count changes require cache recreation.
 
 ---
 
@@ -294,13 +312,17 @@ recreation.
 
 ## ⚔️ Comparison
 
+There are no current, publication-ready cross-system performance results.
+Archived or diagnostic measurements must not be read as current throughput or
+latency guarantees.
+
 | | Redis | OpenKache |
 |---|---|---|
 | **Cost per GB** | DRAM (~$3–5/GB) | SSD (~$0.05–0.10/GB) |
-| **P99 latency** | <1 ms | <1 ms |
-| **Throughput** | ~100K ops/s (single node) | **1M+ ops/s** (single node) |
+| **P99 latency** | varies by workload | not published |
+| **Throughput** | varies by workload | not published |
 | **Transport** | TCP (head-of-line blocking) | QUIC or TLS-over-TCP (TLS 1.3) |
-| **Security** | TLS optional, no E2E | **E2E encrypted by default**, zero trust |
+| **Security** | TLS optional, no client-side value protection | TLS 1.3 transport by default; client-side value protection is optional |
 
 ---
 
@@ -349,9 +371,9 @@ The server reports the selected allocator during startup.
 
 ### Server channel
 
-The server uses Crossfire by default for worker, request/reply, and transport
-channels. Select exactly one of `channel-crossfire`, `channel-flume`, or
-`channel-kanal` at compile time:
+The server uses Kanal by default for worker, request/reply, and transport
+channels. Select exactly one of `channel-kanal`, `channel-crossfire`, or
+`channel-flume` at compile time:
 
 ```bash
 cargo server-build \
@@ -369,7 +391,8 @@ cargo zigbuild --target aarch64-unknown-linux-musl
 ### Both architectures
 
 ```bash
-cargo release-all
+cargo server-build --target x86_64-unknown-linux-musl
+cargo server-build --target aarch64-unknown-linux-musl
 ```
 
 ### Container image
@@ -403,16 +426,24 @@ cargo check --locked
 
 ## 📊 Project status
 
-OpenKache is in **active development**. Core components are stable, the server protocol layer is being built out, and client SDKs are available for Rust, TypeScript, and .NET.
+OpenKache is in **active development**. Core components are stable, the server
+protocol layer is being built out, and maintained client SDKs are available in
+the languages listed below; package status details live in
+[`clients/README.md`](./clients/README.md).
 
 | Component | Status | Notes |
 |---|---|---|
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
-| Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
+| Breadcrumb filter | ✅ Stable | BCF53 with runtime SIMD dispatch |
 | QUIC client (Rust) | 🚧 Preview | Shared Rust core, binary protocol v1, secure value codec |
 | Command-line client | 🚧 Preview | `openkache-cli` for Bash scripts and interactive shell use |
 | QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
-| QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
+| Python client | 🚧 Preview | Async shared-core SDK with generated Smithy operations |
+| Go client | 🚧 Preview | Context-aware shared-core native ABI binding |
+| C client | 🚧 Preview | C17 shared-core ABI |
+| C++ client | 🚧 Preview | C++20 adapter over the C ABI |
+| Swift client | 🚧 Preview | Async shared-core SDK with generated Smithy operations |
+| QUIC/TLS-over-TCP server | 🚧 Preview | Current protocol preview; target SSD-backed worker shards and restart recovery |
 | Container image | ✅ Available | Non-root `linux/amd64` and `linux/arm64` image on GHCR |
 | QUIC client (.NET) | 🚧 Preview | Shared-core C ABI adapter, raw Smithy API, binary protocol v1 |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
@@ -438,7 +469,7 @@ OpenKache is a systems project focused on making caching less expensive and
 easier to operate. There is useful work at every level, from clear bug reports
 and documentation to changes that improve reliability and ease of operation.
 If you like systems work where a small change can matter, start with the
-[roadmap](./README.md#roadmap) or
+[roadmap](./README.md#-roadmap) or
 [open issues](https://github.com/openkache/openkache/issues).
 
 - [Contributing](./CONTRIBUTING.md) — how to propose, check, and review changes.
@@ -460,7 +491,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | Path | Contents |
 |---|---|
 | `protocol/` | Shared binary request, response, opcode, and status definitions |
-| `server/` | SSD cache engine plus the runnable QUIC server |
+| `server/` | SSD cache engine plus the runnable QUIC/TLS-over-TCP server |
 | `clients/` | Implemented SDKs and thin-binding package scaffolds |
 | `clients/core/` | Low-level QUIC client core shared by language adapters |
 | `clients/rust/` | Ergonomic Rust end-user SDK over the client core |

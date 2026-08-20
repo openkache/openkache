@@ -1,10 +1,19 @@
 # OpenKache C client
 
 The C package is a small C17 ABI over the shared Rust client core. It provides
-protected `PING`, `GET`, `SET`, `DELETE`, `STATS`, `SYNC`, and namespace
-management operations while
-the core owns QUIC, TLS, retries, framing, compression, encryption, and the
-worker lifecycle.
+protected `PING`, `GET`, `SET`, `DELETE`, and transitional administrative
+operations while
+the core owns QUIC-over-TLS, retries, framing, compression, encryption, and the
+worker lifecycle. The current binding is QUIC-only; TLS-over-TCP is part of the
+target maintained-client contract.
+
+`STATS` and `SYNC` are transitional experimental maintenance operations and are
+disabled by default. Enable `enable_experimental_api = true` explicitly and
+coordinate exact revision `draft-2026-08-19.4` out of band as described in
+[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending
+them; the revision is not negotiated on the wire. The generated
+namespace-management functions are out-of-band WIP control-plane shapes; they
+do not reserve stable v1 opcodes or public data-plane routes.
 
 ## Build
 
@@ -62,8 +71,9 @@ the `Integer`, `Text`, and `Bytes` rules in
 [`../KEY_FORMAT.md`](../KEY_FORMAT.md).
 
 `openkache_client_namespace_open`, `openkache_client_namespace_update_policy`,
-and `openkache_client_namespace_delete` manage server-assigned namespaces.
-Namespace results carry the canonical descriptor payload; use
+and `openkache_client_namespace_delete` expose those transitional
+control-plane shapes when a private adapter enables them. Namespace results
+carry the canonical descriptor payload; use
 `openkache_client_namespace_descriptor_decode` to obtain a typed descriptor
 without reimplementing the wire parser in the application.
 

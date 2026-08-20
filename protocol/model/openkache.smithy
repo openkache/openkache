@@ -370,14 +370,23 @@ structure WireV1 {
     errorStatusMinimum: Integer
 }
 
-/// Numeric operation assignments used by protocol v1 frames.
+/// Transitional numeric metadata for modeled operations.
+///
+/// A member annotated here is not necessarily a stable-v1 assignment:
+/// experimental operations and out-of-band control-plane operations remain in
+/// this model for adapter generation. Before the draft is finalized,
+/// `protocol/SPEC.md` owns stable-v1 assignments.
 @trait(selector: "enum > member")
 structure wireOpcode {
     @required
     value: Byte
 }
 
-/// Numeric response-status assignments used by protocol v1 frames.
+/// Transitional numeric response-status metadata.
+///
+/// Legacy and experimental statuses may remain in the generated enum. Before
+/// the draft is finalized, `protocol/SPEC.md` and `EXPERIMENTAL.md` own stable
+/// status applicability and assignment.
 @trait(selector: "enum > member")
 structure wireStatus {
     @required

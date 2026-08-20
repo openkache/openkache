@@ -8,7 +8,8 @@ core's C ABI.
 The package provides binary-safe cache operations over one authenticated QUIC
 connection owned by the shared core. It accepts exact opaque `0..=32`-byte
 item IDs and plaintext values. Framing, TLS, retries, stream lanes, and
-protocol validation remain in `clients/core`.
+protocol validation remain in `clients/core`. The current package is
+QUIC-only; TLS-over-TCP is part of the target maintained-client contract.
 
 The [client status table](../README.md#sdk-status) describes this package's
 implementation and migration status.
@@ -84,7 +85,14 @@ seconds, 2 seconds, and 256 lanes. `OperationTimeout` remains as a legacy
 compatibility alias for callers that need one deadline for both phases.
 
 The generated Smithy operation, input, output, and enum types under
-`OpenKache.Smithy` are the canonical .NET API types. The
+`OpenKache.Smithy` are the current transitional .NET API types. `StatsAsync`
+and `SyncAsync` are transitional experimental maintenance operations and are
+disabled by default. Enable `enable_experimental_api = true` explicitly and
+coordinate exact revision `draft-2026-08-19.4` out of band as described in
+[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling
+them; the revision is not negotiated on the wire. Generated
+namespace-management shapes are out-of-band WIP control-plane operations.
+The
 `OpenKache.SetCondition` and `OpenKache.SetOutcome` members remain compatibility
 aliases for earlier callers, and their values have those generated types.
 `SetOptions.Condition` and `SetAsync` return types use the generated shapes

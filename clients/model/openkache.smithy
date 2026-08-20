@@ -303,6 +303,8 @@ structure valueEnvelope {
 }
 
 @clientDefaults(
+    // Transitional current defaults. The target maintained policy is owned by
+    // clients/CLIENT.md and intentionally has no minimum input/savings threshold.
     maxInFlight: 256,
     connectTimeoutMilliseconds: 5000,
     requestTimeoutMilliseconds: 2000,
@@ -775,6 +777,8 @@ structure valueEnvelope {
 )
 @valueFormat(
     version: 1,
+    // Transitional current metadata. The target value-format document uses
+    // StructuredValue-CBOR-v1 as selector 1 and a maximum vu128 width of 9 bytes.
     // VU128 is currently used for unsigned 64-bit protocol lengths and
     // versions.  A canonical u64 varuint is at most nine bytes.
     maxVu128Bytes: 9,

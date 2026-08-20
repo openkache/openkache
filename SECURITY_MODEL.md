@@ -16,11 +16,13 @@ cryptographic details that connect those formats.
 
 ## At a glance
 
-**Zero-trust server, end-to-end encrypted data.** When encryption is enabled,
-the client encrypts data before sending it to OpenKache and decrypts it after
-receiving it. The server stores and returns ciphertext and never receives the
-encryption keys. TLS protects the connection; client-side encryption keeps the
-plaintext outside the server's trust boundary.
+**TLS transport by default; optional client-side value encryption.** When value
+encryption is enabled, the client encrypts data before sending it to OpenKache
+and decrypts it after receiving it. The server stores and returns ciphertext
+and never receives the encryption keys. TLS protects the connection; enabled
+client-side encryption keeps the plaintext outside the server's trust
+boundary. An unprotected value profile remains valid when the caller does not
+configure a value key.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by

@@ -67,8 +67,10 @@ requires without duplicating variable-integer parsing.
   draft-v1 compatibility projection consumed by the Rust crate. It does not
   generate API handlers or client methods.
 - `Opcode`, `Status`, and their generated `ALL`, `COUNT`, `NAMES`, `index()`,
-  and `name()` metadata come from the Smithy enums so adapters and metrics do
-  not repeat wire labels.
+  and `name()` metadata currently come from transitional Smithy enums so
+  adapters and metrics do not repeat labels. During the draft migration,
+  generated members may be experimental, out-of-band, or legacy and are not
+  stable-v1 assignment evidence.
 - `encode_request_frame`, `wire_request_layout`, and `OwnedRequestFrame` encode
   generated numeric fields into ordered compact wire segments while retaining
   large field owners instead of coalescing their bytes.
