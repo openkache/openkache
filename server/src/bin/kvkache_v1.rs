@@ -13,7 +13,12 @@ fn item_id(application_key: &[u8]) -> ItemId {
 
 fn storage_key(cache: &ThreadedKvkache, application_key: &[u8]) -> StorageKey {
     let item_id = item_id(application_key);
-    cache.storage_key_for_identity(item_id.as_bytes())
+    cache.storage_key_for_identity(
+        item_id
+            .as_bytes()
+            .try_into()
+            .expect("legacy item IDs are maximum-width digests"),
+    )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

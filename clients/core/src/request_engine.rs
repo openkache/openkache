@@ -474,6 +474,14 @@ impl Registry {
             .map(|entry| entry.metadata)
     }
 
+    fn started(&self, id: u64) -> bool {
+        self.entries
+            .lock()
+            .expect("request registry lock is not poisoned")
+            .get(&id)
+            .is_some_and(|entry| entry.started)
+    }
+
     fn complete(&self, id: u64, result: Result<ResponseBytes, EngineError>) {
         if let Some(entry) = self
             .entries
@@ -597,6 +605,7 @@ pub struct RequestAdmission {
     engine: Arc<RequestEngineInner>,
     metadata: RequestMetadata,
     request_id: u64,
+    request_bytes: usize,
     permit: Option<BytePermit>,
 }
 
@@ -621,25 +630,7 @@ impl RequestAdmission {
         // The request encoder's common header is intentionally opaque here;
         // adapters pass the ID explicitly and this cheap prefix check catches
         // accidental default-token frames before any bytes reach a transport.
-        let (opcode, encoded_id) = {
-            let mut segments = request.segments();
-            let prefix = segments
-                .next()
-                .ok_or_else(|| EngineError::Local("request frame is empty".into()))?;
-            let opcode = *prefix
-                .first()
-                .ok_or_else(|| EngineError::Local("request frame is empty".into()))?;
-            let encoded_id = openkache_protocol::decode_varuint(
-                prefix
-                    .get(1..)
-                    .ok_or_else(|| EngineError::Local("request frame has no request ID".into()))?,
-                "request ID",
-            )
-            .map_err(|error| EngineError::Protocol(error.to_string()))?
-            .ok_or_else(|| EngineError::Local("request frame has no request ID".into()))?
-            .0;
-            (opcode, encoded_id)
-        };
+        let (opcode, encoded_id) = request_prefix(&request)?;
         openkache_protocol::Opcode::try_from(opcode)
             .map_err(|error| EngineError::Local(format!("request opcode is invalid: {error}")))?;
         if encoded_id != request_id {
@@ -647,17 +638,12 @@ impl RequestAdmission {
                 "request frame ID {encoded_id} does not match reserved ID {request_id}"
             )));
         }
-        let permit = self
-            .permit
-            .as_ref()
-            .expect("request admission permit is present");
-        if request.len() > permit.bytes() {
+        if request.len() > self.request_bytes {
             return Err(EngineError::BudgetExceeded {
                 requested: request.len(),
                 maximum: self.engine.budget.maximum(),
             });
         }
-
         let lane = {
             let start = self.engine.next_lane.fetch_add(1, Ordering::Relaxed);
             let mut selected = None;
@@ -716,6 +702,39 @@ impl Drop for RequestAdmission {
             self.engine.registry.cancel(self.request_id);
         }
     }
+}
+
+/// Reads the fixed opcode and canonical request ID without allocating the
+/// complete (potentially multi-megabyte) request body.
+fn request_prefix(request: &RequestBytes) -> Result<(u8, u64), EngineError> {
+    let mut prefix = [0_u8; 1 + openkache_protocol::MAX_VARUINT_BYTES];
+    let mut length = 0;
+    for segment in request.segments() {
+        let remaining = prefix.len().saturating_sub(length);
+        if remaining == 0 {
+            break;
+        }
+        let take = remaining.min(segment.len());
+        prefix[length..length + take].copy_from_slice(&segment[..take]);
+        length += take;
+        if length >= 2 {
+            if let Some((request_id, _)) = openkache_protocol::decode_varuint(
+                &prefix[1..length],
+                "request ID",
+            )
+            .map_err(|error| EngineError::Protocol(error.to_string()))?
+            {
+                return Ok((prefix[0], request_id));
+            }
+        }
+    }
+    if length == 0 {
+        return Err(EngineError::Local("request frame is empty".into()));
+    }
+    if length == 1 {
+        return Err(EngineError::Local("request frame has no request ID".into()));
+    }
+    Err(EngineError::Local("request frame has no complete request ID".into()))
 }
 
 /// A caller-owned request completion. Dropping it cancels the registry entry
@@ -893,6 +912,7 @@ impl RequestEngine {
             engine: Arc::clone(&self.inner),
             metadata,
             request_id,
+            request_bytes,
             permit: Some(permit),
         })
     }
@@ -934,13 +954,22 @@ impl RequestEngine {
                 }
                 let cause = EngineError::Closed;
                 self.inner.registry.fail_lane(index, &active, cause, true);
-                lane.close();
+                self.close_lane(index, &lane, 2);
                 return Ok(());
             }
-            if reads.is_empty() && !active.is_empty() {
+            // A queued request can be canceled before its command reaches the
+            // writer. Do not let that stale lane-local ID start a response
+            // read, or count it as an outstanding protocol request.
+            active.retain(|id| self.inner.registry.metadata(*id).is_some());
+            if reads.is_empty()
+                && active
+                    .iter()
+                    .any(|id| self.inner.registry.started(*id))
+            {
                 let lane = Arc::clone(&lane);
                 let maximum = active
                     .iter()
+                    .filter(|id| self.inner.registry.started(**id))
                     .filter_map(|id| self.inner.registry.metadata(*id))
                     .map(|metadata| metadata.maximum_response_bytes)
                     .max()
@@ -985,9 +1014,33 @@ impl RequestEngine {
                 }
             }
             .fuse();
-            let read_future = reads.next().fuse();
-            pin_mut!(command, write_future, read_future);
+            let read_future = async {
+                if reads.is_empty() {
+                    std::future::pending::<Option<Result<Vec<u8>, EngineError>>>().await
+                } else {
+                    reads.next().await
+                }
+            }
+            .fuse();
+            let state_future = futures_util::future::poll_fn(|context| {
+                if self.inner.state.load(Ordering::Acquire) != 0 {
+                    Poll::Ready(())
+                } else {
+                    let mut wakers = self
+                        .inner
+                        .drain_wakers
+                        .lock()
+                        .expect("drain waker lock is not poisoned");
+                    if !wakers.iter().any(|waker| waker.will_wake(context.waker())) {
+                        wakers.push(context.waker().clone());
+                    }
+                    Poll::Pending
+                }
+            })
+            .fuse();
+            pin_mut!(command, write_future, read_future, state_future);
             select! {
+                _ = state_future => continue,
                 next = command => {
                     match next {
                         Ok(command) => {
@@ -1003,8 +1056,7 @@ impl RequestEngine {
                                 EngineError::Closed,
                                 true,
                             );
-                            self.inner.lane_states[index].store(1, Ordering::Release);
-                            lane.close();
+                            self.close_lane(index, &lane, 1);
                             return Ok(());
                         }
                     }
@@ -1022,8 +1074,7 @@ impl RequestEngine {
                                 }
                             }
                             self.inner.registry.fail_lane(index, &active, error, false);
-                            self.inner.lane_states[index].store(1, Ordering::Release);
-                            lane.close();
+                            self.close_lane(index, &lane, 1);
                             return Ok(());
                         }
                     }
@@ -1043,8 +1094,7 @@ impl RequestEngine {
                                     EngineError::Protocol("response header is malformed".into()),
                                     true,
                                 );
-                                self.inner.lane_states[index].store(1, Ordering::Release);
-                                lane.close();
+                                self.close_lane(index, &lane, 1);
                                 return Ok(());
                             };
                             if !active.contains(&request_id) {
@@ -1056,15 +1106,25 @@ impl RequestEngine {
                                     )),
                                     true,
                                 );
-                                self.inner.lane_states[index].store(1, Ordering::Release);
-                                lane.close();
+                                self.close_lane(index, &lane, 1);
+                                return Ok(());
+                            }
+                            if !self.inner.registry.started(request_id) {
+                                self.inner.registry.fail_lane(
+                                    index,
+                                    &active,
+                                    EngineError::Protocol(format!(
+                                        "response request ID {request_id} arrived before request transmission"
+                                    )),
+                                    true,
+                                );
+                                self.close_lane(index, &lane, 1);
                                 return Ok(());
                             }
                             let metadata = self.inner.registry.metadata(request_id);
                             let Some(metadata) = metadata else {
                                 self.inner.registry.fail_lane(index, &active, EngineError::Protocol("response request ID was cancelled or duplicated".into()), false);
-                                self.inner.lane_states[index].store(1, Ordering::Release);
-                                lane.close();
+                                self.close_lane(index, &lane, 1);
                                 return Ok(());
                             };
                             match ResponseBytes::decode(frame, metadata) {
@@ -1078,16 +1138,14 @@ impl RequestEngine {
                                     // Keep the offending request in `active`
                                     // so all in-flight requests fail together.
                                     self.inner.registry.fail_lane(index, &active, error, true);
-                                    self.inner.lane_states[index].store(1, Ordering::Release);
-                                    lane.close();
+                                    self.close_lane(index, &lane, 1);
                                     return Ok(());
                                 }
                             }
                         }
                         Err(error) => {
                             self.inner.registry.fail_lane(index, &active, error, true);
-                            self.inner.lane_states[index].store(1, Ordering::Release);
-                            lane.close();
+                            self.close_lane(index, &lane, 1);
                             return Ok(());
                         }
                     }
@@ -1106,11 +1164,8 @@ impl RequestEngine {
             .is_ok()
         {
             self.inner.registry.fail_all(EngineError::Closed);
-            for lane in &self.inner.lanes {
-                lane.close();
-            }
-            for state in &self.inner.lane_states {
-                state.store(2, Ordering::Release);
+            for (index, lane) in self.inner.lanes.iter().enumerate() {
+                self.close_lane(index, lane, 2);
             }
             let waiters = std::mem::take(
                 &mut *self
@@ -1141,6 +1196,15 @@ impl RequestEngine {
             Poll::Pending
         })
         .await;
+    }
+
+    fn close_lane(&self, index: usize, lane: &Arc<dyn TransportLane>, terminal_state: u8) {
+        if self.inner.lane_states[index]
+            .compare_exchange(0, terminal_state, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            lane.close();
+        }
     }
 }
 

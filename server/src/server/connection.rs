@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::{wire_request_layout, Opcode};
 
 #[derive(Clone)]
 pub(super) struct NetworkWorkerLimits {
@@ -230,12 +231,20 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         {
             Ok(Ok(frame)) => frame,
             Ok(Err(rejection)) => {
+                let request_id = rejection.request_id();
                 network_shard.record_request(
                     operation_contract::telemetry_operation(rejection.opcode()),
                     rejection.status(),
                     rejection.elapsed(),
                 );
-                if !write_response(&mut send, rejection.into_response(), request_timeout).await {
+                if !write_response(
+                    &mut send,
+                    rejection.into_response(),
+                    request_id,
+                    request_timeout,
+                )
+                .await
+                {
                     network_shard.response_write_failure();
                 }
                 break;
@@ -245,6 +254,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if !write_response(
                     &mut send,
                     response_bytes(Status::Timeout, b"request read timed out"),
+                    0,
                     request_timeout,
                 )
                 .await
@@ -258,6 +268,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if !write_response(
                     &mut send,
                     response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
+                    0,
                     request_timeout,
                 )
                 .await
@@ -271,6 +282,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if !write_response(
                     &mut send,
                     wire_protocol_error_response(error),
+                    0,
                     request_timeout,
                 )
                 .await
@@ -281,6 +293,20 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(StreamReadError::Transport(_)) => break,
         };
+        let request_id = frame
+            .bytes
+            .first()
+            .copied()
+            .and_then(|opcode| Opcode::try_from(opcode).ok())
+            .and_then(|opcode| {
+                openkache_protocol::OpaqueRequestFrame::decode(
+                    &frame.bytes,
+                    wire_request_layout(opcode),
+                )
+                .ok()
+                .map(|request| request.request_id())
+            })
+            .unwrap_or(0);
         let request_bytes = std::mem::take(&mut frame.bytes);
         let mut terminal_after_response = frame.has_trailing_bytes;
         let response_result = match request_projection::project_owned_request(request_bytes) {
@@ -307,7 +333,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Timeout,
                                 request_started.elapsed(),
                             );
-                            if !write_response(&mut send, response, request_timeout).await {
+                            if !write_response(
+                                &mut send,
+                                response,
+                                request_id,
+                                request_timeout,
+                            )
+                            .await
+                            {
                                 network_shard.response_write_failure();
                                 break;
                             }
@@ -325,7 +358,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Overloaded,
                                 request_started.elapsed(),
                             );
-                            if !write_response(&mut send, response, request_timeout).await {
+                            if !write_response(
+                                &mut send,
+                                response,
+                                request_id,
+                                request_timeout,
+                            )
+                            .await
+                            {
                                 network_shard.response_write_failure();
                                 break;
                             }
@@ -391,7 +431,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 (wire_protocol_error_response(error).into(), None)
             }
         };
-        if !write_response(&mut send, response_result.0, request_timeout).await {
+        if !write_response(
+            &mut send,
+            response_result.0,
+            request_id,
+            request_timeout,
+        )
+        .await
+        {
             network_shard.response_write_failure();
             break;
         }
@@ -414,9 +461,15 @@ impl Drop for ActiveStream<'_> {
 async fn write_response<S: SendStream>(
     send: &mut S,
     response: impl Into<operation_transport::OperationResponse>,
+    request_id: u64,
     request_timeout: Duration,
 ) -> bool {
-    send.write_response(response.into().into_parts(), request_timeout)
+    let parts = response
+        .into()
+        .into_parts()
+        .with_request_id(request_id)
+        .expect("server response framing remains canonical");
+    send.write_response(parts, request_timeout)
         .await
         .is_ok()
 }

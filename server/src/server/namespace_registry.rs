@@ -352,7 +352,11 @@ impl NamespaceRegistry {
         }
         let event = JournalEvent::ReserveItem {
             namespace_id,
-            item_id: *item_id.as_bytes(),
+            item_id: {
+                let mut bytes = [0; openkache_protocol::ITEM_ID_BYTES];
+                bytes[..item_id.len()].copy_from_slice(item_id.as_bytes());
+                bytes
+            },
             route: route.persisted(),
             inserted_item: reservation.inserted_item,
             inserted_worker: reservation.inserted_worker,
@@ -402,7 +406,11 @@ impl NamespaceRegistry {
         if self
             .append_event(JournalEvent::RollbackItem {
                 namespace_id,
-                item_id: *item_id.as_bytes(),
+                item_id: {
+                    let mut bytes = [0; openkache_protocol::ITEM_ID_BYTES];
+                    bytes[..item_id.len()].copy_from_slice(item_id.as_bytes());
+                    bytes
+                },
                 route: route.persisted(),
                 remove_item: reservation.inserted_item,
                 remove_worker: reservation.inserted_worker,
@@ -472,7 +480,11 @@ impl NamespaceRegistry {
             && self
                 .append_event(JournalEvent::MarkDelete {
                     namespace_id,
-                    item_id: *item_id.as_bytes(),
+                    item_id: {
+                        let mut bytes = [0; openkache_protocol::ITEM_ID_BYTES];
+                        bytes[..item_id.len()].copy_from_slice(item_id.as_bytes());
+                        bytes
+                    },
                 })
                 .is_err()
         {
@@ -543,7 +555,11 @@ impl NamespaceRegistry {
         if self
             .append_event(JournalEvent::PruneItem {
                 namespace_id,
-                item_id: *item_id.as_bytes(),
+                item_id: {
+                    let mut bytes = [0; openkache_protocol::ITEM_ID_BYTES];
+                    bytes[..item_id.len()].copy_from_slice(item_id.as_bytes());
+                    bytes
+                },
             })
             .is_err()
         {
