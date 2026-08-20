@@ -26,11 +26,11 @@ pub(crate) struct OperationRequest {
 
 impl OperationRequest {
     pub(crate) fn ping() -> Self {
-        Self::new(Opcode::Ping, Operation::Ping, false)
+        Self::new(Opcode::Ping, Operation::Ping, false, false)
     }
 
     pub(crate) fn get(namespace_id: u64, item_id: ItemId) -> Result<Self> {
-        let mut request = Self::new(Opcode::Get, Operation::Get, false);
+        let mut request = Self::new(Opcode::Get, Operation::Get, false, false);
         request.insert(
             op_get::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -48,7 +48,7 @@ impl OperationRequest {
         validate_value_length(value.len())?;
         let namespace_id = namespace_id_bytes(namespace_id)?;
         let fields = SetFields::from_options(options)?;
-        let mut request = Self::new(Opcode::Set, Operation::Set, false);
+        let mut request = Self::new(Opcode::Set, Operation::Set, true, false);
         request.insert(op_set::NAMESPACE_ID, WireSegment::inline(&namespace_id));
         request.insert(op_set::ITEM_ID, WireSegment::inline(item_id.as_bytes()));
         request.insert(op_set::VALUE, WireSegment::owned(value));
@@ -71,7 +71,7 @@ impl OperationRequest {
     }
 
     pub(crate) fn delete(namespace_id: u64, item_id: ItemId) -> Result<Self> {
-        let mut request = Self::new(Opcode::Delete, Operation::Delete, false);
+        let mut request = Self::new(Opcode::Delete, Operation::Delete, true, false);
         request.insert(
             op_delete::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -81,7 +81,7 @@ impl OperationRequest {
     }
 
     pub(crate) fn stats(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::Stats, Operation::Stats, false);
+        let mut request = Self::new(Opcode::Stats, Operation::Stats, false, false);
         request.insert(
             op_stats::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -90,7 +90,7 @@ impl OperationRequest {
     }
 
     pub(crate) fn sync(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::Sync, Operation::Sync, false);
+        let mut request = Self::new(Opcode::Sync, Operation::Sync, false, false);
         request.insert(
             op_sync::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -113,6 +113,7 @@ impl OperationRequest {
         let mut request = Self::new(
             Opcode::NamespaceOpen,
             Operation::NamespaceOpen,
+            create_if_missing,
             create_if_missing,
         );
         request.insert(op_namespace_open::NAME, WireSegment::owned(name));
@@ -137,6 +138,7 @@ impl OperationRequest {
         let mut request = Self::new(
             Opcode::NamespaceUpdatePolicy,
             Operation::NamespaceUpdatePolicy,
+            true,
             false,
         );
         request.insert(
@@ -152,7 +154,8 @@ impl OperationRequest {
     }
 
     pub(crate) fn namespace_delete(namespace_id: u64, expected_revision: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::NamespaceDelete, Operation::NamespaceDelete, false);
+        let mut request =
+            Self::new(Opcode::NamespaceDelete, Operation::NamespaceDelete, true, false);
         request.insert(
             op_namespace_delete::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -164,11 +167,17 @@ impl OperationRequest {
         Ok(request)
     }
 
-    fn new(opcode: Opcode, operation: Operation, creates_resource: bool) -> Self {
+    fn new(
+        opcode: Opcode,
+        operation: Operation,
+        mutation: bool,
+        creates_resource: bool,
+    ) -> Self {
         Self {
             context: RequestContext {
                 opcode,
                 operation,
+                mutation,
                 retry_policy: generated_retry_policy(opcode, creates_resource),
             },
             fields: std::array::from_fn(|_| None),
