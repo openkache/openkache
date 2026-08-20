@@ -345,7 +345,7 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Offers protocol versions in descending order and enforces a minimum version.
+            /// Configures the supported `openkache/1` protocol.
             pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
                 self.inner = self.inner.alpn_policy(policy);
                 self
