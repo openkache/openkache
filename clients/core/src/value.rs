@@ -1,12 +1,23 @@
-//! Canonical serialization, compression, and authenticated value protection.
+//! Versioned client value envelopes and value-key protection.
+//!
+//! The server receives [`ItemValue`] as an opaque byte string.  This module
+//! owns the client-only boundary described by `VALUE_FORMAT.md` and
+//! `VALUE_SECURITY.md`: version and selector dispatch, exact opaque bytes,
+//! StructuredValue-CBOR-v1, bounded Zstandard, and authenticated protection.
+//! Raw protocol operations never call this module and therefore never sniff or
+//! reinterpret stored bytes.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
-use openkache_protocol::{ITEM_ID_BYTES, MAX_VALUE_BYTES};
+use openkache_protocol::ITEM_ID_BYTES;
+use openkache_value::{
+    Limits as StructuredLimits, Value as StructuredValue, decode_with_limits, encode_with_limits,
+};
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use zeroize::{Zeroize, Zeroizing};
@@ -18,96 +29,124 @@ use zstd_pure_rs::prelude::{
 
 use crate::contract::{
     DEFAULT_ZSTANDARD_LEVEL, DEFAULT_ZSTANDARD_LEVEL_MAX, DEFAULT_ZSTANDARD_LEVEL_MIN,
-    DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES, DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
-    VALUE_FORMAT_AAD_DOMAIN, VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
-    VALUE_FORMAT_COMPACT_MAC_CONTEXT, VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
-    VALUE_FORMAT_COMPRESSION_MASK, VALUE_FORMAT_COMPRESSION_NONE,
-    VALUE_FORMAT_COMPRESSION_ZSTANDARD, VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES,
-    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
-    VALUE_FORMAT_ENCRYPTION_SHIFT, VALUE_FORMAT_FORMAT_BYTE_BYTES, VALUE_FORMAT_MAX_VU128_BYTES,
-    VALUE_FORMAT_ROBUST_CONTEXT, VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES,
-    VALUE_FORMAT_SERIALIZATION_JSON, VALUE_FORMAT_SERIALIZATION_RAW, VALUE_FORMAT_VERSION,
-    VALUE_FORMAT_VERSION_BYTES,
 };
+use crate::transport::{BytePermit, RequestBudget};
 use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 
-/// Current value-format version.
-pub const VERSION: u128 = VALUE_FORMAT_VERSION;
+/// The one OpenKache-defined envelope grammar implemented by this module.
+pub const VERSION: u128 = 1;
+/// Exact bytes of the canonical version field.
+pub const VERSION_BYTES: &[u8] = &[1];
+/// Maximum complete envelope size (64 MiB).
+pub const MAX_VALUE_ENVELOPE_BYTES: usize = 67_108_864;
+/// Maximum expanded payload size (64 MiB).
+pub const MAX_EXPANDED_PAYLOAD_BYTES: usize = 67_108_864;
+/// Maximum Zstandard decoder window (64 MiB).
+pub const MAX_ZSTD_WINDOW_BYTES: usize = 67_108_864;
+/// Maximum canonical unsigned-64-bit `vu128` width used by this profile.
+pub const MAX_VU128_BYTES: usize = 9;
+/// Number of bytes in an AES-256-GCM-SIV nonce.
+pub const GCM_SIV_NONCE_BYTES: usize = 12;
+/// Number of bytes in an AEAD authentication tag.
+pub const AUTH_TAG_BYTES: usize = 16;
+/// Number of bytes in an AES-SIV synthetic IV.
+pub const SIV_SYNTHETIC_IV_BYTES: usize = 16;
+/// The value-key size required by both authenticated profiles.
+pub const VALUE_KEY_BYTES: usize = DATA_PROTECTION_KEY_BYTES;
+/// Compatibility spelling retained for existing adapters.
+pub const ENCRYPTION_KEY_BYTES: usize = VALUE_KEY_BYTES;
 
-/// Bytes required for an application data protection key.
-pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
-
-const VERSION_BYTES: &[u8] = VALUE_FORMAT_VERSION_BYTES;
-const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + VALUE_FORMAT_FORMAT_BYTE_BYTES;
-const NAMESPACE_ID_BYTES: usize = std::mem::size_of::<u64>();
-const AAD_BYTES: usize = VALUE_FORMAT_AAD_DOMAIN.len()
-    + NAMESPACE_ID_BYTES
-    + ITEM_ID_BYTES
-    + VERSION_BYTES.len()
-    + VALUE_FORMAT_FORMAT_BYTE_BYTES;
+const AAD_DOMAIN: &[u8] = b"openkache/value-format/aad/v1";
+const VALUE_ROOT_CONTEXT: &str = "OpenKache value format v1 root key";
+const SIV_MAC_CONTEXT: &str = "OpenKache value format v1 AES-256-SIV-CMAC MAC key";
+const SIV_ENCRYPTION_CONTEXT: &str = "OpenKache value format v1 AES-256-SIV-CMAC encryption key";
+const GCM_SIV_CONTEXT: &str = "OpenKache value format v1 AES-256-GCM-SIV key";
 const BINARY64_SIGNIFICAND_BITS: u32 = 53;
 
+const PROTECTION_UNPROTECTED: u8 = 0;
+const PROTECTION_GCM_SIV: u8 = 1;
+const PROTECTION_SIV_CMAC: u8 = 2;
+const COMPRESSION_NONE: u8 = 0;
+const COMPRESSION_ZSTANDARD: u8 = 1;
+const PAYLOAD_OPAQUE_BYTES: u8 = 0;
+const PAYLOAD_STRUCTURED_CBOR_V1: u8 = 1;
+
+const PROTECTION_MASK: u8 = 0b0000_0011;
+const COMPRESSION_MASK: u8 = 0b0000_1100;
+const PAYLOAD_MASK: u8 = 0b0011_0000;
+const RESERVED_SELECTOR_MASK: u8 = 0b1100_0000;
+
 /// Client-owned encoded bytes stored opaquely by the server.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct ItemValue {
     bytes: Vec<u8>,
+    /// Transport response lease retained while a protected client decodes
+    /// this value. Raw callers never observe or construct this field.
+    response_permit: Option<Arc<BytePermit>>,
 }
 
 impl ItemValue {
-    /// Wraps exact opaque bytes for raw storage.
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - Complete bytes to store without interpretation.
-    ///
-    /// # Returns
-    ///
-    /// An item value that preserves the supplied allocation.
+    /// Wrap exact bytes returned by or sent to the raw protocol API.
     pub const fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
+        Self {
+            bytes,
+            response_permit: None,
+        }
     }
 
-    /// Wraps exact plaintext bytes for raw protocol storage.
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - Exact plaintext bytes that bypass formatted-value processing.
-    ///
-    /// # Returns
-    ///
-    /// An item value that preserves the supplied allocation.
+    /// Wrap exact plaintext bytes for raw protocol operations.
     pub const fn plaintext(bytes: Vec<u8>) -> Self {
         Self::new(bytes)
     }
 
-    /// Returns the exact opaque bytes stored by the server.
-    ///
-    /// # Returns
-    ///
-    /// A borrowed view of the complete item value.
+    /// Borrow the complete opaque byte string.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Consumes the value and returns its exact opaque bytes.
-    ///
-    /// # Returns
-    ///
-    /// The complete owned item-value allocation.
+    /// Consume the wrapper and return the complete opaque byte string.
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
 
-    /// Returns whether the opaque value contains no bytes.
+    /// Return whether the opaque byte string is empty.
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
-    /// Returns the number of opaque bytes.
+    /// Return the complete opaque byte length.
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
+
+    pub(crate) fn with_response_permit(bytes: Vec<u8>, permit: Option<BytePermit>) -> Self {
+        Self {
+            bytes,
+            response_permit: permit.map(Arc::new),
+        }
+    }
+
+    fn into_budgeted_parts(self) -> (Vec<u8>, Option<Arc<BytePermit>>) {
+        (self.bytes, self.response_permit)
+    }
 }
+
+impl fmt::Debug for ItemValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ItemValue")
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
+impl PartialEq for ItemValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+impl Eq for ItemValue {}
 
 impl AsRef<[u8]> for ItemValue {
     fn as_ref(&self) -> &[u8] {
@@ -127,7 +166,7 @@ impl From<ItemValue> for Vec<u8> {
     }
 }
 
-/// Common logical JSON value shared by language adapters.
+/// Common logical JSON value retained as a compatibility adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum JsonValue {
     /// JSON `null`.
@@ -136,28 +175,16 @@ pub enum JsonValue {
     Boolean(bool),
     /// Finite IEEE-754 binary64 number.
     Number(f64),
-    /// Unicode string without normalization.
+    /// Unicode string.
     String(String),
-    /// Dense ordered array.
+    /// Ordered array.
     Array(Vec<Self>),
-    /// Object entries. Encoding rejects duplicate property names.
+    /// Object entries with unique names.
     Object(Vec<(String, Self)>),
 }
 
 impl JsonValue {
-    /// Creates a finite JSON number.
-    ///
-    /// # Arguments
-    ///
-    /// * `value` - Finite IEEE-754 binary64 value to represent.
-    ///
-    /// # Returns
-    ///
-    /// A logical JSON number.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for NaN or positive or negative infinity.
+    /// Construct a finite JSON number.
     pub fn number(value: f64) -> Result<Self> {
         if value.is_finite() {
             Ok(Self::Number(value))
@@ -168,21 +195,9 @@ impl JsonValue {
         }
     }
 
-    /// Creates a JSON object with unique property names.
-    ///
-    /// # Arguments
-    ///
-    /// * `entries` - Object properties in any order.
-    ///
-    /// # Returns
-    ///
-    /// A logical JSON object. Encoding later applies canonical property ordering.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a property name occurs more than once.
+    /// Construct an object after checking duplicate property names.
     pub fn object(entries: Vec<(String, Self)>) -> Result<Self> {
-        validate_object_keys(&entries)?;
+        validate_json_object(&entries)?;
         Ok(Self::Object(entries))
     }
 }
@@ -230,7 +245,7 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
     type Value = JsonValue;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an RFC 8785 JSON value")
+        formatter.write_str("a finite JSON value")
     }
 
     fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
@@ -292,7 +307,7 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
+        let mut values = Vec::new();
         while let Some(value) = sequence.next_element()? {
             values.push(value);
         }
@@ -303,8 +318,8 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
-        let mut keys = HashSet::with_capacity(entries.capacity());
+        let mut entries = Vec::new();
+        let mut keys = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
             if !keys.insert(key.clone()) {
                 return Err(serde::de::Error::custom("duplicate JSON object property"));
@@ -315,21 +330,22 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
     }
 }
 
-/// Core-owned logical value supported by the formatted API.
+/// Compatibility logical value. `Raw` is always `OpaqueBytes`; `Json` uses
+/// the explicit StructuredValue-CBOR-v1 selector.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     /// Exact application bytes.
     Raw(Vec<u8>),
-    /// RFC 8785 canonical JSON.
+    /// Compatibility JSON view encoded as StructuredValue-CBOR-v1.
     Json(JsonValue),
 }
 
-/// Zstandard settings applied before value encryption.
+/// Zstandard write policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ZstandardOptions {
-    /// Compression level in the standard Zstandard range.
+    /// Compression level.
     pub level: i32,
-    /// Serialized values smaller than this many bytes bypass compression.
+    /// Values smaller than this bypass compression.
     pub minimum_input_size: usize,
     /// A compressed frame must save at least this many bytes.
     pub minimum_savings: usize,
@@ -339,48 +355,181 @@ impl Default for ZstandardOptions {
     fn default() -> Self {
         Self {
             level: DEFAULT_ZSTANDARD_LEVEL,
-            minimum_input_size: DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
-            minimum_savings: DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
+            minimum_input_size: 0,
+            minimum_savings: 0,
         }
     }
 }
 
-/// Client-side compression policy.
+/// Compression policy for formatted v1 writes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Compression {
-    /// Store serialized values without compression.
+    /// Emit the payload without compression.
     #[default]
     Disabled,
-    /// Compress beneficial serialized values with Zstandard.
+    /// Try one declared-size Zstandard frame.
     Zstandard(ZstandardOptions),
 }
 
-/// Authenticated-encryption profile selected for formatted values.
+/// Protection profile selected by the v1 selector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Encryption {
-    /// Store formatted values without authentication or encryption.
+    /// No confidentiality or authentication.
     Unprotected,
-    /// Deterministic AES-256-SIV-CMAC with 16 bytes of cryptographic overhead.
+    /// Deterministic AES-SIV-CMAC.
     Compact,
-    /// Randomized AES-256-GCM-SIV with 28 bytes of cryptographic overhead.
+    /// Randomized AES-256-GCM-SIV.
     Robust,
 }
 
 impl Encryption {
-    const fn identifier(self) -> u8 {
+    const fn selector_id(self) -> u8 {
         match self {
-            Self::Unprotected => VALUE_FORMAT_ENCRYPTION_NONE,
-            Self::Compact => VALUE_FORMAT_ENCRYPTION_COMPACT,
-            Self::Robust => VALUE_FORMAT_ENCRYPTION_ROBUST,
+            Self::Unprotected => PROTECTION_UNPROTECTED,
+            Self::Robust => PROTECTION_GCM_SIV,
+            Self::Compact => PROTECTION_SIV_CMAC,
+        }
+    }
+
+    const fn from_selector(id: u8) -> Option<Self> {
+        match id {
+            PROTECTION_UNPROTECTED => Some(Self::Unprotected),
+            PROTECTION_GCM_SIV => Some(Self::Robust),
+            PROTECTION_SIV_CMAC => Some(Self::Compact),
+            _ => None,
         }
     }
 }
 
-/// Reusable value-format encoder and decoder.
+/// Per-value and decoder resource limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValueLimits {
+    /// Complete envelope byte limit.
+    pub max_envelope_bytes: usize,
+    /// Decrypted/decompressed payload byte limit.
+    pub max_expanded_payload_bytes: usize,
+    /// Declared Zstandard window limit.
+    pub max_zstd_window_bytes: usize,
+    /// Structured-value nesting limit.
+    pub max_depth: usize,
+    /// Structured-value item limit.
+    pub max_items: usize,
+    /// Structured-value integer magnitude limit.
+    pub max_integer_bytes: usize,
+    /// Maximum bytes one operation may reserve at a time.
+    pub max_in_flight_bytes: usize,
+}
+
+impl Default for ValueLimits {
+    fn default() -> Self {
+        Self {
+            max_envelope_bytes: MAX_VALUE_ENVELOPE_BYTES,
+            max_expanded_payload_bytes: MAX_EXPANDED_PAYLOAD_BYTES,
+            max_zstd_window_bytes: MAX_ZSTD_WINDOW_BYTES,
+            max_depth: openkache_value::DEFAULT_MAX_DEPTH,
+            max_items: openkache_value::DEFAULT_MAX_ITEMS,
+            max_integer_bytes: openkache_value::DEFAULT_MAX_INTEGER_BYTES,
+            max_in_flight_bytes: MAX_VALUE_ENVELOPE_BYTES,
+        }
+    }
+}
+
+/// An immutable positive-ID value-key mapping.
+pub struct ValueKeyring {
+    keys: BTreeMap<u64, Zeroizing<[u8; VALUE_KEY_BYTES]>>,
+    active_id: Option<u64>,
+}
+
+impl fmt::Debug for ValueKeyring {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ValueKeyring")
+            .field("key_ids", &self.keys.keys().collect::<Vec<_>>())
+            .field("active_id", &self.active_id)
+            .finish()
+    }
+}
+
+impl ValueKeyring {
+    /// Creates an empty read-only keyring.
+    pub fn new() -> Self {
+        Self {
+            keys: BTreeMap::new(),
+            active_id: None,
+        }
+    }
+
+    /// Creates a keyring containing one active key.
+    pub fn single(id: u64, key: [u8; VALUE_KEY_BYTES]) -> Result<Self> {
+        let mut ring = Self::new();
+        ring.insert(id, key)?;
+        ring.active_id = Some(id);
+        Ok(ring)
+    }
+
+    /// Creates the compatibility keyring derived from a client root key.
+    pub(crate) fn from_root_key(key: &DataProtectionKey) -> Result<Self> {
+        Self::single(1, *key.master_key())
+    }
+
+    /// Adds an immutable positive key ID.
+    pub fn insert(&mut self, id: u64, key: [u8; VALUE_KEY_BYTES]) -> Result<()> {
+        if id == 0 {
+            return Err(Error::InvalidValueKeyId(id));
+        }
+        if key.iter().all(|byte| *byte == 0) {
+            return Err(Error::InvalidValueKey);
+        }
+        if let Some(previous) = self.keys.get(&id) {
+            if previous.as_slice() != key {
+                return Err(Error::ValueKeyIdRebound(id));
+            }
+            return Ok(());
+        }
+        self.keys.insert(id, Zeroizing::new(key));
+        Ok(())
+    }
+
+    /// Select the active write key ID.
+    pub fn set_active_id(&mut self, id: Option<u64>) -> Result<()> {
+        if let Some(id) = id {
+            if id == 0 {
+                return Err(Error::InvalidValueKeyId(id));
+            }
+            if !self.keys.contains_key(&id) {
+                return Err(Error::KeyUnavailable(id));
+            }
+        }
+        self.active_id = id;
+        Ok(())
+    }
+
+    /// Return the active write key ID, when configured.
+    pub const fn active_id(&self) -> Option<u64> {
+        self.active_id
+    }
+
+    /// Return a key by its exact positive ID.
+    pub fn get(&self, id: u64) -> Option<&[u8; VALUE_KEY_BYTES]> {
+        self.keys.get(&id).map(|key| &**key)
+    }
+}
+
+impl Default for ValueKeyring {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Reusable value encoder/decoder with explicit key and budget boundaries.
 pub struct ValueCodec {
     compression: Compression,
     encryption: Encryption,
-    value_root_key: Option<Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]>>,
+    keyring: Option<ValueKeyring>,
+    read_profiles: u8,
+    limits: ValueLimits,
+    budget: Option<RequestBudget>,
+    default_budget: OnceLock<RequestBudget>,
 }
 
 impl Default for ValueCodec {
@@ -390,76 +539,71 @@ impl Default for ValueCodec {
 }
 
 impl ValueCodec {
-    /// Creates an unprotected formatted codec without compression.
-    ///
-    /// # Returns
-    ///
-    /// A codec that emits version 1 containers without compression or encryption.
+    /// Create an unprotected, uncompressed codec.
     pub const fn plaintext() -> Self {
         Self {
             compression: Compression::Disabled,
             encryption: Encryption::Unprotected,
-            value_root_key: None,
+            keyring: None,
+            read_profiles: 1 << PROTECTION_UNPROTECTED,
+            limits: ValueLimits {
+                max_envelope_bytes: MAX_VALUE_ENVELOPE_BYTES,
+                max_expanded_payload_bytes: MAX_EXPANDED_PAYLOAD_BYTES,
+                max_zstd_window_bytes: MAX_ZSTD_WINDOW_BYTES,
+                max_depth: openkache_value::DEFAULT_MAX_DEPTH,
+                max_items: openkache_value::DEFAULT_MAX_ITEMS,
+                max_integer_bytes: openkache_value::DEFAULT_MAX_INTEGER_BYTES,
+                max_in_flight_bytes: MAX_VALUE_ENVELOPE_BYTES,
+            },
+            budget: None,
+            default_budget: OnceLock::new(),
         }
     }
 
-    /// Creates an unprotected formatted codec with an explicit compression policy.
-    ///
-    /// # Arguments
-    ///
-    /// * `compression` - Compression policy applied to serialized values.
-    ///
-    /// # Returns
-    ///
-    /// An unprotected version 1 codec using the supplied compression policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the compression level is unsupported.
+    /// Create an unprotected codec with a compression policy.
     pub fn compressed(compression: Compression) -> Result<Self> {
         validate_compression(compression)?;
         Ok(Self {
             compression,
-            encryption: Encryption::Unprotected,
-            value_root_key: None,
+            ..Self::plaintext()
         })
     }
 
-    /// Creates the recommended Robust encrypted codec.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Application-managed data protection key.
-    /// * `compression` - Compression policy applied before encryption.
-    ///
-    /// # Returns
-    ///
-    /// A version 1 codec using Robust AES-256-GCM-SIV protection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the compression level is unsupported.
+    /// Create the default GCM-SIV codec from a client root key.
     pub fn protected(key: &DataProtectionKey, compression: Compression) -> Result<Self> {
         Self::protected_with_profile(key, compression, Encryption::Robust)
     }
 
-    /// Creates an encrypted codec with the selected protection profile.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Application-managed data protection key.
-    /// * `compression` - Compression policy applied before encryption.
-    /// * `encryption` - Compact or Robust authenticated-encryption profile.
-    ///
-    /// # Returns
-    ///
-    /// A version 1 codec using the selected protection profile.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unprotected encryption or an unsupported compression level.
+    /// Create an authenticated codec from a client root key.
     pub fn protected_with_profile(
         key: &DataProtectionKey,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        if encryption == Encryption::Unprotected {
+            return Err(Error::InvalidEncryptionConfiguration);
+        }
+        Self::with_keyring(ValueKeyring::from_root_key(key)?, compression, encryption)
+    }
+
+    /// Create an authenticated codec from exact key bytes.
+    pub fn encrypted(key: [u8; ENCRYPTION_KEY_BYTES], compression: Compression) -> Result<Self> {
+        Self::encrypted_with_profile(key, compression, Encryption::Robust)
+    }
+
+    /// Create an authenticated codec from exact key bytes and profile.
+    pub fn encrypted_with_profile(
+        key: [u8; ENCRYPTION_KEY_BYTES],
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        let ring = ValueKeyring::single(1, key)?;
+        Self::with_keyring(ring, compression, encryption)
+    }
+
+    /// Create a codec with an explicit immutable keyring.
+    pub fn with_keyring(
+        keyring: ValueKeyring,
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
@@ -470,356 +614,548 @@ impl ValueCodec {
         Ok(Self {
             compression,
             encryption,
-            value_root_key: Some(key.value_root_key()),
+            keyring: Some(keyring),
+            read_profiles: 1 << encryption.selector_id(),
+            limits: ValueLimits::default(),
+            budget: None,
+            default_budget: OnceLock::new(),
         })
     }
 
-    /// Creates the recommended Robust codec from exact data-protection-key bytes.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Exact 32-byte data protection key.
-    /// * `compression` - Compression policy applied before encryption.
-    ///
-    /// # Returns
-    ///
-    /// A version 1 codec using Robust AES-256-GCM-SIV protection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the compression level is unsupported.
-    pub fn encrypted(
-        mut key: [u8; ENCRYPTION_KEY_BYTES],
-        compression: Compression,
-    ) -> Result<Self> {
-        let protection_key = DataProtectionKey::from_bytes(key);
-        key.zeroize();
-        Self::protected(&protection_key, compression)
+    /// Allow an additional protection profile for reads without changing the
+    /// write selector or active key.
+    pub fn allow_read_profile(mut self, encryption: Encryption) -> Self {
+        self.read_profiles |= 1 << encryption.selector_id();
+        self
     }
 
-    /// Creates a protected codec from exact data-protection-key bytes and an explicit profile.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Exact 32-byte data protection key.
-    /// * `compression` - Compression policy applied before encryption.
-    /// * `encryption` - Compact or Robust authenticated-encryption profile.
-    ///
-    /// # Returns
-    ///
-    /// A version 1 codec using the selected protection profile.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unprotected encryption or an unsupported compression level.
-    pub fn encrypted_with_profile(
-        mut key: [u8; ENCRYPTION_KEY_BYTES],
-        compression: Compression,
-        encryption: Encryption,
-    ) -> Result<Self> {
-        let protection_key = DataProtectionKey::from_bytes(key);
-        key.zeroize();
-        Self::protected_with_profile(&protection_key, compression, encryption)
+    /// Override all local resource limits.
+    pub fn with_limits(mut self, limits: ValueLimits) -> Result<Self> {
+        validate_limits(limits)?;
+        self.limits = limits;
+        Ok(self)
     }
 
-    /// Encodes a core logical value for opaque server storage.
+    /// Applies one aggregate byte budget to this codec's bounded work.
     ///
-    /// # Arguments
-    ///
-    /// * `item_id` - Exact item ID bound into authenticated encryption.
-    /// * `value` - Raw or logical JSON value to serialize.
-    ///
-    /// # Returns
-    ///
-    /// A complete version 1 value-format container.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid logical values, size-limit violations, compression failures,
-    /// entropy failures, or encryption failures.
+    /// The same budget may be shared with a transport client so network
+    /// response bodies remain accounted while a value is authenticated,
+    /// decompressed, or parsed.
+    pub fn with_budget(mut self, budget: RequestBudget) -> Self {
+        self.budget = Some(budget);
+        self.default_budget = OnceLock::new();
+        self
+    }
+
+    /// Borrow the configured limits.
+    pub const fn limits(&self) -> ValueLimits {
+        self.limits
+    }
+
+    /// Encode a compatibility logical value.
     pub fn encode(&self, item_id: ItemId, value: Value) -> Result<ItemValue> {
         self.encode_in_namespace(1, item_id, value)
     }
 
-    /// Encodes a core logical value and binds it to a namespace and Item ID.
-    ///
-    /// Namespace zero is reserved and rejected.
+    /// Encode a compatibility logical value bound to a namespace and Item ID.
     pub fn encode_in_namespace(
         &self,
         namespace_id: u64,
         item_id: ItemId,
         value: Value,
     ) -> Result<ItemValue> {
-        if namespace_id == 0 {
-            return Err(Error::InvalidNamespace);
+        match value {
+            Value::Raw(bytes) => self.seal_opaque_in_namespace(namespace_id, item_id, &bytes),
+            Value::Json(value) => {
+                validate_json(&value)?;
+                let structured = json_to_structured(&value)?;
+                self.seal_structured_in_namespace(namespace_id, item_id, &structured)
+            }
         }
-        let serialized = serialize_value(value)?;
-        if serialized.len() > MAX_VALUE_BYTES {
-            return Err(Error::DecodedValueTooLarge {
-                size: serialized.len(),
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
-
-        let (transformed, compressed) = compress_if_beneficial(serialized, self.compression)?;
-        let compression_id = if compressed {
-            VALUE_FORMAT_COMPRESSION_ZSTANDARD
-        } else {
-            VALUE_FORMAT_COMPRESSION_NONE
-        };
-        let format =
-            compression_id | (self.encryption.identifier() << VALUE_FORMAT_ENCRYPTION_SHIFT);
-        let aad = make_aad(namespace_id, item_id, format);
-        let body = match self.encryption {
-            Encryption::Unprotected => transformed,
-            Encryption::Compact => self.encrypt_compact(item_id, &aad, transformed)?,
-            Encryption::Robust => self.encrypt_robust(item_id, &aad, transformed)?,
-        };
-
-        let encoded_length =
-            CONTAINER_HEADER_BYTES
-                .checked_add(body.len())
-                .ok_or(Error::EncodedValueTooLarge {
-                    size: usize::MAX,
-                    maximum: MAX_VALUE_BYTES,
-                })?;
-        if encoded_length > MAX_VALUE_BYTES {
-            return Err(Error::EncodedValueTooLarge {
-                size: encoded_length,
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
-        let mut encoded = Vec::with_capacity(encoded_length);
-        encoded.extend_from_slice(VERSION_BYTES);
-        encoded.push(format);
-        encoded.extend_from_slice(&body);
-        Ok(ItemValue::new(encoded))
     }
 
-    /// Encodes exact application bytes as the standard Raw serialization.
-    ///
-    /// # Arguments
-    ///
-    /// * `item_id` - Exact item ID bound into authenticated encryption.
-    /// * `plaintext` - Exact application bytes to copy into Raw serialization.
-    ///
-    /// # Returns
-    ///
-    /// A complete version 1 value-format container.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for size-limit violations, compression failures, entropy failures, or
-    /// encryption failures.
+    /// Encode one exact OpaqueBytes payload.
     pub fn seal(&self, item_id: ItemId, plaintext: &[u8]) -> Result<ItemValue> {
-        self.seal_in_namespace(1, item_id, plaintext)
+        self.seal_opaque_in_namespace(1, item_id, plaintext)
     }
 
-    /// Encodes exact application bytes and binds them to a namespace and Item ID.
+    /// Encode exact OpaqueBytes while binding namespace and Item ID.
     pub fn seal_in_namespace(
         &self,
         namespace_id: u64,
         item_id: ItemId,
         plaintext: &[u8],
     ) -> Result<ItemValue> {
-        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext.to_vec()))
+        self.seal_opaque_in_namespace(namespace_id, item_id, plaintext)
     }
 
-    /// Encodes owned application bytes as the standard Raw serialization.
-    ///
-    /// # Arguments
-    ///
-    /// * `item_id` - Exact item ID bound into authenticated encryption.
-    /// * `plaintext` - Owned application bytes to use as Raw serialization.
-    ///
-    /// # Returns
-    ///
-    /// A complete version 1 value-format container.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for size-limit violations, compression failures, entropy failures, or
-    /// encryption failures.
+    /// Encode owned exact OpaqueBytes.
     pub fn seal_owned(&self, item_id: ItemId, plaintext: Vec<u8>) -> Result<ItemValue> {
         self.seal_owned_in_namespace(1, item_id, plaintext)
     }
 
-    /// Encodes owned application bytes and binds them to a namespace and Item ID.
+    /// Encode owned exact OpaqueBytes while binding namespace and Item ID.
     pub fn seal_owned_in_namespace(
         &self,
         namespace_id: u64,
         item_id: ItemId,
         plaintext: Vec<u8>,
     ) -> Result<ItemValue> {
-        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext))
+        self.seal_opaque_in_namespace(namespace_id, item_id, &plaintext)
     }
 
-    /// Authenticates and decodes a formatted value into the core logical model.
+    /// Encode OpaqueBytes without a format-specific interpretation.
+    pub fn seal_opaque(&self, item_id: ItemId, payload: &[u8]) -> Result<ItemValue> {
+        self.seal_opaque_in_namespace(1, item_id, payload)
+    }
+
+    /// Encode OpaqueBytes bound to a namespace and Item ID.
+    pub fn seal_opaque_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        payload: &[u8],
+    ) -> Result<ItemValue> {
+        self.encode_payload(
+            namespace_id,
+            item_id.as_bytes(),
+            PAYLOAD_OPAQUE_BYTES,
+            payload,
+        )
+    }
+
+    /// Encode OpaqueBytes for an exact wire Item ID byte slice.
     ///
-    /// # Arguments
-    ///
-    /// * `item_id` - Exact item ID expected by authenticated encryption.
-    /// * `encoded` - Complete version 1 container returned by the raw client.
-    ///
-    /// # Returns
-    ///
-    /// The decoded Raw or logical JSON value.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed, unsupported, unauthenticated, non-canonical, or oversized
-    /// input.
+    /// The low-level protocol permits the complete `0..=32` byte Item ID
+    /// range, including an empty identity. Mapped high-level APIs continue to
+    /// use the fixed-size [`ItemId`] type.
+    pub fn seal_opaque_with_item_id_bytes(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        payload: &[u8],
+    ) -> Result<ItemValue> {
+        self.encode_payload(namespace_id, item_id, PAYLOAD_OPAQUE_BYTES, payload)
+    }
+
+    /// Encode one StructuredValue-CBOR-v1 payload.
+    pub fn seal_structured(&self, item_id: ItemId, value: &StructuredValue) -> Result<ItemValue> {
+        self.seal_structured_in_namespace(1, item_id, value)
+    }
+
+    /// Encode StructuredValue-CBOR-v1 bound to a namespace and Item ID.
+    pub fn seal_structured_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: &StructuredValue,
+    ) -> Result<ItemValue> {
+        let payload =
+            encode_with_limits(value, structured_limits(self.limits)).map_err(Error::Structured)?;
+        self.encode_payload(
+            namespace_id,
+            item_id.as_bytes(),
+            PAYLOAD_STRUCTURED_CBOR_V1,
+            &payload,
+        )
+    }
+
+    /// Encode StructuredValue-CBOR-v1 for an exact wire Item ID byte slice.
+    pub fn seal_structured_with_item_id_bytes(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        value: &StructuredValue,
+    ) -> Result<ItemValue> {
+        let payload =
+            encode_with_limits(value, structured_limits(self.limits)).map_err(Error::Structured)?;
+        self.encode_payload(namespace_id, item_id, PAYLOAD_STRUCTURED_CBOR_V1, &payload)
+    }
+
+    /// Decode a compatibility logical value.
     pub fn decode(&self, item_id: ItemId, encoded: ItemValue) -> Result<Value> {
         self.decode_in_namespace(1, item_id, encoded)
     }
 
-    /// Authenticates and decodes a value bound to a namespace and Item ID.
+    /// Decode a compatibility logical value bound to a namespace and Item ID.
     pub fn decode_in_namespace(
         &self,
         namespace_id: u64,
         item_id: ItemId,
         encoded: ItemValue,
     ) -> Result<Value> {
-        if namespace_id == 0 {
-            return Err(Error::InvalidNamespace);
-        }
-        let mut encoded = encoded.into_bytes();
-        if encoded.len() > MAX_VALUE_BYTES {
-            return Err(Error::EncodedValueTooLarge {
-                size: encoded.len(),
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
-
-        let (version, version_length) = decode_vu128(&encoded, "format version")?;
-        if version != VERSION {
-            return Err(Error::UnsupportedVersion(version));
-        }
-        let Some(&format) = encoded.get(version_length) else {
-            return Err(Error::InvalidEncodedValue("format byte is truncated"));
-        };
-        let compression_id = format & VALUE_FORMAT_COMPRESSION_MASK;
-        let encryption_id = format >> VALUE_FORMAT_ENCRYPTION_SHIFT;
-        let compressed = match compression_id {
-            VALUE_FORMAT_COMPRESSION_NONE => false,
-            VALUE_FORMAT_COMPRESSION_ZSTANDARD => true,
-            identifier => return Err(Error::UnsupportedCompression(identifier)),
-        };
-        let encryption = match encryption_id {
-            VALUE_FORMAT_ENCRYPTION_NONE => Encryption::Unprotected,
-            VALUE_FORMAT_ENCRYPTION_COMPACT => Encryption::Compact,
-            VALUE_FORMAT_ENCRYPTION_ROBUST => Encryption::Robust,
-            identifier => return Err(Error::UnsupportedEncryption(identifier)),
-        };
-        if encryption != self.encryption {
-            return Err(match (self.encryption, encryption) {
-                (Encryption::Unprotected, _) => Error::EncryptionKeyRequired,
-                (_, Encryption::Unprotected) => Error::EncryptionRequired,
-                _ => Error::EncryptionProfileMismatch {
-                    expected: self.encryption,
-                    actual: encryption,
-                },
-            });
-        }
-
-        let body_offset = version_length + VALUE_FORMAT_FORMAT_BYTE_BYTES;
-        let body_length = encoded.len() - body_offset;
-        encoded.copy_within(body_offset.., 0);
-        encoded.truncate(body_length);
-        let aad = make_aad(namespace_id, item_id, format);
-        let transformed = match encryption {
-            Encryption::Unprotected => {
-                if encoded.is_empty() {
-                    return Err(Error::InvalidEncodedValue("serialized body is missing"));
-                }
-                encoded
+        let decoded = self.decode_payload(namespace_id, item_id.as_bytes(), encoded)?;
+        match decoded.format {
+            PAYLOAD_OPAQUE_BYTES => Ok(Value::Raw(decoded.payload)),
+            PAYLOAD_STRUCTURED_CBOR_V1 => {
+                let _codec_permit =
+                    self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
+                structured_to_json(
+                    &decode_with_limits(&decoded.payload, structured_limits(self.limits))
+                        .map_err(Error::Structured)?,
+                )?
+                .map(Value::Json)
+                .ok_or_else(|| Error::UnsupportedStructuredValue)
             }
-            Encryption::Compact => {
-                if encoded.len() < VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES + 1 {
-                    return Err(Error::InvalidEncodedValue("Compact body is truncated"));
-                }
-                self.decrypt_compact(item_id, &aad, encoded)?
-            }
-            Encryption::Robust => {
-                if encoded.len()
-                    < VALUE_FORMAT_ROBUST_NONCE_BYTES + VALUE_FORMAT_ROBUST_TAG_BYTES + 1
-                {
-                    return Err(Error::InvalidEncodedValue("Robust body is truncated"));
-                }
-                self.decrypt_robust(item_id, &aad, encoded)?
-            }
-        };
-
-        let serialized = if compressed {
-            decompress_zstandard(&transformed)?
-        } else {
-            transformed
-        };
-        if serialized.len() > MAX_VALUE_BYTES {
-            return Err(Error::DecodedValueTooLarge {
-                size: serialized.len(),
-                maximum: MAX_VALUE_BYTES,
-            });
+            _ => Err(Error::UnsupportedPayloadFormat(decoded.format)),
         }
-        deserialize_value(&serialized)
     }
 
-    /// Decodes a formatted Raw value and returns its exact application bytes.
-    ///
-    /// # Arguments
-    ///
-    /// * `item_id` - Exact item ID expected by authenticated encryption.
-    /// * `encoded` - Complete version 1 container returned by the raw client.
-    ///
-    /// # Returns
-    ///
-    /// The exact Raw serialization payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for any value-format failure or a non-Raw serialization.
+    /// Decode an exact OpaqueBytes payload.
     pub fn open(&self, item_id: ItemId, encoded: ItemValue) -> Result<Vec<u8>> {
-        self.open_in_namespace(1, item_id, encoded)
+        self.open_opaque_in_namespace(1, item_id, encoded)
     }
 
-    /// Authenticates and opens a Raw value bound to a namespace and Item ID.
+    /// Decode exact OpaqueBytes bound to a namespace and Item ID.
     pub fn open_in_namespace(
         &self,
         namespace_id: u64,
         item_id: ItemId,
         encoded: ItemValue,
     ) -> Result<Vec<u8>> {
-        match self.decode_in_namespace(namespace_id, item_id, encoded)? {
-            Value::Raw(bytes) => Ok(bytes),
-            Value::Json(_) => Err(Error::ExpectedRawValue),
-        }
+        self.open_opaque_in_namespace(namespace_id, item_id, encoded)
     }
 
-    fn value_root_key(&self) -> Result<&[u8; DATA_PROTECTION_KEY_BYTES]> {
-        self.value_root_key
-            .as_deref()
-            .ok_or(Error::EncryptionKeyRequired)
+    /// Decode exact OpaqueBytes without applying another payload format.
+    pub fn open_opaque(&self, item_id: ItemId, encoded: ItemValue) -> Result<Vec<u8>> {
+        self.open_opaque_in_namespace(1, item_id, encoded)
+    }
+
+    /// Decode exact OpaqueBytes bound to a namespace and Item ID.
+    pub fn open_opaque_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<Vec<u8>> {
+        let decoded = self.decode_payload(namespace_id, item_id.as_bytes(), encoded)?;
+        if decoded.format != PAYLOAD_OPAQUE_BYTES {
+            return Err(Error::ExpectedOpaqueBytes);
+        }
+        Ok(decoded.payload)
+    }
+
+    /// Decode OpaqueBytes for an exact wire Item ID byte slice.
+    pub fn open_opaque_with_item_id_bytes(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        encoded: ItemValue,
+    ) -> Result<Vec<u8>> {
+        let decoded = self.decode_payload(namespace_id, item_id, encoded)?;
+        if decoded.format != PAYLOAD_OPAQUE_BYTES {
+            return Err(Error::ExpectedOpaqueBytes);
+        }
+        Ok(decoded.payload)
+    }
+
+    /// Decode one StructuredValue-CBOR-v1 payload.
+    pub fn open_structured(&self, item_id: ItemId, encoded: ItemValue) -> Result<StructuredValue> {
+        self.open_structured_in_namespace(1, item_id, encoded)
+    }
+
+    /// Decode StructuredValue-CBOR-v1 bound to a namespace and Item ID.
+    pub fn open_structured_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<StructuredValue> {
+        let decoded = self.decode_payload(namespace_id, item_id.as_bytes(), encoded)?;
+        if decoded.format != PAYLOAD_STRUCTURED_CBOR_V1 {
+            return Err(Error::ExpectedStructuredValue);
+        }
+        let _codec_permit = self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
+        decode_with_limits(&decoded.payload, structured_limits(self.limits))
+            .map_err(Error::Structured)
+    }
+
+    /// Decode StructuredValue-CBOR-v1 for an exact wire Item ID byte slice.
+    pub fn open_structured_with_item_id_bytes(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        encoded: ItemValue,
+    ) -> Result<StructuredValue> {
+        let decoded = self.decode_payload(namespace_id, item_id, encoded)?;
+        if decoded.format != PAYLOAD_STRUCTURED_CBOR_V1 {
+            return Err(Error::ExpectedStructuredValue);
+        }
+        let _codec_permit = self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
+        decode_with_limits(&decoded.payload, structured_limits(self.limits))
+            .map_err(Error::Structured)
+    }
+
+    /// Validate and pass through a caller-owned version-0 envelope.
+    ///
+    /// Version 0 is deliberately not parsed or transformed. This method only
+    /// checks the first canonical `vu128` field and the outer byte limit.
+    pub fn pass_through_v0(&self, bytes: Vec<u8>) -> Result<ItemValue> {
+        if bytes.len() > self.limits.max_envelope_bytes {
+            return Err(Error::ResourceLimit {
+                resource: Resource::EnvelopeBytes,
+                limit: self.limits.max_envelope_bytes,
+                actual: bytes.len(),
+            });
+        }
+        let (version, _) = decode_vu128(&bytes, "value envelope version")?;
+        if version != 0 {
+            return Err(Error::UnsupportedVersion(u128::from(version)));
+        }
+        Ok(ItemValue::new(bytes))
+    }
+
+    fn encode_payload(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        payload_format: u8,
+        payload: &[u8],
+    ) -> Result<ItemValue> {
+        validate_namespace(namespace_id)?;
+        validate_item_id(item_id)?;
+        if payload.len() > self.limits.max_expanded_payload_bytes {
+            return Err(Error::ResourceLimit {
+                resource: Resource::ExpandedPayloadBytes,
+                limit: self.limits.max_expanded_payload_bytes,
+                actual: payload.len(),
+            });
+        }
+        let (transformed, compression_id, _transformed_permit) =
+            compress_if_beneficial(payload, self.compression, &self.limits, self.budget())?;
+        let selector = make_selector(
+            self.encryption.selector_id(),
+            compression_id,
+            payload_format,
+        )?;
+        let key_id = if self.encryption == Encryption::Unprotected {
+            None
+        } else {
+            Some(
+                self.keyring
+                    .as_ref()
+                    .and_then(ValueKeyring::active_id)
+                    .ok_or(Error::KeyUnavailable(0))?,
+            )
+        };
+        let key_id_bytes = key_id.map(encode_vu128).transpose()?.unwrap_or_default();
+        let aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
+        let protection_overhead = match self.encryption {
+            Encryption::Unprotected => 0,
+            Encryption::Compact => SIV_SYNTHETIC_IV_BYTES,
+            Encryption::Robust => GCM_SIV_NONCE_BYTES + AUTH_TAG_BYTES,
+        };
+        let encoded_length = VERSION_BYTES
+            .len()
+            .checked_add(1)
+            .and_then(|length| length.checked_add(key_id_bytes.len()))
+            .and_then(|length| length.checked_add(protection_overhead))
+            .and_then(|length| length.checked_add(transformed.len()))
+            .ok_or(Error::ResourceLimit {
+                resource: Resource::EnvelopeBytes,
+                limit: self.limits.max_envelope_bytes,
+                actual: usize::MAX,
+            })?;
+        if encoded_length > self.limits.max_envelope_bytes {
+            return Err(Error::EncodedValueTooLarge {
+                size: encoded_length,
+                maximum: self.limits.max_envelope_bytes,
+            });
+        }
+        let _encoded_permit = self.reserve(encoded_length, Resource::EnvelopeBytes)?;
+        let body = match self.encryption {
+            Encryption::Unprotected => transformed,
+            Encryption::Compact => self.encrypt_compact(
+                key_id.expect("protected profile has active key"),
+                namespace_id,
+                item_id,
+                &aad,
+                transformed,
+            )?,
+            Encryption::Robust => self.encrypt_robust(
+                key_id.expect("protected profile has active key"),
+                namespace_id,
+                item_id,
+                &aad,
+                transformed,
+            )?,
+        };
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(encoded_length)
+            .map_err(|_| Error::Allocation {
+                size: encoded_length,
+            })?;
+        encoded.extend_from_slice(VERSION_BYTES);
+        encoded.push(selector);
+        encoded.extend_from_slice(&key_id_bytes);
+        encoded.extend_from_slice(&body);
+        Ok(ItemValue::new(encoded))
+    }
+
+    fn decode_payload(
+        &self,
+        namespace_id: u64,
+        item_id: &[u8],
+        encoded: ItemValue,
+    ) -> Result<DecodedPayload> {
+        validate_namespace(namespace_id)?;
+        validate_item_id(item_id)?;
+        let (mut encoded, response_permit) = encoded.into_budgeted_parts();
+        if encoded.len() > self.limits.max_envelope_bytes {
+            return Err(Error::EncodedValueTooLarge {
+                size: encoded.len(),
+                maximum: self.limits.max_envelope_bytes,
+            });
+        }
+        let envelope_permit = if response_permit.is_some() {
+            None
+        } else {
+            Some(self.reserve(encoded.len(), Resource::EnvelopeBytes)?)
+        };
+        let (version, version_length) = decode_vu128(&encoded, "value envelope version")?;
+        if version == 0 {
+            return Err(Error::CallerOwnedV0Required);
+        }
+        if u128::from(version) != VERSION {
+            return Err(Error::UnsupportedVersion(u128::from(version)));
+        }
+        let selector = *encoded
+            .get(version_length)
+            .ok_or(Error::TruncatedEnvelope)?;
+        let (protection, compression, format) = parse_selector(selector)?;
+        if self.read_profiles & (1 << protection.selector_id()) == 0 {
+            return Err(match (self.encryption, protection) {
+                (Encryption::Unprotected, _) => Error::KeyUnavailable(0),
+                (_, Encryption::Unprotected) => Error::ProtectionRequired,
+                _ => Error::ProtectionProfileMismatch {
+                    expected: self.encryption,
+                    actual: protection,
+                },
+            });
+        }
+        let mut offset = version_length + 1;
+        let key_id_bytes = if protection == Encryption::Unprotected {
+            &[][..]
+        } else {
+            let (_, length) = decode_vu128(
+                encoded.get(offset..).ok_or(Error::TruncatedEnvelope)?,
+                "value key ID",
+            )?;
+            let bytes = encoded
+                .get(offset..offset + length)
+                .ok_or(Error::TruncatedEnvelope)?;
+            offset += length;
+            let (key_id, _) = decode_vu128(bytes, "value key ID")?;
+            if key_id == 0 {
+                return Err(Error::InvalidValueKeyId(key_id));
+            }
+            bytes
+        };
+        let key_id = if key_id_bytes.is_empty() {
+            None
+        } else {
+            Some(decode_vu128(key_id_bytes, "value key ID")?.0)
+        };
+        if let Some(key_id) = key_id {
+            // Resolve the exact advertised key before inspecting protected-body
+            // details. Unknown or retired IDs have one distinct outcome and
+            // never fall through to authentication or decompression errors.
+            self.key(key_id)?;
+        }
+        let aad = make_aad(namespace_id, item_id, selector, key_id_bytes);
+        if offset > encoded.len() {
+            return Err(Error::TruncatedEnvelope);
+        }
+        encoded.drain(..offset);
+        let body = encoded;
+        let decrypted_permit = match protection {
+            Encryption::Unprotected => None,
+            Encryption::Compact => Some(self.reserve(
+                body.len().saturating_sub(SIV_SYNTHETIC_IV_BYTES),
+                Resource::ExpandedPayloadBytes,
+            )?),
+            Encryption::Robust => Some(
+                self.reserve(
+                    body.len()
+                        .saturating_sub(GCM_SIV_NONCE_BYTES + AUTH_TAG_BYTES),
+                    Resource::ExpandedPayloadBytes,
+                )?,
+            ),
+        };
+        let transformed = match protection {
+            Encryption::Unprotected => body,
+            Encryption::Compact => {
+                if body.len() < SIV_SYNTHETIC_IV_BYTES {
+                    return Err(Error::TruncatedProtectedBody);
+                }
+                self.decrypt_compact(
+                    key_id.ok_or(Error::KeyUnavailable(0))?,
+                    namespace_id,
+                    item_id,
+                    &aad,
+                    body,
+                )?
+            }
+            Encryption::Robust => {
+                if body.len() < GCM_SIV_NONCE_BYTES + AUTH_TAG_BYTES {
+                    return Err(Error::TruncatedProtectedBody);
+                }
+                self.decrypt_robust(
+                    key_id.ok_or(Error::KeyUnavailable(0))?,
+                    namespace_id,
+                    item_id,
+                    &aad,
+                    body,
+                )?
+            }
+        };
+        let (payload, payload_permit) = if compression == COMPRESSION_ZSTANDARD {
+            let (payload, permit) =
+                decompress_zstandard(&transformed, &self.limits, self.budget())?;
+            (payload, Some(permit))
+        } else {
+            (transformed, None)
+        };
+        if payload.len() > self.limits.max_expanded_payload_bytes {
+            return Err(Error::ResourceLimit {
+                resource: Resource::ExpandedPayloadBytes,
+                limit: self.limits.max_expanded_payload_bytes,
+                actual: payload.len(),
+            });
+        }
+        Ok(DecodedPayload {
+            format,
+            payload,
+            _response_permit: response_permit,
+            _envelope_permit: envelope_permit,
+            _decrypted_permit: decrypted_permit,
+            _payload_permit: payload_permit,
+        })
+    }
+
+    fn key(&self, key_id: u64) -> Result<&[u8; VALUE_KEY_BYTES]> {
+        self.keyring
+            .as_ref()
+            .and_then(|ring| ring.get(key_id))
+            .ok_or(Error::KeyUnavailable(key_id))
     }
 
     fn encrypt_compact(
         &self,
-        item_id: ItemId,
+        key_id: u64,
+        namespace_id: u64,
+        item_id: &[u8],
         aad: &[u8],
         mut plaintext: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let material = item_id_material(self.value_root_key()?, item_id);
-        let mac_key = Zeroizing::new(blake3::derive_key(
-            VALUE_FORMAT_COMPACT_MAC_CONTEXT,
-            material.as_slice(),
-        ));
-        let encryption_key = Zeroizing::new(blake3::derive_key(
-            VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
-            material.as_slice(),
-        ));
-        let mut combined_key = Zeroizing::new([0_u8; ENCRYPTION_KEY_BYTES * 2]);
-        combined_key[..ENCRYPTION_KEY_BYTES].copy_from_slice(mac_key.as_slice());
-        combined_key[ENCRYPTION_KEY_BYTES..].copy_from_slice(encryption_key.as_slice());
-        Aes256Siv::new((&*combined_key).into())
+        let material = item_material(self.key(key_id)?, key_id, namespace_id, item_id);
+        let mac_key = Zeroizing::new(blake3::derive_key(SIV_MAC_CONTEXT, &material));
+        let encryption_key = Zeroizing::new(blake3::derive_key(SIV_ENCRYPTION_CONTEXT, &material));
+        let mut combined = Zeroizing::new([0_u8; VALUE_KEY_BYTES * 2]);
+        combined[..VALUE_KEY_BYTES].copy_from_slice(&mac_key[..]);
+        combined[VALUE_KEY_BYTES..].copy_from_slice(&encryption_key[..]);
+        Aes256Siv::new((&*combined).into())
             .encrypt_in_place([aad], &mut plaintext)
             .map_err(|_| Error::Encryption)?;
         Ok(plaintext)
@@ -827,23 +1163,19 @@ impl ValueCodec {
 
     fn decrypt_compact(
         &self,
-        item_id: ItemId,
+        key_id: u64,
+        namespace_id: u64,
+        item_id: &[u8],
         aad: &[u8],
         mut ciphertext: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let material = item_id_material(self.value_root_key()?, item_id);
-        let mac_key = Zeroizing::new(blake3::derive_key(
-            VALUE_FORMAT_COMPACT_MAC_CONTEXT,
-            material.as_slice(),
-        ));
-        let encryption_key = Zeroizing::new(blake3::derive_key(
-            VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
-            material.as_slice(),
-        ));
-        let mut combined_key = Zeroizing::new([0_u8; ENCRYPTION_KEY_BYTES * 2]);
-        combined_key[..ENCRYPTION_KEY_BYTES].copy_from_slice(mac_key.as_slice());
-        combined_key[ENCRYPTION_KEY_BYTES..].copy_from_slice(encryption_key.as_slice());
-        if Aes256Siv::new((&*combined_key).into())
+        let material = item_material(self.key(key_id)?, key_id, namespace_id, item_id);
+        let mac_key = Zeroizing::new(blake3::derive_key(SIV_MAC_CONTEXT, &material));
+        let encryption_key = Zeroizing::new(blake3::derive_key(SIV_ENCRYPTION_CONTEXT, &material));
+        let mut combined = Zeroizing::new([0_u8; VALUE_KEY_BYTES * 2]);
+        combined[..VALUE_KEY_BYTES].copy_from_slice(&mac_key[..]);
+        combined[VALUE_KEY_BYTES..].copy_from_slice(&encryption_key[..]);
+        if Aes256Siv::new((&*combined).into())
             .decrypt_in_place([aad], &mut ciphertext)
             .is_err()
         {
@@ -855,105 +1187,265 @@ impl ValueCodec {
 
     fn encrypt_robust(
         &self,
-        item_id: ItemId,
+        key_id: u64,
+        namespace_id: u64,
+        item_id: &[u8],
         aad: &[u8],
         mut plaintext: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let material = item_id_material(self.value_root_key()?, item_id);
-        let robust_key = Zeroizing::new(blake3::derive_key(
-            VALUE_FORMAT_ROBUST_CONTEXT,
-            material.as_slice(),
-        ));
-        let cipher = Aes256GcmSiv::new((&*robust_key).into());
-        let mut nonce_bytes = [0_u8; VALUE_FORMAT_ROBUST_NONCE_BYTES];
+        let material = item_material(self.key(key_id)?, key_id, namespace_id, item_id);
+        let key = Zeroizing::new(blake3::derive_key(GCM_SIV_CONTEXT, &material));
+        let cipher = Aes256GcmSiv::new((&*key).into());
+        let mut nonce_bytes = [0_u8; GCM_SIV_NONCE_BYTES];
         getrandom::fill(&mut nonce_bytes).map_err(|error| Error::Entropy(error.to_string()))?;
         let nonce = Nonce::from(nonce_bytes);
         let plaintext_length = plaintext.len();
-        let body_length = VALUE_FORMAT_ROBUST_NONCE_BYTES
+        let body_length = GCM_SIV_NONCE_BYTES
             .checked_add(plaintext_length)
-            .and_then(|length| length.checked_add(VALUE_FORMAT_ROBUST_TAG_BYTES))
-            .ok_or(Error::EncodedValueTooLarge {
-                size: usize::MAX,
-                maximum: MAX_VALUE_BYTES,
+            .and_then(|length| length.checked_add(AUTH_TAG_BYTES))
+            .ok_or(Error::ResourceLimit {
+                resource: Resource::EnvelopeBytes,
+                limit: self.limits.max_envelope_bytes,
+                actual: usize::MAX,
             })?;
         plaintext.resize(body_length, 0);
-        plaintext.copy_within(0..plaintext_length, VALUE_FORMAT_ROBUST_NONCE_BYTES);
+        plaintext.copy_within(0..plaintext_length, GCM_SIV_NONCE_BYTES);
         let tag = cipher
             .encrypt_inout_detached(
                 &nonce,
                 aad,
-                plaintext[VALUE_FORMAT_ROBUST_NONCE_BYTES
-                    ..VALUE_FORMAT_ROBUST_NONCE_BYTES + plaintext_length]
+                plaintext[GCM_SIV_NONCE_BYTES..GCM_SIV_NONCE_BYTES + plaintext_length]
                     .as_mut()
                     .into(),
             )
             .map_err(|_| Error::Encryption)?;
-        plaintext[..VALUE_FORMAT_ROBUST_NONCE_BYTES].copy_from_slice(&nonce_bytes);
-        plaintext[VALUE_FORMAT_ROBUST_NONCE_BYTES + plaintext_length..].copy_from_slice(&tag);
+        plaintext[..GCM_SIV_NONCE_BYTES].copy_from_slice(&nonce_bytes);
+        plaintext[GCM_SIV_NONCE_BYTES + plaintext_length..].copy_from_slice(&tag);
         Ok(plaintext)
     }
 
-    fn decrypt_robust(&self, item_id: ItemId, aad: &[u8], mut encoded: Vec<u8>) -> Result<Vec<u8>> {
-        let tag_offset = encoded
-            .len()
-            .checked_sub(VALUE_FORMAT_ROBUST_TAG_BYTES)
-            .ok_or(Error::InvalidEncodedValue("Robust body is truncated"))?;
-        let nonce_bytes: [u8; VALUE_FORMAT_ROBUST_NONCE_BYTES] = encoded
-            .get(..VALUE_FORMAT_ROBUST_NONCE_BYTES)
-            .ok_or(Error::InvalidEncodedValue("Robust nonce is truncated"))?
+    fn decrypt_robust(
+        &self,
+        key_id: u64,
+        namespace_id: u64,
+        item_id: &[u8],
+        aad: &[u8],
+        mut body: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let tag_offset = body.len() - AUTH_TAG_BYTES;
+        let nonce_bytes: [u8; GCM_SIV_NONCE_BYTES] = body
+            .get(..GCM_SIV_NONCE_BYTES)
+            .ok_or(Error::TruncatedProtectedBody)?
             .try_into()
-            .map_err(|_| Error::InvalidEncodedValue("Robust nonce has an invalid length"))?;
-        let tag_bytes: [u8; VALUE_FORMAT_ROBUST_TAG_BYTES] = encoded
+            .map_err(|_| Error::TruncatedProtectedBody)?;
+        let tag_bytes: [u8; AUTH_TAG_BYTES] = body
             .get(tag_offset..)
-            .ok_or(Error::InvalidEncodedValue("Robust tag is truncated"))?
+            .ok_or(Error::TruncatedProtectedBody)?
             .try_into()
-            .map_err(|_| Error::InvalidEncodedValue("Robust tag has an invalid length"))?;
+            .map_err(|_| Error::TruncatedProtectedBody)?;
         let ciphertext_length = tag_offset
-            .checked_sub(VALUE_FORMAT_ROBUST_NONCE_BYTES)
-            .ok_or(Error::InvalidEncodedValue("Robust ciphertext is truncated"))?;
-        encoded.copy_within(VALUE_FORMAT_ROBUST_NONCE_BYTES..tag_offset, 0);
-        encoded.truncate(ciphertext_length);
-        let material = item_id_material(self.value_root_key()?, item_id);
-        let robust_key = Zeroizing::new(blake3::derive_key(
-            VALUE_FORMAT_ROBUST_CONTEXT,
-            material.as_slice(),
-        ));
-        let cipher = Aes256GcmSiv::new((&*robust_key).into());
+            .checked_sub(GCM_SIV_NONCE_BYTES)
+            .ok_or(Error::TruncatedProtectedBody)?;
+        body.copy_within(GCM_SIV_NONCE_BYTES..tag_offset, 0);
+        body.truncate(ciphertext_length);
+        let material = item_material(self.key(key_id)?, key_id, namespace_id, item_id);
+        let key = Zeroizing::new(blake3::derive_key(GCM_SIV_CONTEXT, &material));
+        let cipher = Aes256GcmSiv::new((&*key).into());
         let nonce = Nonce::from(nonce_bytes);
         let tag = Tag::from(tag_bytes);
         if cipher
-            .decrypt_inout_detached(&nonce, aad, encoded.as_mut_slice().into(), &tag)
+            .decrypt_inout_detached(&nonce, aad, body.as_mut_slice().into(), &tag)
             .is_err()
         {
-            encoded.zeroize();
+            body.zeroize();
             return Err(Error::Authentication);
         }
-        Ok(encoded)
+        Ok(body)
     }
+
+    fn reserve(&self, size: usize, resource: Resource) -> Result<BytePermit> {
+        reserve_budget(self.budget(), size, &self.limits, resource)
+    }
+
+    fn budget(&self) -> &RequestBudget {
+        self.budget
+            .as_ref()
+            .unwrap_or_else(|| {
+                self.default_budget
+                    .get_or_init(|| RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES))
+            })
+    }
+}
+
+fn reserve_budget(
+    budget: &RequestBudget,
+    size: usize,
+    limits: &ValueLimits,
+    resource: Resource,
+) -> Result<BytePermit> {
+    if size > limits.max_in_flight_bytes {
+        return Err(Error::ResourceLimit {
+            resource,
+            limit: limits.max_in_flight_bytes,
+            actual: size,
+        });
+    }
+    budget
+        .try_reserve(size)
+        .map_err(|_| Error::ResourceLimit {
+            resource,
+            limit: budget.capacity(),
+            actual: size,
+        })
+}
+
+struct DecodedPayload {
+    format: u8,
+    payload: Vec<u8>,
+    _response_permit: Option<Arc<BytePermit>>,
+    _envelope_permit: Option<BytePermit>,
+    _decrypted_permit: Option<BytePermit>,
+    _payload_permit: Option<BytePermit>,
+}
+
+/// Resource dimensions exposed by value errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Resource {
+    /// Complete stored envelope.
+    EnvelopeBytes,
+    /// Expanded plaintext payload.
+    ExpandedPayloadBytes,
+    /// Zstandard declared window.
+    ZstdWindowBytes,
+    /// Structured-value model depth/items/integers.
+    StructuredValue,
 }
 
 /// Client-side value-format errors.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The configured Zstandard level is unsupported.
-    #[error("Zstandard level {0} is outside the configured compression-level range")]
+    /// Invalid compression level.
+    #[error("Zstandard level {0} is outside the supported range")]
     InvalidCompressionLevel(i32),
-    /// Namespace zero is reserved by the protocol.
+    /// Namespace zero is reserved.
     #[error("namespace ID must be a positive server-assigned identity")]
     InvalidNamespace,
-    /// An unprotected profile was passed to a protected constructor.
+    /// Item IDs are bounded by the wire protocol's 32-byte identity field.
+    #[error("Item ID contains {0} bytes; maximum is {ITEM_ID_BYTES}")]
+    InvalidItemIdLength(usize),
+    /// A protected constructor was given an unprotected profile.
     #[error("protected value codecs require Compact or Robust encryption")]
     InvalidEncryptionConfiguration,
-    /// The decoded serialized value exceeded its limit.
-    #[error("decoded value is too large: {size} bytes exceeds {maximum}")]
-    DecodedValueTooLarge {
-        /// Actual decoded size.
-        size: usize,
-        /// Maximum accepted decoded size.
-        maximum: usize,
+    /// A key ID was zero or outside the unsigned 64-bit profile.
+    #[error("invalid value key ID {0}")]
+    InvalidValueKeyId(u64),
+    /// A key was all zero.
+    #[error("value keys must not be all zero")]
+    InvalidValueKey,
+    /// A key ID was rebound to different key material.
+    #[error("value key ID {0} was already assigned different key material")]
+    ValueKeyIdRebound(u64),
+    /// The exact key ID in a protected value is not available.
+    #[error("value key unavailable: {0}")]
+    KeyUnavailable(u64),
+    /// Authentication failed; details are intentionally generic.
+    #[error("value authentication failed")]
+    Authentication,
+    /// Encryption failed before an envelope was emitted.
+    #[error("value encryption failed")]
+    Encryption,
+    /// OS randomness failed.
+    #[error("operating-system entropy failed: {0}")]
+    Entropy(String),
+    /// Stored data requires a protected profile.
+    #[error("client policy requires protected values")]
+    ProtectionRequired,
+    /// Legacy spelling retained for adapters during selector migration.
+    #[error("client policy requires encrypted values")]
+    EncryptionRequired,
+    /// Legacy spelling retained for adapters during selector migration.
+    #[error("encrypted value requires a data protection key")]
+    EncryptionKeyRequired,
+    /// Stored data used another allowed profile.
+    #[error("value protection profile mismatch: expected {expected:?}, got {actual:?}")]
+    ProtectionProfileMismatch {
+        /// Configured profile.
+        expected: Encryption,
+        /// Stored profile.
+        actual: Encryption,
     },
-    /// Encoded bytes exceeded the protocol limit.
+    /// Legacy spelling retained for adapters during selector migration.
+    #[error("value encryption profile mismatch: expected {expected:?}, got {actual:?}")]
+    EncryptionProfileMismatch {
+        /// Configured profile.
+        expected: Encryption,
+        /// Stored profile.
+        actual: Encryption,
+    },
+    /// Envelope version is unknown.
+    #[error("unsupported value-format version {0}")]
+    UnsupportedVersion(u128),
+    /// Version-0 data requires an explicit caller-owned path.
+    #[error("caller-owned version-0 value requires the explicit pass-through API")]
+    CallerOwnedV0Required,
+    /// The version or selector field ended early.
+    #[error("value envelope is truncated")]
+    TruncatedEnvelope,
+    /// Legacy structural error spelling retained for adapters.
+    #[error("invalid encoded value: {0}")]
+    InvalidEncodedValue(&'static str),
+    /// Protected body ended before its minimum profile overhead.
+    #[error("protected value body is truncated")]
+    TruncatedProtectedBody,
+    /// Selector has reserved bits or unknown assignments.
+    #[error("unsupported value selector {0:#04x}")]
+    UnsupportedSelector(u8),
+    /// Compression profile is unknown.
+    #[error("unsupported value compression identifier {0}")]
+    UnsupportedCompression(u8),
+    /// Legacy selector spelling retained for adapters.
+    #[error("unsupported value encryption identifier {0}")]
+    UnsupportedEncryption(u8),
+    /// Payload profile is unknown.
+    #[error("unsupported value payload format identifier {0}")]
+    UnsupportedPayloadFormat(u8),
+    /// Legacy payload discriminator spelling retained for adapters.
+    #[error("unsupported value serialization identifier {0}")]
+    UnsupportedSerialization(u128),
+    /// Expected OpaqueBytes but received a structured payload.
+    #[error("formatted value is not OpaqueBytes")]
+    ExpectedOpaqueBytes,
+    /// Expected StructuredValue-CBOR-v1 but received opaque bytes.
+    #[error("formatted value is not StructuredValue-CBOR-v1")]
+    ExpectedStructuredValue,
+    /// Compatibility JSON conversion cannot represent the complete model.
+    #[error("structured value cannot be represented as the compatibility JSON view")]
+    UnsupportedStructuredValue,
+    /// JSON compatibility conversion failed.
+    #[error("invalid canonical JSON: {0}")]
+    InvalidJson(String),
+    /// Legacy canonical JSON mismatch category.
+    #[error("JSON payload is not canonical RFC 8785 JSON")]
+    NonCanonicalJson,
+    /// StructuredValue-CBOR-v1 validation failed.
+    #[error("structured value failed validation: {0}")]
+    Structured(#[source] openkache_value::Error),
+    /// Resource limit was exceeded before allocation or traversal.
+    #[error("{resource:?} limit {limit} exceeded by {actual}")]
+    ResourceLimit {
+        /// Bounded resource.
+        resource: Resource,
+        /// Configured maximum.
+        limit: usize,
+        /// Observed amount.
+        actual: usize,
+    },
+    /// Complete encoded bytes exceeded the configured envelope limit.
+    ///
+    /// This spelling remains available to callers migrating from the
+    /// pre-selector codec. New code should prefer [`Error::ResourceLimit`]
+    /// with [`Resource::EnvelopeBytes`].
     #[error("encoded value is too large: {size} bytes exceeds {maximum}")]
     EncodedValueTooLarge {
         /// Actual encoded size.
@@ -961,197 +1453,64 @@ pub enum Error {
         /// Maximum accepted encoded size.
         maximum: usize,
     },
-    /// The operating system could not provide nonce entropy.
-    #[error("operating-system entropy failed: {0}")]
-    Entropy(String),
-    /// Authenticated encryption failed before producing a container.
-    #[error("value encryption failed")]
-    Encryption,
-    /// Authentication failed without exposing a more specific cause.
-    #[error("value authentication failed")]
-    Authentication,
-    /// Encrypted input was provided to a codec without a key.
-    #[error("encrypted value requires a data protection key")]
-    EncryptionKeyRequired,
-    /// Unencrypted input was provided to a codec that requires encryption.
-    #[error("client policy requires encrypted values")]
-    EncryptionRequired,
-    /// Input encryption did not match the configured protected profile.
-    #[error("value encryption profile mismatch: expected {expected:?}, got {actual:?}")]
-    EncryptionProfileMismatch {
-        /// Configured encryption profile.
-        expected: Encryption,
-        /// Stored encryption profile.
-        actual: Encryption,
+    /// Legacy expanded-payload limit category.
+    #[error("decoded value is too large: {size} bytes exceeds {maximum}")]
+    DecodedValueTooLarge {
+        /// Actual expanded bytes.
+        size: usize,
+        /// Configured expanded limit.
+        maximum: usize,
     },
-    /// The encoded value was structurally malformed.
-    #[error("invalid encoded value: {0}")]
-    InvalidEncodedValue(&'static str),
-    /// A VU128 field was non-canonical, truncated, or overflowing.
+    /// Allocation failed.
+    #[error("failed to allocate {size} bytes")]
+    Allocation {
+        /// Requested size.
+        size: usize,
+    },
+    /// Malformed vu128.
     #[error("invalid {field}: {reason}")]
     InvalidVu128 {
         /// Stable field name.
         field: &'static str,
-        /// Stable validation reason.
+        /// Stable validation detail.
         reason: &'static str,
     },
-    /// The container version is not implemented.
-    #[error("unsupported value-format version {0}")]
-    UnsupportedVersion(u128),
-    /// The compression identifier is reserved or unknown.
-    #[error("unsupported value compression identifier {0}")]
-    UnsupportedCompression(u8),
-    /// The encryption identifier is reserved or unknown.
-    #[error("unsupported value encryption identifier {0}")]
-    UnsupportedEncryption(u8),
-    /// The serialization identifier is reserved or unknown.
-    #[error("unsupported value serialization identifier {0}")]
-    UnsupportedSerialization(u128),
-    /// The caller requested Raw bytes from another serialization.
-    #[error("formatted value is not Raw serialization")]
-    ExpectedRawValue,
-    /// JSON could not be represented by the common logical model.
-    #[error("invalid canonical JSON: {0}")]
-    InvalidJson(String),
-    /// JSON parsed successfully but was not its exact RFC 8785 representation.
-    #[error("JSON payload is not canonical RFC 8785 JSON")]
-    NonCanonicalJson,
-    /// Zstandard compression or decompression failed.
+    /// Zstandard framing or decoding failed.
     #[error("Zstandard {operation} failed: {message}")]
     Zstandard {
-        /// Stable codec operation name.
+        /// Operation name.
         operation: &'static str,
-        /// Human-readable codec detail.
+        /// Codec diagnostic.
         message: String,
     },
-    /// A Zstandard frame produced a different length than declared.
-    #[error("decoded value length mismatch: expected {expected} bytes, got {actual}")]
+    /// Zstandard output did not match its declared content size.
+    #[error("decompressed length mismatch: expected {expected}, got {actual}")]
     DecompressedLength {
-        /// Length declared by the frame.
+        /// Declared content size.
         expected: usize,
-        /// Length produced by decompression.
+        /// Produced bytes.
         actual: usize,
     },
+    /// Kept for callers migrating from the legacy JSON/raw codec.
+    #[error("formatted value is not Raw serialization")]
+    ExpectedRawValue,
 }
 
-/// Convenience result type for value-format operations.
+/// Convenience result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn validate_compression(compression: Compression) -> Result<()> {
-    let Compression::Zstandard(options) = compression else {
-        return Ok(());
-    };
-    if !(DEFAULT_ZSTANDARD_LEVEL_MIN..=DEFAULT_ZSTANDARD_LEVEL_MAX).contains(&options.level) {
-        return Err(Error::InvalidCompressionLevel(options.level));
-    }
-    Ok(())
-}
-
-fn serialize_value(value: Value) -> Result<Vec<u8>> {
-    match value {
-        Value::Raw(bytes) => prefix_vu128(VALUE_FORMAT_SERIALIZATION_RAW as u128, bytes),
-        Value::Json(value) => {
-            validate_json_value(&value)?;
-            let payload = serde_json_canonicalizer::to_vec(&value)
-                .map_err(|error| Error::InvalidJson(error.to_string()))?;
-            prefix_vu128(VALUE_FORMAT_SERIALIZATION_JSON as u128, payload)
-        }
-    }
-}
-
-fn deserialize_value(serialized: &[u8]) -> Result<Value> {
-    let (identifier, identifier_length) = decode_vu128(serialized, "serialization identifier")?;
-    let payload = &serialized[identifier_length..];
-    match identifier {
-        value if value == VALUE_FORMAT_SERIALIZATION_RAW as u128 => {
-            Ok(Value::Raw(payload.to_vec()))
-        }
-        value if value == VALUE_FORMAT_SERIALIZATION_JSON as u128 => {
-            decode_json(payload).map(Value::Json)
-        }
-        identifier => Err(Error::UnsupportedSerialization(identifier)),
-    }
-}
-
-fn prefix_vu128(identifier: u128, payload: Vec<u8>) -> Result<Vec<u8>> {
-    let mut encoded_identifier = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
-    let identifier_length = vu128::encode_u128(&mut encoded_identifier, identifier);
-    let total_length =
-        identifier_length
-            .checked_add(payload.len())
-            .ok_or(Error::EncodedValueTooLarge {
-                size: usize::MAX,
-                maximum: MAX_VALUE_BYTES,
-            })?;
-    let mut serialized = Vec::with_capacity(total_length);
-    serialized.extend_from_slice(&encoded_identifier[..identifier_length]);
-    serialized.extend_from_slice(&payload);
-    Ok(serialized)
-}
-
-fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
-    let Some(&first) = input.first() else {
-        return Err(Error::InvalidVu128 {
-            field,
-            reason: "field is truncated",
-        });
-    };
-    let encoded_length = vu128::encoded_len(first);
-    if encoded_length > VALUE_FORMAT_MAX_VU128_BYTES {
-        return Err(Error::InvalidVu128 {
-            field,
-            reason: "field overflows u128",
-        });
-    }
-    if input.len() < encoded_length {
-        return Err(Error::InvalidVu128 {
-            field,
-            reason: "field is truncated",
-        });
-    }
-    let mut encoded = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
-    encoded[..encoded_length].copy_from_slice(&input[..encoded_length]);
-    let (value, decoded_length) = vu128::decode_u128(&encoded);
-    if decoded_length != encoded_length {
-        return Err(Error::InvalidVu128 {
-            field,
-            reason: "decoder returned an invalid length",
-        });
-    }
-
-    let mut canonical = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
-    let canonical_length = vu128::encode_u128(&mut canonical, value);
-    if canonical_length != encoded_length
-        || canonical[..canonical_length] != input[..encoded_length]
-    {
-        return Err(Error::InvalidVu128 {
-            field,
-            reason: "field is not canonical",
-        });
-    }
-    Ok((value, encoded_length))
-}
-
-fn validate_json_value(value: &JsonValue) -> Result<()> {
-    match value {
-        JsonValue::Number(number) if !number.is_finite() => Err(Error::InvalidJson(
-            "JSON numbers must be finite IEEE-754 values".into(),
-        )),
-        JsonValue::Array(values) => {
-            for value in values {
-                validate_json_value(value)?;
-            }
-            Ok(())
-        }
-        JsonValue::Object(entries) => {
-            validate_object_keys(entries)?;
-            for (_, value) in entries {
-                validate_json_value(value)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
+/// Parse one complete JSON input for compatibility adapters.
+#[allow(dead_code)]
+pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
+    validate_json_integer_tokens(payload)?;
+    let mut deserializer = serde_json::Deserializer::from_slice(payload);
+    let value = JsonValue::deserialize(&mut deserializer)
+        .map_err(|error| Error::InvalidJson(error.to_string()))?;
+    deserializer
+        .end()
+        .map_err(|error| Error::InvalidJson(error.to_string()))?;
+    validate_json(&value)?;
+    Ok(value)
 }
 
 fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
@@ -1166,39 +1525,6 @@ fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
         ));
     }
     Ok(JsonValue::Number(value))
-}
-
-fn validate_object_keys(entries: &[(String, JsonValue)]) -> Result<()> {
-    let mut keys = HashSet::with_capacity(entries.len());
-    for (key, _) in entries {
-        if !keys.insert(key.as_str()) {
-            return Err(Error::InvalidJson(
-                "JSON object property names must be unique".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
-    validate_json_integer_tokens(payload)?;
-    let mut deserializer = serde_json::Deserializer::from_slice(payload);
-    let value = JsonValue::deserialize(&mut deserializer)
-        .map_err(|error| Error::InvalidJson(error.to_string()))?;
-    deserializer
-        .end()
-        .map_err(|error| Error::InvalidJson(error.to_string()))?;
-    Ok(value)
-}
-
-fn decode_json(payload: &[u8]) -> Result<JsonValue> {
-    let value = parse_json_input(payload)?;
-    let canonical = serde_json_canonicalizer::to_vec(&value)
-        .map_err(|error| Error::InvalidJson(error.to_string()))?;
-    if canonical != payload {
-        return Err(Error::NonCanonicalJson);
-    }
-    Ok(value)
 }
 
 fn validate_json_integer_tokens(payload: &[u8]) -> Result<()> {
@@ -1297,81 +1623,413 @@ fn normalize_integer_string(value: &str) -> String {
     }
 }
 
-fn compress_if_beneficial(
-    serialized: Vec<u8>,
-    compression: Compression,
-) -> Result<(Vec<u8>, bool)> {
-    let Compression::Zstandard(options) = compression else {
-        return Ok((serialized, false));
-    };
-    if serialized.len() < options.minimum_input_size {
-        return Ok((serialized, false));
+#[allow(dead_code)]
+fn validate_json(value: &JsonValue) -> Result<()> {
+    match value {
+        JsonValue::Number(number) if !number.is_finite() => Err(Error::InvalidJson(
+            "JSON numbers must be finite IEEE-754 values".into(),
+        )),
+        JsonValue::Array(values) => values.iter().try_for_each(validate_json),
+        JsonValue::Object(entries) => {
+            validate_json_object(entries)?;
+            entries
+                .iter()
+                .try_for_each(|(_, value)| validate_json(value))
+        }
+        _ => Ok(()),
     }
-
-    let mut compressed = vec![0_u8; ZSTD_compressBound(serialized.len())];
-    let compressed_length = ZSTD_compress(&mut compressed, &serialized, options.level);
-    check_zstandard("compression", compressed_length)?;
-    if compressed_length >= serialized.len()
-        || serialized.len() - compressed_length < options.minimum_savings
-    {
-        return Ok((serialized, false));
-    }
-    compressed.truncate(compressed_length);
-    Ok((compressed, true))
 }
 
-fn decompress_zstandard(compressed: &[u8]) -> Result<Vec<u8>> {
+fn validate_json_object(entries: &[(String, JsonValue)]) -> Result<()> {
+    let mut keys = HashSet::with_capacity(entries.len());
+    for (key, _) in entries {
+        if !keys.insert(key) {
+            return Err(Error::InvalidJson(
+                "JSON object property names must be unique".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn json_to_structured(value: &JsonValue) -> Result<StructuredValue> {
+    Ok(match value {
+        JsonValue::Null => StructuredValue::Null,
+        JsonValue::Boolean(value) => StructuredValue::Boolean(*value),
+        JsonValue::Number(value) => StructuredValue::Float64(value.to_bits()),
+        JsonValue::String(value) => StructuredValue::TextString(value.clone()),
+        JsonValue::Array(values) => StructuredValue::Array(
+            values
+                .iter()
+                .map(json_to_structured)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        JsonValue::Object(entries) => StructuredValue::map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        StructuredValue::TextString(key.clone()),
+                        json_to_structured(value)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .map_err(Error::Structured)?,
+    })
+}
+
+fn structured_to_json(value: &StructuredValue) -> Result<Option<JsonValue>> {
+    Ok(match value {
+        StructuredValue::Undefined => None,
+        StructuredValue::Null => Some(JsonValue::Null),
+        StructuredValue::Boolean(value) => Some(JsonValue::Boolean(*value)),
+        StructuredValue::Float16(bits) => Some(JsonValue::number(f16_to_f64(*bits))?),
+        StructuredValue::Float32(bits) => Some(JsonValue::number(f32::from_bits(*bits) as f64)?),
+        StructuredValue::Float64(bits) => Some(JsonValue::number(f64::from_bits(*bits))?),
+        StructuredValue::Integer(integer) => {
+            Some(JsonValue::number(integer_to_binary64(integer)?)?)
+        }
+        StructuredValue::TextString(value) => Some(JsonValue::String(value.clone())),
+        StructuredValue::Bytes(_) => None,
+        StructuredValue::Array(values) => Some(JsonValue::Array(
+            values
+                .iter()
+                .map(|value| structured_to_json(value)?.ok_or(Error::UnsupportedStructuredValue))
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        StructuredValue::Map(entries) => {
+            let mut object = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                let StructuredValue::TextString(key) = key else {
+                    return Ok(None);
+                };
+                object.push((
+                    key.clone(),
+                    structured_to_json(value)?.ok_or(Error::UnsupportedStructuredValue)?,
+                ));
+            }
+            Some(JsonValue::Object(object))
+        }
+    })
+}
+
+/// Converts an arbitrary-precision integer only when its mathematical value
+/// is exactly representable as a finite IEEE-754 binary64 integer.
+fn integer_to_binary64(integer: &openkache_value::Integer) -> Result<f64> {
+    let magnitude = integer.magnitude_be();
+    if magnitude.is_empty() {
+        return Ok(0.0);
+    }
+    let leading = magnitude[0].leading_zeros() as usize;
+    let bit_length = magnitude
+        .len()
+        .checked_mul(8)
+        .and_then(|bits| bits.checked_sub(leading))
+        .ok_or(Error::UnsupportedStructuredValue)?;
+    // Binary64's largest finite integer has a 1024-bit magnitude. A larger
+    // integer would overflow even if all discarded bits were zero.
+    if bit_length > 1024 {
+        return Err(Error::UnsupportedStructuredValue);
+    }
+
+    let discarded = bit_length.saturating_sub(BINARY64_SIGNIFICAND_BITS as usize);
+    if discarded != 0 {
+        let whole_bytes = discarded / 8;
+        if magnitude
+            .get(magnitude.len().saturating_sub(whole_bytes)..)
+            .is_some_and(|bytes| bytes.iter().any(|byte| *byte != 0))
+        {
+            return Err(Error::UnsupportedStructuredValue);
+        }
+        let remaining_bits = discarded % 8;
+        if remaining_bits != 0 {
+            let index = magnitude
+                .len()
+                .checked_sub(whole_bytes + 1)
+                .ok_or(Error::UnsupportedStructuredValue)?;
+            let mask = (1_u8 << remaining_bits) - 1;
+            if magnitude[index] & mask != 0 {
+                return Err(Error::UnsupportedStructuredValue);
+            }
+        }
+    }
+
+    let significant_bits = bit_length.min(BINARY64_SIGNIFICAND_BITS as usize);
+    let mut significand = 0_u64;
+    for bit in 0..significant_bits {
+        let position = leading + bit;
+        let byte = magnitude[position / 8];
+        significand = (significand << 1) | u64::from((byte >> (7 - (position % 8))) & 1);
+    }
+    let shift = discarded as i32;
+    let value = (significand as f64) * 2f64.powi(shift);
+    if !value.is_finite() {
+        return Err(Error::UnsupportedStructuredValue);
+    }
+    Ok(if integer.is_negative() { -value } else { value })
+}
+
+fn f16_to_f64(bits: u16) -> f64 {
+    let sign = f64::from((bits >> 15) & 1);
+    let exponent = (bits >> 10) & 0x1f;
+    let fraction = bits & 0x03ff;
+    if exponent == 0 {
+        sign * f64::from(fraction) * 2f64.powi(-24)
+    } else if exponent == 0x1f {
+        if fraction == 0 {
+            if sign == 0.0 {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            }
+        } else {
+            f64::NAN
+        }
+    } else {
+        let significand = 1.0 + f64::from(fraction) / 1024.0;
+        if sign == 0.0 {
+            significand * 2f64.powi(i32::from(exponent) - 15)
+        } else {
+            -significand * 2f64.powi(i32::from(exponent) - 15)
+        }
+    }
+}
+
+fn structured_limits(limits: ValueLimits) -> StructuredLimits {
+    StructuredLimits {
+        max_bytes: limits
+            .max_expanded_payload_bytes
+            .min(limits.max_in_flight_bytes),
+        max_depth: limits.max_depth,
+        max_items: limits.max_items,
+        max_integer_bytes: limits.max_integer_bytes,
+    }
+}
+
+fn validate_namespace(namespace_id: u64) -> Result<()> {
+    if namespace_id == 0 {
+        Err(Error::InvalidNamespace)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_item_id(item_id: &[u8]) -> Result<()> {
+    if item_id.len() > ITEM_ID_BYTES {
+        Err(Error::InvalidItemIdLength(item_id.len()))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_limits(limits: ValueLimits) -> Result<()> {
+    if limits.max_envelope_bytes == 0
+        || limits.max_expanded_payload_bytes == 0
+        || limits.max_zstd_window_bytes == 0
+        || limits.max_depth == 0
+        || limits.max_items == 0
+        || limits.max_integer_bytes == 0
+        || limits.max_in_flight_bytes == 0
+        || limits.max_envelope_bytes > MAX_VALUE_ENVELOPE_BYTES
+        || limits.max_expanded_payload_bytes > MAX_EXPANDED_PAYLOAD_BYTES
+        || limits.max_zstd_window_bytes > MAX_ZSTD_WINDOW_BYTES
+    {
+        return Err(Error::ResourceLimit {
+            resource: Resource::EnvelopeBytes,
+            limit: 1,
+            actual: 0,
+        });
+    }
+    Ok(())
+}
+
+fn validate_compression(compression: Compression) -> Result<()> {
+    if let Compression::Zstandard(options) = compression {
+        if !(DEFAULT_ZSTANDARD_LEVEL_MIN..=DEFAULT_ZSTANDARD_LEVEL_MAX).contains(&options.level) {
+            return Err(Error::InvalidCompressionLevel(options.level));
+        }
+    }
+    Ok(())
+}
+
+fn make_selector(protection: u8, compression: u8, format: u8) -> Result<u8> {
+    if protection > 3 || compression > 3 || format > 3 {
+        return Err(Error::UnsupportedSelector(0xff));
+    }
+    let selector = protection | (compression << 2) | (format << 4);
+    if selector & RESERVED_SELECTOR_MASK != 0 {
+        return Err(Error::UnsupportedSelector(selector));
+    }
+    Ok(selector)
+}
+
+fn parse_selector(selector: u8) -> Result<(Encryption, u8, u8)> {
+    if selector & RESERVED_SELECTOR_MASK != 0 {
+        return Err(Error::UnsupportedSelector(selector));
+    }
+    let protection_id = selector & PROTECTION_MASK;
+    let compression_id = (selector & COMPRESSION_MASK) >> 2;
+    let format = (selector & PAYLOAD_MASK) >> 4;
+    let protection =
+        Encryption::from_selector(protection_id).ok_or(Error::UnsupportedSelector(selector))?;
+    if compression_id > COMPRESSION_ZSTANDARD {
+        return Err(Error::UnsupportedCompression(compression_id));
+    }
+    if format > PAYLOAD_STRUCTURED_CBOR_V1 {
+        return Err(Error::UnsupportedPayloadFormat(format));
+    }
+    Ok((protection, compression_id, format))
+}
+
+fn compress_if_beneficial(
+    payload: &[u8],
+    compression: Compression,
+    limits: &ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(Vec<u8>, u8, Option<BytePermit>)> {
+    let Compression::Zstandard(options) = compression else {
+        let permit = reserve_budget(
+            budget,
+            payload.len(),
+            limits,
+            Resource::ExpandedPayloadBytes,
+        )?;
+        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+    };
+    if payload.len() < options.minimum_input_size {
+        let permit = reserve_budget(
+            budget,
+            payload.len(),
+            limits,
+            Resource::ExpandedPayloadBytes,
+        )?;
+        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+    }
+    let bound = ZSTD_compressBound(payload.len());
+    if bound > limits.max_envelope_bytes {
+        return Err(Error::ResourceLimit {
+            resource: Resource::EnvelopeBytes,
+            limit: limits.max_envelope_bytes,
+            actual: bound,
+        });
+    }
+    if bound > limits.max_in_flight_bytes {
+        return Err(Error::ResourceLimit {
+            resource: Resource::EnvelopeBytes,
+            limit: limits.max_in_flight_bytes,
+            actual: bound,
+        });
+    }
+    let compression_permit =
+        reserve_budget(budget, bound, limits, Resource::EnvelopeBytes)?;
+    let mut compressed = Vec::new();
+    compressed
+        .try_reserve_exact(bound)
+        .map_err(|_| Error::Allocation { size: bound })?;
+    compressed.resize(bound, 0);
+    let compressed_length = ZSTD_compress(&mut compressed, payload, options.level);
+    check_zstandard("compression", compressed_length)?;
+    if compressed_length >= payload.len()
+        || payload.len() - compressed_length < options.minimum_savings
+    {
+        drop(compression_permit);
+        let permit = reserve_budget(
+            budget,
+            payload.len(),
+            limits,
+            Resource::ExpandedPayloadBytes,
+        )?;
+        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+    }
+    compressed.truncate(compressed_length);
+    Ok((compressed, COMPRESSION_ZSTANDARD, Some(compression_permit)))
+}
+
+fn decompress_zstandard(
+    compressed: &[u8],
+    limits: &ValueLimits,
+    budget: &RequestBudget,
+) -> Result<(Vec<u8>, BytePermit)> {
     let mut header = ZSTD_FrameHeader::default();
     let header_result = ZSTD_getFrameHeader(&mut header, compressed);
     check_zstandard("frame-header decoding", header_result)?;
     if header_result != 0 {
-        return Err(Error::InvalidEncodedValue(
-            "Zstandard frame header is truncated",
-        ));
+        return Err(Error::TruncatedEnvelope);
     }
     if header.frameType != ZSTD_FrameType_e::ZSTD_frame {
-        return Err(Error::InvalidEncodedValue(
-            "Zstandard skippable frames are not supported",
-        ));
-    }
-    if header.frameContentSize == ZSTD_CONTENTSIZE_UNKNOWN {
-        return Err(Error::InvalidEncodedValue(
-            "Zstandard frame does not declare its content size",
-        ));
-    }
-    if header.dictID != 0 {
-        return Err(Error::InvalidEncodedValue(
-            "Zstandard dictionaries are not supported",
-        ));
-    }
-    if header.windowSize > MAX_VALUE_BYTES as u64 {
-        return Err(Error::DecodedValueTooLarge {
-            size: usize::try_from(header.windowSize).unwrap_or(usize::MAX),
-            maximum: MAX_VALUE_BYTES,
+        return Err(Error::Zstandard {
+            operation: "frame validation",
+            message: "skippable frames are not supported".into(),
         });
     }
-
+    if header.frameContentSize == ZSTD_CONTENTSIZE_UNKNOWN {
+        return Err(Error::Zstandard {
+            operation: "frame validation",
+            message: "frame must declare content size".into(),
+        });
+    }
+    if header.dictID != 0 {
+        return Err(Error::Zstandard {
+            operation: "frame validation",
+            message: "external dictionaries are not supported".into(),
+        });
+    }
+    let window = usize::try_from(header.windowSize).map_err(|_| Error::ResourceLimit {
+        resource: Resource::ZstdWindowBytes,
+        limit: limits.max_zstd_window_bytes,
+        actual: usize::MAX,
+    })?;
+    if window > limits.max_zstd_window_bytes {
+        return Err(Error::ResourceLimit {
+            resource: Resource::ZstdWindowBytes,
+            limit: limits.max_zstd_window_bytes,
+            actual: window,
+        });
+    }
     let original_length =
-        usize::try_from(header.frameContentSize).map_err(|_| Error::DecodedValueTooLarge {
-            size: usize::MAX,
-            maximum: MAX_VALUE_BYTES,
+        usize::try_from(header.frameContentSize).map_err(|_| Error::ResourceLimit {
+            resource: Resource::ExpandedPayloadBytes,
+            limit: limits.max_expanded_payload_bytes,
+            actual: usize::MAX,
         })?;
-    if original_length > MAX_VALUE_BYTES {
-        return Err(Error::DecodedValueTooLarge {
-            size: original_length,
-            maximum: MAX_VALUE_BYTES,
+    if original_length > limits.max_expanded_payload_bytes {
+        return Err(Error::ResourceLimit {
+            resource: Resource::ExpandedPayloadBytes,
+            limit: limits.max_expanded_payload_bytes,
+            actual: original_length,
+        });
+    }
+    if original_length > limits.max_in_flight_bytes {
+        return Err(Error::ResourceLimit {
+            resource: Resource::ExpandedPayloadBytes,
+            limit: limits.max_in_flight_bytes,
+            actual: original_length,
         });
     }
     let frame_length = ZSTD_findFrameCompressedSize(compressed);
     check_zstandard("frame-size validation", frame_length)?;
     if frame_length != compressed.len() {
-        return Err(Error::InvalidEncodedValue(
-            "Zstandard frame contains trailing bytes or another frame",
-        ));
+        return Err(Error::Zstandard {
+            operation: "frame validation",
+            message: "multiple frames or trailing bytes are not supported".into(),
+        });
     }
-
-    let mut serialized = vec![0_u8; original_length];
-    let decoded = ZSTD_decompress(&mut serialized, compressed);
+    let output_permit = budget
+        .try_reserve(original_length)
+        .map_err(|_| Error::ResourceLimit {
+            resource: Resource::ExpandedPayloadBytes,
+            limit: budget.capacity(),
+            actual: original_length,
+        })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(original_length)
+        .map_err(|_| Error::Allocation {
+            size: original_length,
+        })?;
+    output.resize(original_length, 0);
+    let decoded = ZSTD_decompress(&mut output, compressed);
     check_zstandard("decompression", decoded)?;
     if decoded != original_length {
         return Err(Error::DecompressedLength {
@@ -1379,7 +2037,7 @@ fn decompress_zstandard(compressed: &[u8]) -> Result<Vec<u8>> {
             actual: decoded,
         });
     }
-    Ok(serialized)
+    Ok((output, output_permit))
 }
 
 fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
@@ -1393,27 +2051,74 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(namespace_id: u64, item_id: ItemId, format: u8) -> [u8; AAD_BYTES] {
-    let mut aad = [0_u8; AAD_BYTES];
-    let item_id_offset = VALUE_FORMAT_AAD_DOMAIN.len();
-    let namespace_end = item_id_offset + NAMESPACE_ID_BYTES;
-    let version_offset = namespace_end + ITEM_ID_BYTES;
-    let version_end = version_offset + VERSION_BYTES.len();
-    aad[..item_id_offset].copy_from_slice(VALUE_FORMAT_AAD_DOMAIN);
-    aad[item_id_offset..namespace_end].copy_from_slice(&namespace_id.to_be_bytes());
-    aad[namespace_end..version_offset].copy_from_slice(item_id.as_bytes());
-    aad[version_offset..version_end].copy_from_slice(VERSION_BYTES);
-    aad[version_end..version_end + VALUE_FORMAT_FORMAT_BYTE_BYTES]
-        .copy_from_slice(std::slice::from_ref(&format));
+fn make_aad(namespace_id: u64, item_id: &[u8], selector: u8, key_id: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        AAD_DOMAIN.len() + 8 + 1 + item_id.len() + VERSION_BYTES.len() + 1 + key_id.len(),
+    );
+    aad.extend_from_slice(AAD_DOMAIN);
+    aad.extend_from_slice(&namespace_id.to_be_bytes());
+    aad.push(item_id.len() as u8);
+    aad.extend_from_slice(item_id);
+    aad.extend_from_slice(VERSION_BYTES);
+    aad.push(selector);
+    aad.extend_from_slice(key_id);
     aad
 }
 
-fn item_id_material(
-    value_root_key: &[u8; DATA_PROTECTION_KEY_BYTES],
-    item_id: ItemId,
-) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]> {
-    let mut material = Zeroizing::new([0_u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]);
-    material[..DATA_PROTECTION_KEY_BYTES].copy_from_slice(value_root_key);
-    material[DATA_PROTECTION_KEY_BYTES..].copy_from_slice(item_id.as_bytes());
+fn item_material(
+    value_key: &[u8; VALUE_KEY_BYTES],
+    key_id: u64,
+    namespace_id: u64,
+    item_id: &[u8],
+) -> Zeroizing<Vec<u8>> {
+    let value_derivation_key = Zeroizing::new(blake3::derive_key(VALUE_ROOT_CONTEXT, value_key));
+    let mut material = Zeroizing::new(Vec::with_capacity(
+        VALUE_KEY_BYTES + 8 + 8 + 1 + item_id.len(),
+    ));
+    material.extend_from_slice(&value_derivation_key[..]);
+    material.extend_from_slice(&key_id.to_be_bytes());
+    material.extend_from_slice(&namespace_id.to_be_bytes());
+    material.push(item_id.len() as u8);
+    material.extend_from_slice(item_id);
     material
+}
+
+fn encode_vu128(value: u64) -> Result<Vec<u8>> {
+    let mut bytes = [0_u8; MAX_VU128_BYTES];
+    let length = vu128::encode_u64(&mut bytes, value);
+    Ok(bytes[..length].to_vec())
+}
+
+fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u64, usize)> {
+    let Some(&first) = input.first() else {
+        return Err(Error::InvalidVu128 {
+            field,
+            reason: "field is truncated",
+        });
+    };
+    let length = vu128::encoded_len(first);
+    if length > MAX_VU128_BYTES || input.len() < length {
+        return Err(Error::InvalidVu128 {
+            field,
+            reason: "field is truncated or overlong",
+        });
+    }
+    let mut bytes = [0_u8; MAX_VU128_BYTES];
+    bytes[..length].copy_from_slice(&input[..length]);
+    let (value, decoded_length) = vu128::decode_u64(&bytes);
+    if decoded_length != length {
+        return Err(Error::InvalidVu128 {
+            field,
+            reason: "decoder returned an invalid length",
+        });
+    }
+    let mut canonical = [0_u8; MAX_VU128_BYTES];
+    let canonical_length = vu128::encode_u64(&mut canonical, value);
+    if canonical_length != length || canonical[..length] != input[..length] {
+        return Err(Error::InvalidVu128 {
+            field,
+            reason: "field is not canonical",
+        });
+    }
+    Ok((value, length))
 }

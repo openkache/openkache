@@ -337,10 +337,11 @@ MAX_EXPANDED_PAYLOAD_BYTES = 67,108,864
 MAX_ZSTD_WINDOW_BYTES = 67,108,864
 ```
 
-These are per-value limits. Implementations SHOULD also configure an aggregate
-in-flight byte budget for concurrent encode/decode operations; that operational
-budget is not part of the wire format. OpenKache-maintained clients require
-that budget as specified in [`CLIENT.md`](CLIENT.md#67-resource-budget).
+These are per-value limits. Implementations MUST also configure one aggregate
+in-flight byte budget for concurrent network, protection, decompression, and
+codec operations; that operational budget is not part of the wire format.
+OpenKache-maintained clients expose and enforce that shared budget as specified
+in [`CLIENT.md`](CLIENT.md#67-resource-budget).
 
 `MAX_VALUE_ENVELOPE_BYTES` applies to the complete byte string stored and
 returned opaquely by the server, including version, selector, value-key ID,

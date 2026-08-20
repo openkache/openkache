@@ -1,8 +1,12 @@
 //! QUIC backend boundary and persistent stream-lane pool.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use crossfire::{MAsyncRx, MAsyncTx};
@@ -28,6 +32,7 @@ pub(crate) trait ClientConnection: Sized {
         tls: rustls::ClientConfig,
         timeout: Duration,
         max_stream_lanes: usize,
+        budget: RequestBudget,
     ) -> impl Future<Output = Result<Self>>;
 
     fn acquire_lane(&self, deadline: Deadline) -> impl Future<Output = Result<Self::Lane<'_>>>;
@@ -55,7 +60,200 @@ pub(crate) trait ClientLane {
         deadline: Deadline,
     ) -> impl Future<Output = Result<ResponseParts>>;
 
+    /// Transfers the response-body lease to a caller-owned value.
+    ///
+    /// The lease is present only after a successful response read. Protected
+    /// clients use it to keep network bytes accounted while value decoding
+    /// performs authentication, decompression, and structured parsing.
+    fn take_response_permit(&mut self) -> Option<RequestBudgetPermit>;
+
     fn release(self);
+}
+
+/// One weighted byte budget shared by transport and value work.
+///
+/// The permit is acquired before a response body allocation/read and is held
+/// by the lane until the response callback completes. Value codecs use the
+/// same budget for decrypted, decompressed, and structured-value allocations.
+#[derive(Clone)]
+pub struct InFlightByteBudget {
+    inner: Arc<RequestBudgetInner>,
+}
+
+pub type RequestBudget = InFlightByteBudget;
+
+struct RequestBudgetInner {
+    capacity: usize,
+    state: Mutex<RequestBudgetState>,
+}
+
+struct RequestBudgetState {
+    used: usize,
+    next_waiter_id: u64,
+    waiters: HashMap<u64, Waker>,
+}
+
+pub struct BytePermit {
+    inner: Arc<RequestBudgetInner>,
+    bytes: usize,
+}
+
+pub(crate) type RequestBudgetPermit = BytePermit;
+
+struct RequestBudgetAcquire {
+    inner: Arc<RequestBudgetInner>,
+    bytes: usize,
+    waiter_id: Option<u64>,
+}
+
+impl InFlightByteBudget {
+    /// Creates one aggregate byte budget shared by concurrent operations.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(RequestBudgetInner {
+                capacity,
+                state: Mutex::new(RequestBudgetState {
+                    used: 0,
+                    next_waiter_id: 0,
+                    waiters: HashMap::new(),
+                }),
+            }),
+        }
+    }
+
+    /// Returns the configured aggregate capacity.
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity
+    }
+
+    /// Reserves bytes synchronously for a bounded codec operation.
+    /// Reserves bytes immediately or returns a local resource-limit error.
+    pub fn try_reserve(&self, bytes: usize) -> Result<BytePermit> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("request budget lock poisoned");
+        if bytes > self.inner.capacity.saturating_sub(state.used) {
+            return Err(Error::ResourceLimit {
+                requested: bytes,
+                maximum: self.inner.capacity,
+            });
+        }
+        state.used += bytes;
+        Ok(BytePermit {
+            inner: Arc::clone(&self.inner),
+            bytes,
+        })
+    }
+
+    /// Waits for bytes without allocating until a permit is available.
+    ///
+    /// The timeout is applied by the backend wrapper around the response read;
+    /// it is retained in this API so callers cannot accidentally omit an
+    /// operation deadline when acquiring network capacity.
+    pub async fn reserve(&self, bytes: usize, _timeout: Duration) -> Result<BytePermit> {
+        if bytes > self.inner.capacity {
+            return Err(Error::ResourceLimit {
+                requested: bytes,
+                maximum: self.inner.capacity,
+            });
+        }
+        Ok(RequestBudgetAcquire {
+            inner: Arc::clone(&self.inner),
+            bytes,
+            waiter_id: None,
+        }
+        .await)
+    }
+
+    pub(crate) async fn acquire(&self, bytes: usize, timeout: Duration) -> Result<BytePermit> {
+        self.reserve(bytes, timeout).await
+    }
+}
+
+impl Future for RequestBudgetAcquire {
+    type Output = RequestBudgetPermit;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = Arc::clone(&self.inner);
+        let mut state = inner.state.lock().expect("request budget lock poisoned");
+        if self.bytes <= inner.capacity.saturating_sub(state.used) {
+            if let Some(waiter_id) = self.waiter_id.take() {
+                state.waiters.remove(&waiter_id);
+            }
+            state.used += self.bytes;
+            drop(state);
+            return Poll::Ready(RequestBudgetPermit {
+                inner,
+                bytes: self.bytes,
+            });
+        }
+
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(waiter) = state.waiters.get_mut(&waiter_id) {
+                if !waiter.will_wake(context.waker()) {
+                    waiter.clone_from(context.waker());
+                }
+            }
+            return Poll::Pending;
+        }
+
+        let waiter_id = state.next_waiter_id;
+        state.next_waiter_id = state
+            .next_waiter_id
+            .checked_add(1)
+            .expect("request budget waiter identifier overflowed");
+        state.waiters.insert(waiter_id, context.waker().clone());
+        self.waiter_id = Some(waiter_id);
+        Poll::Pending
+    }
+}
+
+impl Drop for RequestBudgetAcquire {
+    fn drop(&mut self) {
+        if let Some(waiter_id) = self.waiter_id {
+            self.inner
+                .state
+                .lock()
+                .expect("request budget lock poisoned")
+                .waiters
+                .remove(&waiter_id);
+        }
+    }
+}
+
+impl BytePermit {
+    /// Returns the number of bytes retained by this permit.
+    pub const fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for BytePermit {
+    fn drop(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        let waiters = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("request budget lock poisoned");
+            state.used = state
+                .used
+                .checked_sub(self.bytes)
+                .expect("released request bytes must be reserved");
+            // Keep registrations in place while waking. A wake-up is only a
+            // hint: if one waiter consumes the newly available bytes, every
+            // other waiter must remain registered for the next release.
+            state.waiters.values().cloned().collect::<Vec<_>>()
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
 }
 
 macro_rules! connection_backend {
@@ -73,10 +271,13 @@ macro_rules! connection_backend {
                 tls: rustls::ClientConfig,
                 timeout: Duration,
                 max_stream_lanes: usize,
+                budget: RequestBudget,
             ) -> Result<Self> {
                 $module::connect(address, server_name, tls, timeout)
                     .await
-                    .map(|connection| Self(PooledConnection::new(connection, max_stream_lanes)))
+                    .map(|connection| {
+                        Self(PooledConnection::new(connection, max_stream_lanes, budget))
+                    })
                     .map_err(Error::from)
             }
 
@@ -120,7 +321,17 @@ macro_rules! connection_backend {
                 maximum: usize,
                 deadline: Deadline,
             ) -> Result<ResponseParts> {
-                self.0.read_response(maximum, deadline).await
+                let remaining = deadline.remaining(Operation::ResponseBodyRead)?;
+                match $timeout(remaining, self.0.read_response(maximum, deadline)).await? {
+                    Some(result) => result,
+                    None => Err(Error::Timeout {
+                        operation: Operation::ResponseBodyRead,
+                    }),
+                }
+            }
+
+            fn take_response_permit(&mut self) -> Option<RequestBudgetPermit> {
+                self.0.take_response_permit()
             }
 
             fn release(self) {
@@ -202,15 +413,17 @@ struct PooledConnection<B: BackendConnection> {
     lane_capacity_rx: LaneReceiver<()>,
     open_lanes: AtomicUsize,
     max_stream_lanes: usize,
+    budget: RequestBudget,
 }
 
 struct PooledLane<'a, B: BackendConnection> {
     connection: &'a PooledConnection<B>,
     stream: Option<B::Stream>,
+    response_permit: Option<RequestBudgetPermit>,
 }
 
 impl<B: BackendConnection> PooledConnection<B> {
-    fn new(inner: B, max_stream_lanes: usize) -> Self {
+    fn new(inner: B, max_stream_lanes: usize, budget: RequestBudget) -> Self {
         let (idle_lanes_tx, idle_lanes_rx) = crossfire::mpmc::bounded_async(max_stream_lanes);
         let (lane_capacity_tx, lane_capacity_rx) = crossfire::mpmc::bounded_async(max_stream_lanes);
         Self {
@@ -221,6 +434,7 @@ impl<B: BackendConnection> PooledConnection<B> {
             lane_capacity_rx,
             open_lanes: AtomicUsize::new(0),
             max_stream_lanes,
+            budget,
         }
     }
 
@@ -302,6 +516,7 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
         Self {
             connection,
             stream: Some(stream),
+            response_permit: None,
         }
     }
 
@@ -310,6 +525,11 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
             .stream
             .as_mut()
             .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
+        // Retain request bytes only for the duration of the network write.
+        // The permit is dropped before response admission, allowing one
+        // full-sized request and response to make progress under the same
+        // aggregate budget.
+        let _request_permit = self.connection.budget.try_reserve(request.len())?;
         stream.write_request(request, timeout).await?;
         Ok(())
     }
@@ -339,6 +559,11 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
             return Err(Error::ResponseTooLarge { maximum });
         }
         let body_len = header.payload_len();
+        let permit = self
+            .connection
+            .budget
+            .acquire(body_len, deadline.remaining(Operation::ResponseBodyRead)?)
+            .await?;
         let payload = if body_len == 0 {
             Vec::new()
         } else {
@@ -346,7 +571,13 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
                 .read_exact(body_len, deadline.remaining(Operation::ResponseBodyRead)?)
                 .await?
         };
-        ResponseParts::decode(header_bytes, payload).map_err(Error::protocol)
+        let response = ResponseParts::decode(header_bytes, payload).map_err(Error::protocol)?;
+        self.response_permit = Some(permit);
+        Ok(response)
+    }
+
+    fn take_response_permit(&mut self) -> Option<RequestBudgetPermit> {
+        self.response_permit.take()
     }
 
     fn release(mut self) {

@@ -29,6 +29,7 @@ futures-util = "*"
 getrandom = "*"
 http = "*"
 openkache-protocol = { path = "../../protocol" }
+openkache-value = { path = "../value" }
 polyval = { version = "=0.7.3", features = ["zeroize"] }
 quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
 rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }

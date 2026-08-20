@@ -1,8 +1,11 @@
 //! Shared application-key hiding and value-protection composition.
 
-use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
 use crate::key::validate_canonical_key;
-use crate::{ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, Result};
+use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec, ValueKeyring};
+use crate::{
+    ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, Result,
+    transport::RequestBudget,
+};
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
@@ -42,12 +45,71 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected(&key, compression)?;
+        let codec =
+            ValueCodec::protected(&key, compression)?.allow_read_profile(Encryption::Compact);
         Ok(Self {
             key,
             key_spec,
             codec,
         })
+    }
+
+    /// Creates protection with a separate Item ID root and value-key keyring.
+    ///
+    /// The root key remains solely responsible for deterministic application
+    /// key/Item ID derivation. The supplied keyring owns value-key rotation:
+    /// readers accept every inserted ID while writes use its active ID.
+    pub fn with_keyring(
+        key: ClientRootKey,
+        keyring: ValueKeyring,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        Self::with_keyring_and_key_spec(key, keyring, KeySpec::Bytes, compression, encryption)
+    }
+
+    /// Creates rotating value protection with an explicit formatted key spec.
+    pub fn with_keyring_and_key_spec(
+        key: ClientRootKey,
+        keyring: ValueKeyring,
+        key_spec: KeySpec,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        if key.is_zero() && encryption != Encryption::Unprotected {
+            return Err(crate::Error::configuration(
+                "client_root_key",
+                "must not be all zero when value protection is enabled",
+            ));
+        }
+        let codec = match encryption {
+            Encryption::Unprotected => ValueCodec::compressed(compression)?,
+            Encryption::Compact | Encryption::Robust => {
+                let alternate = match encryption {
+                    Encryption::Compact => Encryption::Robust,
+                    Encryption::Robust => Encryption::Compact,
+                    Encryption::Unprotected => unreachable!(),
+                };
+                ValueCodec::with_keyring(keyring, compression, encryption)?
+                    .allow_read_profile(alternate)
+            }
+        };
+        Ok(Self {
+            key,
+            key_spec,
+            codec,
+        })
+    }
+
+    /// Applies one aggregate byte budget to value protection work.
+    ///
+    /// The budget is retained by this transformation and shared by envelope,
+    /// decrypted, decompressed, and structured-codec allocations. Protected
+    /// network clients install their own connection budget automatically;
+    /// standalone callers can use this method to apply the same bound.
+    pub fn with_budget(mut self, budget: RequestBudget) -> Self {
+        self.codec = self.codec.with_budget(budget);
+        self
     }
 
     /// Creates the default unprotected formatted client.
@@ -69,7 +131,7 @@ impl DataProtection {
     ///
     /// * `key` - Application-managed data protection key.
     /// * `compression` - Compression policy applied before encryption.
-    /// * `encryption` - Compact or Robust authenticated-encryption profile.
+    /// * `encryption` - Unprotected, Compact, or Robust profile.
     ///
     /// # Returns
     ///
@@ -77,7 +139,8 @@ impl DataProtection {
     ///
     /// # Errors
     ///
-    /// Returns an error for an unprotected profile or invalid compression settings.
+    /// Returns an error for an invalid compression setting or protected profile
+    /// configuration.
     pub fn with_profile(
         key: DataProtectionKey,
         compression: Compression,
@@ -99,7 +162,18 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
+        let codec = match encryption {
+            Encryption::Unprotected => ValueCodec::compressed(compression)?,
+            Encryption::Compact | Encryption::Robust => {
+                let alternate = match encryption {
+                    Encryption::Compact => Encryption::Robust,
+                    Encryption::Robust => Encryption::Compact,
+                    Encryption::Unprotected => unreachable!(),
+                };
+                ValueCodec::protected_with_profile(&key, compression, encryption)?
+                    .allow_read_profile(alternate)
+            }
+        };
         Ok(Self {
             key,
             key_spec,

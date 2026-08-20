@@ -68,6 +68,7 @@ rust_library(
     deps = [
         ":openkache_client_core_build_script",
         "//protocol:openkache_protocol",
+        "//clients/value:openkache_value",
     ] + cargo_deps("clients/core"),
 )
 
@@ -88,6 +89,7 @@ rust_library(
     deps = [
         ":openkache_client_core_build_script",
         "//protocol:openkache_protocol",
+        "//clients/value:openkache_value",
     ] + cargo_deps("clients/core"),
 )
 
@@ -108,5 +110,6 @@ rust_shared_library(
     deps = [
         ":openkache_client_core_build_script",
         "//protocol:openkache_protocol",
+        "//clients/value:openkache_value",
     ] + cargo_deps("clients/core"),
 )

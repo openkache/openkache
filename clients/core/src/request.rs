@@ -85,6 +85,10 @@ pub(crate) enum RequestAttempt {
 }
 
 impl RequestAttempt {
+    pub(crate) fn len(&self) -> usize {
+        self.frame().len()
+    }
+
     fn frame(&self) -> &OwnedRequestFrame {
         match self {
             Self::Once(frame) => frame,

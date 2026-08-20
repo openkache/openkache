@@ -183,6 +183,8 @@ let result = <_ as OpenKacheApi>::get(client.raw(), GetInput {
 
 The builder configures explicit trust, mutual TLS, request deadlines, retries
 for response-safe operations, `max_in_flight`, and compression.
+The optional `max_in_flight_bytes` setting bounds aggregate bytes retained
+across transport and value protection work.
 
 One client maintains one QUIC connection and lazily opens reusable bidirectional
 stream lanes up to `max_in_flight`. One request is active on each lane.

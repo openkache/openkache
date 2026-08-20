@@ -120,6 +120,8 @@ client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 trust and derive the TLS server name from the host. Builders accept a
 pre-resolved endpoint, explicit trust roots, mutual TLS identity, deadlines,
 retry attempts, compression policy, and `max_in_flight`.
+`max_in_flight_bytes` additionally bounds aggregate bytes retained across
+transport and value-protection work.
 
 Target transport and security settings are documented in
 [`TARGET.md`](TARGET.md); they are not claims about the transitional builder
