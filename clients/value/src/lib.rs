@@ -719,6 +719,12 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
     let mut frames = Vec::new();
     let mut root = None;
     let mut item_count = 0usize;
+    // Keep a lower bound on the number of model nodes still required by
+    // declared container lengths.  Without this accounting, each nested
+    // container could reserve `max_items` entries before the parser reached
+    // the item-count limit, allowing a tiny input to trigger unbounded
+    // aggregate allocations.
+    let mut pending_items = 1usize;
     loop {
         if let Some(value) = root {
             if cursor != bytes.len() {
@@ -733,9 +739,18 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
         if item_count > limits.max_items {
             return Err(resource(Resource::Items, limits.max_items, item_count));
         }
+        pending_items = pending_items
+            .checked_sub(1)
+            .expect("the root or a declared child is always pending");
         match parse_item(bytes, &mut cursor, limits)? {
             ParsedItem::Value(value) => accept_value(value, &mut frames, &mut root)?,
             ParsedItem::Array(count) => {
+                add_pending_items(
+                    &mut pending_items,
+                    count,
+                    item_count,
+                    limits.max_items,
+                )?;
                 if count == 0 {
                     accept_value(Value::Array(Vec::new()), &mut frames, &mut root)?;
                 } else {
@@ -750,6 +765,15 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
                 }
             }
             ParsedItem::Map(count) => {
+                let child_count = count
+                    .checked_mul(2)
+                    .ok_or_else(|| resource(Resource::Items, limits.max_items, usize::MAX))?;
+                add_pending_items(
+                    &mut pending_items,
+                    child_count,
+                    item_count,
+                    limits.max_items,
+                )?;
                 if count == 0 {
                     accept_value(Value::Map(Vec::new()), &mut frames, &mut root)?;
                 } else {
@@ -769,6 +793,24 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
             }
         }
     }
+}
+
+fn add_pending_items(
+    pending_items: &mut usize,
+    child_count: usize,
+    item_count: usize,
+    maximum: usize,
+) -> Result<()> {
+    *pending_items = pending_items
+        .checked_add(child_count)
+        .ok_or_else(|| resource(Resource::Items, maximum, usize::MAX))?;
+    let minimum_total = item_count
+        .checked_add(*pending_items)
+        .ok_or_else(|| resource(Resource::Items, maximum, usize::MAX))?;
+    if minimum_total > maximum {
+        return Err(resource(Resource::Items, maximum, minimum_total));
+    }
+    Ok(())
 }
 
 /// Alias for [`encode`].
