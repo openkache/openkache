@@ -26,18 +26,22 @@ cargo build --release
 
 ## Quickstart
 
-### Run the SSD-backed QUIC server
+### Run the QUIC and TLS-over-TCP preview server
 
 ```bash
 cargo run --manifest-path server/Cargo.toml --bin openkache-server
 ```
 
-The server listens on `127.0.0.1:4433`, stores shard files under
-`target/kvkache-v1`, and writes its generated certificate to
-`target/openkache-local/certificate.local.der`. It automatically sizes itself
-from the CPUs available to the process, host-available or cgroup-limited RAM,
-and available filesystem space. Use `--port <port>` only to override the
-default port, or `--config <path>` to load an explicit TOML cache configuration.
+The server listens on `127.0.0.1:4433` for QUIC over UDP and TLS-over-TCP over
+TCP, stores shard files under `target/kvkache-v1`, and writes its generated
+certificate to `target/openkache-local/certificate.local.der`. It automatically
+sizes itself from the CPUs available to the process, host-available or
+cgroup-limited RAM, and available filesystem space. Use `--port <port>` only to
+override the default port, or `--config <path>` to load an explicit TOML cache
+configuration.
+This is the current public preview entry point. The target storage layout and
+committed-data restart recovery remain design work; the preview does not yet
+promise that target recovery behavior.
 
 To inspect the automatic result and optionally override individual inputs, run:
 
@@ -65,40 +69,11 @@ NVMe is recommended for the intended latency and throughput profile, but it is
 not a hard requirement. Its memory estimate covers the packed Table rather than
 whole-process peak RSS. `--cpus` selects
 worker threads but does not impose a process CPU quota. `light` and `balanced`
-accept individual values up to their 1 MiB Blob Segment size; `heavy` accepts
-up to 64 MiB. Existing storage must be reopened with the same worker count and
-Segment layout.
-
-To calculate a configuration from resource budgets instead, run:
-
-```bash
-cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
-  --cpus 4 \
-  --memory-gib 32 \
-  --storage-gb 2500 \
-  --profile balanced \
-  --directory ./openkache-data \
-  --plan
-```
-
-`balanced` is the default and models 1 KiB encoded values. `light` models
-100-byte inline values, while `heavy` models 2 KiB Blob values. Remove
-`--plan` to open the storage files and start serving with the calculated
-configuration.
-
-The calculated limits are advisory. The planner does not inspect cgroup
-limits, filesystem free space, or device throughput, and its memory estimate
-covers the packed Table rather than whole-process peak RSS. `--cpus` selects
-worker threads but does not impose a process CPU quota. `light` and `balanced`
-accept individual values up to their 1 MiB Blob Segment size; `heavy` accepts
-up to 64 MiB. Existing storage must be reopened with the same worker count and
-Segment layout.
-
-### Run the BCF53 benchmark
-
-```bash
-cargo run --package openkache --bin breadcrumb --release
-```
+accept individual encoded items up to their 1 MiB Blob Segment size; `heavy`
+uses a 64 MiB Blob Segment but caps one encoded item at 16 MiB. Existing
+storage must be reopened with the same worker count and Segment layout. A
+format-v1 store may use a supported increase in bucket choice count; decreases
+or other geometry changes require cache recreation.
 
 ### Use the SDK (Rust)
 
@@ -123,7 +98,7 @@ let value = client.get(b"mykey").await?;
 
 ## Next steps
 
-- See [Architecture](../README.md#-architecture) for how OpenKache works
+- See [Architecture](architecture.md) for how OpenKache works
 - See the client status and binding architecture in `clients/README.md`
 - See the low-level shared client core under `clients/core/`
 - See the Rust client SDK under `clients/rust/`

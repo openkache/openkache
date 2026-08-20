@@ -1,9 +1,14 @@
 # OpenKache Go client
 
-The Go package exposes context-aware cache operations while delegating QUIC,
-TLS, retries, key derivation, compression, encryption, and value limits to the
-shared `openkache-client-core` native ABI. The package contains no duplicate
-wire or cryptographic implementation.
+The Go package exposes context-aware cache operations while delegating
+QUIC-over-TLS, retries, key derivation, compression, encryption, and value
+limits to the shared `openkache-client-core` native ABI. The package contains
+no duplicate wire or cryptographic implementation. The current binding is
+QUIC-only; TLS-over-TCP is part of the target maintained-client contract.
+
+The generated Smithy API and current native ABI are transitional references.
+Stable-v1 operation assignments and target client/value behavior come from the
+draft protocol and client-format documents.
 
 ## Commands
 

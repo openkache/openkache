@@ -76,6 +76,8 @@ message.
 Mount `/var/lib/openkache` to durable local or block storage. The server stores
 Segment files, the generated storage key, and the running-process marker there.
 Do not use an ephemeral container layer for data that must survive a restart.
+The volume preserves the files, but the current public preview does not promise
+restart replay; committed-data recovery is the target storage contract.
 NVMe SSD is the intended production medium, but it is not required. After the
 storage workers open their data files, startup best-effort checks those opened
 files and emits a non-fatal warning when any device is non-NVMe or the
@@ -95,6 +97,7 @@ docker run --rm \
   --name openkache \
   --security-opt seccomp=unconfined \
   --publish 4433:4433/udp \
+  --publish 4433:4433/tcp \
   --volume openkache-data:/var/lib/openkache \
   ghcr.io/openkache/openkache:latest \
   --listen 0.0.0.0:4433 \
@@ -111,6 +114,7 @@ podman run --rm \
   --name openkache \
   --security-opt seccomp=unconfined \
   --publish 4433:4433/udp \
+  --publish 4433:4433/tcp \
   --volume openkache-data:/var/lib/openkache:Z \
   ghcr.io/openkache/openkache:latest \
   --listen 0.0.0.0:4433 \
@@ -192,6 +196,7 @@ docker run --detach \
   --user "$(id -u):$(id -g)" \
   --security-opt seccomp=unconfined \
   --publish 4433:4433/udp \
+  --publish 4433:4433/tcp \
   --volume ./openkache-data:/var/lib/openkache \
   --volume ./pki/server:/etc/openkache/pki:ro \
   --read-only \
@@ -210,6 +215,7 @@ podman run --detach \
   --user "$(id -u):$(id -g)" \
   --security-opt seccomp=unconfined \
   --publish 4433:4433/udp \
+  --publish 4433:4433/tcp \
   --volume ./openkache-data:/var/lib/openkache:Z \
   --volume ./pki/server:/etc/openkache/pki:ro,Z \
   --read-only \
@@ -218,10 +224,11 @@ podman run --detach \
   ghcr.io/openkache/openkache:1.2.3
 ```
 
-The image's default command listens on `0.0.0.0:4433`, reads
-`/etc/openkache/pki`, and writes cache data under `/var/lib/openkache`. The
-published port is UDP because the default protocol is QUIC. Publish TCP as
-well only when deliberately running the development RESP mode.
+The image's default command listens on `0.0.0.0:4433` for QUIC over UDP and
+TLS-over-TCP over TCP, reads `/etc/openkache/pki`, and writes cache data under
+`/var/lib/openkache`. Publish both UDP and TCP to expose both maintained
+transport profiles. They carry the same frame bytes; TLS-over-TCP is separate
+from the loopback-only plaintext RESP compatibility mode.
 
 For a TOML configuration, mount it read-only and replace the default command,
 for example. Docker:
@@ -235,11 +242,11 @@ docker run --detach \
   --volume ./pki/server:/etc/openkache/pki:ro \
   --volume ./openkache.toml:/etc/openkache/openkache.toml:ro \
   --publish 4433:4433/udp \
+  --publish 4433:4433/tcp \
   ghcr.io/openkache/openkache:1.2.3 \
   --config /etc/openkache/openkache.toml \
   --listen 0.0.0.0:4433 \
-  --pki-directory /etc/openkache/pki \
-  --directory /var/lib/openkache
+  --pki-directory /etc/openkache/pki
 ```
 
 Podman:
@@ -253,16 +260,17 @@ podman run --detach \
   --volume ./pki/server:/etc/openkache/pki:ro,Z \
   --volume ./openkache.toml:/etc/openkache/openkache.toml:ro,Z \
   --publish 4433:4433/udp \
+  --publish 4433:4433/tcp \
   ghcr.io/openkache/openkache:1.2.3 \
   --config /etc/openkache/openkache.toml \
   --listen 0.0.0.0:4433 \
-  --pki-directory /etc/openkache/pki \
-  --directory /var/lib/openkache
+  --pki-directory /etc/openkache/pki
 ```
 
 The server still enforces its normal sizing, storage ownership, and mTLS
 validation inside the container. Use the same worker and Segment layout when
-reopening an existing storage volume.
+reopening an existing storage volume; format-v1 permits only the documented
+supported increase in bucket choice count without recreation.
 
 ## Pin maintenance
 

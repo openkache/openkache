@@ -1,14 +1,16 @@
 # OpenKache Python client
 
 The `openkache` package is an asyncio-friendly Python binding over the shared
-Rust client core. QUIC, TLS, retries, application-key derivation, compression,
-encryption, and the v1 value format stay in [`../core`](../core); Python only
-converts Python values and owns the async scheduling and resource lifecycle.
+Rust client core. QUIC-over-TLS, retries, application-key derivation,
+compression, encryption, and the v1 value format stay in [`../core`](../core);
+Python only converts Python values and owns the async scheduling and resource
+lifecycle. The current binding is QUIC-only; TLS-over-TCP is part of the target
+maintained-client contract.
 
 The Smithy client model in [`../model/openkache.smithy`](../model/openkache.smithy), together with
 the wire model in [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy),
-is the source of the generated operation types, client constants, and native ABI identifiers in
-`src/openkache/_generated/`. The `RawClient` adapter
+currently generates the transitional operation types, client constants, and native ABI identifiers
+in `src/openkache/_generated/`. The `RawClient` adapter
 implements those exact item-ID operations. `Client` adds protected
 application-key operations and JSON values.
 
@@ -84,7 +86,15 @@ native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
 core reparses that input and owns canonical serialization, compression,
 encryption, and value framing.
 
-`client.raw` exposes the Smithy-shaped exact item-ID API:
+This is the current transitional JSON API. The target structured operation
+uses `StructuredValue-CBOR-v1`; JSON helpers remain an explicitly documented
+compatibility surface rather than an implicit substitute for structured
+payloads.
+
+`client.raw` exposes the current transitional Smithy-shaped exact item-ID API.
+The namespace-open call below is an out-of-band WIP control-plane example, not
+a stable v1 wire operation; stable data operations still use a
+server-assigned namespace ID.
 
 ```python
 from openkache import (
@@ -141,7 +151,10 @@ result = await client.raw.get(
 
 Call `close()` when finished; it is idempotent. The client also supports
 `async with`. `stats()` returns validated `ServerStats`, while
-`stats_json()` preserves the Smithy response text.
+`stats_json()` preserves the Smithy response text. `stats` is transitional
+experimental behavior; for a draft-conforming peer, enable
+`enable_experimental_api` and coordinate the exact revision in
+[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling it.
 
 ## Components
 

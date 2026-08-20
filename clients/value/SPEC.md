@@ -453,11 +453,11 @@ unknown-field semantics.
 
 ## 7. Implementation boundary
 
-This directory currently contains the value-model specification only. No
-public package or implementation API is committed by this draft. A future
-reusable implementation is intended to live under `clients/value/` as a small
-shared value package. It may expose a Rust core and language adapters, but the
-logical model and profile conformance remain one specification.
+The Rust implementation is currently published under `clients/value/` as the
+`openkache-value` package. It provides the owned `Value` algebra and the
+bounded `StructuredValue-CBOR-v1` payload codec described by this document.
+Cross-language adapters and final profile-conformance claims remain migration
+work; the logical model and its conformance rules remain one specification.
 
 The OpenKache client core uses this package to produce structured payload
 bytes. The client value envelope then applies compression, cryptographic

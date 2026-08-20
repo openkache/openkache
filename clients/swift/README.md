@@ -3,7 +3,12 @@
 The Swift package is a thin actor-based adapter over the shared Rust client
 core. It accepts Foundation `Data`, exposes async cache operations, and does
 not duplicate QUIC framing, TLS validation, retries, key derivation,
-compression, encryption, or value parsing.
+compression, encryption, or value parsing. The current binding is QUIC-only;
+TLS-over-TCP is part of the target maintained-client contract.
+
+This README documents the current transitional Swift/FFI API. The target
+variable-width Item ID, structured-value, compression, and dual-transport
+contracts live in the shared draft documents linked by [`../README.md`](../README.md).
 
 `OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
 keys use the `Text` type and `Data` keys use the `Bytes` type; both are encoded
@@ -16,6 +21,15 @@ The native library exports the versioned ABI declared in
 [`../core/include/openkache/client_abi.h`](../core/include/openkache/client_abi.h).
 Build or install the `openkache-client-core` Rust `cdylib` for the target platform
 and make it visible to the linker as `openkache_client_core`.
+
+The generated `STATS` and `SYNC` methods are transitional experimental
+maintenance operations and are disabled by default. Enable
+`enable_experimental_api = true` explicitly and coordinate exact revision
+`draft-2026-08-19.4` out of band as described in
+[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling
+them; the revision is not negotiated on the wire. Namespace lifecycle methods
+in the raw example are out-of-band WIP control-plane shapes, not stable-v1
+data-plane operations.
 
 ## Commands
 
@@ -113,9 +127,10 @@ declarations are generated into SwiftPM's build directory from
 [`../model/openkache.smithy`](../model/openkache.smithy) and the wire model in
 [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
 They are not checked into source control: the `GenerateSmithy` SwiftPM build
-plugin regenerates them for every build. These two Smithy models remain the
-scoped sources of truth for operation, state, result, limit, and value-format
-identifiers. The shared C ABI header consumes the same generated contract.
+plugin regenerates the current transitional contract for every build. The
+draft protocol and client-format documents remain the target sources of truth
+until migration is complete. The shared C ABI header consumes the same
+generated current contract.
 To regenerate the declarations explicitly:
 
 ```bash
