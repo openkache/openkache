@@ -94,11 +94,15 @@ If the client host, client process, application, value keyring, Item ID root
 key, or TLS trust configuration is compromised, these profiles provide no
 guarantee for data handled by that compromised boundary.
 
-### Attacker-controlled input
+### Chosen-input attacker
 
-An application-level attacker may choose some keys or value contents and
-observe repeated results or envelope lengths. This category matters when
-evaluating compression side channels and application-specific key isolation.
+This models an attacker who can submit chosen data through an application API,
+such as a user of a multi-tenant service, but cannot access client secrets or
+execute code on the client. On its own, choosing input does not break
+encryption. It matters when the application compresses attacker-chosen data
+together with secret data and a server-side or network observer can compare
+ciphertext lengths across repeated requests; that combination can create a
+compression side channel.
 
 ## Protection matrix
 
