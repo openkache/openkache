@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::FfiNamespaceDescriptor;
+pub use crate::contract::FfiOperationField;
 pub use crate::contract::{
     FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE, FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
     FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL, FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
@@ -136,6 +137,13 @@ enum Command {
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
+        response: SyncSender<FfiResult>,
+    },
+    ExecuteStructured {
+        operation: FfiOperation,
+        canonical_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
         response: SyncSender<FfiResult>,
     },
     ExecuteScoped {
@@ -416,6 +424,22 @@ impl FfiClient {
                 format!("client operation timed out: {error}"),
                 FfiErrorCategory::Timeout,
             )
+        })
+    }
+
+    fn execute_structured(
+        &self,
+        operation: FfiOperation,
+        canonical_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+    ) -> FfiResult {
+        self.send_command_with_response(|response| Command::ExecuteStructured {
+            operation,
+            canonical_key,
+            value,
+            set_options,
+            response,
         })
     }
 
@@ -891,6 +915,29 @@ fn run_worker(
                 );
                 let _ = response.send(result);
             }
+            Command::ExecuteStructured {
+                operation,
+                canonical_key,
+                value,
+                set_options,
+                response,
+            } => {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(execute_structured(
+                        &client,
+                        operation,
+                        canonical_key,
+                        value,
+                        set_options,
+                    ))
+                }))
+                .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
+                state.store(
+                    connection_state_value(client.connection_state()),
+                    Ordering::Release,
+                );
+                let _ = response.send(result);
+            }
             Command::ExecuteScoped {
                 operation,
                 namespace_id,
@@ -1051,6 +1098,47 @@ async fn execute(
     result.unwrap_or_else(FfiResult::from_error)
 }
 
+/// Executes the canonical StructuredValue-CBOR-v1 native seam.
+///
+/// Unary requests carry one canonical application key and are currently used
+/// for structured GET.  Structured SET carries the key and value as two
+/// operation fields; keeping the value-model decode here ensures no Raw or
+/// JSON compatibility fallback can silently change its semantics.
+async fn execute_structured(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    canonical_key: Vec<u8>,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> FfiResult {
+    let result = match operation {
+        FfiOperation::Get => client
+            .get_structured_canonical_key_cbor(canonical_key)
+            .await
+            .and_then(structured_get_result),
+        FfiOperation::Set => {
+            client
+                .set_structured_canonical_key_cbor(canonical_key, value, set_options)
+                .await
+                .map(set_result)
+        }
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "structured native ABI supports only GET and SET",
+        )),
+    };
+    result.unwrap_or_else(FfiResult::from_error)
+}
+
+fn structured_get_result(
+    outcome: GetOutcome<Vec<u8>>,
+) -> std::result::Result<FfiResult, crate::Error> {
+    match outcome {
+        GetOutcome::NotFound => Ok(not_found_result()),
+        GetOutcome::Found(payload) => Ok(FfiResult::success(FfiResultKind::Value, payload)),
+    }
+}
+
 async fn execute_protected(
     client: &LocalProtectedClient,
     operation: FfiOperation,
@@ -1091,7 +1179,7 @@ async fn execute_protected(
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.sync().await.map(|()| raw_result()),
+        FfiOperation::Sync => client.sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
@@ -1134,7 +1222,7 @@ async fn execute_raw(
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.raw().sync().await.map(|()| raw_result()),
+        FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
         FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
             "operation",
@@ -1189,7 +1277,7 @@ async fn execute_scoped(
             .raw()
             .sync_in_namespace(namespace_id)
             .await
-            .map(|()| raw_result()),
+            .map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
             "unsupported namespace-scoped operation from the generated Smithy contract",
@@ -1294,10 +1382,6 @@ fn connection_state_value(state: ConnectionState) -> u32 {
 
 fn ok_result() -> FfiResult {
     FfiResult::success(FfiResultKind::Ok, Vec::new())
-}
-
-fn raw_result() -> FfiResult {
-    FfiResult::success(FfiResultKind::Raw, Vec::new())
 }
 
 fn not_found_result() -> FfiResult {
@@ -1754,6 +1838,115 @@ pub unsafe extern "C" fn openkache_client_execute_raw_async(
         None,
         true,
     )
+}
+
+/// Executes the native StructuredValue-CBOR-v1 unary seam.
+///
+/// A unary GET body is one canonical key item.  Structured SET requests use
+/// [`openkache_client_execute_fields`] so the key and value remain distinct.
+///
+/// # Safety
+///
+/// `client` must be live and `body` must be readable for `body_length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_unary(
+    client: *const FfiClient,
+    operation: u32,
+    body: *const u8,
+    body_length: usize,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        if operation != FfiOperation::Get {
+            return Err(
+                "structured unary ABI currently accepts only GET canonical-key bodies".to_owned(),
+            );
+        }
+        let body = copy_bytes(body, body_length, "structured canonical key")?;
+        Ok(client.execute_structured(
+            operation,
+            body,
+            Vec::new(),
+            SetOptions::new(),
+        ))
+    }))
+}
+
+/// Executes the native StructuredValue-CBOR-v1 field seam.
+///
+/// GET accepts one present field containing a canonical key.  SET accepts two
+/// present fields: canonical key followed by one complete
+/// StructuredValue-CBOR-v1 payload.  Optional/missing fields are rejected so
+/// a caller cannot silently fall back to Raw or JSON behavior.
+///
+/// # Safety
+///
+/// `client` must be live.  `fields` must point to `field_count` initialized
+/// [`FfiOperationField`] values, and every present field buffer must remain
+/// readable for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_fields(
+    client: *const FfiClient,
+    operation: u32,
+    fields: *const FfiOperationField,
+    field_count: usize,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        let fields = if field_count == 0 {
+            &[][..]
+        } else if fields.is_null() {
+            return Err("structured operation fields pointer must not be null".to_owned());
+        } else {
+            unsafe { std::slice::from_raw_parts(fields, field_count) }
+        };
+        let required = match operation {
+            FfiOperation::Get => 1,
+            FfiOperation::Set => 2,
+            _ => {
+                return Err(
+                    "structured fields ABI currently accepts only GET and SET".to_owned()
+                );
+            }
+        };
+        if fields.len() != required {
+            return Err(format!(
+                "structured {operation} requires exactly {required} fields, got {}",
+                fields.len()
+            ));
+        }
+        let copy_field = |index: usize, name: &'static str| -> std::result::Result<Vec<u8>, String> {
+            let field = fields[index];
+            if field.present == 0 {
+                return Err(format!("structured {name} field must be present"));
+            }
+            copy_bytes(field.data, field.length, name)
+        };
+        let canonical_key = copy_field(0, "canonical key")?;
+        let value = if operation == FfiOperation::Set {
+            copy_field(1, "structured value")?
+        } else {
+            Vec::new()
+        };
+        Ok(client.execute_structured(
+            operation,
+            canonical_key,
+            value,
+            SetOptions::new(),
+        ))
+    }))
 }
 
 pub unsafe extern "C" fn openkache_client_execute(

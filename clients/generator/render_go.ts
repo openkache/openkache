@@ -208,6 +208,20 @@ ${contract.ffi.result_kinds
 \tSmithyFFIResult${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
   )
   .join("\n")}
+${contract.ffi.status_categories
+  .map(
+    (entry) =>
+      `\t// SmithyFFIStatusCategory${go_ffi_name(entry.name)} identifies the native completion status category ${entry.name}.
+\tSmithyFFIStatusCategory${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.error_categories
+  .map(
+    (entry) =>
+      `\t// SmithyFFIErrorCategory${go_ffi_name(entry.name)} identifies the native error category ${entry.name}.
+\tSmithyFFIErrorCategory${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
 ${contract.ffi.set_conditions
   .map(
     (entry) =>

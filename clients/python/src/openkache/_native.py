@@ -12,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 from threading import Condition
+from typing import Sequence
 
 from ._generated.smithy_contract import (
     SmithyFFINamespaceDescriptor,
@@ -26,12 +27,13 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET,
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
-    SMITHY_FFI_RESULT_CANCELLED,
+    SMITHY_FFI_RESULT_CANCELED,
     SMITHY_FFI_RESULT_CONNECTED,
     SMITHY_FFI_RESULT_ERROR,
     SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_SET_CONDITION_ANY,
 )
+from ._generated.smithy_native_abi import SmithyNativeOperationField
 
 
 class NativeError(RuntimeError):
@@ -194,6 +196,26 @@ class _NativeApi:
             ),
             _RESULT_POINTER,
         )
+        self.execute_unary = self._optional_function(
+            "openkache_client_execute_unary",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                _U8_POINTER,
+                ctypes.c_size_t,
+            ),
+            _RESULT_POINTER,
+        )
+        self.execute_fields = self._optional_function(
+            "openkache_client_execute_fields",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                ctypes.POINTER(SmithyNativeOperationField),
+                ctypes.c_size_t,
+            ),
+            _RESULT_POINTER,
+        )
         self.execute_raw = self._function(
             "openkache_client_execute_raw",
             (
@@ -329,6 +351,20 @@ class _NativeApi:
         function.restype = result
         return function
 
+    def _optional_function(
+        self,
+        name: str,
+        arguments: tuple[object, ...],
+        result: object,
+    ) -> object | None:
+        try:
+            function = getattr(self.library, name)
+        except AttributeError:
+            return None
+        function.argtypes = list(arguments)
+        function.restype = result
+        return function
+
     def read_result(
         self, result: _RESULT_POINTER, *, take_client: bool = False
     ) -> tuple[int, bytes, _CLIENT_POINTER | None]:
@@ -350,7 +386,7 @@ class _NativeApi:
                 message or "native client operation failed",
                 result_kind=kind,
             )
-        if kind in (SMITHY_FFI_RESULT_UNKNOWN_MUTATION, SMITHY_FFI_RESULT_CANCELLED):
+        if kind in (SMITHY_FFI_RESULT_UNKNOWN_MUTATION, SMITHY_FFI_RESULT_CANCELED):
             message = payload.decode("utf-8", errors="replace")
             raise NativeError(
                 message or "native client operation failed",
@@ -447,6 +483,65 @@ class NativeClient:
             condition=condition,
             ttl_ms=ttl_ms,
         )
+
+    def execute_unary(self, operation: int, *, body: bytes) -> tuple[int, bytes]:
+        function = self._api.execute_unary
+        if function is None:
+            raise NativeError(
+                "native client does not support the StructuredValue-CBOR-v1 unary ABI"
+            )
+        body_buffer, body_pointer = _as_native_buffer(body)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = function(handle, operation, body_pointer, len(body))
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            del body_buffer
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def execute_fields(
+        self,
+        operation: int,
+        *,
+        fields: Sequence[bytes | None],
+    ) -> tuple[int, bytes]:
+        function = self._api.execute_fields
+        if function is None:
+            raise NativeError(
+                "native client does not support the StructuredValue-CBOR-v1 field ABI"
+            )
+        buffers: list[object | None] = []
+        native_fields = (SmithyNativeOperationField * len(fields))()
+        for index, field in enumerate(fields):
+            payload = b"" if field is None else field
+            buffer, pointer = _as_native_buffer(payload)
+            buffers.append(buffer)
+            native_fields[index].data = pointer
+            native_fields[index].length = len(payload)
+            native_fields[index].present = 0 if field is None else 1
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = function(handle, operation, native_fields, len(fields))
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            del buffers
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
 
     def get_structured(self, *, key: bytes) -> tuple[int, bytes]:
         key_buffer, key_pointer = _as_native_buffer(key)

@@ -132,6 +132,18 @@ export function render_python_contract(contract: Client_Contract): string {
         `SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
     )
     .join("\n")
+  const ffi_status_categories = contract.ffi.status_categories
+    .map(
+      (entry) =>
+        `SMITHY_FFI_STATUS_CATEGORY_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_error_categories = contract.ffi.error_categories
+    .map(
+      (entry) =>
+        `SMITHY_FFI_ERROR_CATEGORY_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_connection_states = contract.ffi.connection_states
     .map(
       (entry) =>
@@ -258,6 +270,8 @@ SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
 ${ffi_operations}
 ${ffi_result_kinds}
+${ffi_status_categories}
+${ffi_error_categories}
 ${ffi_connection_states}
 ${ffi_set_conditions}
 ${ffi_namespace_descriptor_decode_statuses}

@@ -143,10 +143,10 @@ function render_rust_operation_contract(contract: Client_Contract): string {
       operation.contract,
       request,
     )
-    // Generic operations use the shape-neutral RAW discriminator. Empty and
-    // opaque framing describe transport, not application semantics; mapping
-    // them to `ok`/`value` here would force every future API into a legacy
-    // result vocabulary.
+    // Generic operations use the shape-neutral RAW discriminator. Explicit
+    // compatibility adapters own domain result semantics; this keeps an
+    // operation such as experimental SYNC on the canonical `Ok` result while
+    // leaving route-less future operations shape-neutral.
     const generic_result_name = "raw"
     const status_mapping = operation.contract.success_statuses.map((status) => {
       const status_variant = rust_status_variant(contract, status)
@@ -507,6 +507,34 @@ pub const FFI_NAMESPACE_OVERRIDE_${snake_case(entry.name).toUpperCase()}: u32 = 
   const ffi_operation_entries = [...contract.opcodes, ...ffi.operations].sort(
     (left, right) => left.value - right.value,
   )
+  const rust_native_structures = ffi.native_abi_structures
+    .filter((structure) => structure.name === "FfiOperationField")
+    .map(
+      (structure) => `/// Borrowed field passed through a generated structured native operation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ${structure.name} {
+${structure.fields.map((field) => {
+  const rust_type = (() => {
+    switch (field.type) {
+      case "u8_pointer":
+        return "*const u8"
+      case "size":
+        return "usize"
+      case "uint8":
+        return "u8"
+      default:
+        throw new Error(
+          `unsupported Rust native operation-field type ${field.type}`,
+        )
+    }
+  })()
+  return `    pub ${field.name}: ${rust_type},`
+}).join("\n")}
+}
+`,
+    )
+    .join("\n")
   const ffi_namespace_descriptor = `/// C-compatible namespace descriptor returned by the native ABI.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -581,6 +609,7 @@ pub const FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES: usize = ${formatted_decimal(descr
 ${descriptor_offset_constants}
 
 ${ffi_namespace_descriptor}
+${rust_native_structures}
 ${api_enum_constants}
 ${render_rust_operation_contract(contract)}
 ${rust_ffi_enum(

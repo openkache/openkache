@@ -21,6 +21,7 @@ export type Compatibility_Response_Projection_Kind =
 export type Compatibility_Response_Adapter_Route =
   | "pong"
   | "value"
+  | "empty"
   | "set_outcome"
   | "delete_outcome"
   | "namespace_delete"
@@ -130,6 +131,13 @@ export const COMPATIBILITY_RESPONSE_ADAPTERS: Readonly<
       status === "not_found" ? "not_found" : "value",
     route: "value",
     supports: supports_compatibility_framing("opaque", "optional_values"),
+  },
+  empty: {
+    projection: "empty",
+    result_kinds: ["ok"],
+    result_kind_for_status: (status) => status === "ok" ? "ok" : undefined,
+    route: "empty",
+    supports: supports_compatibility_framing("empty"),
   },
   set_outcome: {
     projection: "status_outcome",

@@ -145,7 +145,7 @@ impl NativeClient {
     }
 
     /// Retrieves one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "get_structured")]
     pub async fn get_structured(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
         let outcome = self
             .active_client()?
@@ -236,7 +236,7 @@ impl NativeClient {
     }
 
     /// Stores one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "set_structured")]
     pub async fn set_structured(
         &self,
         key: Uint8Array,
@@ -1096,7 +1096,15 @@ fn map_set_outcome(outcome: SetOutcome) -> String {
 }
 
 fn native_error(error: impl std::fmt::Display) -> Error {
-    Error::new(Status::GenericFailure, error.to_string())
+    let message = error.to_string();
+    let message = if message.contains("result is unknown after request transmission")
+        || message.contains("unknown outcome after transmission")
+    {
+        format!("unknown_mutation: {message}")
+    } else {
+        message
+    };
+    Error::new(Status::GenericFailure, message)
 }
 
 fn native_core_error(error: openkache_client_core::Error) -> Error {

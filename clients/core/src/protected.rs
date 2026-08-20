@@ -335,6 +335,21 @@ macro_rules! protected_client_methods {
             self.get_structured_at_item_id(namespace_id, item_id).await
         }
 
+        /// Retrieves StructuredValue-CBOR-v1 bytes for byte-oriented native
+        /// adapters without routing through JSON or Raw conversion.
+        pub async fn get_structured_canonical_key_cbor(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            match self.get_structured_canonical_key(canonical_key).await? {
+                GetOutcome::Found(value) => value
+                    .to_cbor()
+                    .map(GetOutcome::Found)
+                    .map_err(|error| crate::value::Error::Structured(error).into()),
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
         async fn get_value_at_item_id(
             &self,
             namespace_id: u64,
@@ -503,6 +518,24 @@ macro_rules! protected_client_methods {
                     .seal_structured_in_namespace(namespace_id, item_id, &value)?;
             self.raw
                 .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Stores one complete StructuredValue-CBOR-v1 payload for byte
+        /// oriented native adapters.
+        pub async fn set_structured_canonical_key_cbor(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+            value: impl AsRef<[u8]>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let value = StructuredValue::from_cbor(value.as_ref()).map_err(|error| {
+                crate::Error::configuration(
+                    "structured_value",
+                    format!("StructuredValue-CBOR-v1 decode failed: {error}"),
+                )
+            })?;
+            self.set_structured_canonical_key(canonical_key, value, options)
                 .await
         }
 

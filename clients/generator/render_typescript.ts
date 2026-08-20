@@ -148,6 +148,18 @@ ${contract.ffi.result_kinds
       `export const SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
   )
   .join("\n")}
+${contract.ffi.status_categories
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_STATUS_CATEGORY_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.error_categories
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_ERROR_CATEGORY_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
 ${contract.ffi.connection_states
   .map(
     (entry) =>

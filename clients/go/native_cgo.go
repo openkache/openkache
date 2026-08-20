@@ -31,6 +31,11 @@ typedef openkache_client_result *(*openkache_go_connect_ex_fn)(
 typedef openkache_client_result *(*openkache_go_execute_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_execute_unary_fn)(
+    const openkache_client_handle *, uint32_t, const uint8_t *, size_t);
+typedef openkache_client_result *(*openkache_go_execute_fields_fn)(
+    const openkache_client_handle *, uint32_t,
+    const openkache_client_operation_field_t *, size_t);
 typedef openkache_client_result *(*openkache_go_execute_raw_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
@@ -67,6 +72,8 @@ typedef struct openkache_go_library {
     openkache_go_connect_fn connect;
     openkache_go_connect_ex_fn connect_ex;
     openkache_go_execute_fn execute;
+    openkache_go_execute_unary_fn execute_unary;
+    openkache_go_execute_fields_fn execute_fields;
     openkache_go_execute_raw_fn execute_raw;
     openkache_go_execute_with_options_fn execute_with_options;
     openkache_go_execute_raw_with_options_fn execute_raw_with_options;
@@ -176,6 +183,8 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(connect, "openkache_client_connect");
     OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
     OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
+    OPENKACHE_GO_LOAD(execute_unary, "openkache_client_execute_unary");
+    OPENKACHE_GO_LOAD(execute_fields, "openkache_client_execute_fields");
     OPENKACHE_GO_LOAD(execute_raw, "openkache_client_execute_raw");
     OPENKACHE_GO_LOAD(execute_with_options, "openkache_client_execute_with_options");
     OPENKACHE_GO_LOAD(execute_raw_with_options, "openkache_client_execute_raw_with_options");
@@ -227,6 +236,11 @@ int openkache_go_has_connect_ex(const openkache_go_library *library) {
 
 int openkache_go_has_execute_raw(const openkache_go_library *library) {
     return library != NULL && library->execute_raw != NULL;
+}
+
+int openkache_go_has_execute_structured(const openkache_go_library *library) {
+    return library != NULL && library->execute_unary != NULL &&
+        library->execute_fields != NULL;
 }
 
 uint32_t openkache_go_connection_state(
@@ -301,6 +315,27 @@ openkache_client_result *openkache_go_execute_raw(
     return library->execute_raw(
         client, operation, item_id, item_id_length, value, value_length,
         set_condition, ttl_enabled, ttl_ms);
+}
+
+openkache_client_result *openkache_go_execute_unary(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    const uint8_t *body, size_t body_length
+) {
+    if (library == NULL || library->execute_unary == NULL) return NULL;
+    return library->execute_unary(client, operation, body, body_length);
+}
+
+openkache_client_result *openkache_go_execute_fields(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    const openkache_client_operation_field_t *fields,
+    size_t field_count
+) {
+    if (library == NULL || library->execute_fields == NULL) return NULL;
+    return library->execute_fields(client, operation, fields, field_count);
 }
 
 openkache_client_result *openkache_go_execute_with_options(
@@ -448,11 +483,12 @@ type nativeLibrary struct {
 }
 
 type nativeHandle struct {
-	library *nativeLibrary
-	client  *C.openkache_client_handle
-	raw     bool
-	scoped  bool
-	options bool
+	library    *nativeLibrary
+	client     *C.openkache_client_handle
+	raw        bool
+	structured bool
+	scoped     bool
+	options    bool
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -678,11 +714,12 @@ func decodeConnectResult(
 		return nil, &Error{Operation: "connect", Message: "native ABI returned a null client"}
 	}
 	handle := &nativeHandle{
-		library: library,
-		client:  client,
-		raw:     C.openkache_go_has_execute_raw(library.ptr) != 0,
-		scoped:  true,
-		options: true,
+		library:    library,
+		client:     client,
+		raw:        C.openkache_go_has_execute_raw(library.ptr) != 0,
+		structured: C.openkache_go_has_execute_structured(library.ptr) != 0,
+		scoped:     true,
+		options:    true,
 	}
 	handle.cond = sync.NewCond(&handle.mu)
 	return handle, nil
@@ -695,6 +732,105 @@ func (h *nativeHandle) execute(
 	options SetOptions,
 ) (nativeResult, error) {
 	return h.executeNative(ctx, operation, key, value, options, false)
+}
+
+func (h *nativeHandle) executeStructuredUnary(
+	ctx context.Context,
+	operation uint32,
+	key []byte,
+) (nativeResult, error) {
+	if !h.structured {
+		return nativeResult{}, &Error{
+			Operation: "execute structured",
+			Message:   "native library does not support StructuredValue-CBOR-v1 operations",
+		}
+	}
+	client, err := h.begin()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	keyMemory := C.CBytes(key)
+	done := make(chan nativeResult, 1)
+	go func() {
+		defer h.end()
+		result := C.openkache_go_execute_unary(
+			h.library.ptr,
+			client,
+			C.uint32_t(operation),
+			(*C.uint8_t)(keyMemory),
+			C.size_t(len(key)),
+		)
+		C.free(keyMemory)
+		kind, data := decodeResult(h.library, result)
+		done <- nativeResult{kind: kind, data: data}
+	}()
+	select {
+	case result := <-done:
+		if result.kind == SmithyFFIResultError {
+			return nativeResult{}, &Error{Message: string(result.data)}
+		}
+		return result, nil
+	case <-ctx.Done():
+		return nativeResult{}, ctx.Err()
+	}
+}
+
+func (h *nativeHandle) executeStructuredFields(
+	ctx context.Context,
+	operation uint32,
+	fields [][]byte,
+) (nativeResult, error) {
+	if !h.structured {
+		return nativeResult{}, &Error{
+			Operation: "execute structured",
+			Message:   "native library does not support StructuredValue-CBOR-v1 operations",
+		}
+	}
+	client, err := h.begin()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	type fieldMemory struct {
+		pointer unsafe.Pointer
+	}
+	memories := make([]fieldMemory, len(fields))
+	nativeFields := make([]C.openkache_client_operation_field_t, len(fields))
+	for index, field := range fields {
+		memory := C.CBytes(field)
+		memories[index] = fieldMemory{pointer: memory}
+		nativeFields[index].data = (*C.uint8_t)(memory)
+		nativeFields[index].length = C.size_t(len(field))
+		nativeFields[index].present = 1
+	}
+	done := make(chan nativeResult, 1)
+	go func() {
+		defer h.end()
+		var fieldPointer *C.openkache_client_operation_field_t
+		if len(nativeFields) != 0 {
+			fieldPointer = (*C.openkache_client_operation_field_t)(unsafe.Pointer(&nativeFields[0]))
+		}
+		result := C.openkache_go_execute_fields(
+			h.library.ptr,
+			client,
+			C.uint32_t(operation),
+			fieldPointer,
+			C.size_t(len(nativeFields)),
+		)
+		for _, memory := range memories {
+			C.free(memory.pointer)
+		}
+		kind, data := decodeResult(h.library, result)
+		done <- nativeResult{kind: kind, data: data}
+	}()
+	select {
+	case result := <-done:
+		if result.kind == SmithyFFIResultError {
+			return nativeResult{}, &Error{Message: string(result.data)}
+		}
+		return result, nil
+	case <-ctx.Done():
+		return nativeResult{}, ctx.Err()
+	}
 }
 
 func (h *nativeHandle) executeRaw(

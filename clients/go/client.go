@@ -16,6 +16,10 @@ const maxCanonicalKeyBytes = 1 << 20
 // ErrClosed is returned after a client has been permanently closed.
 var ErrClosed = errors.New("openkache: client is closed")
 
+// ErrUnknownMutation identifies a mutation whose server-side outcome could
+// not be confirmed after transmission.
+var ErrUnknownMutation = errors.New("openkache: mutation outcome is unknown")
+
 // Error is a failure returned by the shared native client.
 type Error struct {
 	// Operation identifies the Go operation that observed the failure.
@@ -38,6 +42,39 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error {
 	return e.Cause
+}
+
+// UnknownMutationError preserves the operation and native detail for an
+// ambiguous mutation result. Callers can use errors.Is(err,
+// ErrUnknownMutation) and errors.As(err, *UnknownMutationError).
+type UnknownMutationError struct {
+	// Operation identifies the mutation that crossed the transmission boundary.
+	Operation string
+	// Message is the native diagnostic detail.
+	Message string
+	// Cause is an optional underlying native or transport error.
+	Cause error
+}
+
+func (e *UnknownMutationError) Error() string {
+	if e.Operation == "" {
+		if e.Message == "" {
+			return ErrUnknownMutation.Error()
+		}
+		return "openkache mutation outcome is unknown: " + e.Message
+	}
+	if e.Message == "" {
+		return "openkache " + e.Operation + " mutation outcome is unknown"
+	}
+	return "openkache " + e.Operation + " mutation outcome is unknown: " + e.Message
+}
+
+func (e *UnknownMutationError) Unwrap() error {
+	return e.Cause
+}
+
+func (e *UnknownMutationError) Is(target error) bool {
+	return target == ErrUnknownMutation
 }
 
 // Identity contains the certificate chain and private key for mutual TLS.
@@ -405,6 +442,8 @@ type nativeNamespaceDescriptor = SmithyFFINamespaceDescriptor
 
 type nativeClient interface {
 	execute(context.Context, uint32, []byte, []byte, SetOptions) (nativeResult, error)
+	executeStructuredUnary(context.Context, uint32, []byte) (nativeResult, error)
+	executeStructuredFields(context.Context, uint32, [][]byte) (nativeResult, error)
 	executeRaw(context.Context, uint32, ItemID, []byte, SetOptions) (nativeResult, error)
 	executeScoped(
 		context.Context,
@@ -608,6 +647,24 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	return getResult("get", result)
 }
 
+// GetStructured retrieves one StructuredValue-CBOR-v1 payload for key.
+//
+// The shared native ABI validates and decodes the structured value; this
+// method never falls back to Raw or JSON serialization.
+func (c *Client) GetStructured(ctx context.Context, key []byte) ([]byte, bool, error) {
+	canonicalKey, err := canonicalBytesKey(key)
+	if err != nil {
+		return nil, false, err
+	}
+	result, err := c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.executeStructuredUnary(ctx, SmithyOpcodeGet, canonicalKey)
+	})
+	if err != nil {
+		return nil, false, operationError("get structured", err)
+	}
+	return getResult("get structured", result)
+}
+
 // GetJSON retrieves the canonical JSON document stored for key.
 //
 // The returned bytes are canonical RFC 8785 JSON produced by the shared core.
@@ -651,6 +708,31 @@ func (c *Client) Set(ctx context.Context, key, value []byte, options SetOptions)
 		return "", operationError("set", err)
 	}
 	return setResult("set", result)
+}
+
+// SetStructured stores one StructuredValue-CBOR-v1 payload for key.
+func (c *Client) SetStructured(
+	ctx context.Context,
+	key, value []byte,
+) (SetOutcome, error) {
+	canonicalKey, err := canonicalBytesKey(key)
+	if err != nil {
+		return "", err
+	}
+	if len(value) > SmithyMaxValueBytes {
+		return "", validationError("value", fmt.Sprintf("exceeds %d bytes", SmithyMaxValueBytes))
+	}
+	result, err := c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.executeStructuredFields(
+			ctx,
+			SmithyOpcodeSet,
+			[][]byte{canonicalKey, value},
+		)
+	})
+	if err != nil {
+		return "", operationError("set structured", err)
+	}
+	return setResult("set structured", result)
 }
 
 // SetJSON stores one complete JSON document for key.
@@ -974,6 +1056,12 @@ func operationError(operation string, err error) error {
 }
 
 func unexpectedResult(operation string, kind uint32) error {
+	if kind == SmithyFFIResultUnknownMutation {
+		return &UnknownMutationError{
+			Operation: operation,
+			Message:   "native ABI reported UnknownMutation",
+		}
+	}
 	return &Error{
 		Operation: operation,
 		Message:   fmt.Sprintf("native ABI returned unexpected result kind %d", kind),
