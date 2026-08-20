@@ -207,7 +207,7 @@ impl KacheServer {
     /// Namespace creation and deletion are serialized independently from the
     /// stable data-plane operation registry.
     pub fn namespace_gate(&self) -> NamespaceGate {
-        NamespaceGate::new(Arc::clone(&self.namespaces))
+        NamespaceGate::with_storage(Arc::clone(&self.namespaces), Arc::clone(&self.cache))
     }
 
     /// Accepts connections until `shutdown` resolves, then flushes all cache workers.

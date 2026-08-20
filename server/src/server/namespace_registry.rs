@@ -488,6 +488,12 @@ impl NamespaceRegistry {
         })
     }
 
+    pub(crate) fn item_keys(&self, namespace_id: u64) -> Option<Vec<StorageKey>> {
+        self.by_id
+            .get(&namespace_id)
+            .map(|entry| entry.items.iter().copied().collect())
+    }
+
     pub(crate) fn mark_workers_clean(
         &mut self,
         namespace_id: u64,

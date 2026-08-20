@@ -74,12 +74,21 @@ impl Kvkache {
                     .contains(&located.table_location)
         });
         if !set_condition_allows(options.condition, initial_previous_live) {
+            if let Some(previous) = initial_previous {
+                self.remove_expired_item(&storage_key, previous)?;
+            }
             return Ok(SetOutcome::NotStored);
         }
         drop(initial_previous);
         self.admit_set()?;
         let mut previous = self.locate_item(&storage_key).await?;
-        let (new_location, previous_live, previous_location, previous_mutable_value) = loop {
+        let (
+            new_location,
+            previous_live,
+            previous_counted,
+            previous_location,
+            previous_mutable_value,
+        ) = loop {
             let previous_live = previous.as_ref().is_some_and(|located| {
                 located.item.is_live_at(unix_time_ms())
                     && self
@@ -88,8 +97,18 @@ impl Kvkache {
                         .contains(&located.table_location)
             });
             if !set_condition_allows(options.condition, previous_live) {
+                if let Some(previous) = previous {
+                    self.remove_expired_item(&storage_key, previous)?;
+                }
                 return Ok(SetOutcome::NotStored);
             }
+            let previous_counted = previous.as_ref().is_some_and(|located| {
+                !located.item.is_tombstone
+                    && self
+                        .table
+                        .candidate_locations(&storage_key)
+                        .contains(&located.table_location)
+            });
             let previous_location = previous.as_ref().map(|located| located.table_location);
             let previous_mutable_value = previous
                 .as_ref()
@@ -105,6 +124,7 @@ impl Kvkache {
                 break (
                     location,
                     previous_live,
+                    previous_counted,
                     previous_location,
                     previous_mutable_value,
                 );
@@ -122,12 +142,7 @@ impl Kvkache {
             previous_mutable_value,
             new_location,
         )?;
-        match (previous_live, true) {
-            (false, true) => self.live_keys += 1,
-            (true, true) => {}
-            _ => unreachable!(),
-        }
-        if previous_live && previous_disappeared {
+        if !previous_counted || previous_disappeared {
             self.live_keys += 1;
         }
         Ok(if previous_live {
@@ -177,6 +192,7 @@ impl Kvkache {
             return Ok(false);
         };
         if !previous.item.is_live_at(now_ms) {
+            self.remove_expired_item(storage_key, previous)?;
             return Ok(false);
         }
         let previous_location = previous.table_location;
@@ -184,5 +200,28 @@ impl Kvkache {
         self.remove_table_location(*storage_key, previous_location, previous_mutable_value)?;
         self.live_keys = self.live_keys.saturating_sub(1);
         Ok(true)
+    }
+
+    fn remove_expired_item(
+        &mut self,
+        storage_key: &StorageKey,
+        previous: super::LocatedItem,
+    ) -> Result<()> {
+        if !previous.item.is_expired_at(unix_time_ms())
+            || !self
+                .table
+                .candidate_locations(storage_key)
+                .contains(&previous.table_location)
+        {
+            return Ok(());
+        }
+        let previous_mutable_value = self.mutable_value_handle(&previous);
+        self.remove_table_location(
+            *storage_key,
+            previous.table_location,
+            previous_mutable_value,
+        )?;
+        self.live_keys = self.live_keys.saturating_sub(1);
+        Ok(())
     }
 }

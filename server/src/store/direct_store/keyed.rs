@@ -298,7 +298,19 @@ impl Kvkache {
         };
         let (outcome, visible_state, flush_required, pending) =
             match (completed.operation, observation) {
-                (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
+                (PreparedKeyedOperation::Get, KeyedObservation::Value { mut value, expired }) => {
+                    if let Some(expired) = expired {
+                        if let Err(error) =
+                            self.remove_expired_location(completed.storage_key, expired)
+                        {
+                            return KeyedFinish {
+                                outcome: Err(error),
+                                visible_state: None,
+                                flush_required: false,
+                                pending: false,
+                            };
+                        }
+                    }
                     let visible_state = include_visible_state.then(|| match &mut value {
                         Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
                         None => KeyedVisibleState::Missing,
@@ -354,6 +366,18 @@ impl Kvkache {
                         _ => false,
                     };
                     if !matches {
+                        if let Some(state) = state {
+                            if let Err(error) =
+                                self.remove_expired_location(completed.storage_key, state)
+                            {
+                                return KeyedFinish {
+                                    outcome: Err(error),
+                                    visible_state: None,
+                                    flush_required: false,
+                                    pending: false,
+                                };
+                            }
+                        }
                         let visible_state = include_visible_state.then(|| match &mut value {
                             Some(value) => {
                                 KeyedVisibleState::Present(value.clone_for_visible_state())
@@ -439,8 +463,18 @@ impl Kvkache {
             .as_ref()
             .is_some_and(|located| item_state_is_live_at(located.item_state, evaluated_at_ms));
         if !set_condition_allows(options.condition, previous_live) {
+            if let Some(previous) = previous {
+                self.remove_expired_location(storage_key, previous)?;
+            }
             return Ok((SetOutcome::NotStored, None, false, false));
         }
+        let previous_counted = previous.as_ref().is_some_and(|located| {
+            !located.item_state.is_tombstone
+                && self
+                    .table
+                    .candidate_locations(&storage_key)
+                    .contains(&located.table_location)
+        });
         self.admit_set()?;
         // Admission can wait for a capacity refresh. Re-evaluate the
         // condition at the mutation boundary so expiration is observed at
@@ -449,6 +483,9 @@ impl Kvkache {
             .as_ref()
             .is_some_and(|located| item_state_is_live_at(located.item_state, unix_time_ms()));
         if !set_condition_allows(options.condition, previous_live) {
+            if let Some(previous) = previous {
+                self.remove_expired_location(storage_key, previous)?;
+            }
             return Ok((SetOutcome::NotStored, None, false, false));
         }
         let previous_location = previous.as_ref().map(|located| located.table_location);
@@ -468,7 +505,7 @@ impl Kvkache {
                 previous_mutable_value,
                 replacement,
             )?;
-            if !previous_live || previous_disappeared {
+            if !previous_counted || previous_disappeared {
                 self.live_keys += 1;
             }
             let outcome = if previous_live {
@@ -519,10 +556,37 @@ impl Kvkache {
             return Ok((false, false));
         };
         if !item_state_is_live_at(previous.item_state, evaluated_at_ms) {
+            self.remove_expired_location(storage_key, previous)?;
             return Ok((false, false));
         }
         self.remove_table_location(storage_key, previous.table_location, previous.mutable_value)?;
         self.live_keys = self.live_keys.saturating_sub(1);
         Ok((true, false))
+    }
+
+    pub(super) fn remove_expired_location(
+        &mut self,
+        storage_key: StorageKey,
+        previous: LocatedKeyState,
+    ) -> Result<()> {
+        if previous.item_state.is_tombstone
+            || previous.item_state.expires_at_ms == 0
+            || previous.item_state.expires_at_ms > unix_time_ms()
+        {
+            return Ok(());
+        }
+        // A read may have been prepared before a newer write replaced the
+        // table location. In that case the stale expiration observation must
+        // not remove the live replacement.
+        if !self
+            .table
+            .candidate_locations(&storage_key)
+            .contains(&previous.table_location)
+        {
+            return Ok(());
+        }
+        self.remove_table_location(storage_key, previous.table_location, previous.mutable_value)?;
+        self.live_keys = self.live_keys.saturating_sub(1);
+        Ok(())
     }
 }

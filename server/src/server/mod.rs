@@ -177,11 +177,26 @@ pub enum NamespaceGateError {
 #[derive(Clone)]
 pub struct NamespaceGate {
     registry: Arc<Mutex<NamespaceRegistry>>,
+    storage: Option<Arc<ThreadedKvkache>>,
 }
 
 impl NamespaceGate {
+    #[allow(dead_code)]
     fn new(registry: Arc<Mutex<NamespaceRegistry>>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            storage: None,
+        }
+    }
+
+    pub(crate) fn with_storage(
+        registry: Arc<Mutex<NamespaceRegistry>>,
+        storage: Arc<ThreadedKvkache>,
+    ) -> Self {
+        Self {
+            registry,
+            storage: Some(storage),
+        }
     }
 
     /// Resolves or creates a namespace under the serialized lifecycle gate.
@@ -219,8 +234,9 @@ impl NamespaceGate {
     }
 
     /// Deletes an empty namespace after checking its current descriptor
-    /// revision. Existing item membership remains conservative until storage
-    /// confirms expiration or deletion, so a non-empty result is definitive.
+    /// revision. The production gate probes each conservatively tracked item
+    /// through storage first, pruning expired or already-absent values before
+    /// enforcing the live-membership check.
     pub async fn delete(
         &self,
         namespace_id: u64,
@@ -240,6 +256,27 @@ impl NamespaceGate {
             .ok_or(NamespaceGateError::NotFound)?;
         let (operation_lock, _active) = operation.into_parts();
         let _operation_guard = operation_lock.lock().await;
+        if let Some(storage) = &self.storage {
+            let item_keys = self
+                .registry
+                .lock()
+                .map_err(|_| NamespaceGateError::Internal)?
+                .item_keys(namespace_id)
+                .ok_or(NamespaceGateError::NotFound)?;
+            for storage_key in item_keys {
+                let value = storage
+                    .get_stored(storage_key)
+                    .await
+                    .map_err(|_| NamespaceGateError::Internal)?;
+                if value.is_none() {
+                    self.registry
+                        .lock()
+                        .map_err(|_| NamespaceGateError::Internal)?
+                        .prune_item(namespace_id, storage_key)
+                        .map_err(NamespaceGateError::from)?;
+                }
+            }
+        }
         self.registry
             .lock()
             .map_err(|_| NamespaceGateError::Internal)?

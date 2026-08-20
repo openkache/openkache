@@ -6,6 +6,7 @@ use super::keyed::{
     KeyedOutcome, KeyedVisibleState, PendingKeyedMutation, PendingKeyedResponse, PendingKeyedResult,
 };
 use super::policy::{item_state_is_live_at, set_condition_allows, unix_time_ms};
+use super::read_plan::LocatedKeyState;
 use super::{Kvkache, SegmentFlushReason, SetOutcome};
 
 enum PendingKeyedProgress {
@@ -76,12 +77,30 @@ impl Kvkache {
                         })
                 });
                 if !set_condition_allows(condition, previous_live) {
+                    if let (Some(previous), Some(previous_state)) = (previous, previous_state) {
+                        self.remove_expired_location(
+                            storage_key,
+                            LocatedKeyState {
+                                table_location: previous,
+                                item_state: previous_state,
+                                mutable_value: previous_mutable_value,
+                            },
+                        )?;
+                    }
                     return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
                         storage_key,
                         outcome: pending_outcome(response, SetOutcome::NotStored),
                         visible_state: None,
                     }));
                 }
+                let previous_counted = previous_state.is_some_and(|state| {
+                    !state.is_tombstone
+                        && previous.is_some_and(|location| {
+                            self.table
+                                .candidate_locations(&storage_key)
+                                .contains(&location)
+                        })
+                });
                 let Some(replacement) = self.try_append_value(
                     storage_key,
                     &mut value,
@@ -110,7 +129,7 @@ impl Kvkache {
                     previous_mutable_value,
                     replacement,
                 )?;
-                if !previous_live || previous_disappeared {
+                if !previous_counted || previous_disappeared {
                     self.live_keys += 1;
                 }
                 let outcome = if previous_live {
