@@ -296,7 +296,8 @@ pub trait TransportConnection: Send + Sync + 'static {
 
 struct BudgetState {
     used: usize,
-    waiters: Vec<Waker>,
+    next_waiter_id: u64,
+    waiters: HashMap<u64, Waker>,
 }
 
 /// One aggregate byte budget shared by request, transport, and response work.
@@ -315,7 +316,8 @@ impl InFlightByteBudget {
             maximum,
             state: Mutex::new(BudgetState {
                 used: 0,
-                waiters: Vec::new(),
+                next_waiter_id: 0,
+                waiters: HashMap::new(),
             }),
         }))
     }
@@ -345,7 +347,10 @@ impl InFlightByteBudget {
         let waiters = {
             let mut state = self.state.lock().expect("byte budget lock is not poisoned");
             state.used = state.used.saturating_sub(bytes);
-            std::mem::take(&mut state.waiters)
+            // Keep registrations in place while waking. A wake-up is only a
+            // hint: if one waiter consumes the newly available bytes, every
+            // other waiter must remain registered for the next release.
+            state.waiters.values().cloned().collect::<Vec<_>>()
         };
         for waiter in waiters {
             waiter.wake();
@@ -357,30 +362,77 @@ impl InFlightByteBudget {
         self: &Arc<Self>,
         bytes: usize,
     ) -> impl Future<Output = Result<BytePermit, EngineError>> + '_ {
-        futures_util::future::poll_fn(move |context| {
-            let mut state = self.state.lock().expect("byte budget lock is not poisoned");
-            if bytes <= self.maximum.saturating_sub(state.used) {
-                state.used += bytes;
-                return Poll::Ready(Ok(BytePermit {
-                    budget: Arc::clone(self),
-                    bytes,
-                }));
+        RequestBudgetAcquire {
+            budget: Arc::clone(self),
+            bytes,
+            waiter_id: None,
+        }
+    }
+}
+
+struct RequestBudgetAcquire {
+    budget: Arc<InFlightByteBudget>,
+    bytes: usize,
+    waiter_id: Option<u64>,
+}
+
+impl Future for RequestBudgetAcquire {
+    type Output = Result<BytePermit, EngineError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let budget = Arc::clone(&self.budget);
+        let mut state = budget
+            .state
+            .lock()
+            .expect("byte budget lock is not poisoned");
+        if self.bytes <= budget.maximum.saturating_sub(state.used) {
+            if let Some(waiter_id) = self.waiter_id.take() {
+                state.waiters.remove(&waiter_id);
             }
-            if bytes > self.maximum {
-                return Poll::Ready(Err(EngineError::BudgetExceeded {
-                    requested: bytes,
-                    maximum: self.maximum,
-                }));
+            state.used += self.bytes;
+            drop(state);
+            return Poll::Ready(Ok(BytePermit {
+                budget,
+                bytes: self.bytes,
+            }));
+        }
+        if self.bytes > budget.maximum {
+            return Poll::Ready(Err(EngineError::BudgetExceeded {
+                requested: self.bytes,
+                maximum: budget.maximum,
+            }));
+        }
+
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(waiter) = state.waiters.get_mut(&waiter_id) {
+                if !waiter.will_wake(context.waker()) {
+                    waiter.clone_from(context.waker());
+                }
             }
-            if !state
+            return Poll::Pending;
+        }
+
+        let waiter_id = state.next_waiter_id;
+        state.next_waiter_id = state
+            .next_waiter_id
+            .checked_add(1)
+            .expect("byte budget waiter identifier overflowed");
+        state.waiters.insert(waiter_id, context.waker().clone());
+        self.waiter_id = Some(waiter_id);
+        Poll::Pending
+    }
+}
+
+impl Drop for RequestBudgetAcquire {
+    fn drop(&mut self) {
+        if let Some(waiter_id) = self.waiter_id {
+            self.budget
+                .state
+                .lock()
+                .expect("byte budget lock is not poisoned")
                 .waiters
-                .iter()
-                .any(|waiter| waiter.will_wake(context.waker()))
-            {
-                state.waiters.push(context.waker().clone());
-            }
-            Poll::Pending
-        })
+                .remove(&waiter_id);
+        }
     }
 }
 
