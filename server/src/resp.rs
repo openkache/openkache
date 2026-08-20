@@ -461,17 +461,59 @@ async fn serve_resp_connection(
                     let response_start = responses.len();
                     let request_started = std::time::Instant::now();
                     let operation = operation_for_command(&command);
-                    close = execute_command(
-                        cache,
-                        &command,
-                        &mut responses,
-                        experimental_api_enabled,
-                        experimental_api_revision.as_deref(),
+                    let (mut close, mut timed_out) = match network_runtime::timeout(
+                        request_timeout,
+                        execute_command(
+                            cache,
+                            &command,
+                            &mut responses,
+                            experimental_api_enabled,
+                            experimental_api_revision.as_deref(),
+                        ),
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(close) => (close, false),
+                        Err(_) => {
+                            network_shard.abandoned_request();
+                            if timeout_requires_close_without_response(&command) {
+                                // A timed-out mutation may already have been
+                                // admitted to storage. Sending an error would
+                                // falsely guarantee that it did not take effect.
+                                responses.truncate(response_start);
+                            } else {
+                                error(&mut responses, "request timed out");
+                            }
+                            (true, true)
+                        }
+                    };
+                    // A runtime timeout cannot preempt synchronous work done
+                    // before the command's first await. Enforce the same
+                    // deadline against the elapsed wall clock so a command
+                    // that completes after its budget is still treated as
+                    // abandoned.
+                    if !timed_out && request_started.elapsed() >= request_timeout {
+                        network_shard.abandoned_request();
+                        timed_out = true;
+                        close = true;
+                        if timeout_requires_close_without_response(&command) {
+                            responses.truncate(response_start);
+                        } else {
+                            responses.truncate(response_start);
+                            error(&mut responses, "request timed out");
+                        }
+                    }
+                    let command_timed_out = timed_out
+                        || (close
+                            && responses[response_start..].is_empty()
+                            && timeout_requires_close_without_response(&command));
                     network_shard.record_request(
                         operation,
-                        status_for_resp_response(&responses[response_start..], operation),
+                        if command_timed_out {
+                            openkache_protocol::Status::Timeout
+                        } else {
+                            status_for_resp_response(&responses[response_start..], operation)
+                        },
                         request_started.elapsed(),
                     );
                     if close {
@@ -506,6 +548,13 @@ async fn serve_resp_connection(
             return Ok(());
         }
     }
+}
+
+pub(crate) fn timeout_requires_close_without_response(command: &[&[u8]]) -> bool {
+    matches!(
+        classify_command(command),
+        RespCommandKind::Set | RespCommandKind::Delete
+    )
 }
 
 struct ActiveRespConnection<'a> {
@@ -654,6 +703,10 @@ async fn execute_command(
                 {
                     Ok(Some(value)) => bulk(response, Some(&value.bytes)),
                     Ok(None) => bulk(response, None),
+                    Err(cache_error) if matches!(&cache_error, crate::KvError::Timeout(_)) => {
+                        error(response, "request timed out");
+                        return true;
+                    }
                     Err(cache_error) => resp_cache_error(response, cache_error),
                 }
             }
@@ -674,6 +727,13 @@ async fn execute_command(
                 {
                     Ok(SetOutcome::Created | SetOutcome::Replaced) => simple(response, "OK"),
                     Ok(SetOutcome::NotStored) => bulk(response, None),
+                    Err(cache_error) if matches!(&cache_error, crate::KvError::Timeout(_)) => {
+                        // The storage request may have been admitted before
+                        // its completion timed out, so the mutation outcome
+                        // is unknown and the lane must close without a
+                        // compatibility error response.
+                        return true;
+                    }
                     Err(cache_error) => resp_cache_error(response, cache_error),
                 }
             }
@@ -693,6 +753,9 @@ async fn execute_command(
                     {
                         Ok(true) => deleted += 1,
                         Ok(false) => {}
+                        Err(cache_error) if matches!(&cache_error, crate::KvError::Timeout(_)) => {
+                            return true;
+                        }
                         Err(cache_error) => {
                             resp_cache_error(response, cache_error);
                             return false;
@@ -712,6 +775,10 @@ async fn execute_command(
                         let stats = stats.join("\n");
                         bulk(response, Some(stats.as_bytes()));
                     }
+                    Err(cache_error) if matches!(&cache_error, crate::KvError::Timeout(_)) => {
+                        error(response, "request timed out");
+                        return true;
+                    }
                     Err(cache_error) => resp_cache_error(response, cache_error),
                 },
                 _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
@@ -724,6 +791,10 @@ async fn execute_command(
             match command {
                 [_] => match cache.sync(operation_for_opcode(Opcode::Sync)).await {
                     Ok(()) => simple(response, "OK"),
+                    Err(cache_error) if matches!(&cache_error, crate::KvError::Timeout(_)) => {
+                        error(response, "request timed out");
+                        return true;
+                    }
                     Err(cache_error) => resp_cache_error(response, cache_error),
                 },
                 _ => error(response, "wrong number of arguments for OPENKACHE.SYNC"),

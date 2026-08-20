@@ -723,6 +723,16 @@ pub(crate) async fn write_all_direct(
     Ok(buffer)
 }
 
+/// Flushes file data through the selected storage runtime within the write
+/// deadline. A generation must not be published until every paired file has
+/// completed this barrier.
+pub(crate) async fn sync_data(file: &File, timeout_us: u64, operation: &'static str) -> Result<()> {
+    storage_runtime::timeout(Duration::from_micros(timeout_us), file.sync_data())
+        .await
+        .map_err(|_| KvError::Timeout(operation))?
+        .map_err(Into::into)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetOutcome {
     Created,

@@ -430,6 +430,10 @@ mod backend {
             self.0.as_raw_fd()
         }
 
+        pub(crate) async fn sync_data(&self) -> io::Result<()> {
+            operations::fsync(&*self.0).await.map_err(io::Error::from)
+        }
+
         pub(crate) async fn set_len(&self, len: u64) -> io::Result<()> {
             let len = i64::try_from(len).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "file length overflowed")
@@ -565,6 +569,10 @@ mod backend {
     }
 
     impl File {
+        pub(crate) async fn sync_data(&self) -> io::Result<()> {
+            Ok(())
+        }
+
         pub(crate) async fn set_len(&self, _len: u64) -> io::Result<()> {
             Ok(())
         }
@@ -699,6 +707,10 @@ mod backend {
     impl File {
         pub(crate) fn raw_fd(&self) -> RawFd {
             self.0.as_raw_fd()
+        }
+
+        pub(crate) async fn sync_data(&self) -> io::Result<()> {
+            self.0.sync_data().await
         }
 
         pub(crate) async fn set_len(&self, len: u64) -> io::Result<()> {
@@ -844,6 +856,10 @@ mod backend {
     impl File {
         pub(crate) fn raw_fd(&self) -> RawFd {
             self.0.as_raw_fd()
+        }
+
+        pub(crate) async fn sync_data(&self) -> io::Result<()> {
+            self.0.sync_data().await
         }
 
         pub(crate) async fn set_len(&self, len: u64) -> io::Result<()> {
