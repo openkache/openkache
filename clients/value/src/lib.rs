@@ -746,17 +746,16 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
             ParsedItem::Value(value) => accept_value(value, &mut frames, &mut root)?,
             ParsedItem::Array(count) => {
                 add_pending_items(&mut pending_items, count, item_count, limits.max_items)?;
+                begin_frame(
+                    Frame::Array {
+                        remaining: count,
+                        values: Vec::new(),
+                    },
+                    &mut frames,
+                    limits,
+                )?;
                 if count == 0 {
                     accept_value(Value::Array(Vec::new()), &mut frames, &mut root)?;
-                } else {
-                    begin_frame(
-                        Frame::Array {
-                            remaining: count,
-                            values: Vec::new(),
-                        },
-                        &mut frames,
-                        limits,
-                    )?;
                 }
             }
             ParsedItem::Map(count) => {
@@ -769,21 +768,18 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
                     item_count,
                     limits.max_items,
                 )?;
+                begin_frame(
+                    Frame::Map {
+                        remaining: child_count,
+                        entries: Vec::new(),
+                        pending_key: None,
+                        key_index: ScalarKeyIndex::new(),
+                    },
+                    &mut frames,
+                    limits,
+                )?;
                 if count == 0 {
                     accept_value(Value::Map(Vec::new()), &mut frames, &mut root)?;
-                } else {
-                    begin_frame(
-                        Frame::Map {
-                            remaining: count.checked_mul(2).ok_or_else(|| {
-                                resource(Resource::Items, limits.max_items, usize::MAX)
-                            })?,
-                            entries: Vec::new(),
-                            pending_key: None,
-                            key_index: ScalarKeyIndex::new(),
-                        },
-                        &mut frames,
-                        limits,
-                    )?;
                 }
             }
         }
@@ -1123,6 +1119,12 @@ fn begin_frame(mut frame: Frame, frames: &mut Vec<Frame>, limits: Limits) -> Res
             limits.max_depth,
             frames.len() + 1,
         ));
+    }
+    // Empty containers do not need a frame, but they still consume one depth
+    // level. Keep the depth check above their early return so decoding agrees
+    // with encoding without allocating an otherwise unnecessary stack entry.
+    if frame_remaining(&frame) == 0 {
+        return Ok(());
     }
     frames.try_reserve(1).map_err(|_| Error::Allocation {
         size: frames.len() + 1,
