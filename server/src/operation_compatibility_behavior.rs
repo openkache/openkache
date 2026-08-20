@@ -8,13 +8,17 @@ use std::fmt::Write as _;
 use std::future::Future;
 
 use super::super::{
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy,
-    OverridePolicy, SetCondition, SetOptions,
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
+    NamespacePolicy, OverridePolicy, SetCondition, SetOptions,
 };
 use super::NamespaceError;
-use super::operation_compatibility_decode::{GetInput, NamespaceInput, SetInput};
+use super::operation_compatibility_decode::{
+    GetInput, NamespaceDeleteInput, NamespaceInput, NamespaceOpenInput, NamespaceRevisionInput,
+    SetInput,
+};
 use super::operation_compatibility_services::{
-    DeleteState, GetState, SetState, StatsState, SyncState, storage_write_options,
+    DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
+    SetState, StatsState, SyncState, storage_write_options,
 };
 use super::operation_contract::{OperationId, OperationStatus, telemetry_operation_id};
 use super::operation_outcome::{
@@ -24,6 +28,13 @@ use super::storage_port::{
     PreparedStorageAddress, StorageAdministrationPort, StorageDataPort, StorageError,
     StorageMutation, StorageScope, StorageValue, StorageWriteOutcome,
 };
+use super::NamespaceOpenResult;
+
+fn descriptor_payload(descriptor: NamespaceDescriptor) -> Vec<u8> {
+    descriptor
+        .encode()
+        .expect("validated namespace policy remains encodable")
+}
 
 fn resolve_set_options(
     policy: NamespacePolicy,
@@ -168,6 +179,98 @@ pub(super) fn get<'a, S: StorageDataPort>(
                 domain_success(OperationStatus::NotFound, OperationBody::opaque(Vec::new()))
             }
             Err(error) => domain_storage(error),
+        }
+    }
+}
+
+pub(super) fn namespace_open<'a>(
+    state: &'a NamespaceOpenState,
+    decoded: NamespaceOpenInput,
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
+        match state
+            .catalog
+            .open(decoded.name, decoded.create_if_missing, decoded.policy)
+        {
+            Ok((NamespaceOpenResult::Existing, descriptor)) => domain_success(
+                OperationStatus::Ok,
+                OperationBody::opaque(descriptor_payload(descriptor)),
+            ),
+            Ok((NamespaceOpenResult::Created, descriptor)) => domain_success(
+                OperationStatus::Created,
+                OperationBody::opaque(descriptor_payload(descriptor)),
+            ),
+            Err(error) => namespace_error(error, b"namespace operation rejected"),
+        }
+    }
+}
+
+pub(super) fn namespace_update_policy<'a>(
+    state: &'a NamespaceUpdateState,
+    decoded: NamespaceRevisionInput,
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
+        match state.catalog.update(
+            decoded.namespace_id,
+            decoded.expected_revision,
+            decoded.policy,
+        ) {
+            Ok(descriptor) => domain_success(
+                OperationStatus::Ok,
+                OperationBody::opaque(descriptor_payload(descriptor)),
+            ),
+            Err(error) => namespace_error(error, b"namespace policy update rejected"),
+        }
+    }
+}
+
+pub(super) fn namespace_delete<'a, S: StorageDataPort>(
+    state: &'a NamespaceDeleteState<S>,
+    decoded: NamespaceDeleteInput,
+) -> impl Future<Output = OperationOutcome> + 'a {
+    async move {
+        let namespace_id = decoded.namespace_id;
+        let tracked_items = match state
+            .membership
+            .tracked_items(namespace_id)
+        {
+            Some(items) => items,
+            None => {
+                return domain_error(
+                    OperationStatus::InternalError,
+                    b"namespace metadata is unavailable",
+                );
+            }
+        };
+        for storage_key in tracked_items {
+            let address = state.storage.prepare_storage_key(storage_key);
+            match state
+                .storage
+                .get(telemetry_operation_id(OperationId::Get), address)
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if state
+                        .membership
+                        .prune_item(namespace_id, storage_key)
+                        .is_err()
+                    {
+                        return domain_error(
+                            OperationStatus::InternalError,
+                            b"namespace metadata is unavailable",
+                        );
+                    }
+                }
+                Err(error) => return domain_storage(error),
+            }
+        }
+        match state
+            .catalog
+            .delete(namespace_id, decoded.expected_revision)
+        {
+            Ok(()) => domain_success(OperationStatus::Deleted, OperationBody::Empty),
+            Err(error) => namespace_error(error, b"namespace deletion rejected"),
         }
     }
 }

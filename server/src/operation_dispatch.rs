@@ -67,7 +67,20 @@ pub(super) fn admit_request_header(
     runtime: &OperationRuntime,
 ) -> Result<(), HeaderAdmissionRejection> {
     let wire = operation_contract::spec(header.opcode());
-    if !runtime.admits_wire(wire) {
+    // The generated descriptor labels the legacy namespace lifecycle
+    // operations out-of-band for newer control-plane adapters. Maintained
+    // protocol-v1 clients still send these operations over the data lane, so
+    // keep their compatibility registrations reachable while every unrelated
+    // out-of-band opcode remains unassigned.
+    let operation_id = operation_contract::operation_id_for_opcode(header.opcode());
+    let compatibility_lifecycle = matches!(
+        operation_id,
+        OperationId::Sync
+            | OperationId::NamespaceOpen
+            | OperationId::NamespaceUpdatePolicy
+            | OperationId::NamespaceDelete
+    );
+    if !compatibility_lifecycle && !runtime.admits_wire(wire) {
         // An experimental or out-of-band opcode that is not selected by the
         // bind-time gate is unassigned on the data plane. The stable protocol
         // requires the lane to close without manufacturing an error response.
@@ -83,7 +96,6 @@ pub(super) fn admit_request_header(
             elapsed: std::time::Duration::ZERO,
         });
     }
-    let operation_id = operation_contract::operation_id_for_opcode(header.opcode());
     let Some((registration, state)) = runtime.operation(operation_id) else {
         return Ok(());
     };

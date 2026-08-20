@@ -5,6 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -16,8 +17,10 @@ use crate::protocol::RequestFrame as ProtocolRequestFrame;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use openkache_protocol::ResponseSegment;
 use openkache_protocol::{RequestFrameHeader, ResponseParts};
+
 #[path = "transport/tls.rs"]
 mod tls;
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 pub(super) use tls::strict_server_config;
 #[path = "transport/tcp.rs"]
 pub(super) mod tcp;
@@ -91,7 +94,10 @@ impl ServerEndpoint {
                     Err(TransportError::not_compiled(backend, "quic-quiche"))
                 }
             }
-            QuicBackend::Neqo => unreachable!("non-conforming backends return above"),
+            QuicBackend::Neqo => Err(TransportError::unavailable(
+                backend,
+                "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
+            )),
         }
     }
 
@@ -140,7 +146,10 @@ impl ServerEndpoint {
                     Err(TransportError::not_compiled(backend, "quic-quiche"))
                 }
             }
-            QuicBackend::Neqo => unreachable!("non-conforming backends return above"),
+            QuicBackend::Neqo => Err(TransportError::unavailable(
+                backend,
+                "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
+            )),
         }
     }
 }
@@ -171,9 +180,6 @@ pub(super) trait Connection {
     /// Takes the authenticated peer's leaf certificate, when client authentication is enabled.
     fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>>;
 
-    /// Closes the QUIC connection with an application error code.
-    fn close(&self, error_code: u64, reason: &[u8]);
-
     fn accept_bi(
         &self,
     ) -> impl Future<Output = Result<(Self::SendStream, Self::ReceiveStream), TransportError>>;
@@ -182,6 +188,8 @@ pub(super) trait Connection {
     /// reject it without reading application bytes.
     fn accept_uni(&self) -> impl Future<Output = Result<Self::ReceiveStream, TransportError>>;
 
+    /// Closes this connection with an application error.
+    fn close(&self, error_code: u64, reason: &[u8]);
 }
 
 /// Receive half of one request stream.
@@ -191,6 +199,7 @@ pub(super) trait ReceiveStream {
         maximum: usize,
         timeout: Duration,
         budget: &RequestBudget,
+        progress: &AtomicBool,
         admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
     ) -> impl Future<Output = Result<RequestRead<T>, StreamReadError>>;
 
@@ -435,9 +444,10 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     maximum: usize,
     timeout: Duration,
     budget: &RequestBudget,
+    progress: &AtomicBool,
     admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
 ) -> Result<RequestRead<T>, StreamReadError> {
-    let header_read = read_request_header(stream, backend, maximum, timeout).await?;
+    let header_read = read_request_header(stream, backend, maximum, timeout, progress).await?;
     let (mut frame, header) = match header_read {
         HeaderRead::Header { frame, header } => (frame, header),
         HeaderRead::Finished => return Ok(RequestRead::Finished),
@@ -447,12 +457,14 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     if frame_len > maximum {
         return Err(StreamReadError::TooLarge);
     }
+
     if let Err(rejection) = admit(header, &frame[..header.encoded_len()]) {
         match discard_body(
             stream,
             backend,
             frame_len.saturating_sub(frame.len()),
             timeout,
+            progress,
         )
         .await?
         {
@@ -476,6 +488,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
                 backend,
                 frame_len.saturating_sub(frame.len()),
                 timeout,
+                progress,
             )
             .await?
             {
@@ -494,8 +507,17 @@ async fn read_buffered_request<S: RequestByteStream, T>(
             return Ok(RequestRead::Frame(RequestFrame::new(header, frame, permit)));
         }
         let actual = frame.len();
+        let previous_len = frame.len();
         match append_chunk(stream, frame, remaining, backend, timeout).await? {
-            ChunkRead::Bytes(next) => frame = next,
+            ChunkRead::Bytes(next) => {
+                // The caller may race this read against operation execution.
+                // Mark delivery after extending the local frame so it knows
+                // whether dropping the future would lose buffered bytes.
+                if next.len() > previous_len {
+                    progress.store(true, Ordering::Relaxed);
+                }
+                frame = next;
+            }
             ChunkRead::Finished => {
                 return Err(truncated_frame_error(actual, frame_len));
             }
@@ -509,6 +531,7 @@ async fn read_request_header<S: RequestByteStream>(
     backend: &'static str,
     maximum: usize,
     timeout: Duration,
+    progress: &AtomicBool,
 ) -> Result<HeaderRead, StreamReadError> {
     let mut frame = Vec::new();
     loop {
@@ -530,8 +553,14 @@ async fn read_request_header<S: RequestByteStream>(
             .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
         let was_empty = frame.is_empty();
         let actual = frame.len();
+        let previous_len = frame.len();
         match append_chunk(stream, frame, additional, backend, timeout).await? {
-            ChunkRead::Bytes(next) => frame = next,
+            ChunkRead::Bytes(next) => {
+                if next.len() > previous_len {
+                    progress.store(true, Ordering::Relaxed);
+                }
+                frame = next;
+            }
             ChunkRead::Finished if was_empty => return Ok(HeaderRead::Finished),
             ChunkRead::Finished => return Err(truncated_frame_error(actual, expected)),
             ChunkRead::Cancelled => return Ok(HeaderRead::Cancelled),
@@ -571,6 +600,7 @@ async fn discard_body<S: RequestByteStream>(
     backend: &'static str,
     mut remaining: usize,
     timeout: Duration,
+    progress: &AtomicBool,
 ) -> Result<BodyRead, StreamReadError> {
     const DISCARD_CHUNK_BYTES: usize = 16 * 1024;
     let mut scratch = Vec::new();
@@ -583,6 +613,9 @@ async fn discard_body<S: RequestByteStream>(
                     .len()
                     .checked_sub(previous_len)
                     .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
+                if read > 0 {
+                    progress.store(true, Ordering::Relaxed);
+                }
                 remaining = remaining
                     .checked_sub(read)
                     .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;

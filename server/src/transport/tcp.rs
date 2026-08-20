@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{Cursor, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -225,6 +226,7 @@ impl ReceiveStream for TlsTcpReceiveStream {
         maximum: usize,
         timeout: Duration,
         budget: &RequestBudget,
+        progress: &AtomicBool,
         admit: impl FnOnce(
             openkache_protocol::RequestFrameHeader,
             &[u8],
@@ -290,6 +292,7 @@ impl ReceiveStream for TlsTcpReceiveStream {
 
                     match event {
                         ReceiveEvent::Request(frame) => {
+                            progress.store(true, Ordering::Relaxed);
                             if frame.len() > maximum {
                                 return Err(StreamReadError::TooLarge);
                             }

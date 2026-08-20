@@ -6,7 +6,7 @@ use crate::channel::{self, AsyncReceiver, Sender};
 const NAME: &str = "quiche";
 
 use configuration::config;
-use driver::{Command, ConnectionId, Driver, StreamChunk};
+use driver::{Command, ConnectionId, Driver};
 
 pub(crate) struct Endpoint {
     incoming: AsyncReceiver<Incoming>,
@@ -173,7 +173,7 @@ enum StreamChunk {
     Bytes(Vec<u8>),
     Finished,
     Cancelled,
-    Transport(String),
+    Error(quiche::Error),
 }
 
 pub(crate) struct ReceiveStream {
@@ -235,8 +235,8 @@ impl super::RequestByteStream for ReceiveStream {
                 self.cancelled = true;
                 Ok(super::ChunkRead::Cancelled)
             }
-            StreamChunk::Transport(message) => {
-                Err(TransportError::backend(backend, "stream read", message))
+            StreamChunk::Error(error) => {
+                Err(TransportError::backend(backend, "stream read", error))
             }
         }
     }
@@ -248,9 +248,10 @@ impl super::ReceiveStream for ReceiveStream {
         maximum: usize,
         timeout: Duration,
         budget: &RequestBudget,
+        progress: &std::sync::atomic::AtomicBool,
         admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
     ) -> Result<RequestRead<T>, StreamReadError> {
-        read_buffered_request(self, NAME, maximum, timeout, budget, admit).await
+        read_buffered_request(self, NAME, maximum, timeout, budget, progress, admit).await
     }
 
     fn stop(&mut self) {

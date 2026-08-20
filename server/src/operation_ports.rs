@@ -7,27 +7,46 @@
 
 use std::sync::{Arc, Mutex};
 
+use futures_util::lock::Mutex as AsyncMutex;
+use openkache_protocol::OwnedRange;
+
 use super::operation_capabilities::CapabilityKey;
 use super::storage_port::StorageRoute;
 use super::{
-    NamespaceError, NamespaceOperationLock, NamespacePolicy, NamespaceRegistry, ObservabilityState,
-    ObservabilityStats, SetReservation,
+    NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespaceOperationLock,
+    NamespacePolicy, NamespaceRegistry, ObservabilityState, ObservabilityStats, SetReservation,
 };
 use super::super::types::StorageKey;
 
 /// Namespace locking capability used during operation preparation.
 pub(super) trait NamespaceCoordinationCapability: Send + Sync {
     fn operation_lock(&self, namespace_id: u64) -> Option<NamespaceOperationLock>;
+    fn lifecycle_lock(&self) -> Result<Arc<AsyncMutex<()>>, NamespaceError>;
 }
 
 /// Namespace descriptor and policy capability exposed to API behavior.
 pub(super) trait NamespaceCatalogCapability: Send + Sync {
     fn exists(&self, namespace_id: u64) -> bool;
     fn policy(&self, namespace_id: u64) -> Option<NamespacePolicy>;
+    fn open(
+        &self,
+        name: OwnedRange,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError>;
+    fn update(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> Result<NamespaceDescriptor, NamespaceError>;
+    fn delete(&self, namespace_id: u64, expected_revision: u64)
+        -> Result<(), NamespaceError>;
 }
 
 /// Namespace item and worker membership capability exposed to API behavior.
 pub(super) trait NamespaceMembershipCapability: Send + Sync {
+    fn tracked_items(&self, namespace_id: u64) -> Option<Vec<StorageKey>>;
     fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<StorageRoute>>;
     fn mark_workers_clean(&self, namespace_id: u64) -> Result<(), NamespaceError>;
     fn prune_item(&self, namespace_id: u64, storage_key: StorageKey) -> Result<(), NamespaceError>;
@@ -78,6 +97,12 @@ impl NamespaceCoordinationCapability for Mutex<NamespaceRegistry> {
     fn operation_lock(&self, namespace_id: u64) -> Option<NamespaceOperationLock> {
         self.lock().ok()?.operation_lock(namespace_id)
     }
+
+    fn lifecycle_lock(&self) -> Result<Arc<AsyncMutex<()>>, NamespaceError> {
+        self.lock()
+            .map(|registry| registry.lifecycle_lock())
+            .map_err(|_| NamespaceError::Internal)
+    }
 }
 
 impl NamespaceCatalogCapability for Mutex<NamespaceRegistry> {
@@ -91,9 +116,45 @@ impl NamespaceCatalogCapability for Mutex<NamespaceRegistry> {
     fn policy(&self, namespace_id: u64) -> Option<NamespacePolicy> {
         self.lock().ok()?.policy(namespace_id)
     }
+
+    fn open(
+        &self,
+        name: OwnedRange,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> Result<(NamespaceOpenResult, NamespaceDescriptor), NamespaceError> {
+        self.lock()
+            .map_err(|_| NamespaceError::Internal)?
+            .open(name, create_if_missing, policy)
+    }
+
+    fn update(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> Result<NamespaceDescriptor, NamespaceError> {
+        self.lock()
+            .map_err(|_| NamespaceError::Internal)?
+            .update(namespace_id, expected_revision, policy)
+    }
+
+    fn delete(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+    ) -> Result<(), NamespaceError> {
+        self.lock()
+            .map_err(|_| NamespaceError::Internal)?
+            .delete(namespace_id, expected_revision)
+    }
 }
 
 impl NamespaceMembershipCapability for Mutex<NamespaceRegistry> {
+    fn tracked_items(&self, namespace_id: u64) -> Option<Vec<StorageKey>> {
+        self.lock().ok()?.item_keys(namespace_id)
+    }
+
     fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<StorageRoute>> {
         self.lock().ok()?.dirty_workers(namespace_id)
     }
