@@ -869,7 +869,9 @@ pub fn decode_with_limits_and_budget(
             .checked_sub(1)
             .expect("the root or a declared child is always pending");
         match parse_item(bytes, &mut cursor, limits, &mut allocation)? {
-            ParsedItem::Value(value) => accept_value(value, &mut frames, &mut root)?,
+            ParsedItem::Value(value) => {
+                accept_value(value, &mut frames, &mut root, &mut allocation)?
+            }
             ParsedItem::Array(count) => {
                 add_pending_items(&mut pending_items, count, item_count, limits.max_items)?;
                 begin_frame(
@@ -882,7 +884,12 @@ pub fn decode_with_limits_and_budget(
                     &mut allocation,
                 )?;
                 if count == 0 {
-                    accept_value(Value::Array(Vec::new()), &mut frames, &mut root)?;
+                    accept_value(
+                        Value::Array(Vec::new()),
+                        &mut frames,
+                        &mut root,
+                        &mut allocation,
+                    )?;
                 }
             }
             ParsedItem::Map(count) => {
@@ -907,7 +914,12 @@ pub fn decode_with_limits_and_budget(
                     &mut allocation,
                 )?;
                 if count == 0 {
-                    accept_value(Value::Map(Vec::new()), &mut frames, &mut root)?;
+                    accept_value(
+                        Value::Map(Vec::new()),
+                        &mut frames,
+                        &mut root,
+                        &mut allocation,
+                    )?;
                 }
             }
         }
@@ -1125,13 +1137,22 @@ fn validate_map_entries_with_budget(
     entries: &[(Value, Value)],
     allocation: &mut AllocationState<'_>,
 ) -> Result<()> {
-    charge_allocation(allocation, index_allocation_size(entries.len())?)?;
-    validate_map_entries(entries)
+    let mut key_index = ScalarKeyIndex::with_capacity_and_budget(entries.len(), allocation)?;
+    for (index, (key, _)) in entries.iter().enumerate() {
+        if !key.is_scalar_key() {
+            return Err(Error::NonScalarKey { index });
+        }
+        if key_index.contains(entries, key) {
+            return Err(Error::DuplicateKey { index });
+        }
+        key_index.insert_with_budget(key, index, allocation)?;
+    }
+    Ok(())
 }
 
-fn index_allocation_size(capacity: usize) -> Result<usize> {
+fn hash_map_allocation_size(capacity: usize) -> Result<usize> {
     capacity
-        .checked_mul(size_of::<(u64, Vec<usize>)>() + size_of::<usize>())
+        .checked_mul(size_of::<(u64, Vec<usize>)>())
         .ok_or_else(|| resource(Resource::Bytes, usize::MAX, usize::MAX))
 }
 
@@ -1152,10 +1173,35 @@ impl ScalarKeyIndex {
         Ok(index)
     }
 
+    fn with_capacity_and_budget(
+        capacity: usize,
+        allocation: &mut AllocationState<'_>,
+    ) -> Result<Self> {
+        let mut index = Self::new();
+        index.reserve_with_budget(capacity, allocation)?;
+        Ok(index)
+    }
+
     fn reserve(&mut self, additional: usize) -> Result<()> {
         self.buckets
             .try_reserve(additional)
             .map_err(|_| Error::Allocation { size: additional })
+    }
+
+    fn reserve_with_budget(
+        &mut self,
+        additional: usize,
+        allocation: &mut AllocationState<'_>,
+    ) -> Result<()> {
+        // HashMap's table keeps control slots in addition to entries and may
+        // round a request up to its next growth class. Reserve twice the
+        // logical entry count up front so subsequent inserts cannot grow the
+        // table without a separately charged reservation.
+        let table_capacity = additional
+            .checked_mul(2)
+            .ok_or_else(|| resource(Resource::Bytes, allocation.maximum, usize::MAX))?;
+        charge_allocation(allocation, hash_map_allocation_size(table_capacity)?)?;
+        self.reserve(table_capacity)
     }
 
     fn contains(&self, entries: &[(Value, Value)], key: &Value) -> bool {
@@ -1177,6 +1223,41 @@ impl ScalarKeyIndex {
             return Ok(());
         }
 
+        self.buckets
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        let mut bucket = Vec::new();
+        bucket
+            .try_reserve_exact(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        bucket.push(index);
+        self.buckets.insert(hash, bucket);
+        Ok(())
+    }
+
+    fn insert_with_budget(
+        &mut self,
+        key: &Value,
+        index: usize,
+        allocation: &mut AllocationState<'_>,
+    ) -> Result<()> {
+        let hash = scalar_key_hash(key);
+        if let Some(bucket) = self.buckets.get_mut(&hash) {
+            charge_allocation(allocation, size_of::<usize>())?;
+            bucket
+                .try_reserve_exact(1)
+                .map_err(|_| Error::Allocation { size: 1 })?;
+            bucket.push(index);
+            return Ok(());
+        }
+
+        // The table is reserved to the complete entry count up front, so
+        // inserting a new hash cannot grow the table. Each bucket still owns
+        // one index slot and must be charged before its allocation.
+        charge_allocation(allocation, size_of::<usize>())?;
+        if self.buckets.len() >= self.buckets.capacity() {
+            charge_allocation(allocation, hash_map_allocation_size(1)?)?;
+        }
         self.buckets
             .try_reserve(1)
             .map_err(|_| Error::Allocation { size: 1 })?;
@@ -1351,18 +1432,22 @@ fn begin_frame(
                     .checked_mul(size_of::<(Value, Value)>())
                     .ok_or_else(|| resource(Resource::Bytes, allocation.maximum, usize::MAX))?,
             )?;
-            charge_allocation(allocation, index_allocation_size(entry_count)?)?;
             entries
                 .try_reserve_exact(entry_count)
                 .map_err(|_| Error::Allocation { size: entry_count })?;
-            key_index.reserve(entry_count)?;
+            key_index.reserve_with_budget(entry_count, allocation)?;
         }
     }
     frames.push(frame);
     Ok(())
 }
 
-fn accept_value(mut value: Value, frames: &mut Vec<Frame>, root: &mut Option<Value>) -> Result<()> {
+fn accept_value(
+    mut value: Value,
+    frames: &mut Vec<Frame>,
+    root: &mut Option<Value>,
+    allocation: &mut AllocationState<'_>,
+) -> Result<()> {
     loop {
         let Some(frame) = frames.last_mut() else {
             *root = Some(value);
@@ -1387,7 +1472,7 @@ fn accept_value(mut value: Value, frames: &mut Vec<Frame>, root: &mut Option<Val
                     if key_index.contains(entries, &value) {
                         return Err(Error::DuplicateKey { index });
                     }
-                    key_index.insert(&value, index)?;
+                    key_index.insert_with_budget(&value, index, allocation)?;
                     *pending_key = Some(value);
                 } else {
                     let key = pending_key.take().expect("map key was checked above");
