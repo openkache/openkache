@@ -719,6 +719,12 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
     let mut frames = Vec::new();
     let mut root = None;
     let mut item_count = 0usize;
+    // Keep a lower bound on the number of model nodes still required by
+    // declared container lengths. Without this accounting, each nested
+    // container could reserve `max_items` entries before the parser reached
+    // the item-count limit, allowing a tiny input to trigger unbounded
+    // aggregate allocations.
+    let mut pending_items = 1usize;
     loop {
         if let Some(value) = root {
             if cursor != bytes.len() {
@@ -733,42 +739,69 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
         if item_count > limits.max_items {
             return Err(resource(Resource::Items, limits.max_items, item_count));
         }
+        pending_items = pending_items
+            .checked_sub(1)
+            .expect("the root or a declared child is always pending");
         match parse_item(bytes, &mut cursor, limits)? {
             ParsedItem::Value(value) => accept_value(value, &mut frames, &mut root)?,
             ParsedItem::Array(count) => {
+                add_pending_items(&mut pending_items, count, item_count, limits.max_items)?;
+                begin_frame(
+                    Frame::Array {
+                        remaining: count,
+                        values: Vec::new(),
+                    },
+                    &mut frames,
+                    limits,
+                )?;
                 if count == 0 {
                     accept_value(Value::Array(Vec::new()), &mut frames, &mut root)?;
-                } else {
-                    begin_frame(
-                        Frame::Array {
-                            remaining: count,
-                            values: Vec::new(),
-                        },
-                        &mut frames,
-                        limits,
-                    )?;
                 }
             }
             ParsedItem::Map(count) => {
+                let child_count = count
+                    .checked_mul(2)
+                    .ok_or_else(|| resource(Resource::Items, limits.max_items, usize::MAX))?;
+                add_pending_items(
+                    &mut pending_items,
+                    child_count,
+                    item_count,
+                    limits.max_items,
+                )?;
+                begin_frame(
+                    Frame::Map {
+                        remaining: child_count,
+                        entries: Vec::new(),
+                        pending_key: None,
+                        key_index: ScalarKeyIndex::new(),
+                    },
+                    &mut frames,
+                    limits,
+                )?;
                 if count == 0 {
                     accept_value(Value::Map(Vec::new()), &mut frames, &mut root)?;
-                } else {
-                    begin_frame(
-                        Frame::Map {
-                            remaining: count.checked_mul(2).ok_or_else(|| {
-                                resource(Resource::Items, limits.max_items, usize::MAX)
-                            })?,
-                            entries: Vec::new(),
-                            pending_key: None,
-                            key_index: ScalarKeyIndex::new(),
-                        },
-                        &mut frames,
-                        limits,
-                    )?;
                 }
             }
         }
     }
+}
+
+fn add_pending_items(
+    pending_items: &mut usize,
+    child_count: usize,
+    item_count: usize,
+    maximum: usize,
+) -> Result<()> {
+    *pending_items = pending_items
+        .checked_add(child_count)
+        .ok_or_else(|| resource(Resource::Items, maximum, usize::MAX))?;
+    let minimum_total = item_count
+        .checked_add(*pending_items)
+        .ok_or_else(|| resource(Resource::Items, maximum, usize::MAX))?;
+    if minimum_total > maximum {
+        return Err(resource(Resource::Items, maximum, minimum_total));
+    }
+    Ok(())
 }
 
 /// Alias for [`encode`].
@@ -1086,6 +1119,12 @@ fn begin_frame(mut frame: Frame, frames: &mut Vec<Frame>, limits: Limits) -> Res
             limits.max_depth,
             frames.len() + 1,
         ));
+    }
+    // Empty containers do not need a frame, but they still consume one depth
+    // level. Keep the depth check above their early return so decoding agrees
+    // with encoding without allocating an otherwise unnecessary stack entry.
+    if frame_remaining(&frame) == 0 {
+        return Ok(());
     }
     frames.try_reserve(1).map_err(|_| Error::Allocation {
         size: frames.len() + 1,
