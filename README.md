@@ -6,7 +6,7 @@
 
 **10× cheaper and faster than Redis.**
 
-Open-source · Rust · QUIC · SIMD-accelerated · SSD-first
+Open-source · Rust · QUIC/TLS-over-TCP · SIMD-accelerated · SSD-first
 
 <!-- TODO: add more badges — GitHub Stars, crates.io version/downloads, Docker pulls, real CI status, OpenSSF scorecard, code coverage, PRs welcome -->
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/openkache/openkache/actions)
@@ -32,15 +32,17 @@ The first production-grade Rust implementation of the state-of-the-art BCF53 Bre
 
 ### 📡 Transport: QUIC and TLS-over-TCP
 
-- **Multiplexed, connection-oriented**: Hundreds of concurrent streams over a single connection. No connection pool needed, no head-of-line blocking.
+- **Connection-oriented**: QUIC multiplexes hundreds of concurrent streams;
+  TLS-over-TCP uses one ordered lane per connection.
 - **TLS 1.3 baked in**: Every connection is encrypted by default.
 - **Pluggable backends**: Choose between Quinn, Noq, or Quiche — swap with a feature flag.
 - **Strict hybrid key exchange**: Conforming profiles require
   `X25519MLKEM768`; plaintext and classical-only fallback are rejected.
 
-The TLS-over-TCP profile is currently implemented as a provider-neutral
-one-lane boundary for private integration. The public server listener remains
-QUIC-only until the TCP listener task is completed. See the
+The maintained server listener exposes both profiles: QUIC over UDP and
+TLS-over-TCP with one lane per TLS connection. By default the TCP listener
+reuses the QUIC bind address (TCP and UDP may share a port); set
+`[tcp].listen` when the profiles need separate addresses. See the
 [transport security profile](docs/transport-security.md) for close handling,
 bounded reads, backend conformance, and deployment limitations.
 
@@ -269,14 +271,14 @@ recreation.
 ## 🏗️ Architecture
 
 ```
-┌──────────────┐         QUIC (UDP, TLS 1.3)         ┌──────────────────────┐
+┌──────────────┐   QUIC (UDP) / TLS-over-TCP (TLS 1.3)   ┌──────────────────┐
 │  openkache-  │ ──────────────────────────────────▶ │     OpenKache        │
-│  client      │   Multiplexed streams, 0-RTT        │  (single binary)     │
+│  client      │   Multiplexed streams / one lane    │  (single binary)     │
 │ (Rust/TS/.NET)│                                    │                      │
 └──────────────┘                                     │  ┌────────────────┐  │
                                                      │  │ BCF53 Filter   │  │
 ┌──────────────┐                                     │  │ (SIMD, AVX2)   │  │
-│  Any QUIC    │                                     │  ├────────────────┤  │
+│  Any v1      │                                     │  ├────────────────┤  │
 │  client      │                                     │  │ Compacting Slab│  │
 └──────────────┘                                     │  │ (Hugepage/NUMA)│  │
                                                      │  ├────────────────┤  │
@@ -297,7 +299,7 @@ recreation.
 | **Cost per GB** | DRAM (~$3–5/GB) | SSD (~$0.05–0.10/GB) |
 | **P99 latency** | <1 ms | <1 ms |
 | **Throughput** | ~100K ops/s (single node) | **1M+ ops/s** (single node) |
-| **Transport** | TCP (head-of-line blocking) | QUIC (TLS 1.3, multiplexed, 0-RTT) |
+| **Transport** | TCP (head-of-line blocking) | QUIC or TLS-over-TCP (TLS 1.3) |
 | **Security** | TLS optional, no E2E | **E2E encrypted by default**, zero trust |
 
 ---
