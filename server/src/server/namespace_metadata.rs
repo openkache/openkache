@@ -1,10 +1,11 @@
 //! Durable namespace snapshot schema.
 //!
 //! This codec is intentionally independent of every network wire profile.
-//! Versions 1 and 2 used the then-current compact policy bytes; their decoder
-//! is retained here as a durable storage contract. Version 3 owns an explicit
-//! compact policy representation so future wire-profile changes cannot alter
-//! recovery semantics.
+//! Versions 1 and 2 used the then-current compact policy bytes; version 3
+//! added the explicit compact policy representation but still stored fixed
+//! width Item IDs. Their decoders are retained here as durable storage
+//! contracts. Version 4 owns the explicit policy representation and the
+//! variable-length Item ID list used by the current wire contract.
 
 use std::io::{self, ErrorKind};
 
@@ -13,9 +14,10 @@ use crate::protocol::{
 };
 
 pub(crate) const MAGIC: &[u8; 8] = b"OKNSPACE";
-pub(crate) const VERSION: u32 = 3;
+pub(crate) const VERSION: u32 = 4;
 pub(crate) const LEGACY_V1_VERSION: u32 = 1;
 pub(crate) const LEGACY_V2_VERSION: u32 = 2;
+pub(crate) const LEGACY_V3_VERSION: u32 = 3;
 pub(crate) const NAME_MAX_BYTES: usize = u8::MAX as usize;
 
 const POLICY_FIXED_TTL: u8 = 0x01;
@@ -72,7 +74,7 @@ pub(crate) fn decode_policy(
     input: &[u8],
 ) -> io::Result<Option<(NamespacePolicy, usize)>> {
     match metadata_version {
-        VERSION => decode_policy_v3(input),
+        VERSION | LEGACY_V3_VERSION => decode_policy_v3(input),
         LEGACY_V1_VERSION | LEGACY_V2_VERSION => decode_legacy_policy(input),
         _ => Err(invalid("namespace metadata version is unsupported")),
     }

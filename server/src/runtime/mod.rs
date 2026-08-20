@@ -29,8 +29,8 @@ pub(crate) use port::{completion, storage_port};
 pub(in crate::runtime) use request_admission::RequestAdmissionError;
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{
-    DOMAIN_V2_CONTEXT, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key, derive_scoped_storage_key,
-    derive_storage_key,
+    DOMAIN_V2_CONTEXT, ITEM_ID_STORAGE_SCOPE, SCOPED_STORAGE_ADDRESS_TAG, derive_domain_key,
+    derive_scoped_storage_key, derive_storage_key,
 };
 pub(crate) use storage_port::*;
 #[allow(unused_imports)]
