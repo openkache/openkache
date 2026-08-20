@@ -1,5 +1,4 @@
 use super::*;
-use crate::protocol::{Opcode, wire_request_layout};
 
 #[derive(Clone)]
 pub(super) struct NetworkWorkerLimits {
@@ -280,20 +279,6 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(StreamReadError::Transport(_)) => break,
         };
-        let request_id = frame
-            .bytes
-            .first()
-            .copied()
-            .and_then(|opcode| Opcode::try_from(opcode).ok())
-            .and_then(|opcode| {
-                openkache_protocol::OpaqueRequestFrame::decode(
-                    &frame.bytes,
-                    wire_request_layout(opcode),
-                )
-                .ok()
-                .map(|request| request.request_id())
-            })
-            .unwrap_or(0);
         let request_bytes = std::mem::take(&mut frame.bytes);
         let request_id = frame.request_id;
         let response_result = match request_projection::project_owned_request(request_bytes) {

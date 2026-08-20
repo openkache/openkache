@@ -45,10 +45,6 @@ impl HeaderAdmissionRejection {
         self.elapsed
     }
 
-    pub(super) const fn request_id(&self) -> u64 {
-        self.request_id
-    }
-
     pub(super) fn into_response(self) -> operation_transport::OperationResponse {
         self.response
     }
