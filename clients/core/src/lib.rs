@@ -8,6 +8,8 @@ pub mod contract {
 
 mod config;
 #[cfg(feature = "ffi")]
+mod ffi_admission;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 mod key;
 mod protected;

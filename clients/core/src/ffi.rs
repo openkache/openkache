@@ -35,6 +35,7 @@ pub use crate::contract::{
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
+use crate::ffi_admission::{AdmissionState, FfiAdmission};
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
@@ -65,10 +66,9 @@ pub struct FfiRequest {
     state: AtomicU32,
 }
 
-/// Shared cancellation state observed by the one-engine worker.
+/// Shared admission and cancellation state observed by the one-engine worker.
 struct FfiRequestControl {
-    canceled: AtomicBool,
-    started: AtomicBool,
+    admission: FfiAdmission,
     mutating: bool,
 }
 
@@ -276,6 +276,7 @@ impl FfiResult {
                 FfiErrorCategory::Protocol
             }
             crate::Error::ResponseTooLarge { .. } => FfiErrorCategory::ResourceExhausted,
+            crate::Error::ResourceLimit { .. } => FfiErrorCategory::ResourceExhausted,
             crate::Error::Tls(_) => FfiErrorCategory::Transport,
             crate::Error::Value(_) => FfiErrorCategory::Value,
             crate::Error::Key(_) => FfiErrorCategory::Key,
@@ -428,8 +429,7 @@ impl FfiClient {
     ) -> FfiRequest {
         let (response, receiver) = sync_channel(1);
         let control = Arc::new(FfiRequestControl {
-            canceled: AtomicBool::new(false),
-            started: AtomicBool::new(false),
+            admission: FfiAdmission::new(),
             mutating: matches!(
                 operation,
                 FfiOperation::Set | FfiOperation::SetJson | FfiOperation::Delete
@@ -578,8 +578,7 @@ impl FfiRequest {
     fn completed(result: FfiResult) -> Self {
         Self {
             control: Arc::new(FfiRequestControl {
-                canceled: AtomicBool::new(false),
-                started: AtomicBool::new(false),
+                admission: FfiAdmission::new(),
                 mutating: false,
             }),
             receiver: Mutex::new(None),
@@ -692,6 +691,17 @@ impl FfiRequest {
     }
 
     fn cancel(&self) -> FfiRequestState {
+        if self.state.load(Ordering::Acquire) != FfiRequestState::Pending.code() {
+            return FfiRequestState::try_from(self.state.load(Ordering::Acquire))
+                .unwrap_or(FfiRequestState::Freed);
+        }
+
+        // Publish cancellation against the worker's admission claim before
+        // exposing Canceled through the public request state. If this CAS wins
+        // while Pending, the worker cannot subsequently start the mutation.
+        // If Started wins first, the state records StartedCanceled and the
+        // documented UnknownMutation boundary is preserved.
+        let admission = self.control.admission.cancel();
         if self
             .state
             .compare_exchange(
@@ -702,12 +712,11 @@ impl FfiRequest {
             )
             .is_ok()
         {
-            self.control.canceled.store(true, Ordering::Release);
             *self
                 .ready
                 .lock()
                 .expect("request ready lock is not poisoned") = Some(
-                if self.control.mutating && self.control.started.load(Ordering::Acquire) {
+                if self.control.mutating && admission == AdmissionState::StartedCanceled {
                     FfiResult::with_status(
                         FfiResultKind::UnknownMutation,
                         FfiStatusCategory::UnknownMutation,
@@ -910,14 +919,13 @@ fn run_worker(
                 request,
                 response,
             } => {
-                // A queued request may be canceled before the worker reaches
-                // it. Do not send a mutation in that case: cancellation
-                // before transmission is definitive.
-                if request.canceled.load(Ordering::Acquire) {
+                // Claim admission atomically with cancellation. A queued
+                // request canceled before this point is definitive and must
+                // never enter the mutation execution path.
+                if !request.admission.try_start() {
                     drop(response);
                     continue;
                 }
-                request.started.store(true, Ordering::Release);
                 let task_request = Arc::clone(&request);
                 let task_client = client.clone();
                 let task = async move {
@@ -930,7 +938,7 @@ fn run_worker(
                         raw,
                     )
                     .await;
-                    if task_request.canceled.load(Ordering::Acquire) {
+                    if task_request.admission.is_canceled() {
                         if task_request.mutating {
                             FfiResult::with_status(
                                 FfiResultKind::UnknownMutation,
