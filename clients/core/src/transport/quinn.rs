@@ -20,16 +20,57 @@ use crate::request_engine::{
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Quinn;
+const QUIC_STREAM_CANCELLATION_CODE: quinn::VarInt = quinn::VarInt::from_u32(1);
 
 pub(super) struct Connection {
     _endpoint: quinn::Endpoint,
     inner: quinn::Connection,
     negotiated_alpn: Vec<u8>,
+    _incoming_streams: IncomingStreamRejection,
 }
 
 pub(super) struct Stream {
     send: quinn::SendStream,
     receive: quinn::RecvStream,
+}
+
+/// Rejects every server-initiated stream, which has no protocol meaning for a
+/// client.  Keeping both accept loops active prevents an unsolicited stream
+/// from remaining queued behind the client-initiated request lanes.
+struct IncomingStreamRejection {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl IncomingStreamRejection {
+    fn spawn(connection: quinn::Connection) -> Self {
+        let task = tokio::spawn(async move {
+            futures_util::future::join(
+                reject_server_unidirectional(connection.clone()),
+                reject_server_bidirectional(connection),
+            )
+            .await;
+        });
+        Self { task }
+    }
+}
+
+impl Drop for IncomingStreamRejection {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn reject_server_unidirectional(connection: quinn::Connection) {
+    while let Ok(mut stream) = connection.accept_uni().await {
+        let _ = stream.stop(QUIC_STREAM_CANCELLATION_CODE);
+    }
+}
+
+async fn reject_server_bidirectional(connection: quinn::Connection) {
+    while let Ok((mut send, mut receive)) = connection.accept_bi().await {
+        let _ = send.reset(QUIC_STREAM_CANCELLATION_CODE);
+        let _ = receive.stop(QUIC_STREAM_CANCELLATION_CODE);
+    }
 }
 
 pub(super) async fn connect(
@@ -79,10 +120,12 @@ pub(super) async fn connect(
                 "server did not negotiate an ALPN protocol",
             )
         })?;
+    let _incoming_streams = IncomingStreamRejection::spawn(inner.clone());
     Ok(Connection {
         _endpoint: endpoint,
         inner,
         negotiated_alpn,
+        _incoming_streams,
     })
 }
 
@@ -95,6 +138,7 @@ pub struct Transport {
     _endpoint: quinn::Endpoint,
     inner: quinn::Connection,
     lanes: Vec<Arc<Lane>>,
+    _incoming_streams: IncomingStreamRejection,
 }
 
 /// A transport-neutral QUIC lane.
@@ -130,9 +174,15 @@ impl Transport {
                 "server did not negotiate openkache/1".into(),
             ));
         }
+        let Connection {
+            _endpoint,
+            inner,
+            _incoming_streams,
+            ..
+        } = connection;
         let mut lanes = Vec::with_capacity(lane_count);
         for _ in 0..lane_count {
-            let (send, receive) = tokio::time::timeout(timeout, connection.inner.open_bi())
+            let (send, receive) = tokio::time::timeout(timeout, inner.open_bi())
                 .await
                 .map_err(|_| crate::Error::Timeout {
                     operation: Operation::StreamOpen,
@@ -141,14 +191,15 @@ impl Transport {
             lanes.push(Arc::new(Lane {
                 send: Arc::new(Mutex::new(send)),
                 receive: Arc::new(Mutex::new(receive)),
-                connection: connection.inner.clone(),
+                connection: inner.clone(),
                 closed: Arc::new(AtomicBool::new(false)),
             }));
         }
         Ok(Self {
-            _endpoint: connection._endpoint,
-            inner: connection.inner,
+            _endpoint,
+            inner,
             lanes,
+            _incoming_streams,
         })
     }
 }
@@ -180,6 +231,7 @@ impl TransportLane for Lane {
         request: RequestBytes,
     ) -> BoxFuture<'static, std::result::Result<(), TransportError>> {
         let send = Arc::clone(&self.send);
+        let receive = Arc::clone(&self.receive);
         let closed = Arc::clone(&self.closed);
         Box::pin(async move {
             if closed.load(Ordering::Acquire) {
@@ -206,7 +258,7 @@ impl TransportLane for Lane {
                             offset += written;
                         }
                         Ok(_) => {
-                            closed.store(true, Ordering::Release);
+                            retire_after_write_error(&mut send, &receive, &closed);
                             return Err(if transmitted {
                                 TransportError::after_send("QUIC write made no progress")
                             } else {
@@ -214,7 +266,7 @@ impl TransportLane for Lane {
                             });
                         }
                         Err(error) => {
-                            closed.store(true, Ordering::Release);
+                            retire_after_write_error(&mut send, &receive, &closed);
                             return Err(if transmitted {
                                 TransportError::after_send(error.to_string())
                             } else {
@@ -330,8 +382,21 @@ fn retire_lane(
     if closed.swap(true, Ordering::AcqRel) {
         return;
     }
-    let _ = receive.stop(1_u32.into());
-    reset_send(send, 1_u32.into());
+    let _ = receive.stop(QUIC_STREAM_CANCELLATION_CODE);
+    reset_send(send, QUIC_STREAM_CANCELLATION_CODE);
+}
+
+fn retire_after_write_error(
+    send: &mut quinn::SendStream,
+    receive: &Arc<Mutex<quinn::RecvStream>>,
+    closed: &Arc<AtomicBool>,
+) {
+    // The write future owns the send lock, so reset it directly before marking
+    // the lane closed. STOP_SENDING may use the receive lock asynchronously,
+    // but it is scheduled before the caller can retire this lane.
+    let _ = send.reset(QUIC_STREAM_CANCELLATION_CODE);
+    stop_receive(receive, QUIC_STREAM_CANCELLATION_CODE);
+    closed.store(true, Ordering::Release);
 }
 
 fn fatal_protocol(
@@ -342,7 +407,7 @@ fn fatal_protocol(
     reason: &[u8],
 ) {
     retire_lane(receive, send, closed);
-    connection.close(1_u32.into(), reason);
+    connection.close(QUIC_STREAM_CANCELLATION_CODE, reason);
 }
 
 fn reset_send(send: &Arc<Mutex<quinn::SendStream>>, code: quinn::VarInt) {
@@ -403,26 +468,55 @@ impl BackendStream for Stream {
         request: RequestAttempt,
         timeout: Duration,
     ) -> Result<(), LegacyTransportError> {
-        tokio::time::timeout(timeout, async {
+        let result = tokio::time::timeout(timeout, async {
             for segment in request.segments() {
                 self.send.write_all(segment).await?;
             }
             Ok::<(), quinn::WriteError>(())
         })
-        .await
-        .map_err(|_| LegacyTransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?
-        .map_err(|error| LegacyTransportError::backend(BACKEND, Operation::StreamWrite, error))
+        .await;
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                self.retire();
+                Err(LegacyTransportError::backend(
+                    BACKEND,
+                    Operation::StreamWrite,
+                    error,
+                ))
+            }
+            Err(_) => {
+                self.retire();
+                Err(LegacyTransportError::timeout(
+                    BACKEND,
+                    Operation::StreamWrite,
+                    timeout,
+                ))
+            }
+        }
     }
 
     async fn read_byte(&mut self, timeout: Duration) -> Result<u8, LegacyTransportError> {
         let mut byte = [0];
-        tokio::time::timeout(timeout, self.receive.read_exact(&mut byte))
-            .await
-            .map_err(|_| LegacyTransportError::timeout(BACKEND, Operation::StreamRead, timeout))?
-            .map_err(|error| {
-                LegacyTransportError::backend(BACKEND, Operation::StreamRead, error)
-            })?;
-        Ok(byte[0])
+        match tokio::time::timeout(timeout, self.receive.read_exact(&mut byte)).await {
+            Ok(Ok(())) => Ok(byte[0]),
+            Ok(Err(error)) => {
+                self.retire();
+                Err(LegacyTransportError::backend(
+                    BACKEND,
+                    Operation::StreamRead,
+                    error,
+                ))
+            }
+            Err(_) => {
+                self.retire();
+                Err(LegacyTransportError::timeout(
+                    BACKEND,
+                    Operation::StreamRead,
+                    timeout,
+                ))
+            }
+        }
     }
 
     async fn read_exact(
@@ -431,12 +525,31 @@ impl BackendStream for Stream {
         timeout: Duration,
     ) -> Result<Vec<u8>, LegacyTransportError> {
         let mut bytes = vec![0; length];
-        tokio::time::timeout(timeout, self.receive.read_exact(&mut bytes))
-            .await
-            .map_err(|_| LegacyTransportError::timeout(BACKEND, Operation::StreamRead, timeout))?
-            .map_err(|error| {
-                LegacyTransportError::backend(BACKEND, Operation::StreamRead, error)
-            })?;
-        Ok(bytes)
+        match tokio::time::timeout(timeout, self.receive.read_exact(&mut bytes)).await {
+            Ok(Ok(())) => Ok(bytes),
+            Ok(Err(error)) => {
+                self.retire();
+                Err(LegacyTransportError::backend(
+                    BACKEND,
+                    Operation::StreamRead,
+                    error,
+                ))
+            }
+            Err(_) => {
+                self.retire();
+                Err(LegacyTransportError::timeout(
+                    BACKEND,
+                    Operation::StreamRead,
+                    timeout,
+                ))
+            }
+        }
+    }
+}
+
+impl Stream {
+    fn retire(&mut self) {
+        let _ = self.send.reset(QUIC_STREAM_CANCELLATION_CODE);
+        let _ = self.receive.stop(QUIC_STREAM_CANCELLATION_CODE);
     }
 }

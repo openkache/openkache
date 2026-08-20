@@ -16,16 +16,51 @@ use crate::request::RequestAttempt;
 use crate::{Backend, Operation};
 
 const BACKEND: Backend = Backend::Compio;
+const QUIC_STREAM_CANCELLATION_CODE: compio_quic::VarInt = compio_quic::VarInt::from_u32(1);
 
 pub(super) struct Connection {
     _endpoint: compio_quic::Endpoint,
     inner: compio_quic::Connection,
     negotiated_alpn: Vec<u8>,
+    _incoming_streams: IncomingStreamRejection,
 }
 
 pub(super) struct Stream {
     send: compio_quic::SendStream,
     receive: compio_quic::RecvStream,
+}
+
+/// Rejects every server-initiated stream, which has no protocol meaning for a
+/// client. Both stream directions are accepted so an unsolicited stream
+/// cannot remain queued behind the client-initiated request lanes.
+struct IncomingStreamRejection {
+    _task: compio::runtime::JoinHandle<()>,
+}
+
+impl IncomingStreamRejection {
+    fn spawn(connection: compio_quic::Connection) -> Self {
+        let task = compio::runtime::spawn(async move {
+            futures_util::future::join(
+                reject_server_unidirectional(connection.clone()),
+                reject_server_bidirectional(connection),
+            )
+            .await;
+        });
+        Self { _task: task }
+    }
+}
+
+async fn reject_server_unidirectional(connection: compio_quic::Connection) {
+    while let Ok(mut stream) = connection.accept_uni().await {
+        let _ = stream.stop(QUIC_STREAM_CANCELLATION_CODE);
+    }
+}
+
+async fn reject_server_bidirectional(connection: compio_quic::Connection) {
+    while let Ok((mut send, mut receive)) = connection.accept_bi().await {
+        let _ = send.reset(QUIC_STREAM_CANCELLATION_CODE);
+        let _ = receive.stop(QUIC_STREAM_CANCELLATION_CODE);
+    }
 }
 
 impl IoVectoredBuf for RequestAttempt {
@@ -82,10 +117,12 @@ pub(super) async fn connect(
                     "server did not negotiate an ALPN protocol",
                 )
             })?;
+        let _incoming_streams = IncomingStreamRejection::spawn(inner.clone());
         Ok(Connection {
             _endpoint: endpoint,
             inner,
             negotiated_alpn,
+            _incoming_streams,
         })
     })
     .await
@@ -120,27 +157,49 @@ impl BackendStream for Stream {
         request: RequestAttempt,
         timeout: Duration,
     ) -> Result<(), LegacyTransportError> {
-        let BufResult(result, _) =
-            compio::runtime::time::timeout(timeout, self.send.write_vectored_all(request))
-                .await
-                .map_err(|_| {
-                    LegacyTransportError::timeout(BACKEND, Operation::StreamWrite, timeout)
-                })?;
-        result
-            .map_err(|error| LegacyTransportError::backend(BACKEND, Operation::StreamWrite, error))
+        let result =
+            compio::runtime::time::timeout(timeout, self.send.write_vectored_all(request)).await;
+        match result {
+            Ok(BufResult(Ok(()), _)) => Ok(()),
+            Ok(BufResult(Err(error), _)) => {
+                self.retire();
+                Err(LegacyTransportError::backend(
+                    BACKEND,
+                    Operation::StreamWrite,
+                    error,
+                ))
+            }
+            Err(_) => {
+                self.retire();
+                Err(LegacyTransportError::timeout(
+                    BACKEND,
+                    Operation::StreamWrite,
+                    timeout,
+                ))
+            }
+        }
     }
 
     async fn read_byte(&mut self, timeout: Duration) -> Result<u8, LegacyTransportError> {
-        let BufResult(result, bytes) =
-            compio::runtime::time::timeout(timeout, self.receive.read_exact([0]))
-                .await
-                .map_err(|_| {
-                    LegacyTransportError::timeout(BACKEND, Operation::StreamRead, timeout)
-                })?;
-        result.map_err(|error| {
-            LegacyTransportError::backend(BACKEND, Operation::StreamRead, error)
-        })?;
-        Ok(bytes[0])
+        match compio::runtime::time::timeout(timeout, self.receive.read_exact([0])).await {
+            Ok(BufResult(Ok(()), bytes)) => Ok(bytes[0]),
+            Ok(BufResult(Err(error), _)) => {
+                self.retire();
+                Err(LegacyTransportError::backend(
+                    BACKEND,
+                    Operation::StreamRead,
+                    error,
+                ))
+            }
+            Err(_) => {
+                self.retire();
+                Err(LegacyTransportError::timeout(
+                    BACKEND,
+                    Operation::StreamRead,
+                    timeout,
+                ))
+            }
+        }
     }
 
     async fn read_exact(
@@ -148,15 +207,36 @@ impl BackendStream for Stream {
         length: usize,
         timeout: Duration,
     ) -> Result<Vec<u8>, LegacyTransportError> {
-        let BufResult(result, bytes) = compio::runtime::time::timeout(
+        match compio::runtime::time::timeout(
             timeout,
             self.receive.read_exact(Vec::with_capacity(length)),
         )
         .await
-        .map_err(|_| LegacyTransportError::timeout(BACKEND, Operation::StreamRead, timeout))?;
-        result.map_err(|error| {
-            LegacyTransportError::backend(BACKEND, Operation::StreamRead, error)
-        })?;
-        Ok(bytes)
+        {
+            Ok(BufResult(Ok(()), bytes)) => Ok(bytes),
+            Ok(BufResult(Err(error), _)) => {
+                self.retire();
+                Err(LegacyTransportError::backend(
+                    BACKEND,
+                    Operation::StreamRead,
+                    error,
+                ))
+            }
+            Err(_) => {
+                self.retire();
+                Err(LegacyTransportError::timeout(
+                    BACKEND,
+                    Operation::StreamRead,
+                    timeout,
+                ))
+            }
+        }
+    }
+}
+
+impl Stream {
+    fn retire(&mut self) {
+        let _ = self.send.reset(QUIC_STREAM_CANCELLATION_CODE);
+        let _ = self.receive.stop(QUIC_STREAM_CANCELLATION_CODE);
     }
 }
