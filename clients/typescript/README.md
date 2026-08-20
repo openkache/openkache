@@ -5,10 +5,16 @@ Deno. A packaged Node-API adapter delegates network, retries, value protection,
 and canonical JSON behavior to `openkache-client-core`; applications need no
 helper process or runtime npm dependencies.
 
-> **Current implementation:** This package currently exposes the legacy
-> canonical-JSON and fixed-width Item ID APIs. The draft key, value, and
-> variable Item ID contracts linked below are migration targets, not claims of
-> current conformance.
+The package exports a runtime-neutral ``StructuredValue-CBOR-v1`` model from
+the ``value-codec`` subpath. JavaScript ``number`` always maps to a binary64
+``Float`` (even when integral), ``bigint`` maps to an exact ``Integer``,
+``undefined`` is distinct from ``null``, and ``Uint8Array`` maps to
+``ByteString``. ``Map`` and documented plain objects preserve entry order.
+The default lossless decode returns model wrappers; strict native projection
+returns ``bigint`` for integers, ``number`` for floats, ``Uint8Array`` for
+bytes, and ``Map`` for maps. A checked safe-integer option rejects values that
+would round, and plain-object projection uses null-prototype objects with
+defined properties so names such as ``__proto__`` are safe.
 
 ## Purpose
 
@@ -81,7 +87,8 @@ await client.close()
 `set` accepts nested objects, dense arrays, strings, finite numbers, booleans,
 and null through the backwards-compatible TypeScript metadata envelope. Its
 optional generic parameter documents the expected result shape. Object
-properties whose value is `undefined` are omitted.
+properties whose value is `undefined` are omitted by this legacy JSON helper;
+the structured-value codec preserves them as ``Undefined``.
 
 Use `set_json` and `get_json` for the cross-language value API. These methods
 delegate JSON conversion, canonical RFC 8785 serialization, compression, and

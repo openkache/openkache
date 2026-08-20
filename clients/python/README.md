@@ -12,10 +12,15 @@ is the source of the generated operation types, client constants, and native ABI
 implements those exact item-ID operations. `Client` adds protected
 application-key operations and JSON values.
 
-> **Current implementation:** This package currently exposes the legacy
-> canonical-JSON and fixed-width Item ID APIs. The draft key, value, and
-> variable Item ID contracts linked from the client index are migration
-> targets, not claims of current conformance.
+The package also exposes the lossless ``StructuredValue-CBOR-v1`` model from
+``openkache._value`` (and the package root). Python ``bool`` is tested before
+``int``; Python integers retain arbitrary precision, bytes-like values map to
+byte strings, and both ``list`` and ``tuple`` map to model arrays.
+``decode_value`` returns the complete lossless model, while ``decode_native``
+performs a strict conversion and rejects ``Undefined`` or map-key collisions
+instead of dropping information. Cache methods keep the legacy JSON selector
+explicit; structured payload operations use the generated structured-value ABI
+when the shared core exposes it.
 
 ## Commands
 
@@ -64,12 +69,11 @@ v1 `Text` PortableKey by default. Select `key_spec=KeySpec.BYTES` or
 `key_spec=KeySpec.INTEGER` when the keyspace uses exact bytes or arbitrary
 precision integers. The selected spec is enforced for every formatted
 operation and the key is converted to canonical deterministic CBOR before the
-native ABI. Empty and NUL-containing keys are valid. JSON numbers
-are finite, and integers
-must be exactly representable as IEEE-754 binary64 values. Python converts a
-native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
-core reparses that input and owns canonical serialization, compression,
-encryption, and value framing.
+native ABI. Empty and NUL-containing keys are valid. JSON numbers are finite,
+and integers must be exactly representable as IEEE-754 binary64 values. Python
+converts a native value to a UTF-8 JSON input buffer only to cross the legacy
+JSON ABI; the core reparses that input and owns canonical serialization,
+compression, encryption, and value framing.
 
 `client.raw` exposes the Smithy-shaped exact item-ID API:
 

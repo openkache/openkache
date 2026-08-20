@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 from os import PathLike
 from pathlib import Path
-from typing import Any, Final, Iterable, Sequence
+from typing import Any, Final, Iterable, Literal, Sequence
 
 from ._generated import (
     SmithyDeleteInput,
@@ -115,9 +115,17 @@ from ._generated.smithy_contract import (
     SMITHY_VALUE_ENCRYPTION_ROBUST,
 )
 from ._native import NativeClient as _NativeClient, NativeError
+from ._value import (
+    StructuredValueError,
+    decode_native,
+    decode_value,
+    encode_value,
+)
 
 
 _UINT64_MAX: Final = (1 << 64) - 1
+_I64_MIN: Final = -(1 << 63)
+_I64_MAX: Final = (1 << 63) - 1
 _SIZE_T_MAX: Final = (sys.maxsize << 1) | 1
 _MAX_CANONICAL_KEY_BYTES: Final = 1_048_576
 _BINARY64_SIGNIFICAND_BITS: Final = 53
@@ -389,6 +397,7 @@ class ServerStats:
 
 SetCondition = SmithySetCondition
 SetOutcome = SmithySetOutcome
+ValueRepresentation = Literal["lossless", "native"]
 
 
 class OpenKacheClient:
@@ -480,6 +489,93 @@ class OpenKacheClient:
         self._assert_open()
         payload = _json_bytes(value)
         return await self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
+
+    async def get_structured(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        representation: ValueRepresentation = "lossless",
+    ) -> Any | None:
+        """Gets one StructuredValue-CBOR-v1 value without JSON fallback.
+
+        ``lossless`` returns the generic model wrappers from ``openkache._value``.
+        ``native`` projects to Python ``int``/``float``/``bytes``/``list``/``dict``
+        and raises a conversion error for undefined values or colliding keys.
+        Older native artifacts fail explicitly because they do not expose the
+        structured selector.
+        """
+
+        self._assert_open()
+        if representation not in ("lossless", "native"):
+            raise OpenKacheValueError("representation must be 'lossless' or 'native'")
+        operation = getattr(self._native, "get_structured", None)
+        if not callable(operation):
+            raise OpenKacheError(
+                "structured-value ABI is unavailable in the loaded native adapter"
+            )
+        try:
+            payload = await asyncio.to_thread(
+                operation,
+                key=_key_bytes(key, self._key_spec),
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+        if payload is None:
+            return None
+        if isinstance(payload, tuple):
+            kind, payload = payload
+            if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+                return None
+            if kind != SMITHY_FFI_RESULT_VALUE:
+                raise OpenKacheError(
+                    f"GET_STRUCTURED returned unexpected native result {kind}"
+                )
+        try:
+            return decode_native(payload) if representation == "native" else decode_value(payload)
+        except StructuredValueError as error:
+            raise OpenKacheValueError(
+                f"structured value decoding failed: {error}"
+            ) from error
+
+    async def set_structured(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        value: Any,
+        options: SetOptions | None = None,
+    ) -> SmithySetOutcome:
+        """Stores one StructuredValue-CBOR-v1 value without JSON fallback."""
+
+        self._assert_open()
+        operation = getattr(self._native, "set_structured", None)
+        if not callable(operation):
+            raise OpenKacheError(
+                "structured-value ABI is unavailable in the loaded native adapter"
+            )
+        try:
+            payload = encode_value(value)
+        except StructuredValueError as error:
+            raise OpenKacheValueError(
+                f"structured value encoding failed: {error}"
+            ) from error
+        selected = options or SetOptions()
+        try:
+            result = await asyncio.to_thread(
+                operation,
+                key=_key_bytes(key, self._key_spec),
+                value=payload,
+                set_flags=selected._wire_flags,
+                ttl_ms=selected.ttl_ms or 0,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+        kind = result[0] if isinstance(result, tuple) else result
+        if isinstance(kind, str):
+            try:
+                return SmithySetOutcome(kind)
+            except ValueError as error:
+                raise OpenKacheError(
+                    f"SET_STRUCTURED returned unknown outcome {kind!r}"
+                ) from error
+        return _set_outcome(int(kind))
 
     async def get_raw(
         self, key: str | int | bytes | bytearray | memoryview
@@ -1014,6 +1110,10 @@ def _key_bytes(
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError(
             "key must be an integer for the integer key spec"
+        )
+    if not _I64_MIN <= value <= _I64_MAX:
+        raise OpenKacheValueError(
+            "integer keys must fit the signed 64-bit range"
         )
     return _canonical_cbor_integer(value)
 

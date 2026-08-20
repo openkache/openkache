@@ -5,8 +5,12 @@ import {
 } from "./native-binding.js"
 import {
   assert_json_value,
+  decode_structured_value,
+  encode_structured_value,
+  to_native,
   Value_Codec_Registry,
   type Json_Value,
+  type Structured_Value,
   type Value_Codec,
   type Value_Envelope,
 } from "./value-codec.js"
@@ -15,8 +19,29 @@ export type {
   Encoded_Value,
   Json_Object,
   Json_Value,
+  Structured_Value,
+  Structured_Value_Error_Kind,
+  Value_Limits,
   Value_Codec,
   Value_Envelope,
+} from "./value-codec.js"
+export {
+  Array_Value,
+  ByteString_Value,
+  Float_Value,
+  Integer_Value,
+  Map_Value,
+  Structured_Value_Error,
+  TextString_Value,
+  UNDEFINED_VALUE,
+  Undefined_Value,
+  decode_native_value,
+  decode_structured_value,
+  encode_structured_value,
+  model_equal,
+  to_native,
+  to_plain_object,
+  to_value,
 } from "./value-codec.js"
 export * from "./generated_local/smithy-api.js"
 export * from "./generated_local/smithy-value-format.js"
@@ -192,6 +217,9 @@ export interface Set_Options {
   /** Positive relative lifetime in milliseconds. */
   readonly ttl_ms?: number
 }
+
+/** Structured-value projection requested by a read operation. */
+export type Value_Representation = "lossless" | "native"
 
 /**
  * Structured statistics returned by an administrator-authorized server.
@@ -427,6 +455,104 @@ export class OpenKache_Client {
         envelope.encoding,
         envelope.type_name,
         envelope.payload,
+        options.condition,
+        options.expiration_mode,
+        options.eviction_mode,
+        options.ttl_ms,
+      )
+      return parse_set_outcome(outcome)
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Retrieves one StructuredValue-CBOR-v1 payload.
+   *
+   * The default lossless representation retains integer/float distinctions,
+   * undefined, scalar map-key identity, and map order.  Native projection
+   * returns bigint/number/Uint8Array/Map and rejects values that cannot be
+   * represented without loss.
+   */
+  async get_structured(
+    key: Client_Key,
+    representation?: "lossless",
+  ): Promise<Structured_Value | undefined>
+  async get_structured(
+    key: Client_Key,
+    representation: "native",
+  ): Promise<unknown | undefined>
+  async get_structured(
+    key: Client_Key,
+    representation: Value_Representation = "lossless",
+  ): Promise<unknown | undefined> {
+    this.#assert_open()
+    if (representation !== "lossless" && representation !== "native") {
+      throw new OpenKache_Error(
+        "representation must be lossless or native",
+      )
+    }
+    const get_structured = this.#native_client.get_structured
+    if (typeof get_structured !== "function") {
+      throw new OpenKache_Error(
+        "structured-value ABI is unavailable in the loaded native adapter",
+      )
+    }
+    let payload: Uint8Array | null
+    try {
+      payload = await get_structured.call(
+        this.#native_client,
+        owned_key_bytes(key, this.#key_spec),
+      )
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+    if (payload === null) return undefined
+    try {
+      const value = decode_structured_value(payload)
+      return representation === "native" ? to_native(value) : value
+    } catch (error) {
+      throw new OpenKache_Error(
+        `structured value decoding failed: ${error_message(error)}`,
+        error,
+      )
+    }
+  }
+
+  /**
+   * Encodes and stores one StructuredValue-CBOR-v1 payload.
+   *
+   * This method never routes through legacy JSON or Raw operations. Older
+   * native artifacts fail explicitly until their generated structured ABI is
+   * installed.
+   */
+  async set_structured(
+    key: Client_Key,
+    value: unknown,
+    options: Set_Options = {},
+  ): Promise<Set_Outcome> {
+    this.#assert_open()
+    validate_set_options(options)
+    const set_structured = this.#native_client.set_structured
+    if (typeof set_structured !== "function") {
+      throw new OpenKache_Error(
+        "structured-value ABI is unavailable in the loaded native adapter",
+      )
+    }
+    let payload: Uint8Array
+    try {
+      payload = encode_structured_value(value)
+    } catch (error) {
+      throw new OpenKache_Error(
+        `structured value encoding failed: ${error_message(error)}`,
+        error,
+      )
+    }
+    try {
+      const outcome = await set_structured.call(
+        this.#native_client,
+        owned_key_bytes(key, this.#key_spec),
+        payload,
         options.condition,
         options.expiration_mode,
         options.eviction_mode,
@@ -981,6 +1107,11 @@ function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
     return encode_cbor_integer(BigInt(key))
   }
   if (typeof key === "bigint") {
+    if (key < -(1n << 63n) || key > (1n << 63n) - 1n) {
+      throw new OpenKache_Error(
+        "integer keys must fit the signed 64-bit range",
+      )
+    }
     return encode_cbor_integer(key)
   }
   throw new OpenKache_Error(
