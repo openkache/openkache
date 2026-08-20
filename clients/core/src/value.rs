@@ -16,7 +16,8 @@ use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
 use openkache_protocol::ITEM_ID_BYTES;
 use openkache_value::{
-    Limits as StructuredLimits, Value as StructuredValue, decode_with_limits, encode_with_limits,
+    Limits as StructuredLimits, Value as StructuredValue, decode_with_limits_and_budget,
+    encode_with_limits_and_budget,
 };
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
@@ -750,8 +751,7 @@ impl ValueCodec {
         item_id: ItemId,
         value: &StructuredValue,
     ) -> Result<ItemValue> {
-        let payload =
-            encode_with_limits(value, structured_limits(self.limits)).map_err(Error::Structured)?;
+        let (payload, _structured_permits) = self.encode_structured_payload(value)?;
         self.encode_payload(
             namespace_id,
             item_id.as_bytes(),
@@ -767,8 +767,7 @@ impl ValueCodec {
         item_id: &[u8],
         value: &StructuredValue,
     ) -> Result<ItemValue> {
-        let payload =
-            encode_with_limits(value, structured_limits(self.limits)).map_err(Error::Structured)?;
+        let (payload, _structured_permits) = self.encode_structured_payload(value)?;
         self.encode_payload(namespace_id, item_id, PAYLOAD_STRUCTURED_CBOR_V1, &payload)
     }
 
@@ -788,14 +787,11 @@ impl ValueCodec {
         match decoded.format {
             PAYLOAD_OPAQUE_BYTES => Ok(Value::Raw(decoded.payload)),
             PAYLOAD_STRUCTURED_CBOR_V1 => {
-                let _codec_permit =
-                    self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
-                structured_to_json(
-                    &decode_with_limits(&decoded.payload, structured_limits(self.limits))
-                        .map_err(Error::Structured)?,
-                )?
-                .map(Value::Json)
-                .ok_or_else(|| Error::UnsupportedStructuredValue)
+                let (structured, _structured_permits) =
+                    self.decode_structured_payload(&decoded.payload)?;
+                structured_to_json(&structured)?
+                    .map(Value::Json)
+                    .ok_or_else(|| Error::UnsupportedStructuredValue)
             }
             _ => Err(Error::UnsupportedPayloadFormat(decoded.format)),
         }
@@ -865,9 +861,8 @@ impl ValueCodec {
         if decoded.format != PAYLOAD_STRUCTURED_CBOR_V1 {
             return Err(Error::ExpectedStructuredValue);
         }
-        let _codec_permit = self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
-        decode_with_limits(&decoded.payload, structured_limits(self.limits))
-            .map_err(Error::Structured)
+        let (structured, _structured_permits) = self.decode_structured_payload(&decoded.payload)?;
+        Ok(structured)
     }
 
     /// Decode StructuredValue-CBOR-v1 for an exact wire Item ID byte slice.
@@ -881,9 +876,53 @@ impl ValueCodec {
         if decoded.format != PAYLOAD_STRUCTURED_CBOR_V1 {
             return Err(Error::ExpectedStructuredValue);
         }
-        let _codec_permit = self.reserve(decoded.payload.len(), Resource::StructuredValue)?;
-        decode_with_limits(&decoded.payload, structured_limits(self.limits))
-            .map_err(Error::Structured)
+        let (structured, _structured_permits) = self.decode_structured_payload(&decoded.payload)?;
+        Ok(structured)
+    }
+
+    fn encode_structured_payload(
+        &self,
+        value: &StructuredValue,
+    ) -> Result<(Vec<u8>, Vec<BytePermit>)> {
+        let mut permits = Vec::new();
+        let mut reserve = |size: usize| {
+            let Ok(permit) = self.reserve(size, Resource::StructuredValue) else {
+                return false;
+            };
+            permits.push(permit);
+            true
+        };
+        let payload = encode_with_limits_and_budget(
+            value,
+            structured_limits(self.limits),
+            self.limits.max_in_flight_bytes,
+            &mut reserve,
+        )
+        .map_err(Error::Structured)?;
+        Ok((payload, permits))
+    }
+
+    fn decode_structured_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<(StructuredValue, Vec<BytePermit>)> {
+        let mut permits = Vec::new();
+        permits.push(self.reserve(payload.len(), Resource::StructuredValue)?);
+        let mut reserve = |size: usize| {
+            let Ok(permit) = self.reserve(size, Resource::StructuredValue) else {
+                return false;
+            };
+            permits.push(permit);
+            true
+        };
+        let structured = decode_with_limits_and_budget(
+            payload,
+            structured_limits(self.limits),
+            self.limits.max_in_flight_bytes,
+            &mut reserve,
+        )
+        .map_err(Error::Structured)?;
+        Ok((structured, permits))
     }
 
     /// Validate and pass through a caller-owned version-0 envelope.
@@ -921,13 +960,6 @@ impl ValueCodec {
                 actual: payload.len(),
             });
         }
-        let (transformed, compression_id, _transformed_permit) =
-            compress_if_beneficial(payload, self.compression, &self.limits, self.budget())?;
-        let selector = make_selector(
-            self.encryption.selector_id(),
-            compression_id,
-            payload_format,
-        )?;
         let key_id = if self.encryption == Encryption::Unprotected {
             None
         } else {
@@ -939,17 +971,45 @@ impl ValueCodec {
             )
         };
         let key_id_bytes = key_id.map(encode_vu128).transpose()?.unwrap_or_default();
-        let aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
         let protection_overhead = match self.encryption {
             Encryption::Unprotected => 0,
             Encryption::Compact => SIV_SYNTHETIC_IV_BYTES,
             Encryption::Robust => GCM_SIV_NONCE_BYTES + AUTH_TAG_BYTES,
         };
-        let encoded_length = VERSION_BYTES
+        let envelope_prefix = VERSION_BYTES
             .len()
             .checked_add(1)
             .and_then(|length| length.checked_add(key_id_bytes.len()))
             .and_then(|length| length.checked_add(protection_overhead))
+            .ok_or(Error::ResourceLimit {
+                resource: Resource::EnvelopeBytes,
+                limit: self.limits.max_envelope_bytes,
+                actual: usize::MAX,
+            })?;
+        let max_body_bytes = self
+            .limits
+            .max_envelope_bytes
+            .checked_sub(envelope_prefix)
+            .ok_or(Error::EncodedValueTooLarge {
+                size: envelope_prefix,
+                maximum: self.limits.max_envelope_bytes,
+            })?;
+        let (transformed, compression_id, _transformed_permit) = compress_if_beneficial(
+            payload,
+            self.compression,
+            &self.limits,
+            self.budget(),
+            max_body_bytes,
+        )?;
+        let selector = make_selector(
+            self.encryption.selector_id(),
+            compression_id,
+            payload_format,
+        )?;
+        let aad = make_aad(namespace_id, item_id, selector, &key_id_bytes);
+        let encoded_length = VERSION_BYTES
+            .len()
+            .checked_add(envelope_prefix - VERSION_BYTES.len())
             .and_then(|length| length.checked_add(transformed.len()))
             .ok_or(Error::ResourceLimit {
                 resource: Resource::EnvelopeBytes,
@@ -1268,12 +1328,10 @@ impl ValueCodec {
     }
 
     fn budget(&self) -> &RequestBudget {
-        self.budget
-            .as_ref()
-            .unwrap_or_else(|| {
-                self.default_budget
-                    .get_or_init(|| RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES))
-            })
+        self.budget.as_ref().unwrap_or_else(|| {
+            self.default_budget
+                .get_or_init(|| RequestBudget::new(MAX_VALUE_ENVELOPE_BYTES))
+        })
     }
 }
 
@@ -1290,13 +1348,11 @@ fn reserve_budget(
             actual: size,
         });
     }
-    budget
-        .try_reserve(size)
-        .map_err(|_| Error::ResourceLimit {
-            resource,
-            limit: budget.capacity(),
-            actual: size,
-        })
+    budget.try_reserve(size).map_err(|_| Error::ResourceLimit {
+        resource,
+        limit: budget.capacity(),
+        actual: size,
+    })
 }
 
 struct DecodedPayload {
@@ -1887,42 +1943,22 @@ fn compress_if_beneficial(
     compression: Compression,
     limits: &ValueLimits,
     budget: &RequestBudget,
+    max_body_bytes: usize,
 ) -> Result<(Vec<u8>, u8, Option<BytePermit>)> {
     let Compression::Zstandard(options) = compression else {
-        let permit = reserve_budget(
-            budget,
-            payload.len(),
-            limits,
-            Resource::ExpandedPayloadBytes,
-        )?;
-        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+        return raw_payload(payload, limits, budget, max_body_bytes);
     };
     if payload.len() < options.minimum_input_size {
-        let permit = reserve_budget(
-            budget,
-            payload.len(),
-            limits,
-            Resource::ExpandedPayloadBytes,
-        )?;
-        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+        return raw_payload(payload, limits, budget, max_body_bytes);
     }
     let bound = ZSTD_compressBound(payload.len());
-    if bound > limits.max_envelope_bytes {
-        return Err(Error::ResourceLimit {
-            resource: Resource::EnvelopeBytes,
-            limit: limits.max_envelope_bytes,
-            actual: bound,
-        });
+    if bound > max_body_bytes || bound > limits.max_in_flight_bytes {
+        // A compression bound is only a temporary allocation requirement. If
+        // it cannot fit, retain the v1 raw envelope whenever its complete
+        // body still fits the configured envelope and byte budgets.
+        return raw_payload(payload, limits, budget, max_body_bytes);
     }
-    if bound > limits.max_in_flight_bytes {
-        return Err(Error::ResourceLimit {
-            resource: Resource::EnvelopeBytes,
-            limit: limits.max_in_flight_bytes,
-            actual: bound,
-        });
-    }
-    let compression_permit =
-        reserve_budget(budget, bound, limits, Resource::EnvelopeBytes)?;
+    let compression_permit = reserve_budget(budget, bound, limits, Resource::EnvelopeBytes)?;
     let mut compressed = Vec::new();
     compressed
         .try_reserve_exact(bound)
@@ -1934,16 +1970,33 @@ fn compress_if_beneficial(
         || payload.len() - compressed_length < options.minimum_savings
     {
         drop(compression_permit);
-        let permit = reserve_budget(
-            budget,
-            payload.len(),
-            limits,
-            Resource::ExpandedPayloadBytes,
-        )?;
-        return Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)));
+        return raw_payload(payload, limits, budget, max_body_bytes);
     }
     compressed.truncate(compressed_length);
     Ok((compressed, COMPRESSION_ZSTANDARD, Some(compression_permit)))
+}
+
+fn raw_payload(
+    payload: &[u8],
+    limits: &ValueLimits,
+    budget: &RequestBudget,
+    max_body_bytes: usize,
+) -> Result<(Vec<u8>, u8, Option<BytePermit>)> {
+    if payload.len() > max_body_bytes {
+        let prefix = limits.max_envelope_bytes.saturating_sub(max_body_bytes);
+        let size = payload.len().saturating_add(prefix);
+        return Err(Error::EncodedValueTooLarge {
+            size,
+            maximum: limits.max_envelope_bytes,
+        });
+    }
+    let permit = reserve_budget(
+        budget,
+        payload.len(),
+        limits,
+        Resource::ExpandedPayloadBytes,
+    )?;
+    Ok((payload.to_vec(), COMPRESSION_NONE, Some(permit)))
 }
 
 fn decompress_zstandard(
