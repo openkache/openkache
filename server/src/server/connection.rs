@@ -1,4 +1,8 @@
 use super::*;
+use std::collections::VecDeque;
+use std::fmt::Write as _;
+
+use crate::protocol::Response;
 
 #[derive(Clone)]
 pub(super) struct NetworkWorkerLimits {
@@ -163,39 +167,90 @@ async fn serve_connection<C: TransportConnection>(
     runtime: Arc<operation_execution_state::OperationRuntime>,
 ) {
     let mut streams = FuturesUnordered::new();
+    let mut accept_uni = true;
     loop {
-        if streams.len() >= max_stream_lanes {
-            if streams.next().await.is_some_and(|malformed| malformed) {
-                connection.close(
-                    crate::transport::QUIC_MALFORMED_FRAME_ERROR_CODE,
-                    b"malformed request frame",
-                );
-                break;
+        if streams.is_empty() {
+            let incoming_bi = connection.accept_bi().fuse();
+            if accept_uni {
+                let incoming_uni = connection.accept_uni().fuse();
+                pin_mut!(incoming_bi, incoming_uni);
+                select! {
+                    incoming = incoming_bi => match incoming {
+                        Ok((send, receive)) => {
+                            network_shard.stream_started();
+                            streams.push(serve_stream(
+                                send,
+                                receive,
+                                network_shard,
+                                authorization.clone(),
+                                request_timeout,
+                                request_budget.clone(),
+                                Arc::clone(&runtime),
+                            ));
+                        }
+                        Err(_) => break,
+                    },
+                    uni = incoming_uni => match uni {
+                        Ok(mut receive) => receive.stop(),
+                        Err(_) => accept_uni = false,
+                    },
+                }
+            } else {
+                match incoming_bi.await {
+                    Ok((send, receive)) => {
+                        network_shard.stream_started();
+                        streams.push(serve_stream(
+                            send,
+                            receive,
+                            network_shard,
+                            authorization.clone(),
+                            request_timeout,
+                            request_budget.clone(),
+                            Arc::clone(&runtime),
+                        ));
+                    }
+                    Err(_) => break,
+                }
             }
             continue;
         }
-        if streams.is_empty() {
-            match connection.accept_bi().await {
-                Ok((send, receive)) => {
-                    network_shard.stream_started();
-                    streams.push(serve_stream(
-                        send,
-                        receive,
-                        network_shard,
-                        authorization.clone(),
-                        request_timeout,
-                        request_budget.clone(),
-                        Arc::clone(&runtime),
-                    ));
-                }
-                Err(_) => break,
-            }
-        } else {
-            let incoming = connection.accept_bi().fuse();
+        if streams.len() >= max_stream_lanes {
             let completed = streams.next().fuse();
-            pin_mut!(incoming, completed);
+            if accept_uni {
+                let incoming_uni = connection.accept_uni().fuse();
+                pin_mut!(completed, incoming_uni);
+                select! {
+                    outcome = completed => {
+                        if matches!(outcome, Some(LaneOutcome::Malformed | LaneOutcome::Unknown)) {
+                            connection.close(1, b"lane failure before a mutation outcome was known");
+                            break;
+                        }
+                    }
+                    uni = incoming_uni => match uni {
+                        Ok(mut receive) => receive.stop(),
+                        Err(_) => accept_uni = false,
+                    },
+                }
+            } else if let Some(outcome) = completed.await {
+                if matches!(outcome, LaneOutcome::Malformed | LaneOutcome::Unknown) {
+                    connection.close(1, b"lane failure before a mutation outcome was known");
+                    break;
+                }
+            }
+            continue;
+        }
+        let incoming_bi = connection.accept_bi().fuse();
+        let incoming_uni = if accept_uni {
+            Some(connection.accept_uni().fuse())
+        } else {
+            None
+        };
+        let completed = streams.next().fuse();
+        pin_mut!(incoming_bi, completed);
+        if let Some(incoming_uni) = incoming_uni {
+            pin_mut!(incoming_uni);
             select! {
-                incoming = incoming => match incoming {
+                incoming = incoming_bi => match incoming {
                     Ok((send, receive)) => {
                         network_shard.stream_started();
                         streams.push(serve_stream(
@@ -210,22 +265,82 @@ async fn serve_connection<C: TransportConnection>(
                     }
                     Err(_) => break,
                 },
-                malformed = completed => {
-                    if malformed.is_some_and(|malformed| malformed) {
-                        connection.close(
-                            crate::transport::QUIC_MALFORMED_FRAME_ERROR_CODE,
-                            b"malformed request frame",
-                        );
-                        break;
+                uni = incoming_uni => match uni {
+                    Ok(mut receive) => receive.stop(),
+                    Err(_) => accept_uni = false,
+                },
+                completed = completed => {
+                    if let Some(outcome) = completed {
+                        if matches!(outcome, LaneOutcome::Malformed | LaneOutcome::Unknown) {
+                            connection.close(1, b"lane failure before a mutation outcome was known");
+                            break;
+                        }
                     }
-                }
+                },
+            }
+        } else {
+            select! {
+                incoming = incoming_bi => match incoming {
+                    Ok((send, receive)) => {
+                        network_shard.stream_started();
+                        streams.push(serve_stream(
+                            send,
+                            receive,
+                            network_shard,
+                            authorization.clone(),
+                            request_timeout,
+                            request_budget.clone(),
+                            Arc::clone(&runtime),
+                        ));
+                    }
+                    Err(_) => break,
+                },
+                completed = completed => {
+                    if let Some(outcome) = completed {
+                        if matches!(outcome, LaneOutcome::Malformed | LaneOutcome::Unknown) {
+                            connection.close(1, b"lane failure before a mutation outcome was known");
+                            break;
+                        }
+                    }
+                },
             }
         }
     }
-    while streams.next().await.is_some() {}
+    while let Some(outcome) = streams.next().await {
+        if matches!(outcome, LaneOutcome::Malformed | LaneOutcome::Unknown) {
+            connection.close(1, b"lane failure before a mutation outcome was known");
+        }
+    }
 }
 
-/// Reuses one QUIC stream as a sequential request lane until either peer closes it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LaneOutcome {
+    Finished,
+    Cancelled,
+    Malformed,
+    Transport,
+    Unknown,
+}
+
+enum LaneRequest {
+    Frame(RequestFrame),
+    Rejected {
+        header: openkache_protocol::RequestFrameHeader,
+        rejection: operation_dispatch::HeaderAdmissionRejection,
+    },
+    Overloaded {
+        header: openkache_protocol::RequestFrameHeader,
+        timed_out: bool,
+    },
+}
+
+/// Advances one QUIC lane with bounded read-ahead and ordered effects.
+///
+/// The receive future and the operation future are polled together. This
+/// allows a peer to pipeline complete frames while an earlier operation is
+/// waiting on storage, while the queue bound keeps body permits and frame
+/// allocations finite. Only the queue head executes and writes, preserving
+/// effect and response order.
 pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
@@ -234,193 +349,381 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_timeout: Duration,
     request_budget: RequestBudget,
     runtime: Arc<operation_execution_state::OperationRuntime>,
-) -> bool {
+) -> LaneOutcome {
     let _stream_guard = ActiveStream { network_shard };
     let mut task_storage = operation_registry::OperationTaskStorage::new();
+    const MAX_ADMITTED_REQUESTS: usize = 8;
+    let mut queue = VecDeque::with_capacity(MAX_ADMITTED_REQUESTS);
+    let mut request_direction_open = true;
+    let mut stop_receive = false;
+
     loop {
-        let mut frame = match receive
-            .read_request(
-                crate::protocol::max_request_frame_bytes(),
-                request_timeout,
-                &request_budget,
-                |header, prefix| {
-                    operation_dispatch::admit_request_header(header, prefix, runtime.as_ref())
-                },
-            )
-            .await
-        {
-            Ok(Ok(frame)) => frame,
-            Ok(Err(rejection)) => {
-                network_shard.record_request(
-                    operation_contract::telemetry_operation(rejection.opcode()),
-                    rejection.status(),
-                    rejection.elapsed(),
-                );
-                if rejection.silently_close() {
-                    return true;
-                }
-                let request_id = rejection.request_id();
-                if !write_response(
-                    &mut send,
-                    rejection.into_response(),
-                    request_id,
-                    request_timeout,
-                )
-                .await
-                {
-                    network_shard.response_write_failure();
-                    break;
-                }
-                // Header admission has already consumed the bounded request
-                // body before returning this rejection. The lane remains
-                // reusable for the next complete request.
-                continue;
+        if stop_receive {
+            receive.stop();
+            stop_receive = false;
+        }
+        let Some(request) = queue.pop_front() else {
+            if !request_direction_open {
+                let _ = send.finish();
+                return LaneOutcome::Finished;
             }
-            Err(StreamReadError::Timeout) => {
-                network_shard.request_read_timeout();
+            let result = receive
+                .read_request(
+                    crate::protocol::max_request_frame_bytes(),
+                    request_timeout,
+                    &request_budget,
+                    |header, prefix| {
+                        operation_dispatch::admit_request_header(header, prefix, runtime.as_ref())
+                    },
+                )
+                .await;
+            match enqueue_read_result(
+                result,
+                &mut queue,
+                &mut request_direction_open,
+                network_shard,
+            ) {
+                ReadDisposition::Malformed => return LaneOutcome::Malformed,
+                ReadDisposition::Transport => return LaneOutcome::Transport,
+                ReadDisposition::Stop => stop_receive = true,
+                ReadDisposition::Continue => {}
+            }
+            continue;
+        };
+
+        // The operation owns the dequeued item while reads continue in the
+        // same lane. A bounded queue absorbs completed pipelined frames
+        // without allowing unbounded body permits or allocations.
+        let execute = execute_queued_request(
+            request,
+            &authorization,
+            runtime.as_ref(),
+            &mut task_storage,
+            request_budget.clone(),
+            request_timeout,
+            network_shard,
+        )
+        .fuse();
+        pin_mut!(execute);
+        loop {
+            if request_direction_open && queue.len() < MAX_ADMITTED_REQUESTS {
+                let read = receive
+                    .read_request(
+                        crate::protocol::max_request_frame_bytes(),
+                        request_timeout,
+                        &request_budget,
+                        |header, prefix| {
+                            operation_dispatch::admit_request_header(
+                                header,
+                                prefix,
+                                runtime.as_ref(),
+                            )
+                        },
+                    )
+                    .fuse();
+                pin_mut!(read);
+                select! {
+                    result = read => {
+                        match enqueue_read_result(
+                            result,
+                            &mut queue,
+                            &mut request_direction_open,
+                            network_shard,
+                        ) {
+                            ReadDisposition::Malformed => return LaneOutcome::Malformed,
+                            ReadDisposition::Transport => return LaneOutcome::Transport,
+                            ReadDisposition::Stop => stop_receive = true,
+                            ReadDisposition::Continue => {}
+                        }
+                    }
+                    result = execute => {
+                        match result {
+                            ExecutionResult::Unknown => return LaneOutcome::Unknown,
+                            ExecutionResult::Response(response) => {
+                                let QueuedResponse {
+                                    request_id,
+                                    response,
+                                    permit,
+                                    request_permit,
+                                    unknown_on_write,
+                                    terminal,
+                                } = response;
+                                if !write_response(
+                                    &mut send,
+                                    request_id,
+                                    response,
+                                    request_timeout,
+                                )
+                                .await
+                                {
+                                    network_shard.response_write_failure();
+                                    send.reset();
+                                    drop(permit);
+                                    drop(request_permit);
+                                    return if unknown_on_write {
+                                        LaneOutcome::Unknown
+                                    } else {
+                                        LaneOutcome::Cancelled
+                                    };
+                                }
+                                drop(permit);
+                                drop(request_permit);
+                                if terminal {
+                                    return LaneOutcome::Finished;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+                drop(read);
+            } else {
+                match execute.await {
+                    ExecutionResult::Unknown => return LaneOutcome::Unknown,
+                    ExecutionResult::Response(response) => {
+                        let QueuedResponse {
+                            request_id,
+                            response,
+                            permit,
+                            request_permit,
+                            unknown_on_write,
+                            terminal,
+                        } = response;
+                        if !write_response(&mut send, request_id, response, request_timeout).await {
+                            network_shard.response_write_failure();
+                            send.reset();
+                            drop(permit);
+                            drop(request_permit);
+                            return if unknown_on_write {
+                                LaneOutcome::Unknown
+                            } else {
+                                LaneOutcome::Cancelled
+                            };
+                        }
+                        drop(permit);
+                        drop(request_permit);
+                        if terminal {
+                            return LaneOutcome::Finished;
+                        }
+                    }
+                }
                 break;
             }
-            Err(StreamReadError::TooLarge) => {
-                network_shard.protocol_error();
-                return true;
-            }
-            Err(StreamReadError::Protocol(error)) => {
-                network_shard.protocol_error();
-                let _ = error;
-                return true;
-            }
-            Err(StreamReadError::Transport(_)) => break,
-        };
-        let request_bytes = std::mem::take(&mut frame.bytes);
-        let response_result = match request_projection::project_owned_request(request_bytes) {
-            Ok(input) => {
-                let operation_id = input.operation_id();
-                let request_id = input.request_id();
-                let operation: Operation = operation_contract::telemetry_operation_id(operation_id);
-                let request_started = std::time::Instant::now();
-                let may_mutate = operation_dispatch::may_mutate(runtime.as_ref(), operation_id);
-                let response_permit = if let Some(response_budget_bytes) =
-                    operation_dispatch::response_budget_bytes(runtime.as_ref(), operation_id)
-                {
-                    match request_budget
-                        .acquire(response_budget_bytes, request_timeout)
-                        .await
-                    {
-                        Ok(permit) => Some(permit),
-                        Err(StreamReadError::Timeout) => {
-                            let response = operation_dispatch::timeout_response(
-                                operation_id,
-                                b"response memory budget timed out",
-                            );
-                            network_shard.record_request(
-                                operation,
-                                Status::Timeout,
-                                request_started.elapsed(),
-                            );
-                            if !write_response(&mut send, response, request_id, request_timeout)
-                                .await
-                            {
-                                network_shard.response_write_failure();
-                                break;
-                            }
-                            continue;
-                        }
-                        Err(_) => {
-                            let response =
-                                operation_transport::contract_error_response_for_operation(
-                                    operation_id,
-                                    Status::Overloaded,
-                                    b"response exceeds the server memory budget",
-                                );
-                            network_shard.record_request(
-                                operation,
-                                Status::Overloaded,
-                                request_started.elapsed(),
-                            );
-                            if !write_response(&mut send, response, request_id, request_timeout)
-                                .await
-                            {
-                                network_shard.response_write_failure();
-                                break;
-                            }
-                            continue;
-                        }
-                    }
-                } else {
-                    None
-                };
-                match network_runtime::timeout(
-                    request_timeout,
-                    operation_dispatch::execute_request(
-                        input,
-                        &authorization,
-                        runtime.as_ref(),
-                        &mut task_storage,
-                    ),
-                )
-                .await
-                {
-                    Ok(Some(response)) => {
-                        network_shard.record_request(
-                            operation,
-                            response.status(),
-                            request_started.elapsed(),
-                        );
-                        (
-                            response.with_request_id(request_id),
-                            response_permit,
-                            request_id,
-                        )
-                    }
-                    Ok(None) => {
-                        // A mutating storage failure may have crossed its
-                        // linearization point. Do not send an error response
-                        // that would falsely guarantee that no mutation took
-                        // effect. The protocol requires terminating the
-                        // affected connection when the mutation outcome is
-                        // unknown, so no later request can be mistaken for a
-                        // retry on the same lane.
-                        network_shard.abandoned_request();
-                        return true;
-                    }
-                    Err(_) if may_mutate => {
-                        // The worker request may already have crossed its mutation
-                        // linearization point when this wait expires. An error response
-                        // would falsely guarantee that it did not take effect.
-                        network_shard.abandoned_request();
-                        return true;
-                    }
-                    Err(_) => {
-                        network_shard.record_request(
-                            operation,
-                            Status::Timeout,
-                            request_started.elapsed(),
-                        );
-                        (
-                            operation_dispatch::timeout_response(
-                                operation_id,
-                                b"request execution timed out",
-                            )
-                            .with_request_id(request_id),
-                            response_permit,
-                            request_id,
-                        )
-                    }
-                }
-            }
-            Err(error) => {
-                network_shard.protocol_error();
-                let _ = error;
-                return true;
-            }
-        };
-        let (response, _response_permit, request_id) = response_result;
-        if !write_response(&mut send, response, request_id, request_timeout).await {
-            network_shard.response_write_failure();
-            break;
         }
     }
-    false
+}
+
+enum ReadDisposition {
+    Continue,
+    Stop,
+    Malformed,
+    Transport,
+}
+
+fn enqueue_read_result(
+    result: std::result::Result<
+        RequestRead<operation_dispatch::HeaderAdmissionRejection>,
+        StreamReadError,
+    >,
+    queue: &mut VecDeque<LaneRequest>,
+    request_direction_open: &mut bool,
+    network_shard: NetworkShard<'_>,
+) -> ReadDisposition {
+    match result {
+        Ok(RequestRead::Frame(frame)) => queue.push_back(LaneRequest::Frame(frame)),
+        Ok(RequestRead::Rejected { header, rejection }) => {
+            network_shard.record_request(
+                operation_contract::telemetry_operation(rejection.opcode()),
+                rejection.status(),
+                rejection.elapsed(),
+            );
+            if rejection.silently_close() {
+                *request_direction_open = false;
+                return ReadDisposition::Malformed;
+            } else {
+                queue.push_back(LaneRequest::Rejected { header, rejection });
+            }
+        }
+        Ok(RequestRead::Overloaded { header, timed_out }) => {
+            queue.push_back(LaneRequest::Overloaded { header, timed_out });
+        }
+        Ok(RequestRead::Finished) => *request_direction_open = false,
+        Ok(RequestRead::Cancelled) => {
+            *request_direction_open = false;
+            return ReadDisposition::Stop;
+        }
+        Err(StreamReadError::Timeout) => {
+            network_shard.request_read_timeout();
+            network_shard.protocol_error();
+            return ReadDisposition::Malformed;
+        }
+        Err(StreamReadError::TooLarge | StreamReadError::Malformed(_)) => {
+            network_shard.protocol_error();
+            return ReadDisposition::Malformed;
+        }
+        Err(StreamReadError::Transport(_)) => return ReadDisposition::Transport,
+    }
+    ReadDisposition::Continue
+}
+
+struct QueuedResponse {
+    request_id: u64,
+    response: operation_transport::OperationResponse,
+    permit: Option<RequestBudgetPermit>,
+    request_permit: Option<RequestBudgetPermit>,
+    unknown_on_write: bool,
+    terminal: bool,
+}
+
+enum ExecutionResult {
+    Response(QueuedResponse),
+    Unknown,
+}
+
+async fn execute_queued_request(
+    request: LaneRequest,
+    authorization: &operation_authorization::AuthorizationContext,
+    runtime: &operation_execution_state::OperationRuntime,
+    task_storage: &mut operation_registry::OperationTaskStorage,
+    request_budget: RequestBudget,
+    request_timeout: Duration,
+    network_shard: NetworkShard<'_>,
+) -> ExecutionResult {
+    match request {
+        LaneRequest::Rejected { header, rejection } => ExecutionResult::Response(QueuedResponse {
+            request_id: header.request_id(),
+            response: rejection.into_response(),
+            permit: None,
+            request_permit: None,
+            unknown_on_write: false,
+            terminal: false,
+        }),
+        LaneRequest::Overloaded { header, timed_out } => {
+            let operation_id = operation_contract::operation_id_for_opcode(header.opcode());
+            let response = if timed_out {
+                operation_dispatch::timeout_response(
+                    operation_id,
+                    b"request memory budget timed out",
+                )
+            } else {
+                operation_transport::contract_error_response_for_operation(
+                    operation_id,
+                    Status::Overloaded,
+                    b"request exceeds the server memory budget",
+                )
+            };
+            ExecutionResult::Response(QueuedResponse {
+                request_id: header.request_id(),
+                response,
+                permit: None,
+                request_permit: None,
+                unknown_on_write: false,
+                terminal: false,
+            })
+        }
+        LaneRequest::Frame(frame) => {
+            let RequestFrame {
+                header,
+                bytes: request_bytes,
+                _permit: request_permit,
+            } = frame;
+            let request_id = header.request_id();
+            let input = match request_projection::project_owned_request(request_bytes) {
+                Ok(input) => input,
+                Err(error) => {
+                    return ExecutionResult::Response(QueuedResponse {
+                        request_id,
+                        response: wire_protocol_error_response(error).into(),
+                        permit: None,
+                        request_permit: Some(request_permit),
+                        unknown_on_write: false,
+                        terminal: false,
+                    });
+                }
+            };
+            let operation_id = input.operation_id();
+            let operation = operation_contract::telemetry_operation_id(operation_id);
+            let request_started = std::time::Instant::now();
+            let may_mutate = operation_dispatch::may_mutate(runtime, operation_id);
+            let response_permit = if let Some(bytes) =
+                operation_dispatch::response_budget_bytes(runtime, operation_id)
+            {
+                match request_budget.acquire(bytes, request_timeout).await {
+                    Ok(permit) => Some(permit),
+                    Err(StreamReadError::Timeout) => {
+                        return ExecutionResult::Response(QueuedResponse {
+                            request_id,
+                            response: operation_dispatch::timeout_response(
+                                operation_id,
+                                b"response memory budget timed out",
+                            ),
+                            permit: None,
+                            request_permit: Some(request_permit),
+                            unknown_on_write: false,
+                            terminal: false,
+                        });
+                    }
+                    Err(_) => {
+                        return ExecutionResult::Response(QueuedResponse {
+                            request_id,
+                            response: operation_transport::contract_error_response_for_operation(
+                                operation_id,
+                                Status::Overloaded,
+                                b"response exceeds the server memory budget",
+                            ),
+                            permit: None,
+                            request_permit: Some(request_permit),
+                            unknown_on_write: false,
+                            terminal: false,
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            match network_runtime::timeout(
+                request_timeout,
+                operation_dispatch::execute_request(input, authorization, runtime, task_storage),
+            )
+            .await
+            {
+                Ok(Some(response)) => {
+                    network_shard.record_request(
+                        operation,
+                        response.status(),
+                        request_started.elapsed(),
+                    );
+                    ExecutionResult::Response(QueuedResponse {
+                        request_id,
+                        response,
+                        permit: response_permit,
+                        request_permit: Some(request_permit),
+                        unknown_on_write: may_mutate,
+                        terminal: false,
+                    })
+                }
+                Ok(None) => {
+                    network_shard.abandoned_request();
+                    ExecutionResult::Unknown
+                }
+                Err(_) if may_mutate => {
+                    network_shard.abandoned_request();
+                    ExecutionResult::Unknown
+                }
+                Err(_) => ExecutionResult::Response(QueuedResponse {
+                    request_id,
+                    response: operation_dispatch::timeout_response(
+                        operation_id,
+                        b"request execution timed out",
+                    ),
+                    permit: response_permit,
+                    request_permit: Some(request_permit),
+                    unknown_on_write: false,
+                    terminal: false,
+                }),
+            }
+        }
+    }
 }
 
 struct ActiveStream<'a> {
@@ -435,14 +738,35 @@ impl Drop for ActiveStream<'_> {
 
 async fn write_response<S: SendStream>(
     send: &mut S,
-    response: impl Into<operation_transport::OperationResponse>,
     request_id: u64,
+    response: impl Into<operation_transport::OperationResponse>,
     request_timeout: Duration,
 ) -> bool {
-    send.write_response(
-        response.into().with_request_id(request_id).into_parts(),
-        request_timeout,
-    )
-    .await
-    .is_ok()
+    let parts = match response.into().into_parts().with_request_id(request_id) {
+        Ok(parts) => parts,
+        Err(_) => return false,
+    };
+    send.write_response(parts, request_timeout).await.is_ok()
+}
+
+fn wire_protocol_error_response(error: openkache_protocol::ProtocolError) -> Response {
+    let status = match error {
+        openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
+        openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
+        _ => Status::InvalidRequest,
+    };
+    response_display(status, error)
+}
+
+fn response_display(status: Status, value: impl std::fmt::Display) -> Response {
+    let mut payload = String::with_capacity(
+        openkache_protocol::RESPONSE_FIXED_BYTES + openkache_protocol::MAX_VARUINT_BYTES + 64,
+    );
+    write!(payload, "{value}").expect("writing to a String cannot fail");
+    response(status, payload.into_bytes())
+}
+
+/// Constructs a protocol response whose payload is known to fit protocol limits.
+fn response(status: Status, payload: Vec<u8>) -> Response {
+    Response::new(status, payload).expect("server responses stay within protocol limits")
 }

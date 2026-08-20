@@ -1,5 +1,5 @@
 use super::connection::{
-    NetworkWorkerLimits, prepare_network_worker, run_selected_endpoint, serve_stream,
+    LaneOutcome, NetworkWorkerLimits, prepare_network_worker, run_selected_endpoint, serve_stream,
 };
 use super::*;
 
@@ -649,7 +649,7 @@ async fn serve_tcp_connection(
     network_shard.stream_started();
     let _stream_guard = ActiveTcpStream { network_shard };
     let (send, receive) = lane.split();
-    let malformed = serve_stream(
+    let outcome = serve_stream(
         send,
         receive,
         network_shard,
@@ -659,7 +659,7 @@ async fn serve_tcp_connection(
         runtime,
     )
     .await;
-    if malformed {
+    if matches!(outcome, LaneOutcome::Malformed | LaneOutcome::Unknown) {
         network_shard.protocol_error();
     }
     lane.close().await;

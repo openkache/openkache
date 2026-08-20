@@ -22,11 +22,11 @@ or Raw operations. The native boundary preserves an unknown mutation as
 ``OpenKache_Unknown_Mutation_Error`` and local cancellation as
 ``OpenKache_Cancelled_Error``.
 
-The package also exposes canonical-JSON mapped-key operations and exact
-`0..=32`-byte Item ID operations. Native keys are converted to canonical CBOR
-at the adapter boundary and the shared core applies the default `NamespaceHash`
-profile; `PublicKeyOrHash` remains an explicit core-only profile until binding
-options are finalized.
+> **Current implementation:** This package exposes canonical-JSON mapped-key
+> operations and exact `0..=32`-byte Item ID operations. Native values are
+> converted to canonical key bytes in the adapter and the shared core applies
+> the default `NamespaceHash` profile; `PublicKeyOrHash` remains an explicit
+> core-only profile until the binding options are finalized.
 
 ## Purpose
 
@@ -116,13 +116,13 @@ Canonical JSON accepts only null, booleans, finite numbers, strings, dense
 arrays, and regular objects with string keys. Cycles, sparse arrays, binary
 objects, `undefined`, `bigint`, and non-finite numbers are rejected.
 
-Keys follow the configured current `key_spec` (`text` by default), which
-selects the target `key_type`, not an Item ID mapping profile: text keys are
-exact UTF-8 strings, byte keys are exact `Uint8Array` values, and integer keys
-are safe integer-valued `number` or `bigint` values. Empty and NUL-containing
-keys are valid; floating-point, unsupported native types, and unpaired
-surrogates are rejected. A future API may expose the target name `key_type`
-directly.
+Each mapped operation infers one `TypedKey` variant from its native input:
+text keys are exact UTF-8 strings, byte keys are exact `Uint8Array` values, and
+integer keys are safe integer-valued `number` or signed-i64 `bigint` values.
+The deprecated `key_spec` option remains accepted for source compatibility but
+is not a namespace policy and does not override per-operation inference. Empty
+and NUL-containing keys are valid; floating-point, unsupported native types,
+and unpaired surrogates are rejected.
 
 Use `{ condition: "if_absent" }` to create without overwriting or
 `{ condition: "if_present" }` to update only an existing item. Use `set_raw`
@@ -184,9 +184,8 @@ connection. `connection_state()` reports `connected`, `reconnecting`,
 `disconnected`, `closed`, or `unknown`; `reconnect()` replaces a failed connection without
 replaying an operation. Call and await `close()` when finished. The
 `client.raw()` view implements the Smithy-generated `Smithy_OpenKache_Api`
-contract for the current fixed-width item-ID API and opaque protocol values.
-The draft key contract targets `0..=32`-byte Item IDs and is not implemented
-by this package yet.
+contract for exact opaque protocol values. Exact Item IDs accept `0..=32`
+bytes and are never reinterpreted as application keys.
 
 Protocol limits and operation outcomes follow the
 [wire protocol specification](../../protocol/SPEC.md); retry policy remains

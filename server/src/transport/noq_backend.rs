@@ -23,7 +23,10 @@ impl Endpoint {
         let mut transport = comnoq::TransportConfig::default();
         transport
             .max_concurrent_bidi_streams(comnoq::VarInt::from_u32(max_concurrent_streams))
-            .max_concurrent_uni_streams(comnoq::VarInt::from_u32(0));
+            // Client-initiated unidirectional streams are invalid for the
+            // application protocol, but must still be observable so the
+            // server can issue STOP_SENDING without consuming their body.
+            .max_concurrent_uni_streams(comnoq::VarInt::from_u32(max_concurrent_streams));
         let mut server_config = comnoq::ServerConfig::with_crypto(Arc::new(crypto));
         server_config.transport_config(Arc::new(transport));
         let endpoint = comnoq::Endpoint::new(
@@ -81,26 +84,30 @@ impl super::Connection for Connection {
             .and_then(|certificates| (*certificates).into_iter().next())
     }
 
-    fn close(&self, error_code: u64, reason: &[u8]) {
-        let Ok(error_code) = u32::try_from(error_code) else {
-            self.0.close(comnoq::VarInt::from_u32(u32::MAX), reason);
-            return;
-        };
-        self.0.close(comnoq::VarInt::from_u32(error_code), reason);
-    }
-
     async fn accept_bi(&self) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
         self.0
             .accept_bi()
             .await
-            .map(|(send, receive)| (SendStream(send), ReceiveStream { stream: receive }))
+            .map(|(send, receive)| (SendStream(send), ReceiveStream(receive)))
             .map_err(|error| TransportError::backend(NAME, "stream accept", error))
+    }
+
+    async fn accept_uni(&self) -> Result<Self::ReceiveStream, TransportError> {
+        self.0
+            .accept_uni()
+            .await
+            .map(ReceiveStream)
+            .map_err(|error| TransportError::backend(NAME, "unidirectional stream accept", error))
+    }
+
+    fn close(&self, error_code: u64, reason: &[u8]) {
+        let code =
+            comnoq::VarInt::from_u64(error_code).unwrap_or_else(|_| comnoq::VarInt::from_u32(1));
+        self.0.close(code, reason);
     }
 }
 
-pub(crate) struct ReceiveStream {
-    stream: comnoq::RecvStream,
-}
+pub(crate) struct ReceiveStream(comnoq::RecvStream);
 
 impl super::RequestByteStream for ReceiveStream {
     async fn append_chunk(
@@ -108,22 +115,20 @@ impl super::RequestByteStream for ReceiveStream {
         mut frame: Vec<u8>,
         capacity: usize,
         backend: &'static str,
-    ) -> Result<Vec<u8>, TransportError> {
-        use compio::buf::{IntoInner, IoBuf};
-        use compio::io::AsyncReadExt;
-
+    ) -> Result<super::ChunkRead, TransportError> {
         let capacity = capacity.max(1);
-        frame
-            .try_reserve(capacity)
-            .map_err(|error| TransportError::backend(backend, "request buffer reserve", error))?;
-        let end = frame.len().checked_add(capacity).ok_or_else(|| {
-            TransportError::backend(backend, "request buffer reserve", "size overflow")
-        })?;
-        let compio::BufResult(result, frame) = self.stream.append(frame.slice(..end)).await;
-        let read =
-            result.map_err(|error| TransportError::backend(backend, "stream read", error))?;
-        debug_assert!(read <= capacity);
-        Ok(frame.into_inner())
+        match self.0.read_chunk(capacity).await {
+            Ok(Some(chunk)) => {
+                frame.try_reserve(chunk.len()).map_err(|error| {
+                    TransportError::backend(backend, "request buffer reserve", error)
+                })?;
+                frame.extend_from_slice(&chunk);
+                Ok(super::ChunkRead::Bytes(frame))
+            }
+            Ok(None) => Ok(super::ChunkRead::Finished),
+            Err(comnoq::ReadError::Reset(_)) => Ok(super::ChunkRead::Cancelled),
+            Err(error) => Err(TransportError::backend(backend, "stream read", error)),
+        }
     }
 }
 
@@ -134,8 +139,12 @@ impl super::ReceiveStream for ReceiveStream {
         timeout: Duration,
         budget: &RequestBudget,
         admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
-    ) -> Result<Result<RequestFrame, T>, StreamReadError> {
+    ) -> Result<RequestRead<T>, StreamReadError> {
         read_buffered_request(self, NAME, maximum, timeout, budget, admit).await
+    }
+
+    fn stop(&mut self) {
+        let _ = self.0.stop(comnoq::VarInt::from_u32(0));
     }
 }
 
@@ -159,5 +168,15 @@ impl super::SendStream for SendStream {
         .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?;
         result?;
         Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), TransportError> {
+        self.0
+            .finish()
+            .map_err(|error| TransportError::backend(NAME, "stream finish", error))
+    }
+
+    fn reset(&mut self) {
+        let _ = self.0.reset(comnoq::VarInt::from_u32(0));
     }
 }

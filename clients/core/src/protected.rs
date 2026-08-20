@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ValueKeyring;
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
@@ -21,6 +22,7 @@ struct ProtectionSettings {
     encryption: Encryption,
     encryption_explicit: bool,
     key: Option<DataProtectionKey>,
+    keyring: Option<ValueKeyring>,
     key_spec: KeyType,
     key_format: KeyFormat,
 }
@@ -40,21 +42,30 @@ impl ProtectionSettings {
             encryption: Encryption::Robust,
             encryption_explicit: false,
             key,
+            keyring: None,
             key_spec: KeyType::Bytes,
             key_format: KeyFormat::NamespaceHash,
         }
     }
 
-    fn finish(self) -> Result<Arc<DataProtection>> {
-        match self.key {
-            Some(key) => DataProtection::with_profile_and_key_type_and_format(
-                key,
-                self.key_spec,
-                self.key_format,
-                self.compression,
-                self.encryption,
-            )
-            .map(Arc::new),
+    fn finish_with_budget(self, budget: crate::RequestBudget) -> Result<Arc<DataProtection>> {
+        let protection = match self.key {
+            Some(key) => match self.keyring {
+                Some(keyring) => DataProtection::with_keyring_and_key_spec(
+                    key,
+                    keyring,
+                    self.key_spec,
+                    self.compression,
+                    self.encryption,
+                ),
+                None => DataProtection::with_profile_and_key_type_and_format(
+                    key,
+                    self.key_spec,
+                    self.key_format,
+                    self.compression,
+                    self.encryption,
+                ),
+            },
             None => {
                 if self.encryption_explicit && self.encryption != Encryption::Unprotected {
                     return Err(crate::Error::configuration(
@@ -69,9 +80,9 @@ impl ProtectionSettings {
                     self.compression,
                     Encryption::Unprotected,
                 )
-                .map(Arc::new)
             }
-        }
+        }?;
+        Ok(Arc::new(protection.with_budget(budget)))
     }
 }
 
@@ -96,7 +107,7 @@ macro_rules! protected_builder_methods {
                 self
             }
 
-            /// Offers protocol versions in descending order and enforces a minimum version.
+            /// Configures the supported `openkache/1` protocol.
             pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
                 self.raw = self.raw.alpn_policy(policy);
                 self
@@ -117,6 +128,12 @@ macro_rules! protected_builder_methods {
             /// Bounds simultaneous request lanes on one QUIC connection.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.raw = self.raw.max_in_flight(maximum);
+                self
+            }
+
+            /// Sets the aggregate bytes retained across transport and value work.
+            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
+                self.raw = self.raw.max_in_flight_bytes(maximum);
                 self
             }
 
@@ -148,7 +165,7 @@ macro_rules! protected_builder_methods {
             ///
             /// # Arguments
             ///
-            /// * `encryption` - Compact or Robust authenticated-encryption profile.
+            /// * `encryption` - Unprotected, Compact, or Robust value profile.
             ///
             /// # Returns
             ///
@@ -167,6 +184,12 @@ macro_rules! protected_builder_methods {
             #[deprecated(note = "TypedKey is inferred per operation in v1")]
             pub fn key_spec(mut self, key_spec: KeyType) -> Self {
                 self.protection.key_spec = key_spec;
+                self
+            }
+
+            /// Configures immutable value-key IDs for read-old/write-new rotation.
+            pub fn value_keyring(mut self, keyring: ValueKeyring) -> Self {
+                self.protection.keyring = Some(keyring);
                 self
             }
 
@@ -301,6 +324,21 @@ macro_rules! protected_client_methods {
             self.get_structured_at_item_id(namespace_id, item_id).await
         }
 
+        /// Retrieves StructuredValue-CBOR-v1 bytes for byte-oriented native
+        /// adapters without routing through JSON or Raw conversion.
+        pub async fn get_structured_canonical_key_cbor(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            match self.get_structured_canonical_key(canonical_key).await? {
+                GetOutcome::Found(value) => value
+                    .to_cbor()
+                    .map(GetOutcome::Found)
+                    .map_err(|error| crate::value::Error::Structured(error).into()),
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
         /// Retrieves a value for canonical key bytes supplied by a low-level
         /// language adapter.
         ///
@@ -335,27 +373,16 @@ macro_rules! protected_client_methods {
             self.get_structured_at_item_id(namespace_id, item_id).await
         }
 
-        /// Retrieves StructuredValue-CBOR-v1 bytes for byte-oriented native
-        /// adapters without routing through JSON or Raw conversion.
-        pub async fn get_structured_canonical_key_cbor(
-            &self,
-            canonical_key: impl AsRef<[u8]>,
-        ) -> Result<GetOutcome<Vec<u8>>> {
-            match self.get_structured_canonical_key(canonical_key).await? {
-                GetOutcome::Found(value) => value
-                    .to_cbor()
-                    .map(GetOutcome::Found)
-                    .map_err(|error| crate::value::Error::Structured(error).into()),
-                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
-            }
-        }
-
         async fn get_value_at_item_id(
             &self,
             namespace_id: u64,
             item_id: crate::ItemId,
         ) -> Result<GetOutcome<Value>> {
-            match self.raw.get_in_namespace(namespace_id, item_id).await? {
+            match self
+                .raw
+                .get_in_namespace_with_permit(namespace_id, item_id)
+                .await?
+            {
                 GetOutcome::Found(value) => self
                     .protection
                     .decode_in_namespace(namespace_id, item_id, value)
@@ -479,6 +506,24 @@ macro_rules! protected_client_methods {
                 .await
         }
 
+        /// Stores one complete StructuredValue-CBOR-v1 payload for byte
+        /// oriented native adapters.
+        pub async fn set_structured_canonical_key_cbor(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+            value: impl AsRef<[u8]>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let value = StructuredValue::from_cbor(value.as_ref()).map_err(|error| {
+                crate::Error::configuration(
+                    "structured_value",
+                    format!("StructuredValue-CBOR-v1 decode failed: {error}"),
+                )
+            })?;
+            self.set_structured_canonical_key(canonical_key, value, options)
+                .await
+        }
+
         /// Stores a value for canonical key bytes supplied by a low-level
         /// language adapter.
         #[cfg(feature = "ffi")]
@@ -518,24 +563,6 @@ macro_rules! protected_client_methods {
                     .seal_structured_in_namespace(namespace_id, item_id, &value)?;
             self.raw
                 .set_in_namespace(namespace_id, item_id, value, options)
-                .await
-        }
-
-        /// Stores one complete StructuredValue-CBOR-v1 payload for byte
-        /// oriented native adapters.
-        pub async fn set_structured_canonical_key_cbor(
-            &self,
-            canonical_key: impl AsRef<[u8]>,
-            value: impl AsRef<[u8]>,
-            options: SetOptions,
-        ) -> Result<SetOutcome> {
-            let value = StructuredValue::from_cbor(value.as_ref()).map_err(|error| {
-                crate::Error::configuration(
-                    "structured_value",
-                    format!("StructuredValue-CBOR-v1 decode failed: {error}"),
-                )
-            })?;
-            self.set_structured_canonical_key(canonical_key, value, options)
                 .await
         }
 
@@ -621,8 +648,8 @@ protected_builder_methods!(ProtectedClientBuilder);
 impl ProtectedClientBuilder {
     /// Connects a client with mandatory application-key and value protection.
     pub async fn connect(self) -> Result<ProtectedClient> {
-        let protection = self.protection.finish()?;
         let raw = self.raw.connect().await?;
+        let protection = self.protection.finish_with_budget(raw.request_budget())?;
         Ok(ProtectedClient { raw, protection })
     }
 }
@@ -675,8 +702,8 @@ protected_builder_methods!(LocalProtectedClientBuilder);
 impl LocalProtectedClientBuilder {
     /// Connects a Compio client with mandatory application-key and value protection.
     pub async fn connect(self) -> Result<LocalProtectedClient> {
-        let protection = self.protection.finish()?;
         let raw = self.raw.connect().await?;
+        let protection = self.protection.finish_with_budget(raw.request_budget())?;
         Ok(LocalProtectedClient { raw, protection })
     }
 }

@@ -76,7 +76,9 @@ pub(super) fn config(
     config.set_initial_max_stream_data_bidi_remote(MAX_BUFFERED_REQUEST_BYTES as u64);
     config.set_initial_max_stream_data_bidi_local(64 * 1024);
     config.set_initial_max_streams_bidi(max_concurrent_streams as u64);
-    config.set_initial_max_streams_uni(0);
+    // Advertise bounded receive credit for invalid client uni streams so the
+    // driver can issue STOP_SENDING without consuming their body.
+    config.set_initial_max_streams_uni(max_concurrent_streams as u64);
     config.set_disable_active_migration(true);
     Ok(config)
 }

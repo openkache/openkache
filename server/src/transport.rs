@@ -16,7 +16,6 @@ use crate::protocol::RequestFrame as ProtocolRequestFrame;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use openkache_protocol::ResponseSegment;
 use openkache_protocol::{RequestFrameHeader, ResponseParts};
-
 #[path = "transport/tls.rs"]
 mod tls;
 pub(super) use tls::strict_server_config;
@@ -178,6 +177,11 @@ pub(super) trait Connection {
     fn accept_bi(
         &self,
     ) -> impl Future<Output = Result<(Self::SendStream, Self::ReceiveStream), TransportError>>;
+
+    /// Accepts an incoming unidirectional stream so the protocol server can
+    /// reject it without reading application bytes.
+    fn accept_uni(&self) -> impl Future<Output = Result<Self::ReceiveStream, TransportError>>;
+
 }
 
 /// Receive half of one request stream.
@@ -188,7 +192,10 @@ pub(super) trait ReceiveStream {
         timeout: Duration,
         budget: &RequestBudget,
         admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
-    ) -> impl Future<Output = Result<Result<RequestFrame, T>, StreamReadError>>;
+    ) -> impl Future<Output = Result<RequestRead<T>, StreamReadError>>;
+
+    /// Rejects further request-direction bytes without consuming them.
+    fn stop(&mut self);
 }
 
 /// Send half of one response stream.
@@ -198,6 +205,12 @@ pub(super) trait SendStream {
         parts: ResponseParts,
         timeout: Duration,
     ) -> impl Future<Output = Result<(), TransportError>>;
+
+    /// Sends a clean response-direction half-close after queued responses.
+    fn finish(&mut self) -> Result<(), TransportError>;
+
+    /// Cancels the response direction after the peer has stopped reading it.
+    fn reset(&mut self);
 }
 
 /// Failure while receiving a request frame.
@@ -208,20 +221,50 @@ pub(super) enum StreamReadError {
     #[error("request exceeds the protocol limit")]
     TooLarge,
     #[error(transparent)]
-    Protocol(#[from] openkache_protocol::ProtocolError),
+    Malformed(#[from] openkache_protocol::ProtocolError),
     #[error(transparent)]
     Transport(#[from] TransportError),
 }
 
+/// Result of advancing a request lane by one explicit frame boundary.
+///
+/// A clean finish is observable only before another frame begins. A peer reset
+/// is directional cancellation rather than malformed framing, even when it
+/// interrupts an incomplete frame.
+pub(super) enum RequestRead<T> {
+    /// One complete admitted request and its reserved body bytes.
+    Frame(RequestFrame),
+    /// A complete, delimited request rejected before operation execution.
+    Rejected {
+        header: RequestFrameHeader,
+        rejection: T,
+    },
+    /// A complete request that could not reserve the shared body budget.
+    ///
+    /// The body has been discarded exactly to its declared boundary, so this
+    /// remains a correlated, recoverable lane event rather than malformed
+    /// framing.
+    Overloaded {
+        header: RequestFrameHeader,
+        timed_out: bool,
+    },
+    /// The peer FINed the request direction at a frame boundary.
+    Finished,
+    /// The peer reset the request direction.
+    Cancelled,
+}
+
 /// Request bytes paired with the server-wide memory-budget reservation they consume.
 pub(super) struct RequestFrame {
+    pub(super) header: RequestFrameHeader,
     pub(super) bytes: Vec<u8>,
-    _permit: RequestBudgetPermit,
+    pub(super) _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
-    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit) -> Self {
+    fn new(header: RequestFrameHeader, bytes: Vec<u8>, permit: RequestBudgetPermit) -> Self {
         Self {
+            header,
             bytes,
             _permit: permit,
         }
@@ -371,17 +414,21 @@ impl Drop for RequestBudgetPermit {
     }
 }
 
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 trait RequestByteStream {
     fn append_chunk(
         &mut self,
         frame: Vec<u8>,
         capacity: usize,
         backend: &'static str,
-    ) -> impl Future<Output = Result<Vec<u8>, TransportError>>;
+    ) -> impl Future<Output = Result<ChunkRead, TransportError>>;
 }
 
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+enum ChunkRead {
+    Bytes(Vec<u8>),
+    Finished,
+    Cancelled,
+}
+
 async fn read_buffered_request<S: RequestByteStream, T>(
     stream: &mut S,
     backend: &'static str,
@@ -389,88 +436,173 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     timeout: Duration,
     budget: &RequestBudget,
     admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
-) -> Result<Result<RequestFrame, T>, StreamReadError> {
-    let first = network_runtime::timeout(timeout, stream.append_chunk(Vec::new(), 1, backend))
-        .await
-        .map_err(|_| StreamReadError::Timeout)?
-        .map_err(StreamReadError::Transport)?;
-    if first.is_empty() {
-        return Err(StreamReadError::Transport(TransportError::backend(
-            backend,
-            "stream header read",
-            "stream ended before a request frame",
-        )));
-    }
-    let (frame, header) = network_runtime::timeout(timeout, async {
-        let mut frame = first;
-        loop {
-            let additional = ProtocolRequestFrame::header_bytes_needed(&frame)?;
-            if additional == 0 {
-                let header = ProtocolRequestFrame::decode_header(&frame)?.ok_or(
-                    openkache_protocol::ProtocolError::InvalidFieldSequence(
-                        "header sizing completed before header decode",
-                    ),
-                )?;
-                break Ok::<_, StreamReadError>((frame, header));
-            }
-            if additional > maximum.saturating_sub(frame.len()) {
-                return Err(StreamReadError::TooLarge);
-            }
-            let previous_len = frame.len();
-            frame = stream
-                .append_chunk(frame, additional, backend)
-                .await
-                .map_err(StreamReadError::Transport)?;
-            if frame.len() == previous_len {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream header read",
-                    "stream ended before request header completed",
-                )));
-            }
-        }
-    })
-    .await
-    .map_err(|_| StreamReadError::Timeout)??;
-    let (mut frame, frame_len) = network_runtime::timeout(timeout, async {
-        let frame = frame;
-        let frame_len = header.frame_len()?;
-        Ok::<_, StreamReadError>((frame, frame_len))
-    })
-    .await
-    .map_err(|_| StreamReadError::Timeout)??;
+) -> Result<RequestRead<T>, StreamReadError> {
+    let header_read = read_request_header(stream, backend, maximum, timeout).await?;
+    let (mut frame, header) = match header_read {
+        HeaderRead::Header { frame, header } => (frame, header),
+        HeaderRead::Finished => return Ok(RequestRead::Finished),
+        HeaderRead::Cancelled => return Ok(RequestRead::Cancelled),
+    };
+    let frame_len = header.frame_len()?;
     if frame_len > maximum {
         return Err(StreamReadError::TooLarge);
     }
-    // Admission may reject on bounded header metadata, but the lane must
-    // still consume the declared body before sending that correlated error.
-    // This preserves the next frame boundary and allows the lane to continue.
-    let rejection = admit(header, &frame[..header.encoded_len()]).err();
-    let permit = budget.acquire(header.body_len(), timeout).await?;
-    let body = network_runtime::timeout(timeout, async {
-        while frame.len() < frame_len {
-            let previous_len = frame.len();
-            frame = stream
-                .append_chunk(frame, frame_len - previous_len, backend)
-                .await
-                .map_err(StreamReadError::Transport)?;
-            if frame.len() == previous_len {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream body read",
-                    "stream ended before request body completed",
-                )));
+    if let Err(rejection) = admit(header, &frame[..header.encoded_len()]) {
+        match discard_body(
+            stream,
+            backend,
+            frame_len.saturating_sub(frame.len()),
+            timeout,
+        )
+        .await?
+        {
+            BodyRead::Complete => {
+                return Ok(RequestRead::Rejected { header, rejection });
+            }
+            BodyRead::Cancelled => return Ok(RequestRead::Cancelled),
+        }
+    }
+
+    let permit = match budget.acquire(header.body_len(), timeout).await {
+        Ok(permit) => permit,
+        Err(error @ (StreamReadError::Timeout | StreamReadError::TooLarge)) => {
+            let timed_out = matches!(error, StreamReadError::Timeout);
+            // A request that cannot reserve memory was never admitted. Drain
+            // exactly its known body so later pipelined frame boundaries stay
+            // intact; the caller turns the rejection into a correlated
+            // overload response.
+            match discard_body(
+                stream,
+                backend,
+                frame_len.saturating_sub(frame.len()),
+                timeout,
+            )
+            .await?
+            {
+                BodyRead::Complete => {
+                    return Ok(RequestRead::Overloaded { header, timed_out });
+                }
+                BodyRead::Cancelled => return Ok(RequestRead::Cancelled),
             }
         }
-        Ok::<_, StreamReadError>(frame)
-    })
-    .await
-    .map_err(|_| StreamReadError::Timeout)??;
-    if let Some(rejection) = rejection {
-        drop(permit);
-        return Ok(Err(rejection));
+        Err(error) => return Err(error),
+    };
+
+    loop {
+        let remaining = frame_len.saturating_sub(frame.len());
+        if remaining == 0 {
+            return Ok(RequestRead::Frame(RequestFrame::new(header, frame, permit)));
+        }
+        let actual = frame.len();
+        match append_chunk(stream, frame, remaining, backend, timeout).await? {
+            ChunkRead::Bytes(next) => frame = next,
+            ChunkRead::Finished => {
+                return Err(truncated_frame_error(actual, frame_len));
+            }
+            ChunkRead::Cancelled => return Ok(RequestRead::Cancelled),
+        }
     }
-    Ok(Ok(RequestFrame::new(body, permit)))
+}
+
+async fn read_request_header<S: RequestByteStream>(
+    stream: &mut S,
+    backend: &'static str,
+    maximum: usize,
+    timeout: Duration,
+) -> Result<HeaderRead, StreamReadError> {
+    let mut frame = Vec::new();
+    loop {
+        let additional = ProtocolRequestFrame::header_bytes_needed(&frame)?;
+        if additional == 0 {
+            let header = ProtocolRequestFrame::decode_header(&frame)?.ok_or(
+                openkache_protocol::ProtocolError::InvalidFieldSequence(
+                    "header sizing completed before header decode",
+                ),
+            )?;
+            return Ok(HeaderRead::Header { frame, header });
+        }
+        if additional > maximum.saturating_sub(frame.len()) {
+            return Err(StreamReadError::TooLarge);
+        }
+        let expected = frame
+            .len()
+            .checked_add(additional)
+            .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
+        let was_empty = frame.is_empty();
+        let actual = frame.len();
+        match append_chunk(stream, frame, additional, backend, timeout).await? {
+            ChunkRead::Bytes(next) => frame = next,
+            ChunkRead::Finished if was_empty => return Ok(HeaderRead::Finished),
+            ChunkRead::Finished => return Err(truncated_frame_error(actual, expected)),
+            ChunkRead::Cancelled => return Ok(HeaderRead::Cancelled),
+        }
+    }
+}
+
+enum HeaderRead {
+    Header {
+        frame: Vec<u8>,
+        header: RequestFrameHeader,
+    },
+    Finished,
+    Cancelled,
+}
+
+async fn append_chunk<S: RequestByteStream>(
+    stream: &mut S,
+    frame: Vec<u8>,
+    capacity: usize,
+    backend: &'static str,
+    timeout: Duration,
+) -> Result<ChunkRead, StreamReadError> {
+    network_runtime::timeout(timeout, stream.append_chunk(frame, capacity, backend))
+        .await
+        .map_err(|_| StreamReadError::Timeout)?
+        .map_err(StreamReadError::Transport)
+}
+
+enum BodyRead {
+    Complete,
+    Cancelled,
+}
+
+async fn discard_body<S: RequestByteStream>(
+    stream: &mut S,
+    backend: &'static str,
+    mut remaining: usize,
+    timeout: Duration,
+) -> Result<BodyRead, StreamReadError> {
+    const DISCARD_CHUNK_BYTES: usize = 16 * 1024;
+    let mut scratch = Vec::new();
+    while remaining > 0 {
+        let capacity = remaining.min(DISCARD_CHUNK_BYTES);
+        let previous_len = scratch.len();
+        match append_chunk(stream, scratch, capacity, backend, timeout).await? {
+            ChunkRead::Bytes(next) => {
+                let read = next
+                    .len()
+                    .checked_sub(previous_len)
+                    .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
+                remaining = remaining
+                    .checked_sub(read)
+                    .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
+                scratch = next;
+                scratch.clear();
+            }
+            ChunkRead::Finished => {
+                return Err(truncated_frame_error(0, remaining));
+            }
+            ChunkRead::Cancelled => return Ok(BodyRead::Cancelled),
+        }
+    }
+    Ok(BodyRead::Complete)
+}
+
+fn truncated_frame_error(actual: usize, expected: usize) -> StreamReadError {
+    StreamReadError::Malformed(openkache_protocol::ProtocolError::FrameTooShort {
+        expected,
+        actual,
+    })
 }
 
 /// Stable transport failure with backend and operation context.
