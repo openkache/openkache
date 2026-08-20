@@ -804,7 +804,7 @@ class RawClient(SmithyOpenKacheApi):
     async def ping(self, input: SmithyPingInput | None = None) -> SmithyPingOutput:
         del input
         await self._owner.ping()
-        return SmithyPingOutput()
+        return SmithyPingOutput(payload=b"")
 
     async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
         item_id = _item_id(input.item_id)

@@ -241,7 +241,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     {
         _ = input;
         await PingAsync(cancellationToken).ConfigureAwait(false);
-        return new Smithy.PingOutput();
+        return new Smithy.PingOutput { Payload = Array.Empty<byte>() };
     }
 
     /// <summary>

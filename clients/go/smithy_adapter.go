@@ -19,7 +19,10 @@ type smithyClient struct {
 var _ SmithyOpenKacheAPI = smithyClient{}
 
 func (s smithyClient) Ping(ctx context.Context, _ SmithyPingInput) (SmithyPingOutput, error) {
-	return SmithyPingOutput{}, s.client.Ping(ctx)
+	if err := s.client.Ping(ctx); err != nil {
+		return SmithyPingOutput{}, err
+	}
+	return SmithyPingOutput{Payload: []byte{}}, nil
 }
 
 func (s smithyClient) Get(

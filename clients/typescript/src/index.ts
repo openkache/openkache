@@ -875,14 +875,14 @@ class Raw_Client implements OpenKache_Raw_Client {
    * Invokes the Smithy PING operation.
    *
    * @param _input - Empty Smithy operation input.
-   * @returns An empty Smithy operation output.
+   * @returns The Smithy operation output with its empty payload.
    * @throws {OpenKache_Error} When the operation fails.
    */
   async ping(_input: Smithy_Ping_Input): Promise<Smithy_Ping_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
       await this.#native_client.ping()
-      return {}
+      return { payload: new Uint8Array() }
     } catch (error) {
       throw as_openkache_error(error)
     }

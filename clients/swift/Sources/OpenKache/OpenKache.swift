@@ -1301,7 +1301,7 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
     public func ping(_ input: Smithy_Ping_Input) async throws -> Smithy_Ping_Output {
         _ = input
         try await ping()
-        return Smithy_Ping_Output()
+        return Smithy_Ping_Output(payload: Data())
     }
 
     public func get(_ input: Smithy_Get_Input) async throws -> Smithy_Get_Output {
