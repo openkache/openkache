@@ -164,19 +164,6 @@ impl ItemId {
         self.as_bytes().to_vec()
     }
 
-    /// Returns a fixed-width storage identity for legacy storage boundaries.
-    ///
-    /// The wire ID remains length-sensitive; shorter IDs are domain-separated
-    /// before being passed to storage components that still require 32 bytes.
-    pub fn storage_bytes(&self) -> [u8; ITEM_ID_BYTES] {
-        if self.len() == ITEM_ID_BYTES {
-            return self.bytes;
-        }
-        let mut storage = [0; ITEM_ID_BYTES];
-        storage[0] = self.len;
-        storage[1..1 + self.len()].copy_from_slice(self.as_bytes());
-        storage
-    }
 }
 
 impl AsRef<[u8]> for ItemId {

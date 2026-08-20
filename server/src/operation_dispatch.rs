@@ -53,6 +53,10 @@ impl HeaderAdmissionRejection {
     pub(super) fn into_response(self) -> operation_transport::OperationResponse {
         self.response
     }
+
+    pub(super) const fn request_id(&self) -> u64 {
+        self.request_id
+    }
 }
 
 /// Runs an API-owned request-header admission hook before the transport reads
@@ -73,6 +77,7 @@ pub(super) fn admit_request_header(
         // requires the lane to close without manufacturing an error response.
         return Err(HeaderAdmissionRejection {
             opcode: header.opcode(),
+            request_id: header.request_id(),
             response: operation_transport::contract_error_response_for_operation(
                 operation_contract::operation_id_for_opcode(header.opcode()),
                 openkache_protocol::Status::InternalError,

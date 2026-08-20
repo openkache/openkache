@@ -245,7 +245,15 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if rejection.silently_close() {
                     break;
                 }
-                if !write_response(&mut send, rejection.into_response(), request_timeout).await {
+                let request_id = rejection.request_id();
+                if !write_response(
+                    &mut send,
+                    rejection.into_response(),
+                    Some(request_id),
+                    request_timeout,
+                )
+                .await
+                {
                     network_shard.response_write_failure();
                 }
                 break;
@@ -255,6 +263,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if !write_response(
                     &mut send,
                     response_bytes(Status::Timeout, b"request read timed out"),
+                    None,
                     request_timeout,
                 )
                 .await
@@ -268,6 +277,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if !write_response(
                     &mut send,
                     response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
+                    None,
                     request_timeout,
                 )
                 .await
@@ -281,6 +291,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 if !write_response(
                     &mut send,
                     wire_protocol_error_response(error),
+                    None,
                     request_timeout,
                 )
                 .await
@@ -292,7 +303,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::Transport(_)) => break,
         };
         let request_bytes = std::mem::take(&mut frame.bytes);
-        let mut terminal_after_response = frame.has_trailing_bytes;
+        let request_id = frame.request_id;
         let response_result = match request_projection::project_owned_request(request_bytes) {
             Ok(input) => {
                 let operation_id = input.operation_id();
@@ -317,7 +328,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Timeout,
                                 request_started.elapsed(),
                             );
-                            if !write_response(&mut send, response, request_timeout).await {
+                            if !write_response(
+                                &mut send,
+                                response,
+                                Some(request_id),
+                                request_timeout,
+                            )
+                            .await
+                            {
                                 network_shard.response_write_failure();
                                 break;
                             }
@@ -335,7 +353,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Overloaded,
                                 request_started.elapsed(),
                             );
-                            if !write_response(&mut send, response, request_timeout).await {
+                            if !write_response(
+                                &mut send,
+                                response,
+                                Some(request_id),
+                                request_timeout,
+                            )
+                            .await
+                            {
                                 network_shard.response_write_failure();
                                 break;
                             }
@@ -397,15 +422,18 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(error) => {
                 network_shard.protocol_error();
-                terminal_after_response = true;
                 (wire_protocol_error_response(error).into(), None)
             }
         };
-        if !write_response(&mut send, response_result.0, request_timeout).await {
+        if !write_response(
+            &mut send,
+            response_result.0,
+            Some(request_id),
+            request_timeout,
+        )
+        .await
+        {
             network_shard.response_write_failure();
-            break;
-        }
-        if terminal_after_response {
             break;
         }
     }
@@ -424,9 +452,15 @@ impl Drop for ActiveStream<'_> {
 async fn write_response<S: SendStream>(
     send: &mut S,
     response: impl Into<operation_transport::OperationResponse>,
+    request_id: Option<u64>,
     request_timeout: Duration,
 ) -> bool {
-    send.write_response(response.into().into_parts(), request_timeout)
+    let response = response.into();
+    let response = match request_id {
+        Some(request_id) => response.with_request_id(request_id),
+        None => response,
+    };
+    send.write_response(response.into_parts(), request_timeout)
         .await
         .is_ok()
 }

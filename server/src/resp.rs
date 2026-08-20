@@ -19,7 +19,6 @@ use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
 };
 use crate::platform::StorageDeviceKind;
-use crate::protocol::ItemId;
 use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
     launch_network_role, shutdown_network_workers_and_cache,
@@ -33,8 +32,8 @@ const MAX_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 type Command<'a> = SmallVec<[&'a [u8]; 4]>;
 
-fn resp_item_id(application_key: &[u8]) -> ItemId {
-    ItemId::new(Sha256::digest(application_key).into())
+fn resp_storage_identity(application_key: &[u8]) -> [u8; crate::types::STORAGE_KEY_BYTES] {
+    Sha256::digest(application_key).into()
 }
 
 /// Plaintext RESP2 endpoint that dispatches directly to OpenKache storage workers.
@@ -647,8 +646,8 @@ async fn execute_command(
         RespCommandKind::Ping => simple(response, "PONG"),
         RespCommandKind::Get => match command {
             [_, application_key] => {
-                let item_id = resp_item_id(application_key);
-                let storage_key = cache.storage_key_for_item_id(item_id);
+                let identity = resp_storage_identity(application_key);
+                let storage_key = cache.storage_key_for_identity(&identity);
                 match cache
                     .get_storage_key(storage_key, operation_for_opcode(Opcode::Get))
                     .await
@@ -662,8 +661,8 @@ async fn execute_command(
         },
         RespCommandKind::Set => match command {
             [_, application_key, value] => {
-                let item_id = resp_item_id(application_key);
-                let storage_key = cache.storage_key_for_item_id(item_id);
+                let identity = resp_storage_identity(application_key);
+                let storage_key = cache.storage_key_for_identity(&identity);
                 match cache
                     .set_storage_key(
                         storage_key,
@@ -686,8 +685,8 @@ async fn execute_command(
             } else {
                 let mut deleted = 0;
                 for application_key in &command[1..] {
-                    let item_id = resp_item_id(application_key);
-                    let storage_key = cache.storage_key_for_item_id(item_id);
+                    let identity = resp_storage_identity(application_key);
+                    let storage_key = cache.storage_key_for_identity(&identity);
                     match cache
                         .delete_storage_key(storage_key, operation_for_opcode(Opcode::Delete))
                         .await

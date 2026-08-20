@@ -187,6 +187,9 @@ impl Kvkache {
             {
                 self.live_keys = self.live_keys.saturating_sub(1);
             }
+            if let Some(index) = self.persistent_index.as_mut() {
+                index.remove(&candidate.storage_key);
+            }
         }
 
         self.directory

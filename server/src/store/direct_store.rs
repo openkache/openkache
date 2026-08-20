@@ -1,8 +1,10 @@
 //! Direct mutable SG store backed by a worker-local variable-generation ring.
 
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fs;
 use std::future::Future;
+use std::io::{Read, Write};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -28,6 +30,254 @@ use crate::{BUCKET_BYTES, Config, KvError, Result, StorageKey};
 use futures_util::stream::FuturesUnordered;
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV2\0\0";
+const CHECKPOINT_VERSION: u32 = 1;
+const CHECKPOINT_MAX_RECORDS: usize = 1_000_000;
+
+struct CheckpointGeneration {
+    sequence: u64,
+    location: GenerationLocation,
+    large_value_location: Option<LargeValueLocation>,
+}
+
+struct Checkpoint {
+    generations: Vec<CommittedGenerationState>,
+    index: Vec<(StorageKey, TableLocation)>,
+}
+
+fn checkpoint_path(config: &Config) -> std::path::PathBuf {
+    config.data_path.with_extension("checkpoint")
+}
+
+fn load_checkpoint(config: &Config) -> Result<Option<Checkpoint>> {
+    let path = checkpoint_path(config);
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(startup_io_error("opening the storage checkpoint", error)),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| startup_io_error("reading the storage checkpoint", error))?;
+    decode_checkpoint(config, &bytes)
+        .map(Some)
+        .map_err(|error| startup_storage_error("decoding the storage checkpoint", error))
+}
+
+fn encode_checkpoint(
+    config: &Config,
+    generations: &[CheckpointGeneration],
+    index: &HashMap<StorageKey, TableLocation>,
+) -> Result<Vec<u8>> {
+    let generation_count = u32::try_from(generations.len())
+        .map_err(|_| KvError::Worker("storage checkpoint generation count exceeds u32".into()))?;
+    let index_count = u64::try_from(index.len())
+        .map_err(|_| KvError::Worker("storage checkpoint Item count exceeds u64".into()))?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(CHECKPOINT_MAGIC);
+    bytes.extend_from_slice(&CHECKPOINT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(config.segment_size as u64).to_le_bytes());
+    bytes.extend_from_slice(&(config.blob_segment_size as u64).to_le_bytes());
+    bytes.extend_from_slice(&(config.large_value_capacity as u64).to_le_bytes());
+    bytes.extend_from_slice(&(config.segment_count as u64).to_le_bytes());
+    bytes.extend_from_slice(&generation_count.to_le_bytes());
+    bytes.extend_from_slice(&index_count.to_le_bytes());
+    for generation in generations {
+        bytes.extend_from_slice(&generation.sequence.to_le_bytes());
+        encode_generation_location(&mut bytes, generation.location);
+        match generation.large_value_location {
+            Some(location) => {
+                bytes.push(1);
+                encode_large_value_location(&mut bytes, location);
+            }
+            None => bytes.push(0),
+        }
+    }
+    let mut entries = index.iter().collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|(storage_key, _)| storage_key.into_bytes());
+    for (storage_key, location) in entries {
+        bytes.extend_from_slice(storage_key.as_bytes());
+        bytes.extend_from_slice(&location.sg_index.to_le_bytes());
+        bytes.push(location.bucket_hash_index);
+        bytes.extend_from_slice(&[0; 3]);
+    }
+    let checksum = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&checksum.to_le_bytes());
+    Ok(bytes)
+}
+
+fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
+    if bytes.len() < CHECKPOINT_MAGIC.len() + 4 + 8 * 4 + 4 + 8 + 4
+        || &bytes[..CHECKPOINT_MAGIC.len()] != CHECKPOINT_MAGIC
+    {
+        return Err(KvError::Worker(
+            "storage checkpoint header is invalid".into(),
+        ));
+    }
+    let checksum_start = bytes.len() - 4;
+    let expected = u32::from_le_bytes(
+        bytes[checksum_start..]
+            .try_into()
+            .map_err(|_| KvError::Worker("storage checkpoint checksum is truncated".into()))?,
+    );
+    if crc32fast::hash(&bytes[..checksum_start]) != expected {
+        return Err(KvError::Worker(
+            "storage checkpoint checksum does not match".into(),
+        ));
+    }
+    let mut cursor = Cursor::new(&bytes[..checksum_start]);
+    if cursor.take(8)? != CHECKPOINT_MAGIC {
+        return Err(KvError::Worker(
+            "storage checkpoint magic is invalid".into(),
+        ));
+    }
+    if cursor.u32()? != CHECKPOINT_VERSION {
+        return Err(KvError::Worker(
+            "storage checkpoint version is unsupported".into(),
+        ));
+    }
+    for (label, expected) in [
+        ("Segment size", config.segment_size as u64),
+        ("Blob Segment size", config.blob_segment_size as u64),
+        ("large-value capacity", config.large_value_capacity as u64),
+        ("Segment count", config.segment_count as u64),
+    ] {
+        if cursor.u64()? != expected {
+            return Err(KvError::Worker(format!(
+                "storage checkpoint {label} does not match the configured geometry"
+            )));
+        }
+    }
+    let generation_count = usize::try_from(cursor.u32()?).map_err(|_| {
+        KvError::Worker("storage checkpoint generation count overflows usize".into())
+    })?;
+    let index_count = usize::try_from(cursor.u64()?)
+        .map_err(|_| KvError::Worker("storage checkpoint Item count overflows usize".into()))?;
+    if generation_count > CHECKPOINT_MAX_RECORDS || index_count > CHECKPOINT_MAX_RECORDS {
+        return Err(KvError::Worker(
+            "storage checkpoint contains too many records".into(),
+        ));
+    }
+    let mut generations = Vec::with_capacity(generation_count);
+    for _ in 0..generation_count {
+        let sequence = cursor.u64()?;
+        let location = decode_generation_location(&mut cursor)?;
+        let large_value_location = match cursor.byte()? {
+            0 => None,
+            1 => Some(decode_large_value_location(&mut cursor)?),
+            _ => {
+                return Err(KvError::Worker(
+                    "storage checkpoint large-value flag is invalid".into(),
+                ));
+            }
+        };
+        generations.push(CommittedGenerationState {
+            sequence,
+            location,
+            large_value_location,
+        });
+    }
+    let mut index = Vec::with_capacity(index_count);
+    for _ in 0..index_count {
+        let storage_key = StorageKey::new(cursor.array_32()?);
+        let sg_index = cursor.u32()?;
+        let bucket_hash_index = cursor.byte()?;
+        let _ = cursor.take(3)?;
+        index.push((
+            storage_key,
+            TableLocation {
+                sg_index,
+                bucket_hash_index,
+            },
+        ));
+    }
+    if !cursor.is_empty() {
+        return Err(KvError::Worker(
+            "storage checkpoint contains trailing bytes".into(),
+        ));
+    }
+    Ok(Checkpoint { generations, index })
+}
+
+fn encode_generation_location(bytes: &mut Vec<u8>, location: GenerationLocation) {
+    bytes.extend_from_slice(&location.logical_sg_id.to_le_bytes());
+    bytes.extend_from_slice(&location.record_start.to_le_bytes());
+    bytes.extend_from_slice(&location.blob_logical_len.to_le_bytes());
+    bytes.extend_from_slice(&location.blob_padded_len.to_le_bytes());
+    bytes.extend_from_slice(&location.sg_base.to_le_bytes());
+    bytes.extend_from_slice(&location.record_len.to_le_bytes());
+}
+
+fn decode_generation_location(cursor: &mut Cursor<'_>) -> Result<GenerationLocation> {
+    Ok(GenerationLocation {
+        logical_sg_id: cursor.u32()?,
+        record_start: cursor.u64()?,
+        blob_logical_len: cursor.u32()?,
+        blob_padded_len: cursor.u32()?,
+        sg_base: cursor.u64()?,
+        record_len: cursor.u64()?,
+    })
+}
+
+fn encode_large_value_location(bytes: &mut Vec<u8>, location: LargeValueLocation) {
+    bytes.extend_from_slice(&location.logical_sg_id.to_le_bytes());
+    bytes.extend_from_slice(&location.record_start.to_le_bytes());
+    bytes.extend_from_slice(&location.logical_len.to_le_bytes());
+    bytes.extend_from_slice(&location.padded_len.to_le_bytes());
+}
+
+fn decode_large_value_location(cursor: &mut Cursor<'_>) -> Result<LargeValueLocation> {
+    Ok(LargeValueLocation {
+        logical_sg_id: cursor.u32()?,
+        record_start: cursor.u64()?,
+        logical_len: cursor.u32()?,
+        padded_len: cursor.u32()?,
+    })
+}
+
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or_else(|| KvError::Worker("storage checkpoint offset overflowed".into()))?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| KvError::Worker("storage checkpoint is truncated".into()))?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn byte(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn array_32(&mut self) -> Result<[u8; 32]> {
+        Ok(self.take(32)?.try_into().unwrap())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
 
 mod eviction;
 mod flush;
@@ -205,6 +455,8 @@ pub(crate) struct Kvkache {
     pub(crate) eviction_read_timeouts: u64,
     pub(crate) generation_fill_used_bytes: u64,
     pub(crate) generation_fill_capacity_bytes: u64,
+    allow_checkpoint: bool,
+    persistent_index: Option<HashMap<StorageKey, TableLocation>>,
 }
 
 impl Kvkache {
@@ -227,18 +479,21 @@ impl Kvkache {
         config: Config,
         _storage_key_id: [u8; 16],
         resource_guard: Arc<ResourceGuard>,
-        _allow_checkpoint: bool,
+        allow_checkpoint: bool,
     ) -> Result<Self> {
         config.validate()?;
-        Self::open_with_validated_config(config, [0; 16], resource_guard, false).await
+        Self::open_with_validated_config(config, [0; 16], resource_guard, allow_checkpoint).await
     }
 
     pub(crate) async fn open_with_validated_config(
         config: Config,
         _storage_key_id: [u8; 16],
         resource_guard: Arc<ResourceGuard>,
-        _allow_checkpoint: bool,
+        allow_checkpoint: bool,
     ) -> Result<Self> {
+        // The simulated backend has no durable files. Keep its completion-only
+        // workers ephemeral even though startup grants the checkpoint seam.
+        let allow_checkpoint = allow_checkpoint && storage_backend::USES_PHYSICAL_STORAGE;
         storage_backend::ensure_parent_directory(&config.data_path)
             .map_err(|error| startup_io_error("creating the data directory", error))?;
         let data = open_direct_file(&config.data_path)
@@ -253,23 +508,11 @@ impl Kvkache {
             .map_err(|error| storage_io_error(&resource_guard, error))
             .map_err(|error| startup_storage_error("reserving the data file range", error))?;
         resource_guard.observe_storage_reservation()?;
-        let table = Table::new(&config)?;
+        let mut table = Table::new(&config)?;
         let logical_id_capacity = config.logical_sg_capacity()?;
         let mut directory = SgDirectory::new(logical_id_capacity)?;
-        let generation_log =
+        let mut generation_log =
             GenerationLog::new(capacity, config.segment_size, config.blob_segment_size)?;
-        let mut mutable = Vec::with_capacity(config.mutable_segment_count);
-        for lane in 0..config.mutable_segment_count {
-            let logical_sg_id = directory.allocate_mutable(lane)?;
-            mutable.push(Some(MutableGeneration {
-                logical_sg_id,
-                sequence: lane as u64,
-                segment: MutableSegment::new(&config, logical_sg_id as usize),
-                blob_arena: BlobArena::new(config.blob_segment_size),
-                large_value_arena: BlobArena::new(config.large_value_capacity),
-            }));
-        }
-        let next_sequence = config.mutable_segment_count as u64;
         storage_backend::ensure_parent_directory(&config.large_value_path)
             .map_err(|error| startup_io_error("creating the large-value directory", error))?;
         let large_values = open_direct_file(&config.large_value_path)
@@ -288,7 +531,51 @@ impl Kvkache {
         resource_guard.observe_storage_reservation()?;
         let storage_device_kind = storage_backend::file_device_kind(&data)
             .combine(storage_backend::file_device_kind(&large_values));
-        let large_value_log = LargeValueLog::new(config.large_value_capacity)?;
+        let mut large_value_log = LargeValueLog::new(config.large_value_capacity)?;
+        let checkpoint = allow_checkpoint
+            .then(|| load_checkpoint(&config))
+            .transpose()?
+            .flatten();
+        let mut persistent_index = allow_checkpoint.then(HashMap::new);
+        let mut next_sequence = 0_u64;
+        let mut recovered_live_keys = 0_usize;
+        if let Some(checkpoint) = checkpoint {
+            for committed in checkpoint.generations {
+                generation_log.restore(committed.location)?;
+                if let Some(location) = committed.large_value_location {
+                    large_value_log.restore(location)?;
+                }
+                next_sequence = next_sequence.max(committed.sequence.saturating_add(1));
+                directory.restore_stable(committed)?;
+            }
+            for (storage_key, table_location) in checkpoint.index {
+                if !directory.is_stable(table_location.sg_index) {
+                    return Err(KvError::Worker(format!(
+                        "checkpoint Item points at non-stable logical SG {}",
+                        table_location.sg_index
+                    )));
+                }
+                table.insert(&storage_key, table_location)?;
+                persistent_index
+                    .as_mut()
+                    .expect("persistent checkpoint index is enabled")
+                    .insert(storage_key, table_location);
+                recovered_live_keys = recovered_live_keys.saturating_add(1);
+            }
+        }
+        let mut mutable = Vec::with_capacity(config.mutable_segment_count);
+        for lane in 0..config.mutable_segment_count {
+            let logical_sg_id = directory.allocate_mutable(lane)?;
+            let sequence = next_sequence;
+            next_sequence = next_sequence.saturating_add(1);
+            mutable.push(Some(MutableGeneration {
+                logical_sg_id,
+                sequence,
+                segment: MutableSegment::new(&config, logical_sg_id as usize),
+                blob_arena: BlobArena::new(config.blob_segment_size),
+                large_value_arena: BlobArena::new(config.large_value_capacity),
+            }));
+        }
         let bucket_read_pool_capacity = config.bucket_read_pool_capacity;
         let lease_ssd_read_buffer = config.lease_ssd_read_buffer;
         Ok(Self {
@@ -308,7 +595,7 @@ impl Kvkache {
             stable_ram_segments: VecDeque::new(),
             eviction: None,
             next_sequence,
-            live_keys: 0,
+            live_keys: recovered_live_keys,
             resource_guard,
             next_memory_capacity_check: Instant::now(),
             io: Rc::new(DirectStoreIo::new(
@@ -322,10 +609,57 @@ impl Kvkache {
             eviction_read_timeouts: 0,
             generation_fill_used_bytes: 0,
             generation_fill_capacity_bytes: 0,
+            allow_checkpoint,
+            persistent_index,
         })
     }
 
     pub(crate) async fn checkpoint(&self) -> Result<()> {
+        if !self.allow_checkpoint {
+            return Ok(());
+        }
+        let Some(index) = &self.persistent_index else {
+            return Ok(());
+        };
+        let mut generations = Vec::new();
+        for location in self.generation_log.locations() {
+            let (_, state) = self
+                .directory
+                .stable_states()
+                .find(|(logical_sg_id, _)| *logical_sg_id == location.logical_sg_id)
+                .ok_or_else(|| {
+                    KvError::Worker(format!(
+                        "cannot checkpoint logical SG {} before it is stable",
+                        location.logical_sg_id
+                    ))
+                })?;
+            generations.push(CheckpointGeneration {
+                sequence: state.sequence,
+                location: state.location,
+                large_value_location: state.large_value_location,
+            });
+        }
+        let bytes = encode_checkpoint(&self.config, &generations, index)?;
+        let path = checkpoint_path(&self.config);
+        let temporary = path.with_extension("checkpoint.tmp");
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)?;
+            if let Some(parent) = path.parent() {
+                fs::File::open(parent)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temporary);
+            return Err(startup_io_error("writing the storage checkpoint", error));
+        }
         Ok(())
     }
 

@@ -104,6 +104,48 @@ impl GenerationLog {
         self.records.front().copied()
     }
 
+    pub(crate) fn locations(&self) -> impl Iterator<Item = GenerationLocation> + '_ {
+        self.records.iter().copied()
+    }
+
+    pub(crate) fn restore(&mut self, location: GenerationLocation) -> Result<()> {
+        let blob_end = location
+            .record_start
+            .checked_add(u64::from(location.blob_padded_len))
+            .ok_or_else(|| KvError::Worker("persisted Blob generation offset overflowed".into()))?;
+        let record_end = location
+            .record_start
+            .checked_add(location.record_len)
+            .ok_or_else(|| KvError::Worker("persisted generation offset overflowed".into()))?;
+        if location.record_len != u64::from(location.blob_padded_len) + self.segment_size
+            || location.blob_logical_len > location.blob_padded_len
+            || !u64::from(location.blob_padded_len).is_multiple_of(BUCKET_BYTES as u64)
+            || record_end > self.capacity
+            || location.sg_base != blob_end
+        {
+            return Err(KvError::Worker(
+                "persisted generation metadata does not match the configured geometry".into(),
+            ));
+        }
+        if let Some(previous) = self.records.back()
+            && previous
+                .record_start
+                .checked_add(previous.record_len)
+                .is_none()
+        {
+            return Err(KvError::Worker(
+                "persisted generation metadata contains an invalid predecessor".into(),
+            ));
+        }
+        self.tail = if record_end == self.capacity {
+            0
+        } else {
+            record_end
+        };
+        self.records.push_back(location);
+        Ok(())
+    }
+
     pub(crate) fn can_reserve(&self, blob_logical_len: usize) -> Result<bool> {
         let (_, _, record_len) = self.record_lengths(blob_logical_len)?;
         Ok(self.next_record_start(record_len).is_some())
