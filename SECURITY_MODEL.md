@@ -250,14 +250,17 @@ failure or trigger key probing.
 
 ## Compression and side channels
 
-Compression can leak information only in a specific application composition:
+Compression can leak information only in a specific client-application
+composition. Here, “client application” means the user's program that calls
+the OpenKache client library, such as a backend service. It does not mean the
+OpenKache server or the client library itself:
 
-1. an attacker can submit chosen data through an application endpoint, such as
-   an HTTP or RPC request;
-2. the application compresses that input together with secret data in one
-   payload; and
-3. the attacker, or an observer cooperating with them, can compare the
-   resulting ciphertext lengths across repeated requests.
+1. an untrusted caller can submit chosen fields to that client application
+   through its HTTP or RPC endpoint;
+2. the OpenKache client compresses those fields together with secret data in
+   one payload; and
+3. the caller, or an observer cooperating with them, can compare the resulting
+   ciphertext lengths across repeated requests.
 
 This does not give the attacker OpenKache credentials, client secrets, or
 another client's TCP or QUIC connection. Reusing one connection for multiple
