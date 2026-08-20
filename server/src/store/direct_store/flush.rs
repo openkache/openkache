@@ -13,7 +13,7 @@ use super::{
     FlushCompletion, GenerationLocation, GenerationReservation, Kvkache, LargeValueLocation,
     MutableGeneration, MutableSegment, PreparedFlush, RamBacking, SegmentFlushReason, StoredValue,
     decode_stored_value, encode_blob_ref, encode_large_value_ref, rewrite_segment_values,
-    storage_operation_error, write_all_direct,
+    storage_operation_error, sync_data, write_all_direct,
 };
 
 fn direct_buffer_from_bytes(bytes: &[u8]) -> Result<Option<DirectIoBuffer>> {
@@ -88,6 +88,16 @@ async fn write_generation(
     let _blob_buffer = blob_result?;
     let _segment_buffer = segment_result?;
     let _large_value_buffer = large_value_result?;
+    let (data_sync, large_values_sync) = futures_util::join!(
+        sync_data(&data, config.write_max_time_us, "generation data sync"),
+        sync_data(
+            &large_values,
+            config.write_max_time_us,
+            "generation large-value sync",
+        ),
+    );
+    data_sync?;
+    large_values_sync?;
     Ok(blob_physical_len as u64 + config.segment_size as u64 + large_value_physical_len as u64)
 }
 
