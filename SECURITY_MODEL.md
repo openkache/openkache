@@ -2,9 +2,10 @@
 
 > **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 >
-> This document defines the security model for client-owned item identities and
-> protected values. It is intentionally the first place to look for what
-> OpenKache protects and what it does not claim to protect.
+> This document answers a practical question: what can OpenKache protect, and
+> what remains visible or outside its security boundary? It starts with
+> user-visible goals, then defines the assumptions and technical rules needed
+> to provide them.
 
 The [Client Key Format](clients/KEY_FORMAT.md) and
 [Client Value Format](clients/VALUE_FORMAT.md) define the bytes on the wire.
@@ -12,6 +13,15 @@ The [Wire Protocol](protocol/SPEC.md) defines
 transport security and server operations. This document defines the security
 goals, threat model, key assumptions, value-protection profiles, and
 cryptographic details that connect those formats.
+
+## At a glance
+
+**Zero-trust server, end-to-end encrypted values.** For protected values,
+encryption happens in the client before data reaches OpenKache and decryption
+happens in a client after data leaves the server. The server stores and returns
+ciphertext and does not receive the value keys. TLS protects the connection;
+the client-side encryption keeps the value plaintext outside the server's
+trust boundary.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -21,24 +31,44 @@ uppercase.
 
 ## Security goals
 
-For configurations that enable the relevant protection, OpenKache aims to
-provide:
+For protected values, OpenKache aims to provide:
 
-- **Application-key privacy:** a private key mapping does not expose the
-  application's key through the server-visible item identity.
-- **Value confidentiality:** protected value contents remain private.
-- **Value integrity:** tampering with a protected value is detected and
-  rejected.
-- **Safe key changes:** changing protection keys does not make existing values
-  ambiguous.
+- **End-to-end encrypted cache values:** values remain unreadable to the
+  cache service because they are encrypted before leaving the client and
+  decrypted only by a client with the corresponding secret.
+- **Private application cache keys:** the names your application uses for
+  cached data can remain private when that option is enabled.
+- **Tamper detection:** a client detects when protected data was changed,
+  corrupted, or returned for a different cache entry.
+- **Safe key rotation:** changing protection secrets does not make existing
+  values ambiguous.
 
-The threat model and non-goals below define when these properties apply. The
-remaining sections define the mechanisms used to provide them.
+The non-goals, threat model, and key assumptions below define when these
+properties apply. The remaining sections define the mechanisms used to provide
+them.
+
+## Non-goals and observable information
+
+These profiles do not provide:
+
+- freshness, anti-replay, or rollback detection;
+- protection against deletion, withholding, or denial of service;
+- integrity of server-side TTL, eviction, ordering, or mutation semantics;
+- confidentiality of namespace IDs, Item IDs, value-key IDs, envelope lengths,
+  compression choices, or access patterns;
+- protection after the client host or keyring has been compromised; or
+- confidentiality or integrity for an `Unprotected` value.
+
+The server may therefore retain an older valid envelope, return it later, or
+refuse to return a value. A successful authentication proves that the
+envelope is valid for its authenticated context; it does not prove that the
+envelope is the newest value.
 
 ## Threat model
 
-The following attacker categories are separate. A deployment MAY need to
-consider more than one category at the same time.
+This model considers every attacker category below. They may act independently
+or together. The positive guarantees apply while the client trust boundary
+remains uncompromised; client compromise is an explicit failure boundary.
 
 ### Server operator or storage attacker
 
@@ -50,11 +80,11 @@ logs, and response path. They may:
 - move an envelope to another namespace or Item ID; and
 - observe request timing, result timing, lengths, and access patterns.
 
-This category includes a malicious server operator. It assumes that the
-attacker does not control the client host, client process, or client keyring.
-Transport TLS does not protect against the legitimate server endpoint; the
-client-side value protection profile is what protects a protected payload from
-this category.
+For the server and storage guarantees, this attacker does not control the
+client host, client process, or client keyring. If that boundary is also
+compromised, the [Client compromise](#client-compromise) limitation applies.
+Transport TLS does not protect against the legitimate server endpoint;
+client-side value protection protects a protected payload from this category.
 
 ### Network attacker
 
@@ -93,23 +123,6 @@ means that the configuration intentionally does not provide that property;
 claim application-key privacy. A protected value still has value
 confidentiality and integrity when either address mode is used, provided the
 value-key assumptions hold.
-
-## Non-goals and observable information
-
-These profiles do not provide:
-
-- freshness, anti-replay, or rollback detection;
-- protection against deletion, withholding, or denial of service;
-- integrity of server-side TTL, eviction, ordering, or mutation semantics;
-- confidentiality of namespace IDs, Item IDs, value-key IDs, envelope lengths,
-  compression choices, or access patterns;
-- protection after the client host or keyring has been compromised; or
-- confidentiality or integrity for an `Unprotected` value.
-
-The server may therefore retain an older valid envelope, return it later, or
-refuse to return a value. A successful authentication proves that the
-envelope is valid for its authenticated context; it does not prove that the
-envelope is the newest value.
 
 ## Trust and key assumptions
 
