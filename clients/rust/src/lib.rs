@@ -27,7 +27,7 @@ pub use openkache_client_core::{
     ItemValue, KeyError, KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
     NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
     PrivateKey, Result, RetryPolicy, RequestBudget, ServerErrorCode, ServerTrust, SetCondition,
-    SetOptions, SetOutcome, TypedKey, ValueKeyring,
+    SetOptions, SetOutcome, TypedInteger, TypedKey, ValueKeyring,
     canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
