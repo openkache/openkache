@@ -14,6 +14,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use openkache_value::{Value as StructuredValue, decode, encode};
+
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::FfiOperationField;
@@ -166,6 +168,7 @@ enum Command {
         operation: FfiOperation,
         application_key: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
         raw: bool,
         request: Arc<FfiRequestControl>,
@@ -276,8 +279,23 @@ impl FfiResult {
         payload: Vec<u8>,
         payload_permits: Vec<BytePermit>,
     ) -> Self {
+        let status = match kind {
+            FfiResultKind::NotFound => FfiStatusCategory::NotFound,
+            FfiResultKind::Created
+            | FfiResultKind::Replaced
+            | FfiResultKind::Deleted
+            | FfiResultKind::NotDeleted
+            | FfiResultKind::NotStored => FfiStatusCategory::Mutation,
+            FfiResultKind::Canceled => FfiStatusCategory::Canceled,
+            FfiResultKind::UnknownMutation => FfiStatusCategory::UnknownMutation,
+            FfiResultKind::ResourceExhausted => FfiStatusCategory::ResourceExhausted,
+            FfiResultKind::Error => FfiStatusCategory::Error,
+            _ => FfiStatusCategory::Success,
+        };
         Self {
             kind,
+            status,
+            error_category: FfiErrorCategory::None,
             payload,
             _payload_permits: payload_permits,
             client: None,
@@ -476,6 +494,7 @@ impl FfiClient {
         operation: FfiOperation,
         application_key: Vec<u8>,
         value: Vec<u8>,
+        input_permit: BytePermit,
         set_options: SetOptions,
         raw: bool,
     ) -> FfiRequest {
@@ -511,6 +530,7 @@ impl FfiClient {
             operation,
             application_key,
             value,
+            input_permit,
             set_options,
             raw,
             request: control,
@@ -1011,6 +1031,7 @@ fn run_worker(
                 operation,
                 application_key,
                 value,
+                input_permit,
                 set_options,
                 raw,
                 request,
@@ -1031,6 +1052,7 @@ fn run_worker(
                         operation,
                         application_key,
                         value,
+                        input_permit,
                         set_options,
                         raw,
                     )
@@ -1174,6 +1196,17 @@ fn structured_get_result(
     match outcome {
         GetOutcome::NotFound => Ok(not_found_result()),
         GetOutcome::Found(payload) => Ok(FfiResult::success(FfiResultKind::Value, payload)),
+    }
+}
+
+fn structured_result(
+    outcome: GetOutcome<StructuredValue>,
+) -> std::result::Result<FfiResult, crate::Error> {
+    match outcome {
+        GetOutcome::Found(value) => encode(&value)
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
+            .map_err(|error| crate::value::Error::Structured(error).into()),
+        GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
@@ -2682,15 +2715,26 @@ fn typed_execute_entry(
                 .as_ref()
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
-        let key = ffi_key_bytes(
-            key_spec,
-            copy_bytes(application_key, application_key_length, "application_key")?,
-            false,
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        validate_input_lengths(operation, false, application_key_length, value_length)?;
+        let (key_input, value, input_permit) = copy_input_bytes(
+            application_key,
+            application_key_length,
+            value,
+            value_length,
+            &client.request_budget(),
         )?;
-        let value = copy_bytes(value, value_length, "value")?;
-        let (operation, key, value, set_options) =
-            validated_execute(operation, key, value, false, legacy_options, complete_flags)?;
-        Ok(client.execute(operation, key, value, set_options, false))
+        let key = ffi_key_bytes(key_spec, key_input, false)?;
+        let (operation, key, value, set_options) = validated_execute(
+            operation.code(),
+            key,
+            value,
+            false,
+            legacy_options,
+            complete_flags,
+        )?;
+        Ok(client.execute(operation, key, value, input_permit, set_options, false))
     }))
 }
 
@@ -2713,15 +2757,33 @@ fn typed_async_entry(
                 .as_ref()
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
-        let key = ffi_key_bytes(
-            key_spec,
-            copy_bytes(application_key, application_key_length, "application_key")?,
-            raw,
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        validate_input_lengths(operation, raw, application_key_length, value_length)?;
+        let (key_input, value, input_permit) = copy_input_bytes(
+            application_key,
+            application_key_length,
+            value,
+            value_length,
+            &client.request_budget(),
         )?;
-        let value = copy_bytes(value, value_length, "value")?;
-        let (operation, key, value, set_options) =
-            validated_execute(operation, key, value, raw, legacy_options, complete_flags)?;
-        Ok::<FfiRequest, String>(client.execute_async(operation, key, value, set_options, raw))
+        let key = ffi_key_bytes(key_spec, key_input, raw)?;
+        let (operation, key, value, set_options) = validated_execute(
+            operation.code(),
+            key,
+            value,
+            raw,
+            legacy_options,
+            complete_flags,
+        )?;
+        Ok::<FfiRequest, String>(client.execute_async(
+            operation,
+            key,
+            value,
+            input_permit,
+            set_options,
+            raw,
+        ))
     }));
     match request {
         Ok(Ok(request)) => Box::into_raw(Box::new(request)),
