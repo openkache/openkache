@@ -5,7 +5,9 @@
 //! one bounded, definite-length CBOR payload profile.
 
 use std::cmp::Ordering;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 /// Maximum payload size used by the default codec limits.
@@ -676,16 +678,13 @@ pub fn encode_with_limits(value: &Value, limits: Limits) -> Result<Vec<u8>> {
                 if depth >= limits.max_depth {
                     return Err(resource(Resource::Depth, limits.max_depth, depth + 1));
                 }
+                let task_count = entries
+                    .len()
+                    .checked_mul(2)
+                    .ok_or_else(|| resource(Resource::Items, limits.max_items, usize::MAX))?;
+                validate_count(task_count, limits.max_items)?;
                 validate_map_entries(entries)?;
                 append_head(5, entries.len(), &mut output, limits)?;
-                validate_count(
-                    entries
-                        .len()
-                        .checked_mul(2)
-                        .ok_or_else(|| resource(Resource::Items, limits.max_items, usize::MAX))?,
-                    limits.max_items,
-                )?;
-                let task_count = entries.len().saturating_mul(2);
                 tasks
                     .try_reserve(task_count)
                     .map_err(|_| Error::Allocation {
@@ -761,6 +760,7 @@ pub fn decode_with_limits(bytes: &[u8], limits: Limits) -> Result<Value> {
                             })?,
                             entries: Vec::new(),
                             pending_key: None,
+                            key_index: ScalarKeyIndex::new(),
                         },
                         &mut frames,
                         limits,
@@ -784,8 +784,8 @@ pub fn from_cbor(bytes: &[u8]) -> Result<Value> {
 /// Re-exports the codec under a profile-oriented module name.
 pub mod cbor {
     pub use super::{
-        Error, ErrorKind, Limits, Resource, Result, decode, decode_with_limits, encode,
-        encode_with_limits, from_cbor, to_cbor,
+        decode, decode_with_limits, encode, encode_with_limits, from_cbor, to_cbor, Error,
+        ErrorKind, Limits, Resource, Result,
     };
 }
 
@@ -894,17 +894,110 @@ fn encode_integer(integer: &Integer, output: &mut Vec<u8>, limits: Limits) -> Re
 }
 
 fn validate_map_entries(entries: &[(Value, Value)]) -> Result<()> {
+    let mut key_index = ScalarKeyIndex::with_capacity(entries.len())?;
     for (index, (key, _)) in entries.iter().enumerate() {
         if !key.is_scalar_key() {
             return Err(Error::NonScalarKey { index });
         }
-        for (_, (other, _)) in entries[..index].iter().enumerate() {
-            if scalar_equal(key, other) {
-                return Err(Error::DuplicateKey { index });
-            }
+        if key_index.contains(entries, key) {
+            return Err(Error::DuplicateKey { index });
         }
+        key_index.insert(key, index)?;
     }
     Ok(())
+}
+
+struct ScalarKeyIndex {
+    buckets: HashMap<u64, Vec<usize>>,
+}
+
+impl ScalarKeyIndex {
+    fn new() -> Self {
+        Self {
+            buckets: HashMap::new(),
+        }
+    }
+
+    fn with_capacity(capacity: usize) -> Result<Self> {
+        let mut index = Self::new();
+        index.reserve(capacity)?;
+        Ok(index)
+    }
+
+    fn reserve(&mut self, additional: usize) -> Result<()> {
+        self.buckets
+            .try_reserve(additional)
+            .map_err(|_| Error::Allocation { size: additional })
+    }
+
+    fn contains(&self, entries: &[(Value, Value)], key: &Value) -> bool {
+        let hash = scalar_key_hash(key);
+        self.buckets.get(&hash).is_some_and(|bucket| {
+            bucket
+                .iter()
+                .any(|&index| scalar_equal(key, &entries[index].0))
+        })
+    }
+
+    fn insert(&mut self, key: &Value, index: usize) -> Result<()> {
+        let hash = scalar_key_hash(key);
+        if let Some(bucket) = self.buckets.get_mut(&hash) {
+            bucket
+                .try_reserve(1)
+                .map_err(|_| Error::Allocation { size: 1 })?;
+            bucket.push(index);
+            return Ok(());
+        }
+
+        self.buckets
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        let mut bucket = Vec::new();
+        bucket
+            .try_reserve_exact(1)
+            .map_err(|_| Error::Allocation { size: 1 })?;
+        bucket.push(index);
+        self.buckets.insert(hash, bucket);
+        Ok(())
+    }
+}
+
+fn scalar_key_hash(value: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match value {
+        Value::Undefined => 0u8.hash(&mut hasher),
+        Value::Null => 1u8.hash(&mut hasher),
+        Value::Boolean(value) => {
+            2u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        Value::Integer(value) => {
+            3u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        Value::Float16(value) => {
+            4u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        Value::Float32(value) => {
+            5u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        Value::Float64(value) => {
+            6u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        Value::TextString(value) => {
+            7u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        Value::Bytes(value) => {
+            8u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        Value::Array(_) | Value::Map(_) => unreachable!("only scalar keys are hashed"),
+    }
+    hasher.finish()
 }
 
 fn scalar_equal(left: &Value, right: &Value) -> bool {
@@ -977,6 +1070,7 @@ enum Frame {
         remaining: usize,
         entries: Vec<(Value, Value)>,
         pending_key: Option<Value>,
+        key_index: ScalarKeyIndex,
     },
 }
 
@@ -999,7 +1093,10 @@ fn begin_frame(mut frame: Frame, frames: &mut Vec<Frame>, limits: Limits) -> Res
                 .map_err(|_| Error::Allocation { size: *remaining })?;
         }
         Frame::Map {
-            remaining, entries, ..
+            remaining,
+            entries,
+            key_index,
+            ..
         } => {
             validate_count(*remaining, limits.max_items)?;
             entries
@@ -1007,6 +1104,7 @@ fn begin_frame(mut frame: Frame, frames: &mut Vec<Frame>, limits: Limits) -> Res
                 .map_err(|_| Error::Allocation {
                     size: *remaining / 2,
                 })?;
+            key_index.reserve(*remaining / 2)?;
         }
     }
     frames.push(frame);
@@ -1028,15 +1126,17 @@ fn accept_value(mut value: Value, frames: &mut Vec<Frame>, root: &mut Option<Val
                 remaining,
                 entries,
                 pending_key,
+                key_index,
             } => {
                 if pending_key.is_none() {
                     let index = entries.len();
                     if !value.is_scalar_key() {
                         return Err(Error::NonScalarKey { index });
                     }
-                    if entries.iter().any(|(key, _)| scalar_equal(&value, key)) {
+                    if key_index.contains(entries, &value) {
                         return Err(Error::DuplicateKey { index });
                     }
+                    key_index.insert(&value, index)?;
                     *pending_key = Some(value);
                 } else {
                     let key = pending_key.take().expect("map key was checked above");
@@ -1162,7 +1262,7 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
                 });
             }
             let model_magnitude = if tag == 3 {
-                add_one_be(magnitude)
+                add_one_be(magnitude, limits.max_integer_bytes)?
             } else {
                 magnitude.to_vec()
             };
@@ -1208,8 +1308,25 @@ fn parse_item(bytes: &[u8], cursor: &mut usize, limits: Limits) -> Result<Parsed
     }
 }
 
-fn add_one_be(bytes: &[u8]) -> Vec<u8> {
-    let mut result = bytes.to_vec();
+fn add_one_be(bytes: &[u8], maximum: usize) -> Result<Vec<u8>> {
+    let result_length = if bytes.iter().all(|byte| *byte == u8::MAX) {
+        bytes
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| resource(Resource::IntegerBytes, maximum, usize::MAX))?
+    } else {
+        bytes.len()
+    };
+    if result_length > maximum {
+        return Err(resource(Resource::IntegerBytes, maximum, result_length));
+    }
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(result_length)
+        .map_err(|_| Error::Allocation {
+            size: result_length,
+        })?;
+    result.extend_from_slice(bytes);
     let mut carry = 1u16;
     for byte in result.iter_mut().rev() {
         let value = u16::from(*byte) + carry;
@@ -1217,9 +1334,10 @@ fn add_one_be(bytes: &[u8]) -> Vec<u8> {
         carry = value >> 8;
     }
     if carry != 0 {
+        debug_assert_eq!(result_length, bytes.len() + 1);
         result.insert(0, carry as u8);
     }
-    result
+    Ok(result)
 }
 
 fn read_head(bytes: &[u8], cursor: &mut usize) -> Result<(u8, u8)> {
