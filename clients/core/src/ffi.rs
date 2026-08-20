@@ -1078,7 +1078,7 @@ async fn execute_protected(
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.sync().await.map(|()| ok_result()),
+        FfiOperation::Sync => client.sync().await.map(|()| raw_result()),
         FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
@@ -1121,7 +1121,7 @@ async fn execute_raw(
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
+        FfiOperation::Sync => client.raw().sync().await.map(|()| raw_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
         FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
             "operation",
@@ -1176,7 +1176,7 @@ async fn execute_scoped(
             .raw()
             .sync_in_namespace(namespace_id)
             .await
-            .map(|()| ok_result()),
+            .map(|()| raw_result()),
         _ => Err(crate::Error::configuration(
             "operation",
             "unsupported namespace-scoped operation from the generated Smithy contract",
@@ -1281,6 +1281,10 @@ fn connection_state_value(state: ConnectionState) -> u32 {
 
 fn ok_result() -> FfiResult {
     FfiResult::success(FfiResultKind::Ok, Vec::new())
+}
+
+fn raw_result() -> FfiResult {
+    FfiResult::success(FfiResultKind::Raw, Vec::new())
 }
 
 fn not_found_result() -> FfiResult {
