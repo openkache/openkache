@@ -1026,7 +1026,7 @@ export function render_c_contract(contract: Client_Contract): string {
   const descriptor_offset_asserts = descriptor_fields
     .map(
       (field) =>
-        `_Static_assert(offsetof(openkache_smithy_namespace_descriptor_t, ${field.name}) ==\n                   OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET,\n               "Smithy namespace descriptor ${field.name} offset changed");`,
+        `OPENKACHE_SMITHY_STATIC_ASSERT(offsetof(openkache_smithy_namespace_descriptor_t, ${field.name}) ==\n                   OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET,\n               "Smithy namespace descriptor ${field.name} offset changed");`,
     )
     .join("\n")
   return `/* Generated from the OpenKache Smithy contract. Do not edit. */
@@ -1064,10 +1064,17 @@ ${native_functions}
 /* Function-pointer types used by dynamic language loaders. */
 ${native_function_typedefs}
 
-_Static_assert(sizeof(openkache_smithy_namespace_descriptor_t) ==
+#ifdef __cplusplus
+#define OPENKACHE_SMITHY_STATIC_ASSERT static_assert
+#else
+#define OPENKACHE_SMITHY_STATIC_ASSERT _Static_assert
+#endif
+
+OPENKACHE_SMITHY_STATIC_ASSERT(sizeof(openkache_smithy_namespace_descriptor_t) ==
                    OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
                "Smithy namespace descriptor size changed");
 ${descriptor_offset_asserts}
+#undef OPENKACHE_SMITHY_STATIC_ASSERT
 
 #define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u

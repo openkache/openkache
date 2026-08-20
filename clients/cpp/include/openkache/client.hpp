@@ -177,6 +177,12 @@ public:
 
     /// Connects with the supplied certificate, protection key, and deadlines.
     static Client connect(const Connect_Options& options) {
+        const auto native_abi_version = openkache_client_abi_version();
+        if (native_abi_version != OPENKACHE_CLIENT_ABI_VERSION) {
+            throw Error(
+                "unsupported OpenKache client ABI version "
+                + std::to_string(native_abi_version));
+        }
         const auto* certificate = options.certificate.empty()
             ? nullptr
             : options.certificate.data();
