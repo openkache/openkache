@@ -96,12 +96,42 @@ impl LargeValueLog {
             .record_start
             .checked_add(u64::from(location.padded_len))
             .ok_or_else(|| KvError::Worker("persisted large-value offset overflowed".into()))?;
-        if location.logical_len > location.padded_len
+        if location.logical_len == 0
+            || location.padded_len == 0
+            || !location.record_start.is_multiple_of(BUCKET_BYTES as u64)
+            || location.logical_len > location.padded_len
             || !u64::from(location.padded_len).is_multiple_of(BUCKET_BYTES as u64)
             || end > self.capacity
         {
             return Err(KvError::Worker(
                 "persisted large-value metadata does not match the configured geometry".into(),
+            ));
+        }
+        if !self.records.is_empty()
+            && self.next_record_start(u64::from(location.padded_len)) != Some(location.record_start)
+        {
+            return Err(KvError::Worker(
+                "persisted large-value metadata is not in circular allocation order".into(),
+            ));
+        }
+        if self
+            .records
+            .iter()
+            .any(|previous| previous.logical_sg_id == location.logical_sg_id)
+        {
+            return Err(KvError::Worker(
+                "persisted large-value metadata repeats a logical SG".into(),
+            ));
+        }
+        if self.records.iter().any(|previous| {
+            let previous_end = previous
+                .record_start
+                .checked_add(u64::from(previous.padded_len))
+                .unwrap_or(self.capacity);
+            location.record_start < previous_end && previous.record_start < end
+        }) {
+            return Err(KvError::Worker(
+                "persisted large-value metadata contains overlapping records".into(),
             ));
         }
         self.tail = if end == self.capacity { 0 } else { end };

@@ -7,6 +7,7 @@ pub(crate) fn encode_blob_handle(handle: BlobHandle) -> Vec<u8> {
     encode_blob_ref(BlobRef {
         value_offset: handle.slot,
         value_len: handle.value_len,
+        value_checksum: handle.value_checksum,
     })
 }
 
@@ -14,6 +15,7 @@ pub(crate) fn encode_large_value_handle(handle: BlobHandle) -> Vec<u8> {
     encode_large_value_ref(BlobRef {
         value_offset: handle.slot,
         value_len: handle.value_len,
+        value_checksum: handle.value_checksum,
     })
 }
 
@@ -21,6 +23,7 @@ pub(crate) fn encode_large_value_handle(handle: BlobHandle) -> Vec<u8> {
 pub(crate) struct BlobHandle {
     pub(crate) slot: u32,
     pub(crate) value_len: u32,
+    pub(crate) value_checksum: u32,
 }
 
 #[derive(Debug)]
@@ -37,7 +40,14 @@ impl PackedBlob {
             .copied()
             .flatten()
             .ok_or_else(|| KvError::Worker("mutable Blob handle is no longer live".into()))?;
-        BlobRef::new(offset as usize, handle.value_len as usize)
+        let end = (offset as usize)
+            .checked_add(handle.value_len as usize)
+            .ok_or_else(|| KvError::Worker("packed Blob range overflowed".into()))?;
+        BlobRef::with_checksum(
+            offset as usize,
+            handle.value_len as usize,
+            crc32fast::hash(&self.bytes[offset as usize..end]),
+        )
     }
 }
 
@@ -83,7 +93,11 @@ impl BlobArena {
             slot
         };
         self.live_bytes = live_bytes;
-        Ok(BlobHandle { slot, value_len })
+        Ok(BlobHandle {
+            slot,
+            value_len,
+            value_checksum: crc32fast::hash(value.as_ref()),
+        })
     }
 
     pub(crate) fn replace(
@@ -118,6 +132,7 @@ impl BlobArena {
         Ok(BlobHandle {
             slot: previous.slot,
             value_len,
+            value_checksum: crc32fast::hash(value.as_ref()),
         })
     }
 
@@ -154,7 +169,10 @@ impl BlobArena {
         self.payload_slots
             .get(handle.slot as usize)?
             .as_ref()
-            .filter(|value| value.len() == handle.value_len as usize)
+            .filter(|value| {
+                value.len() == handle.value_len as usize
+                    && crc32fast::hash(value.as_slice()) == handle.value_checksum
+            })
             .map(RetainedItemValue::to_stored_value)
     }
 

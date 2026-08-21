@@ -11,8 +11,8 @@ use super::keyed::PendingKeyedMutation;
 use super::policy::{item_state_is_live_at, unix_time_ms};
 use super::{
     BucketHashSequence, DirectIoBuffer, EvictableLocation, EvictionExtent, EvictionWork,
-    GenerationLocation, Kvkache, TableLocation, find_item_in_bucket, items, read_exact_direct,
-    storage_operation_error,
+    GenerationLocation, Kvkache, SEGMENT_FILE_HEADER_BYTES, TableLocation, find_item_in_bucket,
+    items, read_exact_direct, storage_operation_error, validate_bucket,
 };
 
 fn schedule_eviction_read(data: &File, config: &Config, eviction: &mut EvictionWork) {
@@ -27,7 +27,7 @@ fn schedule_eviction_read(data: &File, config: &Config, eviction: &mut EvictionW
     let len = EXTENT_BYTES.min(config.segment_size - offset);
     eviction.next_read_offset += len;
     let file = data.clone();
-    let file_offset = eviction.victim.sg_base + offset as u64;
+    let file_offset = SEGMENT_FILE_HEADER_BYTES + eviction.victim.sg_base + offset as u64;
     let read_max_time_us = config.read_max_time_us.max(config.write_max_time_us);
     eviction.read = Some(
         async move {
@@ -212,6 +212,7 @@ impl Kvkache {
         let bucket_offset = extent.next_bucket * BUCKET_BYTES;
         let bucket_index = (extent.offset + bucket_offset) / BUCKET_BYTES;
         let bucket = &extent.buffer[bucket_offset..bucket_offset + BUCKET_BYTES];
+        validate_bucket(bucket)?;
         for item in items(bucket) {
             if find_item_in_bucket(bucket, &item.storage_key).as_ref() != Some(&item) {
                 continue;

@@ -3,8 +3,12 @@
 use crate::*;
 
 pub(crate) const BLOB_ITEM_THRESHOLD_BYTES: usize = 2 * 1024;
-pub(crate) const BLOB_REF_BYTES: usize = 8;
-pub(crate) const LARGE_VALUE_REF_BYTES: usize = 8;
+/// Offset, exact length, and CRC-32 of one external payload.
+///
+/// The checksum is part of the persisted reference rather than an in-memory
+/// side index, so every read can validate the bytes it returns.
+pub(crate) const BLOB_REF_BYTES: usize = 12;
+pub(crate) const LARGE_VALUE_REF_BYTES: usize = 12;
 pub(crate) const STORED_VALUE_TAG_BYTES: usize = 1;
 pub(crate) const STORED_BLOB_REF_BYTES: usize = STORED_VALUE_TAG_BYTES + BLOB_REF_BYTES;
 pub(crate) const STORED_LARGE_VALUE_REF_BYTES: usize =
@@ -18,6 +22,7 @@ const LARGE_VALUE_TAG: u8 = 2;
 pub(crate) struct BlobRef {
     pub(crate) value_offset: u32,
     pub(crate) value_len: u32,
+    pub(crate) value_checksum: u32,
 }
 
 impl BlobRef {
@@ -27,20 +32,33 @@ impl BlobRef {
                 .map_err(|_| KvError::Usage("Blob value offset does not fit in u32".into()))?,
             value_len: u32::try_from(value_len)
                 .map_err(|_| KvError::Usage("Blob value length does not fit in u32".into()))?,
+            value_checksum: 0,
         })
+    }
+
+    pub(crate) fn with_checksum(
+        value_offset: usize,
+        value_len: usize,
+        value_checksum: u32,
+    ) -> Result<Self> {
+        let mut value = Self::new(value_offset, value_len)?;
+        value.value_checksum = value_checksum;
+        Ok(value)
     }
 
     fn encode(self) -> [u8; BLOB_REF_BYTES] {
         let mut bytes = [0; BLOB_REF_BYTES];
         bytes[..4].copy_from_slice(&self.value_offset.to_le_bytes());
-        bytes[4..].copy_from_slice(&self.value_len.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.value_len.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.value_checksum.to_le_bytes());
         bytes
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
         (bytes.len() == BLOB_REF_BYTES).then(|| Self {
             value_offset: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
-            value_len: u32::from_le_bytes(bytes[4..].try_into().unwrap()),
+            value_len: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            value_checksum: u32::from_le_bytes(bytes[8..].try_into().unwrap()),
         })
     }
 }

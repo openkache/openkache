@@ -6,8 +6,9 @@ use crate::{BUCKET_BYTES, KvError, Result, StorageKey};
 use super::value_reads::{read_arena_value, read_owned_extent};
 use super::{
     BlobHandle, BlobRef, GenerationLocation, Item, Kvkache, LargeValueLocation, LocatedItem,
-    ReadBacking, StoredValue, TableLocation, bucket_hash, decode_stored_value, find_item_in_bucket,
-    read_exact_direct, remove_stored_value_tag,
+    ReadBacking, SEGMENT_FILE_HEADER_BYTES, StoredValue, TableLocation, bucket_hash,
+    decode_stored_value, find_item_in_bucket, read_exact_direct, remove_stored_value_tag,
+    validate_bucket,
 };
 
 impl Kvkache {
@@ -65,6 +66,7 @@ impl Kvkache {
                     return Ok(None);
                 };
                 let start = bucket_index * BUCKET_BYTES;
+                validate_bucket(&generation.segment.bytes[start..start + BUCKET_BYTES])?;
                 Ok(find_item_in_bucket(
                     &generation.segment.bytes[start..start + BUCKET_BYTES],
                     storage_key,
@@ -72,6 +74,7 @@ impl Kvkache {
             }
             ReadBacking::Ram { backing, .. } => {
                 let start = bucket_index * BUCKET_BYTES;
+                validate_bucket(&backing.segment[start..start + BUCKET_BYTES])?;
                 Ok(find_item_in_bucket(
                     &backing.segment[start..start + BUCKET_BYTES],
                     storage_key,
@@ -81,7 +84,9 @@ impl Kvkache {
                 let bytes = read_exact_direct(
                     &self.data,
                     self.io.bucket_read_pool.take_bucket().await,
-                    backing.location.sg_base + (bucket_index * BUCKET_BYTES) as u64,
+                    SEGMENT_FILE_HEADER_BYTES
+                        + backing.location.sg_base
+                        + (bucket_index * BUCKET_BYTES) as u64,
                     BUCKET_BYTES,
                     self.config.read_max_time_us,
                     "generation Bucket read",
@@ -90,6 +95,7 @@ impl Kvkache {
                 self.io
                     .data_read
                     .set(self.io.data_read.get() + BUCKET_BYTES as u64);
+                validate_bucket(&bytes)?;
                 let item = find_item_in_bucket(&bytes, storage_key);
                 Ok(item)
             }
@@ -113,6 +119,7 @@ impl Kvkache {
                         generation.blob_arena.get_value(BlobHandle {
                             slot: blob_ref.value_offset,
                             value_len: blob_ref.value_len,
+                            value_checksum: blob_ref.value_checksum,
                         })
                     })
                     .ok_or_else(|| KvError::Worker("mutable Blob handle is invalid".into())),
@@ -122,6 +129,7 @@ impl Kvkache {
                         generation.large_value_arena.get_value(BlobHandle {
                             slot: value_ref.value_offset,
                             value_len: value_ref.value_len,
+                            value_checksum: value_ref.value_checksum,
                         })
                     })
                     .ok_or_else(|| KvError::Worker("mutable large-value handle is invalid".into())),
@@ -154,7 +162,7 @@ impl Kvkache {
     async fn read_blob(&self, location: &GenerationLocation, blob_ref: BlobRef) -> Result<Vec<u8>> {
         read_owned_extent(
             &self.data,
-            location.record_start,
+            SEGMENT_FILE_HEADER_BYTES + location.record_start,
             location.blob_logical_len,
             blob_ref,
             self.config.read_max_time_us,
