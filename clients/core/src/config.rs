@@ -40,7 +40,7 @@ impl Endpoint {
     /// # Arguments
     ///
     /// * `host` - DNS hostname or IP address without a port.
-    /// * `port` - Server UDP port.
+    /// * `port` - Server transport port.
     ///
     /// # Returns
     ///
@@ -74,7 +74,7 @@ impl Endpoint {
     ///
     /// # Arguments
     ///
-    /// * `address` - Resolved UDP destination.
+    /// * `address` - Resolved transport destination.
     /// * `server_name` - DNS name or IP address expected in the server certificate.
     ///
     /// # Returns
@@ -429,6 +429,11 @@ pub enum ServerTrust {
     System,
     /// Trust only the supplied certificates, including an explicitly trusted self-signed leaf.
     Custom(Vec<Certificate>),
+    /// Encrypt the connection without authenticating the server certificate or identity.
+    ///
+    /// This is an explicit insecure opt-out intended for local development and
+    /// controlled test environments. It must never be selected implicitly.
+    Insecure,
 }
 
 /// ALPN identifier offered during QUIC/TLS negotiation.

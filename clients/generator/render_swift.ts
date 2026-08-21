@@ -152,6 +152,7 @@ ${assignments}
   const swift_native_constants = [
     ["operation", ffi.operations],
     ["result", ffi.result_kinds],
+    ["transport", ffi.transports],
     ["setCondition", ffi.set_conditions],
     ["namespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
     ["namespaceDefaultExpiration", ffi.namespace_default_expirations],

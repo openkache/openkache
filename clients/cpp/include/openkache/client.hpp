@@ -13,6 +13,10 @@
 
 #include <openkache/client.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace openkache {
 
 using Byte = std::uint8_t;
@@ -24,6 +28,37 @@ public:
     explicit Error(const std::string& message)
         : std::runtime_error(message) {}
 };
+
+// The transport selector was added as an optional ABI symbol. Resolve it at
+// runtime so the compatibility-default path still links against older native
+// libraries that predate TLS-over-TCP.
+#if !defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))
+extern "C" openkache_client_result_t* openkache_client_connect_transport(
+    const openkache_client_connect_options_t*,
+    std::uint32_t) __attribute__((weak));
+#endif
+
+using Connect_Transport_Function = openkache_client_result_t* (*)(
+    const openkache_client_connect_options_t*,
+    std::uint32_t);
+
+inline Connect_Transport_Function optional_connect_transport() noexcept {
+#if defined(_WIN32)
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            reinterpret_cast<LPCSTR>(&openkache_client_abi_version),
+            &module)) {
+        return nullptr;
+    }
+    return reinterpret_cast<Connect_Transport_Function>(
+        GetProcAddress(module, "openkache_client_connect_transport"));
+#elif defined(__GNUC__) || defined(__clang__)
+    return openkache_client_connect_transport;
+#else
+    return nullptr;
+#endif
+}
 
 /// Atomic existence condition for one SET operation.
 enum class Set_Condition : std::uint32_t {
@@ -112,6 +147,14 @@ enum class Connection_State : std::uint32_t {
     Unknown = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
 };
 
+/// Native transport and server-trust selector.
+enum class Transport : std::uint32_t {
+    Quic = OPENKACHE_CLIENT_TRANSPORT_QUIC,
+    Tls_Tcp = OPENKACHE_CLIENT_TRANSPORT_TLS_TCP,
+    Quic_Insecure = OPENKACHE_CLIENT_TRANSPORT_QUIC_INSECURE,
+    Tls_Tcp_Insecure = OPENKACHE_CLIENT_TRANSPORT_TLS_TCP_INSECURE,
+};
+
 /// Optional behavior for one SET operation.
 struct Set_Options {
     Set_Condition condition = Set_Condition::Any;
@@ -122,7 +165,7 @@ struct Set_Options {
 
 /// Values passed to `Client::connect`.
 struct Connect_Options {
-    /// Hostname or numeric address with a UDP port.
+    /// Hostname or numeric address with a transport port.
     std::string address;
     /// TLS certificate identity. Empty selects the host in `address`.
     std::string server_name;
@@ -145,6 +188,7 @@ struct Connect_Options {
         OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS;
     std::size_t retry_max_attempts = OPENKACHE_SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS;
     std::size_t max_in_flight = OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT;
+    Transport transport = Transport::Quic;
 };
 
 /// RAII C++ client over the shared core C ABI.
@@ -196,6 +240,38 @@ public:
         const auto* client_private_key = options.client_private_key.empty()
             ? nullptr
             : options.client_private_key.data();
+        if (options.transport != Transport::Quic) {
+            const auto connect_transport = optional_connect_transport();
+            if (connect_transport == nullptr) {
+                throw Error(
+                    "native OpenKache client does not export the optional transport selector");
+            }
+            const openkache_client_connect_options_t native_options{
+                reinterpret_cast<const Byte*>(options.address.data()),
+                options.address.size(),
+                reinterpret_cast<const Byte*>(options.server_name.data()),
+                options.server_name.size(),
+                certificate,
+                options.certificate.size(),
+                client_certificate_chain,
+                options.client_certificate_chain.size(),
+                client_private_key,
+                options.client_private_key.size(),
+                key,
+                options.data_protection_key.size(),
+                static_cast<std::uint8_t>(options.compression_enabled ? 1u : 0u),
+                options.compression_level,
+                options.minimum_input_size,
+                options.minimum_savings,
+                static_cast<std::uint32_t>(options.encryption),
+                options.connect_timeout_ms,
+                options.request_timeout_ms,
+                options.retry_max_attempts,
+                options.max_in_flight,
+            };
+            return connect_result(connect_transport(
+                &native_options, static_cast<std::uint32_t>(options.transport)));
+        }
         openkache_client_result_t* result =
             openkache_client_connect_ex(
                 reinterpret_cast<const Byte*>(options.address.data()),
@@ -219,22 +295,7 @@ public:
                 options.max_in_flight,
                 options.connect_timeout_ms,
                 options.request_timeout_ms);
-        if (result == nullptr) {
-            throw Error("OpenKache connect returned a null result");
-        }
-
-        const auto kind = result_kind(result);
-        if (kind != OPENKACHE_SMITHY_FFI_RESULT_CONNECTED) {
-            const auto message = result_payload(result);
-            openkache_client_result_free(result);
-            throw Error(message.empty() ? "OpenKache connection failed" : message);
-        }
-        openkache_client_t* client = openkache_client_result_take_client(result);
-        openkache_client_result_free(result);
-        if (client == nullptr) {
-            throw Error("OpenKache connect returned no client handle");
-        }
-        return Client(client);
+        return connect_result(result);
     }
 
     /// Returns whether this object owns an open native handle.
@@ -481,6 +542,24 @@ public:
     }
 
 private:
+    static Client connect_result(openkache_client_result_t* result) {
+        if (result == nullptr) {
+            throw Error("OpenKache connect returned a null result");
+        }
+        const auto kind = result_kind(result);
+        if (kind != OPENKACHE_SMITHY_FFI_RESULT_CONNECTED) {
+            const auto message = result_payload(result);
+            openkache_client_result_free(result);
+            throw Error(message.empty() ? "OpenKache connection failed" : message);
+        }
+        openkache_client_t* client = openkache_client_result_take_client(result);
+        openkache_client_result_free(result);
+        if (client == nullptr) {
+            throw Error("OpenKache connect returned no client handle");
+        }
+        return Client(client);
+    }
+
     struct Operation_Result {
         std::uint32_t kind;
         Bytes payload;

@@ -4,6 +4,7 @@
 //! other native bindings only marshal buffers and interpret result discriminators; connection
 //! management, retries, protocol framing, and value protection remain in this crate.
 
+use std::future::Future;
 use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -16,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use openkache_value::{Value as StructuredValue, decode, encode};
 
+#[cfg(feature = "tls-tcp")]
+use crate::TlsTcpProtectedClient;
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::FfiOperationField;
@@ -34,7 +37,7 @@ pub use crate::contract::{
 };
 pub use crate::contract::{
     FfiErrorCategory, FfiKeySpec, FfiOperation, FfiRequestState, FfiResultKind, FfiSetCondition,
-    FfiStatusCategory, FfiValueMode, FfiValueRepresentation,
+    FfiStatusCategory, FfiTransport, FfiValueMode, FfiValueRepresentation,
 };
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
@@ -83,7 +86,7 @@ struct FfiRequestControl {
 /// Native connection options passed by C and C++ bindings.
 #[repr(C)]
 pub struct FfiConnectOptions {
-    /// UTF-8 host and UDP port such as `127.0.0.1:4433` or `cache.example.com:4433`.
+    /// UTF-8 host and transport port such as `127.0.0.1:4433` or `cache.example.com:4433`.
     pub address: *const u8,
     /// Byte length of [`Self::address`].
     pub address_length: usize,
@@ -201,6 +204,7 @@ type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
 type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 
 struct WorkerOptions {
+    transport: TransportSelection,
     endpoint: Endpoint,
     certificate: Vec<u8>,
     data_protection_key: Option<DataProtectionKey>,
@@ -211,6 +215,33 @@ struct WorkerOptions {
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+}
+
+/// Internal transport selector used by the additive ABI entry point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportSelection {
+    Quic { verify_server: bool },
+    TlsTcp { verify_server: bool },
+}
+
+impl TransportSelection {
+    fn from_code(code: u32) -> std::result::Result<Self, String> {
+        match FfiTransport::try_from(code) {
+            Ok(FfiTransport::Quic) => Ok(Self::Quic {
+                verify_server: true,
+            }),
+            Ok(FfiTransport::TlsTcp) => Ok(Self::TlsTcp {
+                verify_server: true,
+            }),
+            Ok(FfiTransport::QuicInsecure) => Ok(Self::Quic {
+                verify_server: false,
+            }),
+            Ok(FfiTransport::TlsTcpInsecure) => Ok(Self::TlsTcp {
+                verify_server: false,
+            }),
+            Err(value) => Err(format!("unsupported transport selector {value}")),
+        }
+    }
 }
 
 impl FfiResult {
@@ -369,6 +400,7 @@ impl FfiClient {
     // The argument list mirrors the stable native connection contract.
     #[allow(clippy::too_many_arguments)]
     fn connect(
+        transport: TransportSelection,
         endpoint: Endpoint,
         certificate: Vec<u8>,
         data_protection_key: Option<DataProtectionKey>,
@@ -389,6 +421,7 @@ impl FfiClient {
         )));
         let worker_state = Arc::clone(&state);
         let options = WorkerOptions {
+            transport,
             endpoint,
             certificate,
             data_protection_key,
@@ -855,7 +888,25 @@ fn run_worker(
     shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
 ) {
+    match options.transport {
+        TransportSelection::Quic { .. } => {
+            run_quic_worker(commands, ready, options, shutdown, state)
+        }
+        TransportSelection::TlsTcp { .. } => {
+            run_tls_tcp_worker(commands, ready, options, shutdown, state)
+        }
+    }
+}
+
+fn run_quic_worker(
+    commands: CommandReceiver,
+    ready: SyncSender<std::result::Result<crate::RequestBudget, String>>,
+    options: WorkerOptions,
+    shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
+) {
     let WorkerOptions {
+        transport,
         endpoint,
         certificate,
         data_protection_key,
@@ -880,6 +931,10 @@ fn run_worker(
         ));
         return;
     }
+    let verify_server = match transport {
+        TransportSelection::Quic { verify_server } => verify_server,
+        TransportSelection::TlsTcp { .. } => unreachable!("transport dispatch selected QUIC"),
+    };
     let protected = data_protection_key.is_some();
     let mut builder = match data_protection_key {
         Some(key) => LocalProtectedClient::builder(endpoint, key),
@@ -892,7 +947,13 @@ fn run_worker(
     if protected {
         builder = builder.encryption(encryption);
     }
-    if !certificate.is_empty() {
+    if !verify_server {
+        // The explicit insecure selector takes precedence over any supplied
+        // certificate bytes.  A caller that opts out of verification must not
+        // accidentally regain certificate validation merely by leaving a
+        // legacy trust buffer populated.
+        builder = builder.server_trust(ServerTrust::Insecure);
+    } else if !certificate.is_empty() {
         let certificates = match Certificate::from_der_or_pem_chain(&certificate) {
             Ok(certificates) => certificates,
             Err(error) => {
@@ -942,6 +1003,450 @@ fn run_worker(
         return;
     }
 
+    run_command_loop(&runtime, client, commands, shutdown, state, true);
+}
+
+fn run_tls_tcp_worker(
+    commands: CommandReceiver,
+    ready: SyncSender<std::result::Result<crate::RequestBudget, String>>,
+    options: WorkerOptions,
+    shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
+) {
+    let WorkerOptions {
+        transport,
+        endpoint,
+        certificate,
+        data_protection_key,
+        client_certificate_chain,
+        client_private_key,
+        compression,
+        encryption,
+        timeouts,
+        retry,
+        max_in_flight,
+    } = options;
+    let verify_server = match transport {
+        TransportSelection::TlsTcp { verify_server } => verify_server,
+        TransportSelection::Quic { .. } => unreachable!("transport dispatch selected TLS/TCP"),
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = ready.send(Err(format!("failed to create Tokio runtime: {error}")));
+            return;
+        }
+    };
+    let trust = if !verify_server {
+        ServerTrust::Insecure
+    } else if certificate.is_empty() {
+        ServerTrust::System
+    } else {
+        match Certificate::from_der_or_pem_chain(&certificate) {
+            Ok(certificates) => ServerTrust::Custom(certificates),
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        }
+    };
+    let mut identity = if !client_certificate_chain.is_empty() || !client_private_key.is_empty() {
+        let certificate_chain = match Certificate::from_der_or_pem_chain(&client_certificate_chain)
+        {
+            Ok(certificate_chain) => certificate_chain,
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        };
+        let private_key = match PrivateKey::from_der_or_pem(&client_private_key) {
+            Ok(private_key) => private_key,
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        };
+        match ClientIdentity::new(certificate_chain, private_key) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let protected = data_protection_key.is_some();
+    macro_rules! connect_builder {
+        ($builder:expr) => {{
+            let mut builder = $builder
+                .compression(compression)
+                .timeouts(timeouts)
+                .retry_policy(retry)
+                .max_in_flight(max_in_flight)
+                .server_trust(trust.clone());
+            if let Some(identity) = identity.take() {
+                builder = builder.client_identity(identity);
+            }
+            if protected {
+                builder = builder.encryption(encryption);
+            }
+            runtime.block_on(builder.connect())
+        }};
+    }
+    let client = match data_protection_key {
+        Some(key) => connect_builder!(TlsTcpProtectedClient::builder(endpoint, key)),
+        None => connect_builder!(TlsTcpProtectedClient::builder_unprotected(endpoint)),
+    };
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
+    state.store(
+        connection_state_value(client.connection_state()),
+        Ordering::Release,
+    );
+    if ready.send(Ok(client.request_budget())).is_err() {
+        return;
+    }
+    run_command_loop(&runtime, client, commands, shutdown, state, false);
+}
+
+trait WorkerRuntime {
+    fn block_on<F: Future>(&self, future: F) -> F::Output;
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static;
+}
+
+impl WorkerRuntime for compio::runtime::Runtime {
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        compio::runtime::Runtime::block_on(self, future)
+    }
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        compio::runtime::Runtime::spawn(self, future).detach();
+    }
+}
+
+impl WorkerRuntime for tokio::runtime::Runtime {
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        tokio::runtime::Runtime::block_on(self, future)
+    }
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        // Tokio's current-thread worker uses the synchronous command loop,
+        // so TLS-over-TCP dispatch never calls this method.
+        drop(future);
+    }
+}
+
+trait FfiRawClientApi {
+    async fn ping(&self) -> crate::Result<Duration>;
+    async fn get(&self, item_id: ItemId) -> crate::Result<GetOutcome<ItemValue>>;
+    async fn set(
+        &self,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn delete(&self, item_id: ItemId) -> crate::Result<DeleteOutcome>;
+    async fn stats(&self) -> crate::Result<String>;
+    async fn sync(&self) -> crate::Result<()>;
+    async fn reconnect(&self) -> crate::Result<()>;
+    async fn get_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<ItemValue>>;
+    async fn set_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn delete_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<DeleteOutcome>;
+    async fn stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String>;
+    async fn sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()>;
+    async fn namespace_open_with_outcome(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> crate::Result<(crate::NamespaceDescriptor, bool)>;
+    async fn namespace_update_policy(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> crate::Result<crate::NamespaceDescriptor>;
+    async fn namespace_delete(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+    ) -> crate::Result<()>;
+}
+
+macro_rules! impl_ffi_raw_client {
+    ($client:ty) => {
+        impl FfiRawClientApi for $client {
+            async fn ping(&self) -> crate::Result<Duration> {
+                self.ping().await
+            }
+            async fn get(&self, item_id: ItemId) -> crate::Result<GetOutcome<ItemValue>> {
+                self.get(item_id).await
+            }
+            async fn set(
+                &self,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set(item_id, value, options).await
+            }
+            async fn delete(&self, item_id: ItemId) -> crate::Result<DeleteOutcome> {
+                self.delete(item_id).await
+            }
+            async fn stats(&self) -> crate::Result<String> {
+                self.stats().await
+            }
+            async fn sync(&self) -> crate::Result<()> {
+                self.sync().await
+            }
+            async fn reconnect(&self) -> crate::Result<()> {
+                self.reconnect().await
+            }
+            async fn get_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<ItemValue>> {
+                self.get_in_namespace(namespace_id, item_id).await
+            }
+            async fn set_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_in_namespace(namespace_id, item_id, value, options)
+                    .await
+            }
+            async fn delete_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<DeleteOutcome> {
+                self.delete_in_namespace(namespace_id, item_id).await
+            }
+            async fn stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String> {
+                self.stats_in_namespace(namespace_id).await
+            }
+            async fn sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()> {
+                self.sync_in_namespace(namespace_id).await
+            }
+            async fn namespace_open_with_outcome(
+                &self,
+                name: Vec<u8>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> crate::Result<(crate::NamespaceDescriptor, bool)> {
+                self.namespace_open_with_outcome(name, create_if_missing, policy)
+                    .await
+            }
+            async fn namespace_update_policy(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+                policy: NamespacePolicy,
+            ) -> crate::Result<crate::NamespaceDescriptor> {
+                self.namespace_update_policy(namespace_id, expected_revision, policy)
+                    .await
+            }
+            async fn namespace_delete(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+            ) -> crate::Result<()> {
+                self.namespace_delete(namespace_id, expected_revision).await
+            }
+        }
+    };
+}
+
+#[cfg(feature = "quic-compio")]
+impl_ffi_raw_client!(crate::LocalRawClient);
+#[cfg(feature = "tls-tcp")]
+impl_ffi_raw_client!(crate::TlsTcpRawClient);
+
+trait FfiProtectedClientApi: Clone + 'static {
+    type Raw: FfiRawClientApi;
+
+    fn raw(&self) -> &Self::Raw;
+    fn request_budget(&self) -> crate::RequestBudget;
+    fn value_limits(&self) -> ValueLimits;
+    fn connection_state(&self) -> ConnectionState;
+    async fn ping(&self) -> crate::Result<Duration>;
+    async fn get_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<Value>>;
+    async fn get_structured_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<StructuredValue>>;
+    async fn get_structured_canonical_key_cbor(
+        &self,
+        canonical_key: Vec<u8>,
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn set_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: Value,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_structured_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: StructuredValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_structured_canonical_key_cbor(
+        &self,
+        canonical_key: Vec<u8>,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn delete_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<DeleteOutcome>;
+    async fn stats(&self) -> crate::Result<String>;
+    async fn sync(&self) -> crate::Result<()>;
+    async fn reconnect(&self) -> crate::Result<()>;
+}
+
+macro_rules! impl_ffi_protected_client {
+    ($client:ty, $raw:ty) => {
+        impl FfiProtectedClientApi for $client {
+            type Raw = $raw;
+
+            fn raw(&self) -> &Self::Raw {
+                self.raw()
+            }
+            fn request_budget(&self) -> crate::RequestBudget {
+                self.request_budget()
+            }
+            fn value_limits(&self) -> ValueLimits {
+                self.value_limits()
+            }
+            fn connection_state(&self) -> ConnectionState {
+                self.connection_state()
+            }
+            async fn ping(&self) -> crate::Result<Duration> {
+                self.ping().await
+            }
+            async fn get_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<Value>> {
+                self.get_canonical_key_unchecked(canonical_key).await
+            }
+            async fn get_structured_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<StructuredValue>> {
+                self.get_structured_canonical_key_unchecked(canonical_key)
+                    .await
+            }
+            async fn get_structured_canonical_key_cbor(
+                &self,
+                canonical_key: Vec<u8>,
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_structured_canonical_key_cbor(canonical_key).await
+            }
+            async fn set_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: Value,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_canonical_key_unchecked(canonical_key, value, options)
+                    .await
+            }
+            async fn set_structured_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: StructuredValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_structured_canonical_key_unchecked(canonical_key, value, options)
+                    .await
+            }
+            async fn set_structured_canonical_key_cbor(
+                &self,
+                canonical_key: Vec<u8>,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_structured_canonical_key_cbor(canonical_key, value, options)
+                    .await
+            }
+            async fn delete_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<DeleteOutcome> {
+                self.delete_canonical_key_unchecked(canonical_key).await
+            }
+            async fn stats(&self) -> crate::Result<String> {
+                self.stats().await
+            }
+            async fn sync(&self) -> crate::Result<()> {
+                self.sync().await
+            }
+            async fn reconnect(&self) -> crate::Result<()> {
+                self.reconnect().await
+            }
+        }
+    };
+}
+
+#[cfg(feature = "quic-compio")]
+impl_ffi_protected_client!(crate::LocalProtectedClient, crate::LocalRawClient);
+#[cfg(feature = "tls-tcp")]
+impl_ffi_protected_client!(crate::TlsTcpProtectedClient, crate::TlsTcpRawClient);
+
+fn run_command_loop<R, C>(
+    runtime: &R,
+    client: C,
+    commands: CommandReceiver,
+    shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
+    async_dispatch: bool,
+) where
+    R: WorkerRuntime,
+    C: FfiProtectedClientApi,
+{
     while !shutdown.load(Ordering::Acquire) {
         let Ok(command) = commands.recv() else {
             break;
@@ -1040,53 +1545,27 @@ fn run_worker(
                 request,
                 response,
             } => {
-                // Claim admission atomically with cancellation. A queued
-                // request canceled before this point is definitive and must
-                // never enter the mutation execution path.
                 if !request.admission.try_start() {
                     drop(response);
                     continue;
                 }
-                let task_request = Arc::clone(&request);
-                let task_client = client.clone();
-                let task = async move {
-                    let result = execute(
-                        &task_client,
-                        operation,
-                        application_key,
-                        value,
-                        input_permit,
-                        set_options,
-                        raw,
-                    )
-                    .await;
-                    let completion = task_request.admission.complete();
-                    if completion == AdmissionState::CompletedCanceled {
-                        if task_request.mutating {
-                            FfiResult::with_status(
-                                FfiResultKind::UnknownMutation,
-                                FfiStatusCategory::UnknownMutation,
-                                FfiErrorCategory::UnknownMutation,
-                                b"mutation outcome is unknown after cancellation".to_vec(),
-                            )
-                        } else {
-                            FfiResult::with_status(
-                                FfiResultKind::Canceled,
-                                FfiStatusCategory::Canceled,
-                                FfiErrorCategory::Canceled,
-                                b"request canceled".to_vec(),
-                            )
-                        }
-                    } else {
-                        result
-                    }
-                };
-                let response_sender = response;
-                runtime
-                    .spawn(async move {
-                        let _ = response_sender.send(task.await);
-                    })
-                    .detach();
+                let task = execute_async_request(
+                    client.clone(),
+                    operation,
+                    application_key,
+                    value,
+                    input_permit,
+                    set_options,
+                    raw,
+                    request,
+                );
+                if async_dispatch {
+                    runtime.spawn(async move {
+                        let _ = response.send(task.await);
+                    });
+                } else {
+                    let _ = response.send(runtime.block_on(task));
+                }
             }
             Command::NamespaceOpen {
                 name,
@@ -1145,8 +1624,53 @@ fn run_worker(
     }
 }
 
+async fn execute_async_request<C>(
+    client: C,
+    operation: FfiOperation,
+    application_key: Vec<u8>,
+    value: Vec<u8>,
+    input_permit: BytePermit,
+    set_options: SetOptions,
+    raw: bool,
+    request: Arc<FfiRequestControl>,
+) -> FfiResult
+where
+    C: FfiProtectedClientApi,
+{
+    let result = execute(
+        &client,
+        operation,
+        application_key,
+        value,
+        input_permit,
+        set_options,
+        raw,
+    )
+    .await;
+    let completion = request.admission.complete();
+    if completion == AdmissionState::CompletedCanceled {
+        if request.mutating {
+            FfiResult::with_status(
+                FfiResultKind::UnknownMutation,
+                FfiStatusCategory::UnknownMutation,
+                FfiErrorCategory::UnknownMutation,
+                b"mutation outcome is unknown after cancellation".to_vec(),
+            )
+        } else {
+            FfiResult::with_status(
+                FfiResultKind::Canceled,
+                FfiStatusCategory::Canceled,
+                FfiErrorCategory::Canceled,
+                b"request canceled".to_vec(),
+            )
+        }
+    } else {
+        result
+    }
+}
+
 async fn execute(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     application_key: Vec<u8>,
     value: Vec<u8>,
@@ -1170,7 +1694,7 @@ async fn execute(
 /// operation fields; keeping the value-model decode here ensures no Raw or
 /// JSON compatibility fallback can silently change its semantics.
 async fn execute_structured(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     canonical_key: Vec<u8>,
     value: Vec<u8>,
@@ -1214,7 +1738,7 @@ fn structured_result(
 }
 
 async fn execute_protected(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     canonical_key: Vec<u8>,
     value: Vec<u8>,
@@ -1283,7 +1807,7 @@ async fn execute_protected(
 }
 
 async fn execute_raw(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     item_id: Vec<u8>,
     value: Vec<u8>,
@@ -1330,7 +1854,7 @@ async fn execute_raw(
 }
 
 async fn execute_scoped(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     namespace_id: u64,
     item_id: Vec<u8>,
@@ -1382,7 +1906,7 @@ async fn execute_scoped(
 }
 
 async fn namespace_open(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     name: Vec<u8>,
     create_if_missing: bool,
     policy: Option<NamespacePolicy>,
@@ -1410,7 +1934,7 @@ async fn namespace_open(
 }
 
 async fn namespace_update_policy(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     namespace_id: u64,
     expected_revision: u64,
     policy: NamespacePolicy,
@@ -1431,7 +1955,7 @@ async fn namespace_update_policy(
 }
 
 async fn namespace_delete(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     namespace_id: u64,
     expected_revision: u64,
 ) -> FfiResult {
@@ -1768,7 +2292,14 @@ pub unsafe extern "C" fn openkache_client_connect(
         retry_max_attempts: 0,
         max_in_flight: 0,
     };
-    boxed_result(catch_result(|| connect_options(&options)))
+    boxed_result(catch_result(|| {
+        connect_options(
+            &options,
+            TransportSelection::Quic {
+                verify_server: true,
+            },
+        )
+    }))
 }
 
 /// Connects a native client with the complete shared-core configuration.
@@ -1827,7 +2358,14 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
         connect_timeout_ms,
         request_timeout_ms,
     };
-    boxed_result(catch_result(|| connect_options(&options)))
+    boxed_result(catch_result(|| {
+        connect_options(
+            &options,
+            TransportSelection::Quic {
+                verify_server: true,
+            },
+        )
+    }))
 }
 
 /// Connects using a caller-owned options structure.
@@ -1849,11 +2387,44 @@ pub unsafe extern "C" fn openkache_client_connect_with_options(
                 .as_ref()
                 .ok_or_else(|| "connect options pointer must not be null".to_owned())?
         };
-        connect_options(options)
+        connect_options(
+            options,
+            TransportSelection::Quic {
+                verify_server: true,
+            },
+        )
     }))
 }
 
-fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult, String> {
+/// Connects using the stable options structure and an explicit transport selector.
+///
+/// This additive symbol leaves the ABI v6 options structure unchanged. Older
+/// native libraries may omit it; callers must probe the symbol before use.
+///
+/// # Safety
+///
+/// `options` must be either null or a valid, initialized pointer. Every non-empty
+/// pointer/length pair in the structure must identify readable memory for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_transport(
+    options: *const FfiConnectOptions,
+    transport: u32,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let options = unsafe {
+            options
+                .as_ref()
+                .ok_or_else(|| "connect options pointer must not be null".to_owned())?
+        };
+        let transport = TransportSelection::from_code(transport)?;
+        connect_options(options, transport)
+    }))
+}
+
+fn connect_options(
+    options: &FfiConnectOptions,
+    transport: TransportSelection,
+) -> std::result::Result<FfiResult, String> {
     let address = copy_utf8(options.address, options.address_length, "address")?;
     let mut endpoint: Endpoint = address
         .parse()
@@ -1944,6 +2515,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
         options.max_in_flight
     };
     FfiClient::connect(
+        transport,
         endpoint,
         certificate,
         data_protection_key,

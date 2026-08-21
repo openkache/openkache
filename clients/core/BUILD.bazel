@@ -83,6 +83,7 @@ rust_library(
     crate_features = [
         "ffi",
         "quic-compio",
+        "tls-tcp",
     ],
     crate_name = "openkache_client_core",
     crate_root = "src/lib.rs",
@@ -92,6 +93,7 @@ rust_library(
         ":openkache_client_core_build_script",
         "//protocol:openkache_protocol",
         "//clients/value:openkache_value",
+        "@crates//:tokio-rustls",
     ] + cargo_deps("clients/core"),
 )
 
@@ -104,6 +106,7 @@ rust_shared_library(
     crate_features = [
         "ffi",
         "quic-compio",
+        "tls-tcp",
     ],
     crate_name = "openkache_client_core",
     crate_root = "src/lib.rs",
@@ -113,5 +116,6 @@ rust_shared_library(
         ":openkache_client_core_build_script",
         "//protocol:openkache_protocol",
         "//clients/value:openkache_value",
+        "@crates//:tokio-rustls",
     ] + cargo_deps("clients/core"),
 )

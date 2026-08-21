@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 // The Rust client owns transport, TLS, retries, key derivation, compression,
 // encryption, and value validation.  Swift only supplies native values and
@@ -6,8 +11,23 @@ import Foundation
 
 private typealias NativeClientPointer = OpaquePointer
 private typealias NativeResultPointer = OpaquePointer
+private typealias NativeConnectTransportFunction = @convention(c) (
+    UnsafeRawPointer?,
+    UInt32
+) -> UnsafeMutableRawPointer?
 
 private typealias NativeNamespaceDescriptor = Smithy_Native_Namespace_Descriptor
+
+private func optionalNativeConnectTransport() -> NativeConnectTransportFunction? {
+    guard let handle = dlopen(nil, RTLD_LAZY) else {
+        return nil
+    }
+    defer { _ = dlclose(handle) }
+    guard let symbol = dlsym(handle, "openkache_client_connect_transport") else {
+        return nil
+    }
+    return unsafeBitCast(symbol, to: NativeConnectTransportFunction.self)
+}
 
 private let nativeNamespaceDescriptorLayoutIsValid: Void = {
     let layout = MemoryLayout<NativeNamespaceDescriptor>.self
@@ -51,148 +71,6 @@ private let nativeNamespaceDescriptorLayoutIsValid: Void = {
         "native namespace descriptor evictionOverride offset does not match the Smithy contract"
     )
 }()
-
-@_silgen_name("openkache_client_abi_version")
-private func nativeAbiVersion() -> UInt32
-
-@_silgen_name("openkache_client_connect_ex")
-private func nativeConnect(
-    _ address: UnsafePointer<UInt8>?,
-    _ addressLength: Int,
-    _ serverName: UnsafePointer<UInt8>?,
-    _ serverNameLength: Int,
-    _ certificate: UnsafePointer<UInt8>?,
-    _ certificateLength: Int,
-    _ clientCertificate: UnsafePointer<UInt8>?,
-    _ clientCertificateLength: Int,
-    _ clientPrivateKey: UnsafePointer<UInt8>?,
-    _ clientPrivateKeyLength: Int,
-    _ dataProtectionKey: UnsafePointer<UInt8>?,
-    _ dataProtectionKeyLength: Int,
-    _ compressionEnabled: UInt8,
-    _ compressionLevel: Int32,
-    _ minimumInputSize: Int,
-    _ minimumSavings: Int,
-    _ encryption: UInt32,
-    _ retryMaxAttempts: Int,
-    _ maxInFlight: Int,
-    _ connectTimeoutMilliseconds: UInt64,
-    _ requestTimeoutMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_execute")
-private func nativeExecute(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ applicationKey: UnsafePointer<UInt8>?,
-    _ applicationKeyLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setCondition: UInt32,
-    _ ttlEnabled: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_execute_raw")
-private func nativeExecuteRaw(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ itemID: UnsafePointer<UInt8>?,
-    _ itemIDLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setCondition: UInt32,
-    _ ttlEnabled: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_execute_with_options")
-private func nativeExecuteWithOptions(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ applicationKey: UnsafePointer<UInt8>?,
-    _ applicationKeyLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setFlags: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_execute_raw_with_options")
-private func nativeExecuteRawWithOptions(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ itemID: UnsafePointer<UInt8>?,
-    _ itemIDLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setFlags: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_execute_scoped")
-private func nativeExecuteScoped(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ namespaceID: UInt64,
-    _ itemID: UnsafePointer<UInt8>?,
-    _ itemIDLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setFlags: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_namespace_open")
-private func nativeNamespaceOpen(
-    _ client: NativeClientPointer?,
-    _ name: UnsafePointer<UInt8>?,
-    _ nameLength: Int,
-    _ createIfMissing: UInt8,
-    _ policyFlags: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_namespace_update_policy")
-private func nativeNamespaceUpdatePolicy(
-    _ client: NativeClientPointer?,
-    _ namespaceID: UInt64,
-    _ expectedRevision: UInt64,
-    _ policyFlags: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_namespace_delete")
-private func nativeNamespaceDelete(
-    _ client: NativeClientPointer?,
-    _ namespaceID: UInt64,
-    _ expectedRevision: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_namespace_descriptor_decode")
-private func nativeNamespaceDescriptorDecode(
-    _ payload: UnsafePointer<UInt8>?,
-    _ payloadLength: Int,
-    _ output: UnsafeMutablePointer<NativeNamespaceDescriptor>?
-) -> UInt32
-
-@_silgen_name("openkache_client_result_kind")
-private func nativeResultKind(_ result: NativeResultPointer?) -> UInt32
-
-@_silgen_name("openkache_client_result_data")
-private func nativeResultData(_ result: NativeResultPointer?) -> UnsafePointer<UInt8>?
-
-@_silgen_name("openkache_client_result_data_length")
-private func nativeResultDataLength(_ result: NativeResultPointer?) -> Int
-
-@_silgen_name("openkache_client_result_take_client")
-private func nativeTakeClient(_ result: NativeResultPointer?) -> NativeClientPointer?
-
-@_silgen_name("openkache_client_result_free")
-private func nativeFreeResult(_ result: NativeResultPointer?)
-
-@_silgen_name("openkache_client_free")
-private func nativeFreeClient(_ client: NativeClientPointer?)
 
 /// A native client failure returned by the shared Rust core.
 public struct OpenKacheError: Error, LocalizedError, Equatable, Sendable {
@@ -294,9 +172,30 @@ public enum OpenKacheEncryption: Sendable {
     }
 }
 
+/// Native transport and server-trust selector.
+public enum OpenKacheTransport: Sendable {
+    case quic
+    case tlsTcp
+    case quicInsecure
+    case tlsTcpInsecure
+
+    fileprivate var rawValue: UInt32 {
+        switch self {
+        case .quic:
+            return Smithy_Native_Contract.transportQuic
+        case .tlsTcp:
+            return Smithy_Native_Contract.transportTlsTcp
+        case .quicInsecure:
+            return Smithy_Native_Contract.transportQuicInsecure
+        case .tlsTcpInsecure:
+            return Smithy_Native_Contract.transportTlsTcpInsecure
+        }
+    }
+}
+
 /// Connection and value-layer configuration.
 public struct OpenKacheClientOptions: Sendable {
-    /// Hostname or numeric address followed by the UDP port.
+    /// Hostname or numeric address followed by the transport port.
     public var address: String
     /// Certificate identity for a numeric address. A hostname uses its own
     /// value as the TLS identity when this is nil.
@@ -319,6 +218,8 @@ public struct OpenKacheClientOptions: Sendable {
     public var retryMaxAttempts: Int
     /// Maximum reusable request lanes on one connection.
     public var maxInFlight: Int
+    /// Native transport; verified QUIC is the compatibility default.
+    public var transport: OpenKacheTransport
 
     /// Creates a client configuration with shared-core defaults.
     public init(
@@ -336,7 +237,8 @@ public struct OpenKacheClientOptions: Sendable {
             Int64(Smithy_Value_Format.defaultRequestTimeoutMilliseconds)
         ),
         retryMaxAttempts: Int = Smithy_Value_Format.defaultRetryMaxAttempts,
-        maxInFlight: Int = Smithy_Value_Format.defaultMaxInFlight
+        maxInFlight: Int = Smithy_Value_Format.defaultMaxInFlight,
+        transport: OpenKacheTransport = .quic
     ) {
         self.address = address
         self.serverName = serverName
@@ -349,6 +251,7 @@ public struct OpenKacheClientOptions: Sendable {
         self.requestTimeout = requestTimeout
         self.retryMaxAttempts = retryMaxAttempts
         self.maxInFlight = maxInFlight
+        self.transport = transport
     }
 }
 
@@ -436,35 +339,73 @@ private enum NativeBridge {
         let clientPrivateKey = Array(options.identity?.privateKey ?? Data())
         let dataProtectionKey = Array(options.dataProtectionKey)
 
-        let result = withBytes(address) { addressPointer, addressLength in
-            withBytes(serverName) { serverNamePointer, serverNameLength in
-                withBytes(certificate) { certificatePointer, certificateLength in
-                    withBytes(clientCertificate) { clientCertificatePointer, clientCertificateLength in
-                        withBytes(clientPrivateKey) { clientPrivateKeyPointer, clientPrivateKeyLength in
-                            withBytes(dataProtectionKey) { keyPointer, keyLength in
-                                nativeConnect(
-                                    addressPointer,
-                                    addressLength,
-                                    serverNamePointer,
-                                    serverNameLength,
-                                    certificatePointer,
-                                    certificateLength,
-                                    clientCertificatePointer,
-                                    clientCertificateLength,
-                                    clientPrivateKeyPointer,
-                                    clientPrivateKeyLength,
-                                    keyPointer,
-                                    keyLength,
-                                    options.compression.enabled ? 1 : 0,
-                                    options.compression.level,
-                                    options.compression.minimumInputSize,
-                                    options.compression.minimumSavings,
-                                    options.encryption.nativeValue,
-                                    options.retryMaxAttempts,
-                                    options.maxInFlight,
-                                    connectTimeout,
-                                    requestTimeout
-                                )
+        let result = try withBytes(address) { addressPointer, addressLength in
+            try withBytes(serverName) { serverNamePointer, serverNameLength in
+                try withBytes(certificate) { certificatePointer, certificateLength in
+                    try withBytes(clientCertificate) { clientCertificatePointer, clientCertificateLength in
+                        try withBytes(clientPrivateKey) { clientPrivateKeyPointer, clientPrivateKeyLength in
+                            try withBytes(dataProtectionKey) { keyPointer, keyLength in
+                                if options.transport == .quic {
+                                    return nativeConnect(
+                                        addressPointer,
+                                        addressLength,
+                                        serverNamePointer,
+                                        serverNameLength,
+                                        certificatePointer,
+                                        certificateLength,
+                                        clientCertificatePointer,
+                                        clientCertificateLength,
+                                        clientPrivateKeyPointer,
+                                        clientPrivateKeyLength,
+                                        keyPointer,
+                                        keyLength,
+                                        options.compression.enabled ? 1 : 0,
+                                        options.compression.level,
+                                        options.compression.minimumInputSize,
+                                        options.compression.minimumSavings,
+                                        options.encryption.nativeValue,
+                                        options.retryMaxAttempts,
+                                        options.maxInFlight,
+                                        connectTimeout,
+                                        requestTimeout
+                                    )
+                                } else {
+                                    var nativeOptions = Smithy_Native_Connect_Options(
+                                        address: addressPointer,
+                                        addressLength: addressLength,
+                                        serverName: serverNamePointer,
+                                        serverNameLength: serverNameLength,
+                                        certificate: certificatePointer,
+                                        certificateLength: certificateLength,
+                                        clientCertificateChain: clientCertificatePointer,
+                                        clientCertificateChainLength: clientCertificateLength,
+                                        clientPrivateKey: clientPrivateKeyPointer,
+                                        clientPrivateKeyLength: clientPrivateKeyLength,
+                                        dataProtectionKey: keyPointer,
+                                        dataProtectionKeyLength: keyLength,
+                                        compressionEnabled: options.compression.enabled ? 1 : 0,
+                                        compressionLevel: options.compression.level,
+                                        minimumInputSize: options.compression.minimumInputSize,
+                                        minimumSavings: options.compression.minimumSavings,
+                                        encryption: options.encryption.nativeValue,
+                                        connectTimeoutMilliseconds: connectTimeout,
+                                        requestTimeoutMilliseconds: requestTimeout,
+                                        retryMaxAttempts: options.retryMaxAttempts,
+                                        maxInFlight: options.maxInFlight
+                                    )
+                                    guard let connectTransport = optionalNativeConnectTransport()
+                                    else {
+                                        throw OpenKacheError(
+                                            "native OpenKache client does not export the optional transport selector"
+                                        )
+                                    }
+                                    return connectTransport(
+                                        withUnsafePointer(to: &nativeOptions) {
+                                            UnsafeRawPointer($0)
+                                        },
+                                        options.transport.rawValue
+                                    ).map(OpaquePointer.init)
+                                }
                             }
                         }
                     }
@@ -1588,9 +1529,6 @@ private func smithyNamespaceDescriptor(
         )
     )
 }
-
-@_silgen_name("openkache_client_connection_state")
-private func nativeConnectionState(_ client: NativeClientPointer?) -> UInt32
 
 /// Optional SET condition and expiration.
 public struct OpenKacheSetOptions: Sendable {

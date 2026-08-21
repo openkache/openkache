@@ -388,6 +388,20 @@ structure valueEnvelope {
             ]
         },
         {
+            name: "openkache_client_connect_transport",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                {
+                    name: "options",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptions",
+                    mutable: false
+                },
+                { name: "transport", type: "uint32", mutable: false }
+            ]
+        },
+        {
             name: "openkache_client_execute_async",
             returnType: "request_pointer",
             returnOwnership: "owned",
@@ -906,6 +920,22 @@ enum FfiOperation {
         dedicatedAbi: false
     )
     RECONNECT = "reconnect"
+}
+
+/// Explicit native transport and trust selection. Legacy connection symbols
+/// remain verified QUIC for source and ABI compatibility.
+enum FfiTransport {
+    @ffiValue(value: 0)
+    QUIC = "quic"
+
+    @ffiValue(value: 1)
+    TLS_TCP = "tls_tcp"
+
+    @ffiValue(value: 2)
+    QUIC_INSECURE = "quic_insecure"
+
+    @ffiValue(value: 3)
+    TLS_TCP_INSECURE = "tls_tcp_insecure"
 }
 
 enum FfiResultKind {

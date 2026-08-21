@@ -2,10 +2,15 @@
 
 The C package is a small C17 ABI over the shared Rust client core. It provides
 protected `PING`, `GET`, `SET`, `DELETE`, and transitional administrative
-operations while
-the core owns QUIC-over-TLS, retries, framing, compression, encryption, and the
-worker lifecycle. The current binding is QUIC-only; TLS-over-TCP is part of the
-target maintained-client contract.
+operations while the core owns TLS 1.3 over QUIC or TCP, retries, framing,
+compression, encryption, and the worker lifecycle. Select
+`OPENKACHE_CLIENT_TRANSPORT_QUIC` (the legacy default),
+`OPENKACHE_CLIENT_TRANSPORT_TLS_TCP`,
+`OPENKACHE_CLIENT_TRANSPORT_QUIC_INSECURE`, or
+`OPENKACHE_CLIENT_TRANSPORT_TLS_TCP_INSECURE` through the generated
+`openkache_client_connect_transport` entry point. The insecure selectors are
+explicit opt-outs: they keep TLS encryption but disable certificate and server
+identity verification.
 
 `STATS` and `SYNC` are transitional experimental maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and

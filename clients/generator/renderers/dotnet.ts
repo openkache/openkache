@@ -97,6 +97,7 @@ export function render_csharp(contract: Client_Contract): string {
     ["FfiOperation", ffi.operations],
     ["FfiResult", ffi.result_kinds],
     ["FfiConnection", ffi.connection_states],
+    ["FfiTransport", ffi.transports],
     ["FfiSetCondition", ffi.set_conditions],
     ["FfiKeySpec", ffi.key_specs],
     ["FfiNamespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],

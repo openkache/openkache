@@ -131,9 +131,20 @@ type RetryPolicy struct {
 	MaxAttempts int
 }
 
+// Transport selects the native connection transport and server-trust policy.
+// The zero value is verified QUIC for source compatibility.
+type Transport uint32
+
+const (
+	TransportQuic          Transport = Transport(SmithyFFITransportQuic)
+	TransportTlsTcp        Transport = Transport(SmithyFFITransportTlsTcp)
+	TransportQuicInsecure  Transport = Transport(SmithyFFITransportQuicInsecure)
+	TransportTlsTcpInsecure Transport = Transport(SmithyFFITransportTlsTcpInsecure)
+)
+
 // Options configures a protected OpenKache connection.
 type Options struct {
-	// Address is the server host and UDP port, such as "127.0.0.1:4433" or
+	// Address is the server host and transport port, such as "127.0.0.1:4433" or
 	// "cache.example.com:4433".
 	Address string
 	// ServerName is the TLS certificate name. Empty selects the shared default.
@@ -154,12 +165,15 @@ type Options struct {
 	Timeouts TimeoutOptions
 	// Retry controls response-safe retry attempts.
 	Retry RetryPolicy
-	// MaxInFlight bounds reusable QUIC stream lanes. Zero selects the shared
-	// default.
+	// MaxInFlight bounds reusable request lanes (TLS-over-TCP always uses one).
+	// Zero selects the shared default.
 	MaxInFlight int
 	// NativeLibrary overrides native library discovery. The default consults
 	// OPENKACHE_CLIENT_LIBRARY and then platform library names.
 	NativeLibrary string
+	// Transport selects verified QUIC by default; insecure variants are
+	// explicit opt-outs and retain TLS encryption.
+	Transport Transport
 }
 
 type normalizedOptions struct {
@@ -175,6 +189,7 @@ type normalizedOptions struct {
 	retryAttempts       int
 	maxInFlight         int
 	nativeLibrary       string
+	transport           Transport
 }
 
 func (o Options) normalize() (normalizedOptions, error) {
@@ -326,6 +341,7 @@ func (o Options) normalize() (normalizedOptions, error) {
 		retryAttempts:       retryAttempts,
 		maxInFlight:         maxInFlight,
 		nativeLibrary:       o.NativeLibrary,
+		transport:           o.Transport,
 	}, nil
 }
 

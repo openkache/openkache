@@ -5,11 +5,13 @@ core's C ABI.
 
 ## Purpose
 
-The package provides binary-safe cache operations over one authenticated QUIC
-connection owned by the shared core. It accepts exact opaque `0..=32`-byte
-item IDs and plaintext values. Framing, TLS, retries, stream lanes, and
-protocol validation remain in `clients/core`. The current package is
-QUIC-only; TLS-over-TCP is part of the target maintained-client contract.
+The package provides binary-safe cache operations over the authenticated
+transport selected by `ClientOptions.Transport` (verified QUIC by default or
+verified TLS-over-TCP). It accepts exact opaque `0..=32`-byte item IDs and
+plaintext values. Framing, TLS, retries, stream lanes, and protocol validation
+remain in `clients/core`. `QuicInsecure` and `TlsTcpInsecure` are explicit
+TLS-preserving opt-outs that disable certificate and server-identity
+verification.
 
 The [client status table](../README.md#sdk-status) describes this package's
 implementation and migration status.
@@ -37,8 +39,9 @@ generates ignored wire values and Smithy API contracts before compilation.
 
 ## Connect and use
 
-Pass the DER bytes of a server or CA certificate; the client has no
-certificate-verification bypass.
+Pass the DER bytes of a server or CA certificate for verified transports. The
+insecure selectors explicitly opt out of certificate and server-identity
+verification and may omit that buffer.
 
 ```csharp
 using OpenKache;

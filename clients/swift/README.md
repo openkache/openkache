@@ -2,9 +2,10 @@
 
 The Swift package is a thin actor-based adapter over the shared Rust client
 core. It accepts Foundation `Data`, exposes async cache operations, and does
-not duplicate QUIC framing, TLS validation, retries, key derivation,
-compression, encryption, or value parsing. The current binding is QUIC-only;
-TLS-over-TCP is part of the target maintained-client contract.
+not duplicate QUIC/TCP framing, TLS validation, retries, key derivation,
+compression, encryption, or value parsing. `OpenKacheClientOptions.transport`
+selects verified QUIC (the default), verified TLS-over-TCP, or an explicit
+TLS-preserving insecure selector.
 
 This README documents the current transitional Swift/FFI API. The target
 variable-width Item ID, structured-value, compression, and dual-transport

@@ -118,6 +118,7 @@ export interface Ffi_Entry extends Wire_Entry {
 export interface Ffi_Contract {
   readonly abi_version: number
   readonly connection_states: readonly Ffi_Entry[]
+  readonly transports: readonly Ffi_Entry[]
   readonly namespace_default_evictions: readonly Ffi_Entry[]
   readonly namespace_default_expirations: readonly Ffi_Entry[]
   readonly namespace_descriptor_decode_statuses: readonly Ffi_Entry[]

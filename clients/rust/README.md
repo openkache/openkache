@@ -15,6 +15,8 @@ use the re-exported raw core types over the same connection.
 - `Client` accepts application keys and plaintext values.
 - `RawClient` accepts exact opaque `0..=32`-byte Item IDs and values.
 - `LocalClient` and `LocalRawClient` provide equivalent Compio-local layers.
+- `TlsTcpClient` and `TlsTcpRawClient` provide the one-lane TLS-over-TCP
+  profile on Tokio.
 - `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
 - `RawClient` and `LocalRawClient` implement the Smithy-generated
   `smithy::OpenKacheApi` interface, so generated operation inputs and outputs
@@ -32,6 +34,7 @@ From `clients/rust`:
 ```bash
 cargo build
 cargo check --no-default-features --features quic-compio
+cargo check --no-default-features --features tls-tcp
 cargo fmt --check
 ```
 
@@ -198,10 +201,10 @@ compressed frame only when it is smaller; call
 The optional `max_in_flight_bytes` setting bounds aggregate bytes retained
 across transport and value protection work.
 
-The current client maintains one QUIC connection and lazily opens reusable
-bidirectional stream lanes up to `max_in_flight`. One request is active on each
-lane. Additional operations wait for a free lane. The target maintained-client
-contract also supports TLS-over-TCP; QUIC-only is a current package limitation.
+`Client` maintains one QUIC connection and lazily opens reusable bidirectional
+stream lanes up to `max_in_flight`. `TlsTcpClient` uses one ordered lane over a
+TLS-over-TCP connection; concurrent operations wait for that lane while the
+same request, deadline, retry, and close semantics remain in the shared core.
 
 ```rust
 let state = client.connection_state();

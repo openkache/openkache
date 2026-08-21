@@ -7,8 +7,13 @@ operations. CMake propagates the C++20 requirement only through the imported
 target; it does not change the consuming project's global standard.
 Projects using C++23 or newer can consume the same target; C++17 is not a
 supported minimum because the public API uses `std::span`.
-The current binding uses QUIC over TLS; TLS-over-TCP is part of the target
-maintained-client contract.
+`Connect_Options::transport` selects verified QUIC (the source-compatible
+default), verified TLS-over-TCP, or one of the explicit TLS-preserving
+insecure variants. Both profiles use TLS 1.3, `openkache/1`, and
+`X25519MLKEM768`, with identical v1 frame bytes. Non-default selectors require
+the additive `openkache_client_connect_transport` symbol; older native
+libraries report a clear unsupported-selector error through the runtime symbol
+probe.
 
 ## Build
 

@@ -153,7 +153,7 @@ export interface Client_Identity {
  * Native connection and complete request/response deadlines.
  */
 export interface Client_Timeouts {
-  /** Maximum duration for connection setup and the QUIC/TLS handshake. */
+  /** Maximum duration for connection setup and the TLS handshake. */
   readonly connect_ms?: number
   /** Maximum duration for one complete cache operation. */
   readonly request_ms?: number
@@ -171,9 +171,9 @@ export interface Retry_Options {
  * Connection settings for the Rust-backed Node.js, Bun, and Deno client.
  */
 export interface Client_Options {
-  /** Server UDP socket address, such as `127.0.0.1:4433`. */
+  /** Server transport address, such as `127.0.0.1:4433`. */
   readonly address: string
-  /** Server or CA certificate trusted for the QUIC connection, encoded as DER or PEM. */
+  /** Server or CA certificate trusted for the selected TLS transport, encoded as DER or PEM. */
   readonly certificate: Uint8Array
   /** Optional exact 32-byte root secret; omitted means unprotected values. */
   readonly data_protection_key?: Uint8Array
@@ -189,7 +189,7 @@ export interface Client_Options {
   readonly timeouts?: Client_Timeouts
   /** Automatic retry policy for response-safe operations. */
   readonly retry?: Retry_Options
-  /** Maximum concurrent request lanes on one connection. */
+  /** Maximum concurrent request lanes on one connection (TCP uses one lane). */
   readonly max_in_flight?: number
   /** Authenticated value-encryption profile; requires `data_protection_key`. */
   readonly encryption?: "compact" | "robust"
@@ -197,6 +197,8 @@ export interface Client_Options {
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
   readonly native_path?: string
+  /** Verified QUIC (default), TLS-over-TCP, or explicit TLS-preserving insecure variants. */
+  readonly transport?: "quic" | "tls_tcp" | "quic_insecure" | "tls_tcp_insecure"
 }
 
 /**
@@ -313,8 +315,8 @@ export class OpenKache_Client {
    * Connects Node.js, Bun, or Deno through the packaged asynchronous Node-API adapter.
    *
    * @param options - Address, trust, mTLS identity, encryption, and compression settings.
-   * @returns A connected client that reuses one QUIC connection.
-   * @throws {OpenKache_Error} When configuration, native loading, TLS, or QUIC fails.
+   * @returns A connected client that reuses the selected transport connection.
+   * @throws {OpenKache_Error} When configuration, native loading, or transport setup fails.
    */
   static async connect(options: Client_Options): Promise<OpenKache_Client> {
     validate_options(options)
@@ -351,6 +353,7 @@ export class OpenKache_Client {
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
       key_spec: options.key_spec,
+      transport: options.transport ?? "quic",
     }
     try {
       const native_module = load_native_module(options.native_path)
@@ -834,7 +837,7 @@ function parse_json_value(value: unknown): Json_Value {
  * Exact-item-ID client implementing the Smithy-generated service contract.
  *
  * This view shares the protected connection owned by `OpenKache_Client`; it
- * does not open a second QUIC connection. Use it when an application already
+ * does not open a second transport connection. Use it when an application already
  * owns protocol item IDs and formatted value bytes.
  */
 export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
@@ -1279,8 +1282,22 @@ function validate_options(options: Client_Options): void {
   if (typeof options.address !== "string" || options.address.length === 0) {
     throw new OpenKache_Error("address must be a non-empty string")
   }
-  if (!(options.certificate instanceof Uint8Array) || options.certificate.byteLength === 0) {
+  const insecure_transport =
+    options.transport === "quic_insecure" || options.transport === "tls_tcp_insecure"
+  if (
+    (!(options.certificate instanceof Uint8Array) || options.certificate.byteLength === 0) &&
+    !insecure_transport
+  ) {
     throw new OpenKache_Error("certificate must be a non-empty Uint8Array")
+  }
+  if (
+    options.transport !== undefined &&
+    options.transport !== "quic" &&
+    options.transport !== "tls_tcp" &&
+    options.transport !== "quic_insecure" &&
+    options.transport !== "tls_tcp_insecure"
+  ) {
+    throw new OpenKache_Error("transport must be quic, tls_tcp, quic_insecure, or tls_tcp_insecure")
   }
   if (
     options.data_protection_key !== undefined &&

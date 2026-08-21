@@ -108,6 +108,7 @@ export interface Ffi_Entry extends Wire_Entry {
 export interface Ffi_Contract {
   readonly abi_version: number
   readonly connection_states: readonly Ffi_Entry[]
+  readonly transports: readonly Ffi_Entry[]
   readonly native_abi_functions: readonly Native_Abi_Function[]
   readonly native_abi_structures: readonly Native_Abi_Structure[]
   readonly error_categories: readonly Ffi_Entry[]
@@ -215,6 +216,7 @@ const UNSIGNED_LONG_TRAIT_ID = "openkache.protocol#unsignedLong"
 const LEGACY_UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
 const FFI_ENUMS = {
   operations: { name: "FfiOperation", kind: "FFI operation" },
+  transports: { name: "FfiTransport", kind: "FFI transport" },
   result_kinds: { name: "FfiResultKind", kind: "FFI result" },
   status_categories: { name: "FfiStatusCategory", kind: "FFI status category" },
   error_categories: { name: "FfiErrorCategory", kind: "FFI error category" },
@@ -1220,6 +1222,15 @@ function ffi_contract(
       FFI_ENUMS.connection_states.name,
       FFI_ENUMS.connection_states.kind,
     ),
+    transports:
+      shapes[`${namespace}#${FFI_ENUMS.transports.name}`] === undefined
+        ? []
+        : ffi_enum_entries(
+            shapes,
+            namespace,
+            FFI_ENUMS.transports.name,
+            FFI_ENUMS.transports.kind,
+          ),
     error_categories: ffi_enum_entries(
       shapes,
       namespace,

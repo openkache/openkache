@@ -152,7 +152,7 @@ The runtime-neutral codec layer is available from
 
 ## Configuration
 
-- `address` is the server UDP address.
+- `address` is the server transport address.
 - `server_name` is the certificate identity for a pre-resolved address.
 - `certificate` is one trusted DER or PEM server or CA certificate.
 - `identity` contains the DER or PEM client certificate chain and private key
@@ -188,8 +188,10 @@ Linux x64 and ARM64 (glibc 2.17 or newer) plus Apple Silicon macOS.
 
 The browser cannot load the native adapter or open the UDP-based QUIC
 transport. The `value-codec` subpath is runtime-neutral, but the client
-connection API is not a browser transport. The current connection API is
-QUIC-only; TLS-over-TCP is part of the target maintained-client contract.
+connection API is not a browser transport. Set `transport: "tls_tcp"` for
+verified TLS-over-TCP or use an explicit `*_insecure` selector to disable
+certificate and server-identity verification; the default remains verified
+QUIC.
 
 Every connection and cache method returns a Promise. The adapter runs native
 networking outside the JavaScript event loop and maintains one reusable

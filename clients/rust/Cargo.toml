@@ -13,6 +13,7 @@ default = ["quic-quinn"]
 ffi = ["openkache-client-core/ffi"]
 quic-compio = ["openkache-client-core/quic-compio"]
 quic-quinn = ["openkache-client-core/quic-quinn"]
+tls-tcp = ["openkache-client-core/tls-tcp"]
 
 [dependencies]
 futures-util = "*"
