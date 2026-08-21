@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::storage_runtime::File;
+use crate::store::sync_data;
 use crate::{BUCKET_BYTES, Config, KvError, Result};
 use futures_util::future::FutureExt;
 use futures_util::stream::StreamExt;
@@ -13,7 +14,7 @@ use super::{
     FlushCompletion, GenerationLocation, GenerationReservation, Kvkache, LargeValueLocation,
     MutableGeneration, MutableSegment, PreparedFlush, RamBacking, SegmentFlushReason, StoredValue,
     decode_stored_value, encode_blob_ref, encode_large_value_ref, rewrite_segment_values,
-    storage_operation_error, sync_data, write_all_direct,
+    storage_operation_error, write_all_direct,
 };
 
 fn direct_buffer_from_bytes(bytes: &[u8]) -> Result<Option<DirectIoBuffer>> {
