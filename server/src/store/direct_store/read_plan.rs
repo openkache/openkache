@@ -14,9 +14,9 @@ use crate::{BUCKET_BYTES, Config, KvError, Result, StorageKey};
 use super::policy::item_state_is_live_now;
 use super::{
     CommittedGenerationState, DirectIoBuffer, DirectIoBufferLease, DirectStoreIo, INLINE_VALUE_TAG,
-    Item, ItemState, JobPin, MutableValueHandle, RamBacking, STORED_VALUE_TAG_BYTES, StoredValue,
-    TableLocation, bucket_hash, decode_stored_value, find_item_state_and_value_range,
-    read_exact_direct,
+    Item, ItemState, JobPin, MutableValueHandle, RamBacking, SEGMENT_FILE_HEADER_BYTES,
+    STORED_VALUE_TAG_BYTES, StoredValue, TableLocation, bucket_hash, decode_stored_value,
+    find_item_state_and_value_range, read_exact_direct, validate_bucket,
 };
 
 #[derive(Clone, Copy)]
@@ -219,6 +219,7 @@ impl PreparedReadCandidate {
                 );
                 let start = bucket_index * BUCKET_BYTES;
                 let bucket = &backing.segment[start..start + BUCKET_BYTES];
+                validate_bucket(bucket)?;
                 let Some((state, range)) = find_item_state_and_value_range(bucket, &storage_key)
                 else {
                     return Ok(None);
@@ -249,13 +250,16 @@ impl PreparedReadCandidate {
                 let bytes = read_exact_direct(
                     data,
                     io.bucket_read_pool.take_bucket().await,
-                    backing.location.sg_base + (bucket_index * BUCKET_BYTES) as u64,
+                    SEGMENT_FILE_HEADER_BYTES
+                        + backing.location.sg_base
+                        + (bucket_index * BUCKET_BYTES) as u64,
                     BUCKET_BYTES,
                     config.read_max_time_us,
                     "generation Bucket read",
                 )
                 .await?;
                 io.data_read.set(io.data_read.get() + BUCKET_BYTES as u64);
+                validate_bucket(&bytes)?;
                 let observed =
                     find_item_state_and_value_range(&bytes, &storage_key).map(|(state, range)| {
                         let value = match purpose {

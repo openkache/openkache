@@ -13,16 +13,17 @@ use std::time::Instant;
 use super::{
     BLOB_ITEM_THRESHOLD_BYTES, BlobArena, BlobHandle, BlobRef, BucketHashSequence,
     CAPACITY_CHECK_INTERVAL, CommittedGenerationState, DirectIoBuffer, DirectIoBufferLease,
-    DirectIoBufferPool, GenerationLocation, GenerationLog, GenerationReservation, INLINE_VALUE_TAG,
-    ITEM_EXPIRATION_BYTES, ITEM_FIXED_BYTES, Item, ItemState, JobPin, LargeValueLocation,
-    LargeValueLog, MutableSegment, RamBacking, ReadBacking, ResourceGuard, STORED_BLOB_REF_BYTES,
-    STORED_LARGE_VALUE_REF_BYTES, STORED_VALUE_TAG_BYTES, SegmentFlushReason, SetOutcome,
-    SgDirectory, StoredValue, Table, TableLocation, bucket_hash, decode_stored_value,
-    encode_blob_handle, encode_blob_ref, encode_inline_value, encode_large_value_handle,
-    encode_large_value_ref, find_item_in_bucket, find_item_state_and_value_range,
+    DirectIoBufferPool, GenerationIntegrity, GenerationLocation, GenerationLog,
+    GenerationReservation, INLINE_VALUE_TAG, ITEM_EXPIRATION_BYTES, ITEM_FIXED_BYTES, Item,
+    ItemState, JobPin, LargeValueLocation, LargeValueLog, MutableSegment, RamBacking, ReadBacking,
+    ResourceGuard, SEGMENT_FILE_HEADER_BYTES, STORED_BLOB_REF_BYTES, STORED_LARGE_VALUE_REF_BYTES,
+    STORED_VALUE_TAG_BYTES, SegmentFlushReason, SetOutcome, SgDirectory, StoredValue, Table,
+    TableLocation, bucket_hash, decode_stored_value, encode_blob_handle, encode_blob_ref,
+    encode_inline_value, encode_large_value_handle, encode_large_value_ref,
+    encode_segment_file_header, find_item_in_bucket, find_item_state_and_value_range,
     item_offsets_bytes, items, open_direct_file, read_exact_direct, remove_stored_value_tag,
     reserve_file_range, rewrite_segment_values, storage_io_error, storage_operation_error,
-    write_all_direct,
+    sync_data, validate_bucket, validate_segment_file_header, write_all_direct,
 };
 use crate::storage_backend;
 use crate::storage_runtime::File;
@@ -31,17 +32,18 @@ use futures_util::stream::FuturesUnordered;
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV2\0\0";
-const CHECKPOINT_VERSION: u32 = 1;
+const CHECKPOINT_VERSION: u32 = 2;
 const CHECKPOINT_MAX_RECORDS: usize = 1_000_000;
 
 struct CheckpointGeneration {
     sequence: u64,
     location: GenerationLocation,
     large_value_location: Option<LargeValueLocation>,
+    integrity: GenerationIntegrity,
 }
 
 struct Checkpoint {
-    generations: Vec<CommittedGenerationState>,
+    generations: Vec<CheckpointGeneration>,
     index: Vec<(StorageKey, TableLocation)>,
 }
 
@@ -92,6 +94,9 @@ fn encode_checkpoint(
             }
             None => bytes.push(0),
         }
+        bytes.extend_from_slice(&generation.integrity.segment_checksum.to_le_bytes());
+        bytes.extend_from_slice(&generation.integrity.blob_checksum.to_le_bytes());
+        bytes.extend_from_slice(&generation.integrity.large_value_checksum.to_le_bytes());
     }
     let mut entries = index.iter().collect::<Vec<_>>();
     entries.sort_unstable_by_key(|(storage_key, _)| storage_key.into_bytes());
@@ -171,10 +176,16 @@ fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
                 ));
             }
         };
-        generations.push(CommittedGenerationState {
+        let integrity = GenerationIntegrity {
+            segment_checksum: cursor.u32()?,
+            blob_checksum: cursor.u32()?,
+            large_value_checksum: cursor.u32()?,
+        };
+        generations.push(CheckpointGeneration {
             sequence,
             location,
             large_value_location,
+            integrity,
         });
     }
     let mut index = Vec::with_capacity(index_count);
@@ -348,6 +359,148 @@ fn startup_storage_error(operation: &str, error: KvError) -> KvError {
     }
 }
 
+async fn validate_generation_integrity(
+    data: &File,
+    large_values: &File,
+    config: &Config,
+    location: GenerationLocation,
+    large_value_location: Option<LargeValueLocation>,
+    integrity: GenerationIntegrity,
+) -> Result<()> {
+    validate_generation_metadata(config, location, large_value_location)?;
+    let segment = read_exact_direct(
+        data,
+        DirectIoBuffer::for_read(config.segment_size),
+        SEGMENT_FILE_HEADER_BYTES
+            .checked_add(location.sg_base)
+            .ok_or_else(|| KvError::Worker("committed SG offset overflowed".into()))?,
+        config.segment_size,
+        config.read_max_time_us,
+        "committed SG integrity read",
+    )
+    .await
+    .map_err(|error| startup_storage_error("reading committed SG integrity bytes", error))?;
+    if crc32fast::hash(&segment) != integrity.segment_checksum {
+        return Err(KvError::Worker(format!(
+            "committed SG {} checksum does not match",
+            location.logical_sg_id
+        )));
+    }
+    for bucket in segment.chunks_exact(BUCKET_BYTES) {
+        validate_bucket(bucket)?;
+    }
+
+    if location.blob_padded_len != 0 {
+        let blob = read_exact_direct(
+            data,
+            DirectIoBuffer::for_read(location.blob_padded_len as usize),
+            SEGMENT_FILE_HEADER_BYTES
+                .checked_add(location.record_start)
+                .ok_or_else(|| KvError::Worker("committed Blob offset overflowed".into()))?,
+            location.blob_padded_len as usize,
+            config.read_max_time_us,
+            "committed Blob integrity read",
+        )
+        .await
+        .map_err(|error| startup_storage_error("reading committed Blob integrity bytes", error))?;
+        if crc32fast::hash(&blob[..location.blob_logical_len as usize]) != integrity.blob_checksum {
+            return Err(KvError::Worker(format!(
+                "committed Blob Segment {} checksum does not match",
+                location.logical_sg_id
+            )));
+        }
+    } else if integrity.blob_checksum != crc32fast::hash(&[]) {
+        return Err(KvError::Worker(format!(
+            "committed empty Blob Segment {} checksum does not match",
+            location.logical_sg_id
+        )));
+    }
+
+    match large_value_location {
+        Some(location) if location.padded_len != 0 => {
+            let bytes = read_exact_direct(
+                large_values,
+                DirectIoBuffer::for_read(location.padded_len as usize),
+                location.record_start,
+                location.padded_len as usize,
+                config.read_max_time_us,
+                "committed large-value integrity read",
+            )
+            .await
+            .map_err(|error| {
+                startup_storage_error("reading committed large-value integrity bytes", error)
+            })?;
+            if crc32fast::hash(&bytes[..location.logical_len as usize])
+                != integrity.large_value_checksum
+            {
+                return Err(KvError::Worker(format!(
+                    "committed large-value Segment {} checksum does not match",
+                    location.logical_sg_id
+                )));
+            }
+        }
+        Some(_) | None if integrity.large_value_checksum != crc32fast::hash(&[]) => {
+            return Err(KvError::Worker(
+                "committed empty large-value checksum does not match".into(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_generation_metadata(
+    config: &Config,
+    location: GenerationLocation,
+    large_value_location: Option<LargeValueLocation>,
+) -> Result<()> {
+    let data_capacity = config.generation_data_file_bytes()?;
+    let blob_end = location
+        .record_start
+        .checked_add(u64::from(location.blob_padded_len))
+        .ok_or_else(|| KvError::Worker("committed Blob offset overflowed".into()))?;
+    let record_end = location
+        .record_start
+        .checked_add(location.record_len)
+        .ok_or_else(|| KvError::Worker("committed generation offset overflowed".into()))?;
+    let expected_record_len = u64::from(location.blob_padded_len)
+        .checked_add(config.segment_size as u64)
+        .ok_or_else(|| KvError::Worker("committed generation length overflowed".into()))?;
+    if location.record_start % BUCKET_BYTES as u64 != 0
+        || location.blob_logical_len > location.blob_padded_len
+        || u64::from(location.blob_padded_len) > config.blob_segment_size as u64
+        || !u64::from(location.blob_padded_len).is_multiple_of(BUCKET_BYTES as u64)
+        || location.record_len != expected_record_len
+        || location.sg_base != blob_end
+        || record_end > data_capacity
+    {
+        return Err(KvError::Worker(
+            "committed generation metadata does not match the configured geometry".into(),
+        ));
+    }
+    if let Some(large_location) = large_value_location {
+        let end = large_location
+            .record_start
+            .checked_add(u64::from(large_location.padded_len))
+            .ok_or_else(|| KvError::Worker("committed large-value offset overflowed".into()))?;
+        if large_location.logical_sg_id != location.logical_sg_id
+            || large_location.logical_len == 0
+            || large_location.padded_len == 0
+            || large_location.logical_len > large_location.padded_len
+            || !large_location
+                .record_start
+                .is_multiple_of(BUCKET_BYTES as u64)
+            || !u64::from(large_location.padded_len).is_multiple_of(BUCKET_BYTES as u64)
+            || end > config.large_value_capacity as u64
+        {
+            return Err(KvError::Worker(
+                "committed large-value metadata does not match the configured geometry".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 struct DirectStoreIo {
     data_written: Cell<u64>,
     data_read: Cell<u64>,
@@ -457,6 +610,8 @@ pub(crate) struct Kvkache {
     pub(crate) generation_fill_capacity_bytes: u64,
     allow_checkpoint: bool,
     persistent_index: Option<HashMap<StorageKey, TableLocation>>,
+    generation_integrity: HashMap<u32, GenerationIntegrity>,
+    pending_generation_integrity: HashMap<u32, GenerationIntegrity>,
 }
 
 impl Kvkache {
@@ -477,17 +632,18 @@ impl Kvkache {
 
     pub(crate) async fn open_with_resource_guard(
         config: Config,
-        _storage_key_id: [u8; 16],
+        storage_key_id: [u8; 16],
         resource_guard: Arc<ResourceGuard>,
         allow_checkpoint: bool,
     ) -> Result<Self> {
         config.validate()?;
-        Self::open_with_validated_config(config, [0; 16], resource_guard, allow_checkpoint).await
+        Self::open_with_validated_config(config, storage_key_id, resource_guard, allow_checkpoint)
+            .await
     }
 
     pub(crate) async fn open_with_validated_config(
         config: Config,
-        _storage_key_id: [u8; 16],
+        storage_key_id: [u8; 16],
         resource_guard: Arc<ResourceGuard>,
         allow_checkpoint: bool,
     ) -> Result<Self> {
@@ -509,13 +665,66 @@ impl Kvkache {
         }
         storage_backend::ensure_parent_directory(&config.data_path)
             .map_err(|error| startup_io_error("creating the data directory", error))?;
+        let data_exists = if storage_backend::USES_PHYSICAL_STORAGE {
+            match fs::metadata(&config.data_path) {
+                Ok(metadata) => {
+                    if !metadata.file_type().is_file() {
+                        return Err(KvError::Worker(
+                            "Segment storage path must be a regular file".into(),
+                        ));
+                    }
+                    Some(metadata.len())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(startup_io_error("inspecting the data file", error));
+                }
+            }
+        } else {
+            None
+        };
         let data = open_direct_file(&config.data_path)
             .await
             .map_err(|error| startup_io_error("opening the data file", error))?;
         let capacity = config.generation_file_bytes()?;
+        if let Some(actual) = data_exists
+            && actual != capacity
+        {
+            return Err(KvError::Worker(format!(
+                "Segment file has length {actual}, expected {capacity}; legacy files require repopulation"
+            )));
+        }
         data.set_len(capacity)
             .await
             .map_err(|error| startup_io_error("setting the data file length", error))?;
+        if storage_backend::USES_PHYSICAL_STORAGE {
+            if data_exists.is_none() {
+                let header = encode_segment_file_header(&config, storage_key_id);
+                write_all_direct(
+                    &data,
+                    header,
+                    0,
+                    BUCKET_BYTES,
+                    config.write_max_time_us,
+                    "Segment file header write",
+                )
+                .await
+                .map_err(|error| startup_storage_error("writing the Segment file header", error))?;
+                sync_data(&data, config.write_max_time_us, "Segment file header sync").await?;
+            } else {
+                let header = read_exact_direct(
+                    &data,
+                    DirectIoBuffer::for_read(BUCKET_BYTES),
+                    0,
+                    BUCKET_BYTES,
+                    config.read_max_time_us,
+                    "Segment file header read",
+                )
+                .await
+                .map_err(|error| startup_storage_error("reading the Segment file header", error))?;
+                validate_segment_file_header(&header, &config, storage_key_id)?;
+            }
+        }
         reserve_file_range(&data, 0, capacity)
             .await
             .map_err(|error| storage_io_error(&resource_guard, error))
@@ -524,8 +733,9 @@ impl Kvkache {
         let mut table = Table::new(&config)?;
         let logical_id_capacity = config.logical_sg_capacity()?;
         let mut directory = SgDirectory::new(logical_id_capacity)?;
+        let data_capacity = config.generation_data_file_bytes()?;
         let mut generation_log =
-            GenerationLog::new(capacity, config.segment_size, config.blob_segment_size)?;
+            GenerationLog::new(data_capacity, config.segment_size, config.blob_segment_size)?;
         storage_backend::ensure_parent_directory(&config.large_value_path)
             .map_err(|error| startup_io_error("creating the large-value directory", error))?;
         let large_values = open_direct_file(&config.large_value_path)
@@ -550,16 +760,32 @@ impl Kvkache {
             .transpose()?
             .flatten();
         let mut persistent_index = allow_checkpoint.then(HashMap::new);
+        let mut generation_integrity = HashMap::new();
+        let pending_generation_integrity = HashMap::new();
         let mut next_sequence = 0_u64;
         let mut recovered_live_keys = 0_usize;
         if let Some(checkpoint) = checkpoint {
             for committed in checkpoint.generations {
+                validate_generation_integrity(
+                    &data,
+                    &large_values,
+                    &config,
+                    committed.location,
+                    committed.large_value_location,
+                    committed.integrity,
+                )
+                .await?;
                 generation_log.restore(committed.location)?;
                 if let Some(location) = committed.large_value_location {
                     large_value_log.restore(location)?;
                 }
                 next_sequence = next_sequence.max(committed.sequence.saturating_add(1));
-                directory.restore_stable(committed)?;
+                generation_integrity.insert(committed.location.logical_sg_id, committed.integrity);
+                directory.restore_stable(CommittedGenerationState {
+                    sequence: committed.sequence,
+                    location: committed.location,
+                    large_value_location: committed.large_value_location,
+                })?;
             }
             for (storage_key, table_location) in checkpoint.index {
                 if !directory.is_stable(table_location.sg_index) {
@@ -624,6 +850,8 @@ impl Kvkache {
             generation_fill_capacity_bytes: 0,
             allow_checkpoint,
             persistent_index,
+            generation_integrity,
+            pending_generation_integrity,
         })
     }
 
@@ -650,6 +878,15 @@ impl Kvkache {
                 sequence: state.sequence,
                 location: state.location,
                 large_value_location: state.large_value_location,
+                integrity: *self
+                    .generation_integrity
+                    .get(&location.logical_sg_id)
+                    .ok_or_else(|| {
+                        KvError::Worker(format!(
+                            "cannot checkpoint logical SG {} without integrity metadata",
+                            location.logical_sg_id
+                        ))
+                    })?,
             });
         }
         let bytes = encode_checkpoint(&self.config, &generations, index)?;

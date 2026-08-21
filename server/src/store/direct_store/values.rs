@@ -27,6 +27,7 @@ pub(super) fn mutable_value_handle_for(
             handle: BlobHandle {
                 slot: blob_ref.value_offset,
                 value_len: blob_ref.value_len,
+                value_checksum: blob_ref.value_checksum,
             },
         }),
         StoredValue::Large(value_ref) => Some(MutableValueHandle::Large {
@@ -35,6 +36,7 @@ pub(super) fn mutable_value_handle_for(
             handle: BlobHandle {
                 slot: value_ref.value_offset,
                 value_len: value_ref.value_len,
+                value_checksum: value_ref.value_checksum,
             },
         }),
     }
@@ -82,11 +84,13 @@ pub(super) fn try_replace_value_in_place(
                     handle: BlobHandle {
                         slot: handle.slot,
                         value_len,
+                        value_checksum: crc32fast::hash(value.as_ref()),
                     },
                 },
                 encode_blob_handle(BlobHandle {
                     slot: handle.slot,
                     value_len,
+                    value_checksum: crc32fast::hash(value.as_ref()),
                 }),
             ))
         }
@@ -108,11 +112,13 @@ pub(super) fn try_replace_value_in_place(
                     handle: BlobHandle {
                         slot: handle.slot,
                         value_len,
+                        value_checksum: crc32fast::hash(value.as_ref()),
                     },
                 },
                 encode_large_value_handle(BlobHandle {
                     slot: handle.slot,
                     value_len,
+                    value_checksum: crc32fast::hash(value.as_ref()),
                 }),
             ))
         }
