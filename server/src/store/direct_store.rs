@@ -34,6 +34,17 @@ const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV2\0\0";
 const CHECKPOINT_VERSION: u32 = 2;
 const CHECKPOINT_MAX_RECORDS: usize = 1_000_000;
+const CHECKPOINT_HEADER_BYTES: u64 = 8 + 4 + (8 * 4) + 4 + 8;
+const CHECKPOINT_CHECKSUM_BYTES: u64 = 4;
+// Maximum encoded widths, including the optional large-value extent and the
+// fixed-width integrity fields. These bounds cap allocation before decoding
+// untrusted checkpoint counts.
+const CHECKPOINT_GENERATION_BYTES: u64 =
+    8 + (4 + 8 + 4 + 4 + 8 + 8) + 1 + (4 + 8 + 4 + 4) + (4 * 3);
+const CHECKPOINT_INDEX_BYTES: u64 = 32 + 4 + 1 + 1 + 2;
+const CHECKPOINT_MAX_BYTES: u64 = CHECKPOINT_HEADER_BYTES
+    + CHECKPOINT_CHECKSUM_BYTES
+    + (CHECKPOINT_MAX_RECORDS as u64 * (CHECKPOINT_GENERATION_BYTES + CHECKPOINT_INDEX_BYTES));
 
 struct CheckpointGeneration {
     sequence: u64,
@@ -59,14 +70,34 @@ fn checkpoint_path(config: &Config) -> std::path::PathBuf {
 
 fn load_checkpoint(config: &Config) -> Result<Option<Checkpoint>> {
     let path = checkpoint_path(config);
-    let mut file = match fs::File::open(&path) {
+    let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(startup_io_error("opening the storage checkpoint", error)),
     };
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let metadata = file
+        .metadata()
+        .map_err(|error| startup_io_error("inspecting the storage checkpoint", error))?;
+    if metadata.len() > CHECKPOINT_MAX_BYTES {
+        return Err(KvError::Worker(format!(
+            "storage checkpoint is too large ({} bytes; maximum is {CHECKPOINT_MAX_BYTES})",
+            metadata.len()
+        )));
+    }
+    let read_limit = CHECKPOINT_MAX_BYTES
+        .checked_add(1)
+        .expect("checkpoint byte limit fits in u64");
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len()).expect("bounded checkpoint size fits in usize"),
+    );
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
         .map_err(|error| startup_io_error("reading the storage checkpoint", error))?;
+    if bytes.len() as u64 > CHECKPOINT_MAX_BYTES {
+        return Err(KvError::Worker(format!(
+            "storage checkpoint grew beyond the {CHECKPOINT_MAX_BYTES}-byte limit"
+        )));
+    }
     decode_checkpoint(config, &bytes)
         .map(Some)
         .map_err(|error| startup_storage_error("decoding the storage checkpoint", error))
@@ -766,10 +797,18 @@ impl Kvkache {
         let storage_device_kind = storage_backend::file_device_kind(&data)
             .combine(storage_backend::file_device_kind(&large_values));
         let mut large_value_log = LargeValueLog::new(config.large_value_capacity)?;
-        let checkpoint = allow_checkpoint
-            .then(|| load_checkpoint(&config))
-            .transpose()?
-            .flatten();
+        let checkpoint = if allow_checkpoint {
+            let checkpoint = load_checkpoint(&config)?;
+            if data_exists.is_some() && checkpoint.is_none() {
+                return Err(KvError::Worker(
+                    "storage checkpoint is missing for an existing data file; refusing to expose an empty Table"
+                        .into(),
+                ));
+            }
+            checkpoint
+        } else {
+            None
+        };
         let mut persistent_index = allow_checkpoint.then(HashMap::new);
         let mut generation_integrity = HashMap::new();
         let pending_generation_integrity = HashMap::new();

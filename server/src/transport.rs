@@ -257,6 +257,12 @@ pub(super) enum RequestRead<T> {
         header: RequestFrameHeader,
         timed_out: bool,
     },
+    /// The lane has complete buffered bytes but its response window is full.
+    ///
+    /// This is a recoverable receive-side pause, not malformed framing. The
+    /// caller must finish an outstanding response before asking the lane for
+    /// another request event.
+    Backpressured,
     /// The peer FINed the request direction at a frame boundary.
     Finished,
     /// The peer reset the request direction.
@@ -314,6 +320,13 @@ impl RequestBudget {
                 waiters: HashMap::new(),
             })),
         }
+    }
+
+    pub(super) fn capacity(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("request budget lock poisoned")
+            .capacity
     }
 
     pub(super) async fn acquire(
@@ -447,42 +460,22 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     progress: &AtomicBool,
     admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
 ) -> Result<RequestRead<T>, StreamReadError> {
-    let header_read = read_request_header(stream, backend, maximum, timeout, progress).await?;
-    let (mut frame, header) = match header_read {
-        HeaderRead::Header { frame, header } => (frame, header),
-        HeaderRead::Finished => return Ok(RequestRead::Finished),
-        HeaderRead::Cancelled => return Ok(RequestRead::Cancelled),
-    };
-    let frame_len = header.frame_len()?;
-    if frame_len > maximum {
-        return Err(StreamReadError::TooLarge);
-    }
-
-    if let Err(rejection) = admit(header, &frame[..header.encoded_len()]) {
-        match discard_body(
-            stream,
-            backend,
-            frame_len.saturating_sub(frame.len()),
-            timeout,
-            progress,
-        )
-        .await?
-        {
-            BodyRead::Complete => {
-                return Ok(RequestRead::Rejected { header, rejection });
-            }
-            BodyRead::Cancelled => return Ok(RequestRead::Cancelled),
+    // Apply one absolute deadline to the complete frame, not one deadline per
+    // chunk. Otherwise a peer can keep a lane alive indefinitely by sending
+    // each byte just before the per-read timeout expires.
+    network_runtime::timeout(timeout, async {
+        let header_read = read_request_header(stream, backend, maximum, timeout, progress).await?;
+        let (mut frame, header) = match header_read {
+            HeaderRead::Header { frame, header } => (frame, header),
+            HeaderRead::Finished => return Ok(RequestRead::Finished),
+            HeaderRead::Cancelled => return Ok(RequestRead::Cancelled),
+        };
+        let frame_len = header.frame_len()?;
+        if frame_len > maximum {
+            return Err(StreamReadError::TooLarge);
         }
-    }
 
-    let permit = match budget.acquire(header.body_len(), timeout).await {
-        Ok(permit) => permit,
-        Err(error @ (StreamReadError::Timeout | StreamReadError::TooLarge)) => {
-            let timed_out = matches!(error, StreamReadError::Timeout);
-            // A request that cannot reserve memory was never admitted. Drain
-            // exactly its known body so later pipelined frame boundaries stay
-            // intact; the caller turns the rejection into a correlated
-            // overload response.
+        if let Err(rejection) = admit(header, &frame[..header.encoded_len()]) {
             match discard_body(
                 stream,
                 backend,
@@ -493,37 +486,64 @@ async fn read_buffered_request<S: RequestByteStream, T>(
             .await?
             {
                 BodyRead::Complete => {
-                    return Ok(RequestRead::Overloaded { header, timed_out });
+                    return Ok(RequestRead::Rejected { header, rejection });
                 }
                 BodyRead::Cancelled => return Ok(RequestRead::Cancelled),
             }
         }
-        Err(error) => return Err(error),
-    };
 
-    loop {
-        let remaining = frame_len.saturating_sub(frame.len());
-        if remaining == 0 {
-            return Ok(RequestRead::Frame(RequestFrame::new(header, frame, permit)));
-        }
-        let actual = frame.len();
-        let previous_len = frame.len();
-        match append_chunk(stream, frame, remaining, backend, timeout).await? {
-            ChunkRead::Bytes(next) => {
-                // The caller may race this read against operation execution.
-                // Mark delivery after extending the local frame so it knows
-                // whether dropping the future would lose buffered bytes.
-                if next.len() > previous_len {
-                    progress.store(true, Ordering::Relaxed);
+        let permit = match budget.acquire(header.body_len(), timeout).await {
+            Ok(permit) => permit,
+            Err(error @ (StreamReadError::Timeout | StreamReadError::TooLarge)) => {
+                let timed_out = matches!(error, StreamReadError::Timeout);
+                // A request that cannot reserve memory was never admitted. Drain
+                // exactly its known body so later pipelined frame boundaries stay
+                // intact; the caller turns the rejection into a correlated
+                // overload response.
+                match discard_body(
+                    stream,
+                    backend,
+                    frame_len.saturating_sub(frame.len()),
+                    timeout,
+                    progress,
+                )
+                .await?
+                {
+                    BodyRead::Complete => {
+                        return Ok(RequestRead::Overloaded { header, timed_out });
+                    }
+                    BodyRead::Cancelled => return Ok(RequestRead::Cancelled),
                 }
-                frame = next;
             }
-            ChunkRead::Finished => {
-                return Err(truncated_frame_error(actual, frame_len));
+            Err(error) => return Err(error),
+        };
+
+        loop {
+            let remaining = frame_len.saturating_sub(frame.len());
+            if remaining == 0 {
+                return Ok(RequestRead::Frame(RequestFrame::new(header, frame, permit)));
             }
-            ChunkRead::Cancelled => return Ok(RequestRead::Cancelled),
+            let actual = frame.len();
+            let previous_len = frame.len();
+            match append_chunk(stream, frame, remaining, backend, timeout).await? {
+                ChunkRead::Bytes(next) => {
+                    // The caller may race this read against operation execution.
+                    // Mark delivery after extending the local frame so it knows
+                    // whether dropping the future would lose buffered bytes.
+                    if next.len() > previous_len {
+                        progress.store(true, Ordering::Relaxed);
+                    }
+                    frame = next;
+                }
+                ChunkRead::Finished => {
+                    return Err(truncated_frame_error(actual, frame_len));
+                }
+                ChunkRead::Cancelled => return Ok(RequestRead::Cancelled),
+            }
         }
-    }
+    })
+    .await
+    .map_err(|_| StreamReadError::Timeout)?
 }
 
 async fn read_request_header<S: RequestByteStream>(
