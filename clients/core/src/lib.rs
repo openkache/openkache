@@ -24,7 +24,7 @@ pub mod value_envelope;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
@@ -430,7 +430,11 @@ struct Core<C: ClientConnection> {
     namespace_policy: NamespacePolicy,
     state: AtomicU32,
     next_request_id: AtomicU64,
-    pending: futures_util::lock::Mutex<HashMap<u64, PendingEntry>>,
+    // Correlation entries are touched only while performing short,
+    // synchronous map operations.  A synchronous mutex lets the reservation
+    // guard remove an entry from `Drop` when a caller cancels an async
+    // operation; an async mutex cannot be acquired reliably from `Drop`.
+    pending: Mutex<HashMap<u64, PendingEntry>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -438,6 +442,53 @@ struct PendingEntry {
     operation: Operation,
     mutation: bool,
     transmitted: bool,
+}
+
+/// Owns one correlation-table reservation for the duration of a request
+/// future.
+///
+/// Every normal completion removes its entry explicitly.  If the caller
+/// drops/cancels the future at any await point, this guard removes the entry
+/// synchronously so abandoned operations cannot leak the correlation table.
+struct PendingRequestReservation<'a, C: ClientConnection> {
+    core: &'a Core<C>,
+    request_id: u64,
+    completed: bool,
+}
+
+impl<C: ClientConnection> PendingRequestReservation<'_, C> {
+    fn complete(&mut self) {
+        self.core.complete_request(self.request_id);
+        self.completed = true;
+    }
+}
+
+impl<C: ClientConnection> Drop for PendingRequestReservation<'_, C> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let entry = self
+            .core
+            .pending
+            .lock()
+            .expect("request correlation table lock is not poisoned")
+            .remove(&self.request_id);
+        // A dropped transmitted mutation cannot be reported to a caller whose
+        // future was cancelled.  Retire the connection so a later operation
+        // cannot accidentally treat that abandoned lane as a known outcome.
+        if entry.is_some_and(|entry| {
+            entry.transmitted && (entry.mutation || matches!(entry.operation, Operation::Sync))
+        }) {
+            let _ = self
+                .core
+                .state
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                    (state != ConnectionState::Closed.code())
+                        .then_some(ConnectionState::Disconnected.code())
+                });
+        }
+    }
 }
 
 struct RequestFailure {
@@ -539,7 +590,7 @@ impl<C: ClientConnection> Core<C> {
             namespace_policy,
             state: AtomicU32::new(ConnectionState::Connected.code()),
             next_request_id: AtomicU64::new(0),
-            pending: futures_util::lock::Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
         };
         Ok(core)
     }
@@ -762,9 +813,12 @@ impl<C: ClientConnection> Core<C> {
         }
         let context = request.context();
         let response_safe = context.retry_policy.is_safe();
-        let request_id = self
-            .reserve_request_id(context.operation, context.mutation)
-            .await?;
+        let request_id = self.reserve_request_id(context.operation, context.mutation)?;
+        let mut reservation = PendingRequestReservation {
+            core: self,
+            request_id,
+            completed: false,
+        };
         let (success_statuses, error_statuses) = {
             let wire = operation_wire_spec(context.opcode);
             (wire.success_statuses, wire.error_statuses)
@@ -780,12 +834,12 @@ impl<C: ClientConnection> Core<C> {
             let connection = match self.current_connection() {
                 Ok(connection) => connection,
                 Err(error) => {
-                    self.complete_request(request_id).await;
+                    reservation.complete();
                     return Err(error);
                 }
             };
             let Some(attempt_request) = attempts.next(attempt == max_attempts) else {
-                self.complete_request(request_id).await;
+                reservation.complete();
                 return Err(Error::Connection(
                     "request retry state was exhausted before the final attempt".into(),
                 ));
@@ -804,7 +858,7 @@ impl<C: ClientConnection> Core<C> {
                 .await
             {
                 Ok(result) => {
-                    self.complete_request(request_id).await;
+                    reservation.complete();
                     return result;
                 }
                 Err(failure) => {
@@ -815,8 +869,8 @@ impl<C: ClientConnection> Core<C> {
                         self.reconnect_failed(&connection, deadline).await?;
                         continue;
                     }
-                    let transmitted = self.pending_was_transmitted(request_id).await;
-                    self.complete_request(request_id).await;
+                    let transmitted = self.pending_was_transmitted(request_id);
+                    reservation.complete();
                     if operation_has_unknown_outcome(context)
                         && (failure.may_have_reached_server || transmitted)
                     {
@@ -834,8 +888,11 @@ impl<C: ClientConnection> Core<C> {
         ))
     }
 
-    async fn reserve_request_id(&self, operation: Operation, mutation: bool) -> Result<u64> {
-        let mut pending = self.pending.lock().await;
+    fn reserve_request_id(&self, operation: Operation, mutation: bool) -> Result<u64> {
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("request correlation table lock is not poisoned");
         for _ in 0..=u64::MAX {
             let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
             if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(request_id) {
@@ -852,16 +909,21 @@ impl<C: ClientConnection> Core<C> {
         ))
     }
 
-    async fn mark_transmitted(&self, request_id: u64) {
-        if let Some(entry) = self.pending.lock().await.get_mut(&request_id) {
+    fn mark_transmitted(&self, request_id: u64) {
+        if let Some(entry) = self
+            .pending
+            .lock()
+            .expect("request correlation table lock is not poisoned")
+            .get_mut(&request_id)
+        {
             entry.transmitted = true;
         }
     }
 
-    async fn pending_was_transmitted(&self, request_id: u64) -> bool {
+    fn pending_was_transmitted(&self, request_id: u64) -> bool {
         self.pending
             .lock()
-            .await
+            .expect("request correlation table lock is not poisoned")
             .get(&request_id)
             .is_some_and(|entry| {
                 let _ = (entry.operation, entry.mutation);
@@ -869,8 +931,11 @@ impl<C: ClientConnection> Core<C> {
             })
     }
 
-    async fn complete_request(&self, request_id: u64) {
-        self.pending.lock().await.remove(&request_id);
+    fn complete_request(&self, request_id: u64) {
+        self.pending
+            .lock()
+            .expect("request correlation table lock is not poisoned")
+            .remove(&request_id);
     }
 
     fn selected_namespace_id(&self) -> Result<u64> {
@@ -1067,7 +1132,7 @@ impl<C: ClientConnection> Core<C> {
             .write_request(request, write_timeout)
             .await
             .map_err(RequestFailure::after_send)?;
-        self.mark_transmitted(request_id).await;
+        self.mark_transmitted(request_id);
         let parts = stream
             .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
             .await
