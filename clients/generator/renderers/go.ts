@@ -1053,15 +1053,23 @@ func smithyDecodeF64Array(payload []byte) ([]float64, error) {
     operation_uses_item_id_helpers,
   )
     ? `func smithyConcatItemIDs(itemIDs ...[]byte) ([]byte, error) {
+	total := 0
 	for _, itemID := range itemIDs {
-		if len(itemID) != SmithyItemIDBytes {
+		if len(itemID) > SmithyItemIDBytes {
 			return nil, validationError(
 				"item_id",
-				fmt.Sprintf("each item ID must contain exactly %d bytes", SmithyItemIDBytes),
+				fmt.Sprintf("each item ID must contain at most %d bytes", SmithyItemIDBytes),
 			)
 		}
+		if total > SmithyItemIDBytes-len(itemID) {
+			return nil, validationError(
+				"item_id",
+				fmt.Sprintf("combined item IDs must contain at most %d bytes", SmithyItemIDBytes),
+			)
+		}
+		total += len(itemID)
 	}
-	combined := make([]byte, 0, len(itemIDs)*SmithyItemIDBytes)
+	combined := make([]byte, 0, total)
 	for _, itemID := range itemIDs {
 		combined = append(combined, itemID...)
 	}
