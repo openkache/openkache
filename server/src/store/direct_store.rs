@@ -31,7 +31,8 @@ use futures_util::stream::FuturesUnordered;
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV2\0\0";
-const CHECKPOINT_VERSION: u32 = 1;
+const CHECKPOINT_VERSION: u32 = 2;
+const LEGACY_CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_MAX_RECORDS: usize = 1_000_000;
 
 struct CheckpointGeneration {
@@ -42,7 +43,13 @@ struct CheckpointGeneration {
 
 struct Checkpoint {
     generations: Vec<CommittedGenerationState>,
-    index: Vec<(StorageKey, TableLocation)>,
+    index: Vec<(StorageKey, TableLocation, bool)>,
+}
+
+#[derive(Clone, Copy)]
+struct PersistentIndexEntry {
+    location: TableLocation,
+    live: bool,
 }
 
 fn checkpoint_path(config: &Config) -> std::path::PathBuf {
@@ -67,7 +74,7 @@ fn load_checkpoint(config: &Config) -> Result<Option<Checkpoint>> {
 fn encode_checkpoint(
     config: &Config,
     generations: &[CheckpointGeneration],
-    index: &HashMap<StorageKey, TableLocation>,
+    index: &HashMap<StorageKey, PersistentIndexEntry>,
 ) -> Result<Vec<u8>> {
     let generation_count = u32::try_from(generations.len())
         .map_err(|_| KvError::Worker("storage checkpoint generation count exceeds u32".into()))?;
@@ -95,11 +102,12 @@ fn encode_checkpoint(
     }
     let mut entries = index.iter().collect::<Vec<_>>();
     entries.sort_unstable_by_key(|(storage_key, _)| storage_key.into_bytes());
-    for (storage_key, location) in entries {
+    for (storage_key, entry) in entries {
         bytes.extend_from_slice(storage_key.as_bytes());
-        bytes.extend_from_slice(&location.sg_index.to_le_bytes());
-        bytes.push(location.bucket_hash_index);
-        bytes.extend_from_slice(&[0; 3]);
+        bytes.extend_from_slice(&entry.location.sg_index.to_le_bytes());
+        bytes.push(entry.location.bucket_hash_index);
+        bytes.push(u8::from(entry.live));
+        bytes.extend_from_slice(&[0; 2]);
     }
     let checksum = crc32fast::hash(&bytes);
     bytes.extend_from_slice(&checksum.to_le_bytes());
@@ -131,7 +139,8 @@ fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
             "storage checkpoint magic is invalid".into(),
         ));
     }
-    if cursor.u32()? != CHECKPOINT_VERSION {
+    let version = cursor.u32()?;
+    if !matches!(version, LEGACY_CHECKPOINT_VERSION | CHECKPOINT_VERSION) {
         return Err(KvError::Worker(
             "storage checkpoint version is unsupported".into(),
         ));
@@ -182,13 +191,24 @@ fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
         let storage_key = StorageKey::new(cursor.array_32()?);
         let sg_index = cursor.u32()?;
         let bucket_hash_index = cursor.byte()?;
-        let _ = cursor.take(3)?;
+        // Version 1 never retained tombstones in its checkpoint index, so all
+        // legacy entries are live. Version 2 uses one of the three reserved
+        // bytes for this state while keeping the record width unchanged.
+        let live = if version == LEGACY_CHECKPOINT_VERSION {
+            let _ = cursor.take(3)?;
+            true
+        } else {
+            let live = cursor.byte()? != 0;
+            let _ = cursor.take(2)?;
+            live
+        };
         index.push((
             storage_key,
             TableLocation {
                 sg_index,
                 bucket_hash_index,
             },
+            live,
         ));
     }
     if !cursor.is_empty() {
@@ -456,7 +476,7 @@ pub(crate) struct Kvkache {
     pub(crate) generation_fill_used_bytes: u64,
     pub(crate) generation_fill_capacity_bytes: u64,
     allow_checkpoint: bool,
-    persistent_index: Option<HashMap<StorageKey, TableLocation>>,
+    persistent_index: Option<HashMap<StorageKey, PersistentIndexEntry>>,
 }
 
 impl Kvkache {
@@ -561,7 +581,7 @@ impl Kvkache {
                 next_sequence = next_sequence.max(committed.sequence.saturating_add(1));
                 directory.restore_stable(committed)?;
             }
-            for (storage_key, table_location) in checkpoint.index {
+            for (storage_key, table_location, live) in checkpoint.index {
                 if !directory.is_stable(table_location.sg_index) {
                     return Err(KvError::Worker(format!(
                         "checkpoint Item points at non-stable logical SG {}",
@@ -572,8 +592,16 @@ impl Kvkache {
                 persistent_index
                     .as_mut()
                     .expect("persistent checkpoint index is enabled")
-                    .insert(storage_key, table_location);
-                recovered_live_keys = recovered_live_keys.saturating_add(1);
+                    .insert(
+                        storage_key,
+                        PersistentIndexEntry {
+                            location: table_location,
+                            live,
+                        },
+                    );
+                if live {
+                    recovered_live_keys = recovered_live_keys.saturating_add(1);
+                }
             }
         }
         let mut mutable = Vec::with_capacity(config.mutable_segment_count);
