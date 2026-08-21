@@ -494,6 +494,19 @@ impl Kvkache {
         // The simulated backend has no durable files. Keep its completion-only
         // workers ephemeral even though startup grants the checkpoint seam.
         let allow_checkpoint = allow_checkpoint && storage_backend::USES_PHYSICAL_STORAGE;
+        if storage_backend::USES_PHYSICAL_STORAGE && !allow_checkpoint {
+            let running_marker = config
+                .data_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(storage_backend::RUNNING_MARKER_FILE);
+            if running_marker.exists() {
+                return Err(KvError::Worker(format!(
+                    "unclean storage run detected at {}; committed-SG recovery is unavailable, so refusing to expose an empty Table; remove or repopulate the storage only after an offline recovery decision",
+                    running_marker.display()
+                )));
+            }
+        }
         storage_backend::ensure_parent_directory(&config.data_path)
             .map_err(|error| startup_io_error("creating the data directory", error))?;
         let data = open_direct_file(&config.data_path)
