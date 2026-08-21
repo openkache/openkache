@@ -46,7 +46,11 @@ impl Kvkache {
                 PendingKeyedMutation::Set {
                     storage_key: pending_key,
                     ..
-                } if *pending_key == storage_key
+                }
+                    | PendingKeyedMutation::Delete {
+                        storage_key: pending_key,
+                        ..
+                    } if *pending_key == storage_key
             )
         });
     }
@@ -143,6 +147,51 @@ impl Kvkache {
                     storage_key,
                     outcome: pending_outcome(response, outcome),
                     visible_state,
+                }));
+            }
+            PendingKeyedMutation::Delete {
+                storage_key,
+                previous,
+                previous_mutable_value,
+                previous_state,
+            } => {
+                // Capacity work may have evicted the observed generation
+                // before the tombstone became appendable. In that case the
+                // deleted record is already gone and no second live-key
+                // decrement or Table publication is needed.
+                let deleted = item_state_is_live_at(previous_state, unix_time_ms());
+                if !self
+                    .table
+                    .candidate_locations(&storage_key)
+                    .contains(&previous)
+                {
+                    return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
+                        storage_key,
+                        outcome: KeyedOutcome::Deleted(deleted),
+                        visible_state: Some(KeyedVisibleState::Missing),
+                    }));
+                }
+                let Some(replacement) = self.try_append_tombstone(storage_key)? else {
+                    return Ok(PendingKeyedProgress::Pending(
+                        PendingKeyedMutation::Delete {
+                            storage_key,
+                            previous,
+                            previous_mutable_value,
+                            previous_state,
+                        },
+                    ));
+                };
+                self.publish_tombstone_location(
+                    storage_key,
+                    Some(previous),
+                    previous_mutable_value,
+                    replacement,
+                )?;
+                self.live_keys = self.live_keys.saturating_sub(1);
+                return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
+                    storage_key,
+                    outcome: KeyedOutcome::Deleted(deleted),
+                    visible_state: Some(KeyedVisibleState::Missing),
                 }));
             }
         }
