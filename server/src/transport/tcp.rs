@@ -347,7 +347,11 @@ impl ReceiveStream for TlsTcpReceiveStream {
                             return Ok(RequestRead::Finished);
                         }
                         ReceiveEvent::Backpressure => {
-                            return Err(StreamReadError::TooLarge);
+                            // The frame is complete and still buffered, but an
+                            // earlier response owns the lane's in-flight
+                            // window. Let the connection loop finish that
+                            // response before asking for another event.
+                            return Ok(RequestRead::Backpressured);
                         }
                         ReceiveEvent::NeedMore | ReceiveEvent::Ready => continue,
                     }

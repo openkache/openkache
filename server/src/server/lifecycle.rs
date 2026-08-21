@@ -627,11 +627,16 @@ async fn serve_tcp_connection(
 ) -> std::result::Result<(), TransportError> {
     let _connection_guard = ActiveTcpConnection { network_shard };
     let max_frame = crate::protocol::max_request_frame_bytes();
+    // RequestBudget accounts for body bytes, while the TCP lane retains
+    // complete framed requests until their responses finish. Allow one frame
+    // of fixed framing overhead on top of the configured body budget instead
+    // of multiplying the wire maximum by a connection-local constant.
+    let max_in_flight_bytes = request_budget.capacity().saturating_add(max_frame);
     let lane = TlsTcpLane::new(
         stream,
         tls,
         max_frame,
-        max_frame.saturating_mul(64),
+        max_in_flight_bytes,
     )
     .map_err(|error| TransportError::backend("tls-tcp", "create", error))?;
     if lane.handshake(request_timeout).await.is_err() {

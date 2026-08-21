@@ -44,11 +44,15 @@ const CHECKPOINT_LARGE_VALUE_LOCATION_BYTES: usize = 20;
 const CHECKPOINT_INDEX_BYTES: usize = 40;
 const CHECKPOINT_CLOCK_BYTES: usize = 8;
 const CHECKPOINT_CRC_BYTES: usize = 4;
-/// Reject a checkpoint before allocating or reading an unbounded amount of
-/// restart metadata. The record-count guard below remains the authoritative
-/// structural limit; this byte ceiling also covers malformed count fields
-/// and files grown concurrently with a metadata probe.
-const CHECKPOINT_MAX_BYTES: u64 = 128 * 1024 * 1024;
+// Maximum encoded widths, including the optional large-value extent and the
+// fixed-width integrity fields. These bounds cap allocation before decoding
+// untrusted checkpoint counts.
+const CHECKPOINT_MAX_BYTES: u64 = CHECKPOINT_HEADER_BYTES as u64
+    + (CHECKPOINT_MAX_RECORDS as u64
+        * (CHECKPOINT_GENERATION_FIXED_BYTES as u64
+            + CHECKPOINT_LARGE_VALUE_LOCATION_BYTES as u64))
+    + (CHECKPOINT_MAX_RECORDS as u64 * CHECKPOINT_INDEX_BYTES as u64)
+    + (CHECKPOINT_CLOCK_BYTES + CHECKPOINT_CRC_BYTES) as u64;
 
 struct CheckpointGeneration {
     sequence: u64,
@@ -906,10 +910,18 @@ impl Kvkache {
         let storage_device_kind = storage_backend::file_device_kind(&data)
             .combine(storage_backend::file_device_kind(&large_values));
         let mut large_value_log = LargeValueLog::new(config.large_value_capacity)?;
-        let checkpoint = allow_checkpoint
-            .then(|| load_checkpoint(&config))
-            .transpose()?
-            .flatten();
+        let checkpoint = if allow_checkpoint {
+            let checkpoint = load_checkpoint(&config)?;
+            if data_exists.is_some() && checkpoint.is_none() {
+                return Err(KvError::Worker(
+                    "storage checkpoint is missing for an existing data file; refusing to expose an empty Table"
+                        .into(),
+                ));
+            }
+            checkpoint
+        } else {
+            None
+        };
         let mut persistent_index = allow_checkpoint.then(HashMap::new);
         let mut generation_integrity = HashMap::new();
         let pending_generation_integrity = HashMap::new();

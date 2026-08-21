@@ -257,6 +257,12 @@ pub(super) enum RequestRead<T> {
         header: RequestFrameHeader,
         timed_out: bool,
     },
+    /// The lane has complete buffered bytes but its response window is full.
+    ///
+    /// This is a recoverable receive-side pause, not malformed framing. The
+    /// caller must finish an outstanding response before asking the lane for
+    /// another request event.
+    Backpressured,
     /// The peer FINed the request direction at a frame boundary.
     Finished,
     /// The peer reset the request direction.
@@ -314,6 +320,13 @@ impl RequestBudget {
                 waiters: HashMap::new(),
             })),
         }
+    }
+
+    pub(super) fn capacity(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("request budget lock poisoned")
+            .capacity
     }
 
     pub(super) async fn acquire(
@@ -510,7 +523,6 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         }
         Err(error) => return Err(error),
     };
-
     loop {
         let remaining = frame_len.saturating_sub(frame.len());
         if remaining == 0 {
