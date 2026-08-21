@@ -2,7 +2,7 @@
 //!
 //! The server receives [`ItemValue`] as an opaque byte string.  This module
 //! owns the client-only boundary described by `VALUE_FORMAT.md` and
-//! `VALUE_SECURITY.md`: version and selector dispatch, exact opaque bytes,
+//! `SECURITY_MODEL.md`: version and selector dispatch, exact opaque bytes,
 //! StructuredValue-CBOR-v1, bounded Zstandard, and authenticated protection.
 //! Raw protocol operations never call this module and therefore never sniff or
 //! reinterpret stored bytes.
