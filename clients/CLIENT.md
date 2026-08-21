@@ -158,6 +158,32 @@ tasks according to the selected shutdown mode, and completes every pending
 caller exactly once. Native adapters MUST keep the underlying handle and
 runtime alive until those completions no longer reference them.
 
+### 3.4 Native request handles and safe boundaries
+
+ABI v6 exposes asynchronous execute entry points that return an owned request
+handle. A managed adapter MUST keep the copied input buffers and client active
+slot owned until the request lifecycle is complete, then consume at most one
+result and call `request_free` exactly once. The required sequence is:
+`request_poll` until ready, `request_wait` to take the result,
+`request_cancel` when language cancellation wins, and `request_free` in every
+exit path. A result returned by `request_wait` has independent ownership and
+MUST be released through the result API.
+
+Cancellation before worker admission is a definitive `Canceled` result.
+Cancellation after a mutating request crosses admission is
+`UnknownMutation`; adapters MUST preserve that category instead of returning a
+generic runtime cancellation or retrying the mutation. Read-only cancellation
+may map to the language's normal cancellation exception after the native result
+has been consumed.
+
+ABI v6 does not expose a request-handle entry point for every operation shape
+(for example, complete raw SET policy flags and namespace/scoped calls).
+Adapters MAY use a documented **safe completion boundary** for those calls:
+shield the synchronous native task from language cancellation, drain its
+definitive result, release the result, and only then return control. This
+boundary keeps ownership and mutation outcomes correct; it does not claim that
+the native call was interrupted.
+
 ## 4. Retries, outcomes, and errors
 
 ### 4.1 Common outcome model

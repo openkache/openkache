@@ -11,11 +11,20 @@ variable-width Item ID, structured-value, compression, and dual-transport
 contracts live in the shared draft documents linked by [`../README.md`](../README.md).
 
 `OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
-keys use the `Text` type and `Data` keys use the `Bytes` type; both are encoded
-as canonical deterministic CBOR before crossing the native ABI. Use
+keys use the `Text` type and `Data` keys use the `Bytes` type; the logical bytes
+and generated key discriminator cross the native ABI and the shared core
+performs canonical encoding. Use
 `OpenKacheRawClient` when an integration owns exact protocol item IDs and
 opaque value bytes; it implements the generated `Smithy_OpenKache_Api`
 contract.
+
+ABI v6 operations use the native request-handle lifecycle (`poll`, `wait`,
+`cancel`, and `free`). A canceled read is surfaced as Swift's
+`CancellationError`; a mutation that crossed native admission throws
+`OpenKacheUnknownMutationError` and must not be replayed. Raw SETs that request
+complete policy flags, and scoped or namespace calls without request handles,
+use a detached synchronous safe-completion boundary so native ownership and
+definitive outcomes are drained before cancellation returns.
 
 The native library exports the versioned ABI declared in
 [`../core/include/openkache/client_abi.h`](../core/include/openkache/client_abi.h).

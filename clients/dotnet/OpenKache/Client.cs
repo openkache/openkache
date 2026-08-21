@@ -521,6 +521,18 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
 
     private static OpenKacheException UnexpectedKind(string operation, uint kind)
     {
+        if (kind == Protocol.FfiResultUnknownMutation)
+        {
+            return new OpenKacheException(
+                "UNKNOWN_MUTATION",
+                $"{operation} crossed the native mutation cancellation boundary.");
+        }
+        if (kind == Protocol.FfiResultCanceled)
+        {
+            return new OpenKacheException(
+                "CANCELED",
+                $"{operation} was canceled before native admission.");
+        }
         return new OpenKacheException(
             "PROTOCOL_ERROR",
             $"{operation} returned unexpected native result kind {kind}.");

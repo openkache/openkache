@@ -205,7 +205,12 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
+        let codec = match encryption {
+            Encryption::Unprotected => ValueCodec::compressed(compression)?,
+            Encryption::Compact | Encryption::Robust => {
+                ValueCodec::protected_with_profile(&key, compression, encryption)?
+            }
+        };
         Ok(Self {
             key,
             key_spec: key_type,

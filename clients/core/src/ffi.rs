@@ -195,7 +195,7 @@ enum Command {
 }
 
 type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
-type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
+type CommandReceiver = crossfire::AsyncRx<crossfire::mpsc::Array<Command>>;
 
 struct WorkerOptions {
     endpoint: Endpoint,
@@ -377,7 +377,8 @@ impl FfiClient {
         retry: RetryPolicy,
         max_in_flight: usize,
     ) -> std::result::Result<Self, String> {
-        let (commands, receiver) = crossfire::mpsc::bounded_blocking(COMMAND_QUEUE_CAPACITY);
+        let (commands, receiver) =
+            crossfire::mpsc::bounded_blocking_async(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
@@ -940,7 +941,7 @@ fn run_worker(
     }
 
     while !shutdown.load(Ordering::Acquire) {
-        let Ok(command) = commands.recv() else {
+        let Ok(command) = runtime.block_on(commands.recv()) else {
             break;
         };
         match command {
@@ -2725,7 +2726,17 @@ fn typed_execute_entry(
             value_length,
             &client.request_budget(),
         )?;
-        let key = ffi_key_bytes(key_spec, key_input, false)?;
+        let key = if matches!(
+            operation,
+            FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync | FfiOperation::Reconnect
+        ) {
+            // Keyless operations use an empty application-key buffer.  Do
+            // not turn that buffer into a canonical empty Bytes key before
+            // `validated_execute` checks the operation's empty-key contract.
+            key_input
+        } else {
+            ffi_key_bytes(key_spec, key_input, false)?
+        };
         let (operation, key, value, set_options) = validated_execute(
             operation.code(),
             key,
@@ -2767,7 +2778,21 @@ fn typed_async_entry(
             value_length,
             &client.request_budget(),
         )?;
-        let key = ffi_key_bytes(key_spec, key_input, raw)?;
+        let key = if !raw
+            && matches!(
+                operation,
+                FfiOperation::Ping
+                    | FfiOperation::Stats
+                    | FfiOperation::Sync
+                    | FfiOperation::Reconnect
+            ) {
+            // Keyless operations use an empty application-key buffer.  Do
+            // not turn that buffer into a canonical empty Bytes key before
+            // `validated_execute` checks the operation's empty-key contract.
+            key_input
+        } else {
+            ffi_key_bytes(key_spec, key_input, raw)?
+        };
         let (operation, key, value, set_options) = validated_execute(
             operation.code(),
             key,

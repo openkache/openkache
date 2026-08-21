@@ -31,6 +31,15 @@ typedef openkache_client_result *(*openkache_go_connect_ex_fn)(
 typedef openkache_client_result *(*openkache_go_execute_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
+typedef openkache_client_request_t *(*openkache_go_execute_async_fn)(
+    const openkache_client_handle *, uint32_t, uint32_t,
+    const uint8_t *, size_t, const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
+typedef openkache_client_request_t *(*openkache_go_execute_with_options_async_fn)(
+    const openkache_client_handle *, uint32_t, uint32_t,
+    const uint8_t *, size_t, const uint8_t *, size_t, uint8_t, uint64_t);
+typedef openkache_client_request_t *(*openkache_go_execute_raw_async_fn)(
+    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
+    const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
 typedef openkache_client_result *(*openkache_go_execute_unary_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t);
 typedef openkache_client_result *(*openkache_go_execute_fields_fn)(
@@ -65,6 +74,11 @@ typedef openkache_client_handle *(*openkache_go_result_take_client_fn)(
     openkache_client_result *);
 typedef void (*openkache_go_result_free_fn)(openkache_client_result *);
 typedef void (*openkache_go_client_free_fn)(openkache_client_handle *);
+typedef uint32_t (*openkache_go_request_poll_fn)(const openkache_client_request_t *);
+typedef openkache_client_result *(*openkache_go_request_wait_fn)(
+    openkache_client_request_t *, uint64_t);
+typedef uint32_t (*openkache_go_request_cancel_fn)(const openkache_client_request_t *);
+typedef void (*openkache_go_request_free_fn)(openkache_client_request_t *);
 
 typedef struct openkache_go_library {
     openkache_go_library_handle handle;
@@ -72,6 +86,9 @@ typedef struct openkache_go_library {
     openkache_go_connect_fn connect;
     openkache_go_connect_ex_fn connect_ex;
     openkache_go_execute_fn execute;
+    openkache_go_execute_async_fn execute_async;
+    openkache_go_execute_with_options_async_fn execute_with_options_async;
+    openkache_go_execute_raw_async_fn execute_raw_async;
     openkache_go_execute_unary_fn execute_unary;
     openkache_go_execute_fields_fn execute_fields;
     openkache_go_execute_raw_fn execute_raw;
@@ -89,6 +106,10 @@ typedef struct openkache_go_library {
     openkache_go_result_take_client_fn result_take_client;
     openkache_go_result_free_fn result_free;
     openkache_go_client_free_fn client_free;
+    openkache_go_request_poll_fn request_poll;
+    openkache_go_request_wait_fn request_wait;
+    openkache_go_request_cancel_fn request_cancel;
+    openkache_go_request_free_fn request_free;
 } openkache_go_library;
 
 static void *openkache_go_symbol(openkache_go_library_handle handle, const char *name) {
@@ -183,6 +204,9 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(connect, "openkache_client_connect");
     OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
     OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
+    OPENKACHE_GO_LOAD(execute_async, "openkache_client_execute_async");
+    OPENKACHE_GO_LOAD(execute_with_options_async, "openkache_client_execute_with_options_async");
+    OPENKACHE_GO_LOAD(execute_raw_async, "openkache_client_execute_raw_async");
     OPENKACHE_GO_LOAD(execute_unary, "openkache_client_execute_unary");
     OPENKACHE_GO_LOAD(execute_fields, "openkache_client_execute_fields");
     OPENKACHE_GO_LOAD(execute_raw, "openkache_client_execute_raw");
@@ -200,16 +224,24 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(result_take_client, "openkache_client_result_take_client");
     OPENKACHE_GO_LOAD(result_free, "openkache_client_result_free");
     OPENKACHE_GO_LOAD(client_free, "openkache_client_free");
+    OPENKACHE_GO_LOAD(request_poll, "openkache_client_request_poll");
+    OPENKACHE_GO_LOAD(request_wait, "openkache_client_request_wait");
+    OPENKACHE_GO_LOAD(request_cancel, "openkache_client_request_cancel");
+    OPENKACHE_GO_LOAD(request_free, "openkache_client_request_free");
 #undef OPENKACHE_GO_LOAD
 
     if (library->abi == NULL || library->connect == NULL || library->execute == NULL ||
+        library->execute_async == NULL || library->execute_with_options_async == NULL ||
+        library->execute_raw_async == NULL ||
         library->execute_with_options == NULL || library->execute_raw_with_options == NULL ||
         library->execute_scoped == NULL || library->namespace_open == NULL ||
         library->namespace_update_policy == NULL || library->namespace_delete == NULL ||
         library->namespace_descriptor_decode == NULL ||
         library->result_kind == NULL || library->result_data == NULL ||
         library->result_data_length == NULL || library->result_take_client == NULL ||
-        library->result_free == NULL || library->client_free == NULL) {
+        library->result_free == NULL || library->client_free == NULL ||
+        library->request_poll == NULL || library->request_wait == NULL ||
+        library->request_cancel == NULL || library->request_free == NULL) {
         openkache_go_close(handle);
         free(library);
         *error_message = openkache_go_error_copy("native library is missing the OpenKache ABI");
@@ -301,6 +333,50 @@ openkache_client_result *openkache_go_execute(
     return library->execute(
         client, operation, application_key, application_key_length, value,
         value_length, set_condition, ttl_enabled, ttl_ms);
+}
+
+openkache_client_request_t *openkache_go_execute_async(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    uint32_t key_spec,
+    const uint8_t *application_key, size_t application_key_length,
+    const uint8_t *value, size_t value_length,
+    uint32_t set_condition, uint8_t ttl_enabled, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_async == NULL) return NULL;
+    return library->execute_async(
+        client, operation, key_spec, application_key, application_key_length,
+        value, value_length, set_condition, ttl_enabled, ttl_ms);
+}
+
+openkache_client_request_t *openkache_go_execute_with_options_async(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    uint32_t key_spec,
+    const uint8_t *application_key, size_t application_key_length,
+    const uint8_t *value, size_t value_length,
+    uint8_t set_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_with_options_async == NULL) return NULL;
+    return library->execute_with_options_async(
+        client, operation, key_spec, application_key, application_key_length,
+        value, value_length, set_flags, ttl_ms);
+}
+
+openkache_client_request_t *openkache_go_execute_raw_async(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    const uint8_t *item_id, size_t item_id_length,
+    const uint8_t *value, size_t value_length,
+    uint32_t set_condition, uint8_t ttl_enabled, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_raw_async == NULL) return NULL;
+    return library->execute_raw_async(
+        client, operation, item_id, item_id_length, value, value_length,
+        set_condition, ttl_enabled, ttl_ms);
 }
 
 openkache_client_result *openkache_go_execute_raw(
@@ -465,6 +541,40 @@ void openkache_go_client_free(
     openkache_client_handle *client
 ) {
     if (library != NULL && client != NULL) library->client_free(client);
+}
+
+uint32_t openkache_go_request_poll(
+    const openkache_go_library *library,
+    const openkache_client_request_t *request
+) {
+    if (library == NULL || library->request_poll == NULL || request == NULL) return 4;
+    return library->request_poll(request);
+}
+
+openkache_client_result *openkache_go_request_wait(
+    const openkache_go_library *library,
+    openkache_client_request_t *request,
+    uint64_t timeout_ms
+) {
+    if (library == NULL || library->request_wait == NULL || request == NULL) return NULL;
+    return library->request_wait(request, timeout_ms);
+}
+
+uint32_t openkache_go_request_cancel(
+    const openkache_go_library *library,
+    const openkache_client_request_t *request
+) {
+    if (library == NULL || library->request_cancel == NULL || request == NULL) return 4;
+    return library->request_cancel(request);
+}
+
+void openkache_go_request_free(
+    const openkache_go_library *library,
+    openkache_client_request_t *request
+) {
+    if (library != NULL && library->request_free != NULL && request != NULL) {
+        library->request_free(request);
+    }
 }
 */
 import "C"
@@ -764,15 +874,7 @@ func (h *nativeHandle) executeStructuredUnary(
 		kind, data := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data}
 	}()
-	select {
-	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
-	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
-	}
+	return awaitNativeBoundary(ctx, done)
 }
 
 func (h *nativeHandle) executeStructuredFields(
@@ -822,15 +924,7 @@ func (h *nativeHandle) executeStructuredFields(
 		kind, data := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data}
 	}()
-	select {
-	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
-	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
-	}
+	return awaitNativeBoundary(ctx, done)
 }
 
 func (h *nativeHandle) executeRaw(
@@ -897,15 +991,7 @@ func (h *nativeHandle) executeScoped(
 		kind, data := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data}
 	}()
-	select {
-	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
-	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
-	}
+	return awaitNativeBoundary(ctx, done)
 }
 
 func (h *nativeHandle) namespaceOpen(
@@ -936,15 +1022,7 @@ func (h *nativeHandle) namespaceOpen(
 		kind, data := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data}
 	}()
-	select {
-	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
-	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
-	}
+	return awaitNativeBoundary(ctx, done)
 }
 
 func (h *nativeHandle) namespaceUpdatePolicy(
@@ -972,15 +1050,7 @@ func (h *nativeHandle) namespaceUpdatePolicy(
 		kind, data := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data}
 	}()
-	select {
-	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
-	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
-	}
+	return awaitNativeBoundary(ctx, done)
 }
 
 func (h *nativeHandle) namespaceDelete(
@@ -1004,15 +1074,7 @@ func (h *nativeHandle) namespaceDelete(
 		kind, data := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data}
 	}()
-	select {
-	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
-	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
-	}
+	return awaitNativeBoundary(ctx, done)
 }
 
 func (h *nativeHandle) decodeNamespaceDescriptor(
@@ -1060,38 +1122,148 @@ func (h *nativeHandle) executeNative(
 			Message:   "native library does not support complete SET options",
 		}
 	}
+	flags, ttl, err := options.wireFlags()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	if raw {
+		if condition, ttlEnabled, ttlMilliseconds, ok := legacyRawOptions(options); ok {
+			return h.executeRawRequest(
+				ctx,
+				operation,
+				key,
+				value,
+				condition,
+				ttlEnabled,
+				ttlMilliseconds,
+			)
+		}
+		// ABI v6 has no raw request entry point carrying complete policy
+		// flags.  Keep this synchronous call alive through cancellation so a
+		// mutation cannot be abandoned with an unknown owner.
+		return h.executeSyncBoundary(
+			ctx,
+			operation,
+			key,
+			value,
+			flags,
+			ttl,
+			true,
+		)
+	}
+	return h.executeTypedRequest(ctx, operation, key, value, flags, ttl)
+}
+
+func (h *nativeHandle) executeTypedRequest(
+	ctx context.Context,
+	operation uint32,
+	key, value []byte,
+	flags uint8,
+	ttl uint64,
+) (nativeResult, error) {
 	client, err := h.begin()
 	if err != nil {
 		return nativeResult{}, err
 	}
 	keyMemory := C.CBytes(key)
 	valueMemory := C.CBytes(value)
-
-	flags, ttl, err := options.wireFlags()
-	if err != nil {
-		C.free(keyMemory)
-		C.free(valueMemory)
+	request := C.openkache_go_execute_with_options_async(
+		h.library.ptr,
+		client,
+		C.uint32_t(operation),
+		C.uint32_t(SmithyFFIKeySpecBytes),
+		(*C.uint8_t)(keyMemory),
+		C.size_t(len(key)),
+		(*C.uint8_t)(valueMemory),
+		C.size_t(len(value)),
+		C.uint8_t(flags),
+		C.uint64_t(ttl),
+	)
+	C.free(keyMemory)
+	C.free(valueMemory)
+	if request == nil {
 		h.end()
+		return nativeResult{}, &Error{Message: "native ABI returned a null request"}
+	}
+	return h.awaitRequest(ctx, request)
+}
+
+func (h *nativeHandle) executeRawRequest(
+	ctx context.Context,
+	operation uint32,
+	key, value []byte,
+	condition uint32,
+	ttlEnabled bool,
+	ttl uint64,
+) (nativeResult, error) {
+	client, err := h.begin()
+	if err != nil {
 		return nativeResult{}, err
 	}
+	keyMemory := C.CBytes(key)
+	valueMemory := C.CBytes(value)
+	request := C.openkache_go_execute_raw_async(
+		h.library.ptr,
+		client,
+		C.uint32_t(operation),
+		(*C.uint8_t)(keyMemory),
+		C.size_t(len(key)),
+		(*C.uint8_t)(valueMemory),
+		C.size_t(len(value)),
+		C.uint32_t(condition),
+		C.uint8_t(boolByte(ttlEnabled)),
+		C.uint64_t(ttl),
+	)
+	C.free(keyMemory)
+	C.free(valueMemory)
+	if request == nil {
+		h.end()
+		return nativeResult{}, &Error{Message: "native ABI returned a null request"}
+	}
+	return h.awaitRequest(ctx, request)
+}
 
+func (h *nativeHandle) executeSyncBoundary(
+	ctx context.Context,
+	operation uint32,
+	key, value []byte,
+	flags uint8,
+	ttl uint64,
+	raw bool,
+) (nativeResult, error) {
+	client, err := h.begin()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	keyMemory := C.CBytes(key)
+	valueMemory := C.CBytes(value)
 	done := make(chan nativeResult, 1)
 	go func() {
 		defer h.end()
 		var result *C.openkache_client_result
 		if raw {
 			result = C.openkache_go_execute_raw_with_options(
-				h.library.ptr, client, C.uint32_t(operation),
-				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
-				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
-				C.uint8_t(flags), C.uint64_t(ttl),
+				h.library.ptr,
+				client,
+				C.uint32_t(operation),
+				(*C.uint8_t)(keyMemory),
+				C.size_t(len(key)),
+				(*C.uint8_t)(valueMemory),
+				C.size_t(len(value)),
+				C.uint8_t(flags),
+				C.uint64_t(ttl),
 			)
 		} else {
 			result = C.openkache_go_execute_with_options(
-				h.library.ptr, client, C.uint32_t(operation),
-				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
-				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
-				C.uint8_t(flags), C.uint64_t(ttl),
+				h.library.ptr,
+				client,
+				C.uint32_t(operation),
+				(*C.uint8_t)(keyMemory),
+				C.size_t(len(key)),
+				(*C.uint8_t)(valueMemory),
+				C.size_t(len(value)),
+				C.uint8_t(flags),
+				C.uint64_t(ttl),
 			)
 		}
 		C.free(keyMemory)
@@ -1100,14 +1272,106 @@ func (h *nativeHandle) executeNative(
 		done <- nativeResult{kind: kind, data: data}
 	}()
 
+	return awaitNativeBoundary(ctx, done)
+}
+
+func (h *nativeHandle) awaitRequest(
+	ctx context.Context,
+	request *C.openkache_client_request_t,
+) (nativeResult, error) {
+	defer h.end()
+	defer C.openkache_go_request_free(h.library.ptr, request)
+
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	canceled := false
+	for {
+		state := uint32(C.openkache_go_request_poll(h.library.ptr, request))
+		if state != 0 {
+			result := C.openkache_go_request_wait(
+				h.library.ptr,
+				request,
+				C.uint64_t(0),
+			)
+			decoded := nativeResultFromPointer(h.library, result)
+			if canceled && decoded.kind == SmithyFFIResultCanceled {
+				return nativeResult{}, ctx.Err()
+			}
+			return nativeResultOrError(decoded)
+		}
+		if !canceled {
+			select {
+			case <-ctx.Done():
+				C.openkache_go_request_cancel(h.library.ptr, request)
+				canceled = true
+			case <-ticker.C:
+			}
+		} else {
+			<-ticker.C
+		}
+	}
+}
+
+func nativeResultFromPointer(
+	library *nativeLibrary,
+	result *C.openkache_client_result,
+) nativeResult {
+	kind, data := decodeResult(library, result)
+	return nativeResult{kind: kind, data: data}
+}
+
+func nativeResultOrError(result nativeResult) (nativeResult, error) {
+	if result.kind == SmithyFFIResultError {
+		return nativeResult{}, &Error{Message: string(result.data)}
+	}
+	return result, nil
+}
+
+// awaitNativeBoundary keeps a legacy synchronous ABI call alive after the
+// caller's context is canceled.  The native result must be consumed before
+// returning control so a mutation cannot be abandoned with an unknown owner.
+func awaitNativeBoundary(
+	ctx context.Context,
+	done <-chan nativeResult,
+) (nativeResult, error) {
 	select {
 	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
+		return nativeResultOrError(result)
 	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
+		result := <-done
+		return nativeResultOrError(result)
+	}
+}
+
+func legacyRawOptions(options SetOptions) (uint32, bool, uint64, bool) {
+	condition := options.Condition
+	var conditionCode uint32
+	switch condition {
+	case "", SmithySetConditionAny:
+		conditionCode = SmithyFFISetConditionAny
+	case SmithySetConditionIfAbsent:
+		conditionCode = SmithyFFISetConditionIfAbsent
+	case SmithySetConditionIfPresent:
+		conditionCode = SmithyFFISetConditionIfPresent
+	default:
+		return 0, false, 0, false
+	}
+	if options.EvictionMode != "" && options.EvictionMode != SmithyEvictionModeInherit {
+		return 0, false, 0, false
+	}
+	switch options.ExpirationMode {
+	case "", SmithyExpirationModeInherit:
+		if options.TTLMillis != 0 {
+			return 0, false, 0, false
+		}
+		return conditionCode, false, 0, true
+	case SmithyExpirationModeExplicitTtl:
+		if options.TTLMillis == 0 {
+			return 0, false, 0, false
+		}
+		return conditionCode, true, options.TTLMillis, true
+	default:
+		return 0, false, 0, false
 	}
 }
 

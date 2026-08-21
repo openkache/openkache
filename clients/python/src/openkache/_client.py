@@ -50,6 +50,9 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
     SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
     SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
+    SMITHY_FFI_KEY_SPEC_BYTES,
+    SMITHY_FFI_KEY_SPEC_INTEGER,
+    SMITHY_FFI_KEY_SPEC_TEXT,
     SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
     SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
     SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED,
@@ -538,7 +541,7 @@ class OpenKacheClient:
                 "structured-value ABI is unavailable in the loaded native adapter"
             )
         try:
-            payload = await asyncio.to_thread(
+            payload = await _await_sync_boundary(
                 operation,
                 key=_key_bytes(key, self._key_spec),
             )
@@ -583,7 +586,7 @@ class OpenKacheClient:
             ) from error
         selected = options or SetOptions()
         try:
-            result = await asyncio.to_thread(
+            result = await _await_sync_boundary(
                 operation,
                 key=_key_bytes(key, self._key_spec),
                 value=payload,
@@ -627,9 +630,11 @@ class OpenKacheClient:
         self, key: str | int | bytes | bytearray | memoryview
     ) -> bool:
         self._assert_open()
+        key_spec, key_bytes = _typed_key_input(key)
         kind, _ = await self._execute(
             SMITHY_OPCODE_DELETE,
-            key=_key_bytes(key, self._key_spec),
+            key=key_bytes,
+            key_spec=key_spec,
         )
         return _delete_outcome(kind)
 
@@ -700,15 +705,26 @@ class OpenKacheClient:
         *,
         key: bytes = b"",
         value: bytes = b"",
+        key_spec: int = SMITHY_FFI_KEY_SPEC_BYTES,
         options: SetOptions | None = None,
     ) -> tuple[int, bytes]:
         self._assert_open()
         selected = options or SetOptions()
         try:
-            return await asyncio.to_thread(
+            execute_async = getattr(self._native, "execute_with_options_async", None)
+            if callable(execute_async):
+                return await execute_async(
+                    operation,
+                    key=key,
+                    value=value,
+                    key_spec=key_spec,
+                    set_flags=selected._wire_flags,
+                    ttl_ms=selected.ttl_ms or 0,
+                )
+            return await _await_sync_boundary(
                 self._native.execute_with_options,
                 operation,
-                key=key,
+                key=_canonical_key_bytes(key, key_spec),
                 value=value,
                 set_flags=selected._wire_flags,
                 ttl_ms=selected.ttl_ms or 0,
@@ -722,10 +738,8 @@ class OpenKacheClient:
         key: str | int | bytes | bytearray | memoryview,
         operation_name: str = "GET",
     ) -> bytes | None:
-        kind, payload = await self._execute(
-            operation,
-            key=_key_bytes(key, self._key_spec),
-        )
+        key_spec, key_bytes = _typed_key_input(key)
+        kind, payload = await self._execute(operation, key=key_bytes, key_spec=key_spec)
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return None
         if kind != SMITHY_FFI_RESULT_VALUE:
@@ -745,7 +759,16 @@ class OpenKacheClient:
         self._assert_open()
         selected = options or SetOptions()
         try:
-            return await asyncio.to_thread(
+            execute_async = getattr(self._native, "execute_raw_with_options_async", None)
+            if callable(execute_async):
+                return await execute_async(
+                    operation,
+                    item_id=item_id,
+                    value=value,
+                    set_flags=selected._wire_flags,
+                    ttl_ms=selected.ttl_ms or 0,
+                )
+            return await _await_sync_boundary(
                 self._native.execute_raw_with_options,
                 operation,
                 item_id=item_id,
@@ -772,7 +795,7 @@ class OpenKacheClient:
             )
         selected = options or SetOptions()
         try:
-            return await asyncio.to_thread(
+            return await _await_sync_boundary(
                 self._native.execute_scoped,
                 operation,
                 namespace_id=namespace_id,
@@ -791,9 +814,11 @@ class OpenKacheClient:
         value: bytes,
         options: SetOptions | None,
     ) -> SmithySetOutcome:
+        key_spec, key_bytes = _typed_key_input(key)
         kind, _ = await self._execute(
             operation,
-            key=_key_bytes(key, self._key_spec),
+            key=key_bytes,
+            key_spec=key_spec,
             value=value,
             options=options,
         )
@@ -885,7 +910,7 @@ class RawClient(SmithyOpenKacheApi):
             )
         policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
         try:
-            kind, payload = await asyncio.to_thread(
+            kind, payload = await _await_sync_boundary(
                 self._owner._native.namespace_open,
                 name=input.name.encode("utf-8"),
                 create_if_missing=input.create_if_missing,
@@ -913,7 +938,7 @@ class RawClient(SmithyOpenKacheApi):
     ) -> SmithyNamespaceUpdatePolicyOutput:
         policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
         try:
-            kind, payload = await asyncio.to_thread(
+            kind, payload = await _await_sync_boundary(
                 self._owner._native.namespace_update_policy,
                 namespace_id=input.namespace_id,
                 expected_revision=input.expected_revision,
@@ -941,7 +966,7 @@ class RawClient(SmithyOpenKacheApi):
         self, input: SmithyNamespaceDeleteInput
     ) -> SmithyNamespaceDeleteOutput:
         try:
-            await asyncio.to_thread(
+            await _await_sync_boundary(
                 self._owner._native.namespace_delete,
                 namespace_id=input.namespace_id,
                 expected_revision=input.expected_revision,
@@ -955,6 +980,79 @@ class RawClient(SmithyOpenKacheApi):
 
 
 Client = OpenKacheClient
+
+
+async def _await_sync_boundary(
+    function: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Wait for a legacy synchronous ABI call before honoring cancellation.
+
+    Structured, scoped, and namespace operations do not yet have dedicated
+    request-handle entry points in ABI v6.  Keeping their native call alive
+    until its core deadline is the safe ownership boundary: a canceled task
+    never abandons a mutation whose result could still become unknown.
+    """
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Shield the native call from task cancellation, then return its
+        # definitive result (including UnknownMutation) to the caller.
+        current = asyncio.current_task()
+        while True:
+            if current is not None:
+                current.uncancel()
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+
+
+def _typed_key_input(
+    value: str | int | bytes | bytearray | memoryview,
+) -> tuple[int, bytes]:
+    """Return the logical key bytes and generated FFI key discriminator."""
+
+    if isinstance(value, str):
+        try:
+            return SMITHY_FFI_KEY_SPEC_TEXT, value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise OpenKacheValueError("key must contain valid UTF-8 text") from error
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return SMITHY_FFI_KEY_SPEC_BYTES, _as_bytes(value, "key")
+    if isinstance(value, bool):
+        raise OpenKacheValueError("boolean keys are not supported")
+    if isinstance(value, int):
+        if not _I64_MIN <= value <= _I64_MAX:
+            raise OpenKacheValueError("integer key must fit in signed i64")
+        return SMITHY_FFI_KEY_SPEC_INTEGER, str(value).encode("ascii")
+    raise OpenKacheValueError(
+        "key must be a signed-i64 integer, UTF-8 string, or bytes-like value"
+    )
+
+
+def _canonical_key_bytes(key: bytes, key_spec: int) -> bytes:
+    """Recreate the legacy canonical-key ABI representation for fallback calls."""
+
+    if not key:
+        return b""
+    if key_spec == SMITHY_FFI_KEY_SPEC_BYTES:
+        return _canonical_cbor_string(2, key)
+    if key_spec == SMITHY_FFI_KEY_SPEC_TEXT:
+        try:
+            return _canonical_cbor_string(3, key)
+        except UnicodeEncodeError as error:
+            raise OpenKacheValueError("key must contain valid UTF-8 text") from error
+    if key_spec == SMITHY_FFI_KEY_SPEC_INTEGER:
+        try:
+            value = int(key.decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise OpenKacheValueError("integer key must be a signed-i64 value") from error
+        return _canonical_cbor_integer(value)
+    raise OpenKacheValueError("native ABI returned an unknown key specification")
 
 
 def _raise_native_error(error: NativeError) -> NoReturn:

@@ -636,11 +636,11 @@ func (c *Client) Ping(ctx context.Context) error {
 // Get retrieves decrypted and decompressed bytes for key. The found result is
 // distinguished from an empty stored value by the found boolean.
 func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
-	canonicalKey, err := canonicalBytesKey(key)
+	logicalKey, err := logicalBytesKey(key)
 	if err != nil {
 		return nil, false, err
 	}
-	result, err := c.invoke(ctx, SmithyOpcodeGet, canonicalKey, nil, SetOptions{})
+	result, err := c.invoke(ctx, SmithyOpcodeGet, logicalKey, nil, SetOptions{})
 	if err != nil {
 		return nil, false, operationError("get", err)
 	}
@@ -670,11 +670,11 @@ func (c *Client) GetStructured(ctx context.Context, key []byte) ([]byte, bool, e
 // The returned bytes are canonical RFC 8785 JSON produced by the shared core.
 // The Go adapter does not parse or re-serialize the document.
 func (c *Client) GetJSON(ctx context.Context, key []byte) ([]byte, bool, error) {
-	canonicalKey, err := canonicalBytesKey(key)
+	logicalKey, err := logicalBytesKey(key)
 	if err != nil {
 		return nil, false, err
 	}
-	result, err := c.invoke(ctx, SmithyFFIOperationGetJson, canonicalKey, nil, SetOptions{})
+	result, err := c.invoke(ctx, SmithyFFIOperationGetJson, logicalKey, nil, SetOptions{})
 	if err != nil {
 		return nil, false, operationError("get json", err)
 	}
@@ -693,7 +693,7 @@ func (c *Client) GetItem(ctx context.Context, itemID ItemID) ([]byte, bool, erro
 
 // Set encrypts and stores value for key.
 func (c *Client) Set(ctx context.Context, key, value []byte, options SetOptions) (SetOutcome, error) {
-	canonicalKey, err := canonicalBytesKey(key)
+	logicalKey, err := logicalBytesKey(key)
 	if err != nil {
 		return "", err
 	}
@@ -703,7 +703,7 @@ func (c *Client) Set(ctx context.Context, key, value []byte, options SetOptions)
 	if err := validateSetOptions(options); err != nil {
 		return "", err
 	}
-	result, err := c.invoke(ctx, SmithyOpcodeSet, canonicalKey, value, options)
+	result, err := c.invoke(ctx, SmithyOpcodeSet, logicalKey, value, options)
 	if err != nil {
 		return "", operationError("set", err)
 	}
@@ -745,7 +745,7 @@ func (c *Client) SetJSON(
 	key, jsonBytes []byte,
 	options SetOptions,
 ) (SetOutcome, error) {
-	canonicalKey, err := canonicalBytesKey(key)
+	logicalKey, err := logicalBytesKey(key)
 	if err != nil {
 		return "", err
 	}
@@ -758,7 +758,7 @@ func (c *Client) SetJSON(
 	if err := validateSetOptions(options); err != nil {
 		return "", err
 	}
-	result, err := c.invoke(ctx, SmithyFFIOperationSetJson, canonicalKey, jsonBytes, options)
+	result, err := c.invoke(ctx, SmithyFFIOperationSetJson, logicalKey, jsonBytes, options)
 	if err != nil {
 		return "", operationError("set json", err)
 	}
@@ -884,19 +884,35 @@ func (c *Client) SetItem(
 
 // Delete removes key and reports whether an item existed.
 func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
-	canonicalKey, err := canonicalBytesKey(key)
+	logicalKey, err := logicalBytesKey(key)
 	if err != nil {
 		return false, err
 	}
-	result, err := c.invoke(ctx, SmithyOpcodeDelete, canonicalKey, nil, SetOptions{})
+	result, err := c.invoke(ctx, SmithyOpcodeDelete, logicalKey, nil, SetOptions{})
 	if err != nil {
 		return false, operationError("delete", err)
 	}
 	return deleteResult("delete", result)
 }
 
-// canonicalBytesKey encodes a Go []byte key as the v1 Bytes PortableKey.
-// The native ABI accepts canonical key bytes, not the caller's raw bytes.
+// logicalBytesKey validates the v1 Bytes PortableKey length while keeping the
+// logical bytes for the typed async ABI's explicit key discriminator.
+func logicalBytesKey(key []byte) ([]byte, error) {
+	header, err := cborArgument(2, uint64(len(key)))
+	if err != nil {
+		return nil, err
+	}
+	if len(header)+len(key) > maxCanonicalKeyBytes {
+		return nil, validationError(
+			"key",
+			fmt.Sprintf("canonical encoding exceeds %d bytes", maxCanonicalKeyBytes),
+		)
+	}
+	return append([]byte(nil), key...), nil
+}
+
+// canonicalBytesKey encodes a Go []byte key as the v1 Bytes PortableKey for
+// the structured-value ABI, whose fields already carry canonical key bytes.
 func canonicalBytesKey(key []byte) ([]byte, error) {
 	header, err := cborArgument(2, uint64(len(key)))
 	if err != nil {
