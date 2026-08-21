@@ -114,10 +114,14 @@ guarantee for data handled by that compromised boundary.
 Application-key mapping is defined by
 [clients/KEY_FORMAT.md](clients/KEY_FORMAT.md).
 
-The protected mapping profile derives a server-visible Item ID from the
-application key using a secret root key and namespace. The server sees the
+The root-bound `NamespaceHash` profile derives a server-visible Item ID from
+the application key using a secret root key and namespace. The server sees the
 derived Item ID, not the application key. The root key and namespace are part
-of the client-owned identity derivation.
+of the client-owned identity derivation. The all-zero/public root is a valid
+explicit exception: its Item IDs are publicly derivable and provide no
+application-key privacy. A protected value may still use that public root when
+the client supplies an independent value keyring; value-key confidentiality
+does not make the Item-ID mapping secret.
 
 Changing an Item ID root changes the address of mapped data. It is an identity
 migration, not value-key rotation. Value-protection keys rotate independently.

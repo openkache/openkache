@@ -26,9 +26,9 @@ pub use openkache_client_core::{
     ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
     ItemValue, KeyError, KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
     NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
-    PrivateKey, Result, RetryPolicy, RequestBudget, ServerErrorCode, ServerTrust, SetCondition,
-    SetOptions, SetOutcome, TypedInteger, TypedKey, ValueKeyring,
-    canonical_key_bytes, value, value_envelope,
+    PrivateKey, RequestBudget, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition,
+    SetOptions, SetOutcome, TypedInteger, TypedKey, ValueKeyring, canonical_key_bytes, value,
+    value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -616,6 +616,22 @@ impl Client {
         }
     }
 
+    /// Starts a client with an explicit Item-ID root and independent value
+    /// keyring.
+    ///
+    /// [`ClientRootKey::public`] (or [`ClientRootKey::zero`]) intentionally
+    /// selects publicly derivable Item IDs. Value confidentiality comes only
+    /// from the supplied keyring.
+    pub fn builder_with_keyring(
+        endpoint: Endpoint,
+        item_id_root: ClientRootKey,
+        keyring: ValueKeyring,
+    ) -> ClientBuilder {
+        ClientBuilder {
+            inner: SharedClient::builder_with_keyring(endpoint, item_id_root, keyring),
+        }
+    }
+
     /// Starts an unprotected client with namespace-bound Item IDs.
     pub fn builder_unprotected(endpoint: Endpoint) -> ClientBuilder {
         ClientBuilder {
@@ -675,6 +691,22 @@ impl LocalClient {
     ) -> LocalClientBuilder {
         LocalClientBuilder {
             inner: SharedLocalClient::builder(endpoint, data_protection_key),
+        }
+    }
+
+    /// Starts a Compio client with an explicit Item-ID root and independent
+    /// value keyring.
+    ///
+    /// [`ClientRootKey::public`] (or [`ClientRootKey::zero`]) intentionally
+    /// selects publicly derivable Item IDs. Value confidentiality comes only
+    /// from the supplied keyring.
+    pub fn builder_with_keyring(
+        endpoint: Endpoint,
+        item_id_root: ClientRootKey,
+        keyring: ValueKeyring,
+    ) -> LocalClientBuilder {
+        LocalClientBuilder {
+            inner: SharedLocalClient::builder_with_keyring(endpoint, item_id_root, keyring),
         }
     }
 

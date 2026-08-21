@@ -359,6 +359,12 @@ An adapter MUST keep identity configuration separate from value-protection
 configuration even when a language offers a convenience constructor. The key
 and value specifications define the actual fields and validity rules.
 
+The shared core's explicit keyring builders accept an Item-ID root and a
+separate `ValueKeyring`. `ClientRootKey::public()`/`zero()` deliberately select
+publicly derivable Item IDs and MUST NOT be documented as application-key
+secrets. Existing root-key convenience builders remain available for source
+compatibility and retain their derived value-key behavior.
+
 The maintained identity default is `NamespaceHash`. When no value key is configured,
 formatted values use `Unprotected`; this does not change key mapping.
 `PublicKeyOrHash` is an explicit choice for applications that trust the

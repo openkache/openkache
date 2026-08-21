@@ -88,9 +88,9 @@ not treat generated Smithy metadata as a stable opcode or status registry.
 | Item ID | `0..=32` bytes | Exact `0..=32` bytes in core/FFI and maintained adapters | Implemented |
 | Integer key | Signed `i64` deterministic-CBOR subset | Core and maintained adapters enforce signed `i64`; CBOR bignum tags are rejected | Implemented |
 | `NamespaceHash` input | Domain string \| namespace ID \| canonical key bytes | Namespace-bound BLAKE3 uses the documented domain, namespace ID, and canonical key bytes | Implemented |
-| Item ID/value keys | Independent Item ID root and value-key rotation | Convenience root key couples both; explicit keyrings separate rotation, but protected profiles reject an all-zero Item-ID root | Migration pending |
+| Item ID/value keys | Independent Item ID root and value-key rotation | `builder_with_keyring`/`with_item_id_root_and_keyring` keep identity and value keys independent; legacy root builders remain coupled for compatibility | Implemented |
 | Item ID mapping | `NamespaceHash` plus explicit `PublicKeyOrHash` | `NamespaceHash` by default; `PublicKeyOrHash` is explicit; raw Exact Item ID remains available | Implemented |
-| Public Item ID root + protected value | Zero/public root may be paired with a separate value keyring | Current protected builders reject the zero root | Migration pending |
+| Public Item ID root + protected value | Zero/public root may be paired with a separate value keyring | Explicit keyring builders and native ABI v7 accept a public zero root; legacy ABI v6 keeps its coupled semantics | Implemented |
 | Key API shape | Exact Item ID accepts `0..=32` bytes; mapped profiles choose the output length | Core and maintained adapters accept the complete `0..=32` Item ID range | Implemented |
 | Structured value selector `1` | `StructuredValue-CBOR-v1` | Legacy JSON-compatible view backed by selector `1` | Migration pending |
 | Maintained compression | Automatic; use a completed frame when it is at least one byte smaller | Legacy per-core/default settings | Migration pending |

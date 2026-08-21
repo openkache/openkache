@@ -70,6 +70,15 @@ opaque values unchanged. C callers that construct protected keys directly should
 the `Integer`, `Text`, and `Bytes` rules in
 [`../KEY_FORMAT.md`](../KEY_FORMAT.md).
 
+The ABI v6 connect functions keep their historical coupled
+`data_protection_key` semantics. Bindings that need publicly derivable Item IDs
+with protected values can probe `openkache_client_abi_version_v7()` and, when
+it returns `7`, call `openkache_client_connect_with_options_v7`. The v7 options
+reference the v6 transport settings but require an explicit Item-ID root and
+an immutable array of value-key records; the legacy data-protection field must
+be empty and is never reinterpreted. A zero-length Item-ID root selects the
+public all-zero root, while value-key IDs and key material remain independent.
+
 `openkache_client_namespace_open`, `openkache_client_namespace_update_policy`,
 and `openkache_client_namespace_delete` expose those transitional
 control-plane shapes when a private adapter enables them. Namespace results

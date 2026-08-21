@@ -116,6 +116,25 @@ let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```
 
+When Item-ID identity must remain public while values are protected, use the
+explicit keyring builder:
+
+```rust
+use openkache_client_core::{ClientRootKey, ProtectedClient, ValueKeyring};
+
+let value_keys = ValueKeyring::single(1, [0x24; 32])?;
+let client = ProtectedClient::builder_with_keyring(
+    "cache.example.com:4433".parse()?,
+    ClientRootKey::public(),
+    value_keys,
+);
+```
+
+`ClientRootKey::public()` (equivalent to `zero()`) deliberately makes mapped
+Item IDs publicly derivable; it never claims application-key confidentiality.
+The original `ProtectedClient::builder` remains source-compatible and keeps
+its explicit secret-root-plus-derived-value-key behavior.
+
 ## Configuration
 
 `RawClient::connect("host:port")` and `ProtectedClient::connect` use system
@@ -132,6 +151,12 @@ surface.
 `Endpoint` requires a positive port. A pre-resolved socket address also
 requires an explicit certificate server name because the network destination
 does not provide one.
+
+The native ABI v6 connection functions retain their historical
+`data_protection_key` coupling. ABI v7 adds
+`openkache_client_connect_with_options_v7`, which references v6 transport
+options while accepting an explicit Item-ID root and an immutable value-key
+array; callers must check `openkache_client_abi_version_v7()` before use.
 
 ## Request-engine migration
 

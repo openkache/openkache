@@ -42,15 +42,25 @@ use crate::contract::{
 use crate::ffi_admission::{AdmissionState, FfiAdmission};
 use crate::transport::BytePermit;
 use crate::value::{
-    Compression, Encryption, JsonValue, Resource, Value, ValueLimits, ZstandardOptions,
+    Compression, Encryption, JsonValue, Resource, Value, ValueKeyring, ValueLimits,
+    ZstandardOptions,
 };
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpace, KeyType,
-    LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
-    SetCondition, SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState, DataProtectionKey,
+    DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
+    KeySpace, KeyType, LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey,
+    RetryPolicy, ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// Additive native connection contract for independent Item-ID and value
+/// protection roots.
+///
+/// ABI v6 callers continue to use [`FfiConnectOptions`] and its historical
+/// coupled `data_protection_key` behavior. ABI v7 requires callers to provide
+/// this version marker and keeps the legacy key field out of the new
+/// configuration path.
+pub const FFI_ABI_VERSION_V7: u32 = 7;
 
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
@@ -82,6 +92,7 @@ struct FfiRequestControl {
 
 /// Native connection options passed by C and C++ bindings.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct FfiConnectOptions {
     /// UTF-8 host and UDP port such as `127.0.0.1:4433` or `cache.example.com:4433`.
     pub address: *const u8,
@@ -126,6 +137,51 @@ pub struct FfiConnectOptions {
     pub retry_max_attempts: usize,
     /// Maximum in-flight lanes; zero selects the core default.
     pub max_in_flight: usize,
+}
+
+/// One immutable value-protection key supplied to the additive ABI v7
+/// connection path.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiValueKey {
+    /// Positive immutable value-key identifier.
+    pub id: u64,
+    /// Exact 32-byte value key.
+    pub key: *const u8,
+    /// Byte length of [`Self::key`].
+    pub key_length: usize,
+}
+
+/// ABI v7 connection options.
+///
+/// `base` points to an ABI v6 options structure for transport, trust,
+/// compression, and timeout settings. Its `data_protection_key` is required
+/// to be empty and is never reinterpreted. `item_id_root_key_length == 0`
+/// selects the public all-zero Item-ID root; a 32-byte value selects an
+/// explicit root, including an intentionally public all-zero value.
+///
+/// `value_keys` describes an explicit immutable keyring. The active ID may be
+/// zero for a read-only keyring. A zero `value_key_count` is valid only for
+/// unprotected values.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiConnectOptionsV7 {
+    /// Must equal [`FFI_ABI_VERSION_V7`].
+    pub abi_version: u32,
+    /// Shared ABI v6 transport/configuration options.
+    pub base: *const FfiConnectOptions,
+    /// Optional Item-ID root bytes.
+    pub item_id_root_key: *const u8,
+    /// Byte length of [`Self::item_id_root_key`], either zero or 32.
+    pub item_id_root_key_length: usize,
+    /// Borrowed array of immutable value keys.
+    pub value_keys: *const FfiValueKey,
+    /// Number of entries in [`Self::value_keys`].
+    pub value_key_count: usize,
+    /// Active write key ID, or zero for read-only protection.
+    pub active_value_key_id: u64,
+    /// Value protection profile: 0 unprotected, 1 Robust, 2 Compact.
+    pub value_encryption: u32,
 }
 
 /// Opaque native handle to a dedicated Rust client worker.
@@ -200,7 +256,8 @@ type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 struct WorkerOptions {
     endpoint: Endpoint,
     certificate: Vec<u8>,
-    data_protection_key: Option<DataProtectionKey>,
+    item_id_root: Option<DataProtectionKey>,
+    value_keyring: Option<ValueKeyring>,
     client_certificate_chain: Vec<u8>,
     client_private_key: Vec<u8>,
     compression: Compression,
@@ -368,7 +425,8 @@ impl FfiClient {
     fn connect(
         endpoint: Endpoint,
         certificate: Vec<u8>,
-        data_protection_key: Option<DataProtectionKey>,
+        item_id_root: Option<DataProtectionKey>,
+        value_keyring: Option<ValueKeyring>,
         client_certificate_chain: Vec<u8>,
         client_private_key: Vec<u8>,
         compression: Compression,
@@ -388,7 +446,8 @@ impl FfiClient {
         let options = WorkerOptions {
             endpoint,
             certificate,
-            data_protection_key,
+            item_id_root,
+            value_keyring,
             client_certificate_chain,
             client_private_key,
             compression,
@@ -855,7 +914,8 @@ fn run_worker(
     let WorkerOptions {
         endpoint,
         certificate,
-        data_protection_key,
+        item_id_root,
+        value_keyring,
         client_certificate_chain,
         client_private_key,
         compression,
@@ -877,8 +937,8 @@ fn run_worker(
         ));
         return;
     }
-    let protected = data_protection_key.is_some();
-    let mut builder = match data_protection_key {
+    let protected = item_id_root.is_some();
+    let mut builder = match item_id_root {
         Some(key) => LocalProtectedClient::builder(endpoint, key),
         None => LocalProtectedClient::builder_unprotected(endpoint),
     }
@@ -888,6 +948,9 @@ fn run_worker(
     .max_in_flight(max_in_flight);
     if protected {
         builder = builder.encryption(encryption);
+    }
+    if let Some(keyring) = value_keyring {
+        builder = builder.value_keyring(keyring);
     }
     if !certificate.is_empty() {
         let certificates = match Certificate::from_der_or_pem_chain(&certificate) {
@@ -1850,6 +1913,194 @@ pub unsafe extern "C" fn openkache_client_connect_with_options(
     }))
 }
 
+/// Returns the additive ABI version that supports independent Item-ID and
+/// value-key configuration.
+#[unsafe(no_mangle)]
+pub extern "C" fn openkache_client_abi_version_v7() -> u32 {
+    FFI_ABI_VERSION_V7
+}
+
+/// Connects through the additive ABI v7 configuration path.
+///
+/// The v7 structure references an ABI v6 base options value for transport,
+/// trust, compression, and timeout settings. Its legacy
+/// `data_protection_key` must be empty; v7 never reinterprets that field.
+/// Item-ID roots and value keyrings are copied before this function returns.
+///
+/// # Safety
+///
+/// `options` and its `base` pointer must be null or valid, properly aligned
+/// pointers for the duration of this call. Non-empty buffers and the
+/// `value_keys` array must identify readable memory for the duration of this
+/// call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_with_options_v7(
+    options: *const FfiConnectOptionsV7,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let options = unsafe {
+            options
+                .as_ref()
+                .ok_or_else(|| "v7 connect options pointer must not be null".to_owned())?
+        };
+        connect_options_v7(options)
+    }))
+}
+
+fn connect_options_v7(options: &FfiConnectOptionsV7) -> std::result::Result<FfiResult, String> {
+    if options.abi_version != FFI_ABI_VERSION_V7 {
+        return Err(format!(
+            "unsupported native ABI v7 options version {}, expected {}",
+            options.abi_version, FFI_ABI_VERSION_V7
+        ));
+    }
+    let base = unsafe {
+        options
+            .base
+            .as_ref()
+            .ok_or_else(|| "v7 base options pointer must not be null".to_owned())?
+    };
+    if base.data_protection_key_length != 0 {
+        return Err(
+            "v7 base data_protection_key must be empty; configure item_id_root_key and value_keys"
+                .to_owned(),
+        );
+    }
+
+    let item_id_root = if options.item_id_root_key_length == 0 {
+        ClientRootKey::public()
+    } else {
+        copy_data_protection_key(options.item_id_root_key, options.item_id_root_key_length)?
+            .ok_or_else(|| "item_id_root_key must contain exactly 32 bytes".to_owned())?
+    };
+
+    let encryption = match options.value_encryption {
+        value if value == VALUE_FORMAT_ENCRYPTION_NONE as u32 => Encryption::Unprotected,
+        value if value == VALUE_FORMAT_ENCRYPTION_COMPACT as u32 => Encryption::Compact,
+        value if value == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 => Encryption::Robust,
+        value => return Err(format!("unsupported v7 encryption profile {value}")),
+    };
+    if options.value_key_count == 0 && encryption != Encryption::Unprotected {
+        return Err("protected v7 values require at least one value key".to_owned());
+    }
+    if options.value_key_count > 0 && encryption == Encryption::Unprotected {
+        return Err("unprotected v7 values must not supply value keys".to_owned());
+    }
+    if options.value_key_count > 0 && options.value_keys.is_null() {
+        return Err(format!(
+            "value_keys pointer is null for {} entries",
+            options.value_key_count
+        ));
+    }
+    if options.value_key_count > (isize::MAX as usize) / std::mem::size_of::<FfiValueKey>() {
+        return Err("value_keys array is too large".to_owned());
+    }
+    let value_keyring = if options.value_key_count == 0 {
+        None
+    } else {
+        let entries =
+            unsafe { std::slice::from_raw_parts(options.value_keys, options.value_key_count) };
+        let mut keyring = ValueKeyring::new();
+        for entry in entries {
+            let key = copy_fixed_value_key(entry.key, entry.key_length)?;
+            keyring
+                .insert(entry.id, key)
+                .map_err(|error| error.to_string())?;
+        }
+        if options.active_value_key_id != 0 {
+            keyring
+                .set_active_id(Some(options.active_value_key_id))
+                .map_err(|error| error.to_string())?;
+        }
+        Some(keyring)
+    };
+    if encryption == Encryption::Unprotected {
+        debug_assert!(value_keyring.is_none());
+    }
+
+    let address = copy_utf8(base.address, base.address_length, "address")?;
+    let mut endpoint: Endpoint = address
+        .parse()
+        .map_err(|error| format!("invalid server address: {error}"))?;
+    let server_name = copy_utf8(base.server_name, base.server_name_length, "server name")?;
+    if !server_name.is_empty() {
+        endpoint = endpoint
+            .with_server_name(server_name)
+            .map_err(|error| error.to_string())?;
+    }
+    let certificate = copy_bytes(base.certificate, base.certificate_length, "certificate")?;
+    let client_certificate_chain = copy_bytes(
+        base.client_certificate_chain,
+        base.client_certificate_chain_length,
+        "client certificate chain",
+    )?;
+    let client_private_key = copy_bytes(
+        base.client_private_key,
+        base.client_private_key_length,
+        "client private key",
+    )?;
+    if client_certificate_chain.is_empty() != client_private_key.is_empty() {
+        return Err(
+            "client certificate chain and private key must be supplied together".to_owned(),
+        );
+    }
+    let compression = if base.compression_enabled == 0 {
+        Compression::Disabled
+    } else {
+        let defaults = ZstandardOptions::default();
+        Compression::Zstandard(ZstandardOptions {
+            level: if base.compression_level == 0 {
+                defaults.level
+            } else {
+                base.compression_level
+            },
+            minimum_input_size: if base.minimum_input_size == 0 {
+                defaults.minimum_input_size
+            } else {
+                base.minimum_input_size
+            },
+            minimum_savings: if base.minimum_savings == 0 {
+                defaults.minimum_savings
+            } else {
+                base.minimum_savings
+            },
+        })
+    };
+    if base.connect_timeout_ms == 0 || base.request_timeout_ms == 0 {
+        return Err("client timeouts must be greater than zero milliseconds".to_owned());
+    }
+    let timeouts = ClientTimeouts {
+        connect: Duration::from_millis(base.connect_timeout_ms),
+        request: Duration::from_millis(base.request_timeout_ms),
+    };
+    let retry = if base.retry_max_attempts == 0 {
+        RetryPolicy::default()
+    } else {
+        RetryPolicy {
+            max_attempts: base.retry_max_attempts,
+        }
+    };
+    let max_in_flight = if base.max_in_flight == 0 {
+        crate::DEFAULT_MAX_IN_FLIGHT
+    } else {
+        base.max_in_flight
+    };
+    FfiClient::connect(
+        endpoint,
+        certificate,
+        Some(item_id_root),
+        value_keyring,
+        client_certificate_chain,
+        client_private_key,
+        compression,
+        encryption,
+        timeouts,
+        retry,
+        max_in_flight,
+    )
+    .map(FfiResult::connected)
+}
+
 fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult, String> {
     let address = copy_utf8(options.address, options.address_length, "address")?;
     let mut endpoint: Endpoint = address
@@ -1944,6 +2195,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
         endpoint,
         certificate,
         data_protection_key,
+        None,
         client_certificate_chain,
         client_private_key,
         compression,
@@ -3178,6 +3430,20 @@ fn copy_data_protection_key(
     DataProtectionKey::from_slice(bytes)
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+fn copy_fixed_value_key(
+    pointer: *const u8,
+    length: usize,
+) -> std::result::Result<[u8; crate::DATA_PROTECTION_KEY_BYTES], String> {
+    let bytes = copy_bytes(pointer, length, "value key")?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        format!(
+            "value key must contain exactly {} bytes, got {}",
+            crate::DATA_PROTECTION_KEY_BYTES,
+            bytes.len()
+        )
+    })
 }
 
 fn validate_input_lengths(
