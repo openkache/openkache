@@ -204,6 +204,7 @@ ${csharp_descriptor_offsets}
     internal const byte ValueFormatEncryptionShift = ${formatted_byte(value.format_encryption_shift)};
     internal const byte ValueFormatSerializationRaw = ${formatted_byte(value.serialization_raw)};
     internal const byte ValueFormatSerializationJson = ${formatted_byte(value.serialization_json)};
+    internal const byte ValueFormatSerializationStructured = ${formatted_byte(value.serialization_structured)};
     internal const byte ValueFormatCompressionNone = ${formatted_byte(value.compression_none)};
     internal const byte ValueFormatCompressionZstandard = ${formatted_byte(value.compression_zstandard)};
     internal const byte ValueFormatEncryptionNone = ${formatted_byte(value.encryption_none)};

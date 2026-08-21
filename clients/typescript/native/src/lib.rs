@@ -27,7 +27,6 @@ use openkache_client_core::{
         SMITHY_SET_CONDITION_IF_ABSENT, SMITHY_SET_CONDITION_IF_PRESENT,
         SMITHY_SET_OUTCOME_CREATED, SMITHY_SET_OUTCOME_NOT_STORED, SMITHY_SET_OUTCOME_REPLACED,
     },
-    decode_structured_value as decode_structured, encode_structured_value as encode_structured,
     value_envelope,
 };
 
@@ -434,18 +433,16 @@ impl NativeClient {
     }
 
     /// Retrieves one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "get_structured")]
     pub async fn get_structured(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
         let outcome = self
             .active_client()?
-            .get_structured_canonical_key(key.as_ref())
+            .get_structured_canonical_key_cbor(key.as_ref())
             .await
             .map_err(native_core_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(value) => encode_structured(&value)
-                .map(|payload| Some(Uint8Array::new(payload)))
-                .map_err(native_error),
+            GetOutcome::Found(payload) => Ok(Some(Uint8Array::new(payload))),
         }
     }
 
@@ -488,12 +485,12 @@ impl NativeClient {
     pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
         let client = self.active_client()?;
         let outcome = client
-            .get_canonical_key(key.as_ref())
+            .get_json_canonical_key(key.as_ref())
             .await
             .map_err(native_core_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Json(mut value)) => {
+            GetOutcome::Found(mut value) => {
                 let (payload, _permits) = encode_json_output_with_budget(
                     &mut value,
                     client.value_limits(),
@@ -504,9 +501,20 @@ impl NativeClient {
                     .map(Some)
                     .map_err(|error| native_error(error.to_string()))
             }
-            GetOutcome::Found(Value::Raw(_)) => Err(native_error(
-                "stored value uses raw serialization, expected canonical JSON",
-            )),
+        }
+    }
+
+    /// Retrieves a caller-owned version-0 envelope for a canonical key.
+    #[napi(js_name = "get_v0")]
+    pub async fn get_v0(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
+        let outcome = self
+            .active_client()?
+            .get_v0_canonical_key(key.as_ref())
+            .await
+            .map_err(native_core_error)?;
+        match outcome {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(bytes) => Ok(Some(Uint8Array::new(bytes))),
         }
     }
 
@@ -533,7 +541,7 @@ impl NativeClient {
     }
 
     /// Stores one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "set_structured")]
     pub async fn set_structured(
         &self,
         key: Uint8Array,
@@ -543,7 +551,6 @@ impl NativeClient {
         eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
-        let structured = decode_structured(value.as_ref()).map_err(native_error)?;
         let options = parse_set_options(
             condition.as_deref(),
             expiration_mode.as_deref(),
@@ -551,7 +558,7 @@ impl NativeClient {
             ttl_ms,
         )?;
         self.active_client()?
-            .set_structured_canonical_key(key.as_ref(), structured, options)
+            .set_structured_canonical_key_cbor(key.as_ref(), value.as_ref(), options)
             .await
             .map(map_set_outcome)
             .map_err(native_core_error)
@@ -626,7 +633,187 @@ impl NativeClient {
         )?;
         let _input_permit = input_permit;
         client
-            .set_canonical_key(key.as_ref(), Value::Json(value), options)
+            .set_json_canonical_key(key.as_ref(), value, options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Stores a caller-owned version-0 envelope for a canonical key.
+    #[napi(js_name = "set_v0")]
+    pub async fn set_v0(
+        &self,
+        key: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<f64>,
+    ) -> Result<String> {
+        let options = parse_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .set_v0_canonical_key(key.as_ref(), value.as_ref().to_vec(), options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Retrieves canonical JSON for an exact Item ID in a namespace.
+    #[napi(js_name = "get_json_in_namespace")]
+    pub async fn get_json_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<Option<String>> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let client = self.active_client()?;
+        let outcome = client
+            .get_json_exact_item_id(namespace_id, item_id)
+            .await
+            .map_err(native_core_error)?;
+        match outcome {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(mut value) => {
+                let (payload, _permits) = encode_json_output_with_budget(
+                    &mut value,
+                    client.value_limits(),
+                    &client.request_budget(),
+                )
+                .map_err(native_error)?;
+                String::from_utf8(payload)
+                    .map(Some)
+                    .map_err(|error| native_error(error.to_string()))
+            }
+        }
+    }
+
+    /// Stores canonical JSON for an exact Item ID in a namespace.
+    #[napi(js_name = "set_json_in_namespace")]
+    pub async fn set_json_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: String,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let client = self.active_client()?;
+        let budget = client.request_budget();
+        let (value, _permits) =
+            parse_json_input_with_budget(value.as_bytes(), client.value_limits(), &budget)
+                .map_err(native_error)?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        client
+            .set_json_exact_item_id(namespace_id, item_id, value, options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Retrieves one StructuredValue-CBOR-v1 value for an exact Item ID.
+    #[napi(js_name = "get_structured_in_namespace")]
+    pub async fn get_structured_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<Option<Uint8Array>> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        match self
+            .active_client()?
+            .get_structured_exact_item_id_cbor(namespace_id, item_id)
+            .await
+            .map_err(native_core_error)?
+        {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(payload) => Ok(Some(Uint8Array::new(payload))),
+        }
+    }
+
+    /// Stores one StructuredValue-CBOR-v1 value for an exact Item ID.
+    #[napi(js_name = "set_structured_in_namespace")]
+    pub async fn set_structured_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .set_structured_exact_item_id_cbor(namespace_id, item_id, value.as_ref(), options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Retrieves a caller-owned version-0 envelope for an exact Item ID.
+    #[napi(js_name = "get_v0_in_namespace")]
+    pub async fn get_v0_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<Option<Uint8Array>> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        match self
+            .active_client()?
+            .get_v0_exact_item_id(namespace_id, item_id)
+            .await
+            .map_err(native_core_error)?
+        {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(bytes) => Ok(Some(Uint8Array::new(bytes))),
+        }
+    }
+
+    /// Stores a caller-owned version-0 envelope for an exact Item ID.
+    #[napi(js_name = "set_v0_in_namespace")]
+    pub async fn set_v0_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .set_v0_exact_item_id(namespace_id, item_id, value.as_ref().to_vec(), options)
             .await
             .map(map_set_outcome)
             .map_err(native_core_error)

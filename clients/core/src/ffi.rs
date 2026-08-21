@@ -15,8 +15,6 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openkache_value::{Value as StructuredValue, decode, encode};
-
 #[cfg(feature = "tls-tcp")]
 use crate::TlsTcpProtectedClient;
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
@@ -539,7 +537,11 @@ impl FfiClient {
             admission: FfiAdmission::new(),
             mutating: matches!(
                 operation,
-                FfiOperation::Set | FfiOperation::SetJson | FfiOperation::Delete
+                FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::SetStructured
+                    | FfiOperation::SetV0
+                    | FfiOperation::Delete
             ),
         });
         let request = FfiRequest {
@@ -1726,17 +1728,6 @@ fn structured_get_result(
     }
 }
 
-fn structured_result(
-    outcome: GetOutcome<StructuredValue>,
-) -> std::result::Result<FfiResult, crate::Error> {
-    match outcome {
-        GetOutcome::Found(value) => encode(&value)
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| crate::value::Error::Structured(error).into()),
-        GetOutcome::NotFound => Ok(not_found_result()),
-    }
-}
-
 async fn execute_protected(
     client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
@@ -1751,15 +1742,19 @@ async fn execute_protected(
             .await
             .map(|value| get_result(value, raw_value_result)),
         FfiOperation::GetJson => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
+            .get_json_canonical_key_unchecked(canonical_key.as_slice())
             .await
             .and_then(|outcome| {
-                json_result(outcome, client.request_budget(), client.value_limits())
+                json_value_result(outcome, client.request_budget(), client.value_limits())
             }),
         FfiOperation::GetStructured => client
-            .get_structured_canonical_key_unchecked(canonical_key.as_slice())
+            .get_structured_canonical_key_cbor_unchecked(canonical_key.as_slice())
             .await
-            .and_then(structured_result),
+            .and_then(structured_get_result),
+        FfiOperation::GetV0 => client
+            .get_v0_canonical_key_unchecked(canonical_key.as_slice())
+            .await
+            .map(|value| get_result(value, bytes_result)),
         FfiOperation::Set => client
             .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
@@ -1770,25 +1765,22 @@ async fn execute_protected(
             let (json, _json_permits) =
                 crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
             client
-                .set_canonical_key_unchecked(
-                    canonical_key.as_slice(),
-                    Value::Json(json),
-                    set_options,
-                )
+                .set_json_canonical_key_unchecked(canonical_key.as_slice(), json, set_options)
                 .await
                 .map(set_result)
         }
-        FfiOperation::SetStructured => {
-            let structured = decode(&value).map_err(crate::value::Error::Structured)?;
-            client
-                .set_structured_canonical_key_unchecked(
-                    canonical_key.as_slice(),
-                    structured,
-                    set_options,
-                )
-                .await
-                .map(set_result)
-        }
+        FfiOperation::SetStructured => client
+            .set_structured_canonical_key_cbor_unchecked(
+                canonical_key.as_slice(),
+                value.as_slice(),
+                set_options,
+            )
+            .await
+            .map(set_result),
+        FfiOperation::SetV0 => client
+            .set_v0_canonical_key_unchecked(canonical_key.as_slice(), value, set_options)
+            .await
+            .map(set_result),
         FfiOperation::Delete => client
             .delete_canonical_key_unchecked(canonical_key.as_slice())
             .await
@@ -1831,6 +1823,54 @@ async fn execute_raw(
                 .await
                 .map(set_result)
         }
+        FfiOperation::GetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_json_exact_item_id(1, item_id)
+                .await
+                .and_then(|outcome| {
+                    json_value_result(outcome, client.request_budget(), client.value_limits())
+                })
+        }
+        FfiOperation::SetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            let budget = client.request_budget();
+            let limits = client.value_limits();
+            let (json, _json_permits) =
+                crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
+            client
+                .set_json_exact_item_id(1, item_id, json, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_structured_exact_item_id_cbor(1, item_id)
+                .await
+                .and_then(structured_get_result)
+        }
+        FfiOperation::SetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_structured_exact_item_id_cbor(1, item_id, value, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_v0_exact_item_id(1, item_id)
+                .await
+                .map(|value| get_result(value, bytes_result))
+        }
+        FfiOperation::SetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_v0_exact_item_id(1, item_id, value, set_options)
+                .await
+                .map(set_result)
+        }
         FfiOperation::Delete => {
             let item_id = ItemId::from_slice(&item_id)?;
             client.raw().delete(item_id).await.map(delete_result)
@@ -1842,10 +1882,6 @@ async fn execute_raw(
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
         FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
-        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
-            "operation",
-            "exact item-ID calls do not support formatted JSON operations",
-        )),
         _ => Err(crate::Error::configuration(
             "operation",
             "unsupported operation from the generated Smithy contract",
@@ -1877,6 +1913,54 @@ async fn execute_scoped(
             client
                 .raw()
                 .set_in_namespace(namespace_id, item_id, ItemValue::new(value), set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_json_exact_item_id(namespace_id, item_id)
+                .await
+                .and_then(|outcome| {
+                    json_value_result(outcome, client.request_budget(), client.value_limits())
+                })
+        }
+        FfiOperation::SetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            let budget = client.request_budget();
+            let limits = client.value_limits();
+            let (json, _json_permits) =
+                crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
+            client
+                .set_json_exact_item_id(namespace_id, item_id, json, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_structured_exact_item_id_cbor(namespace_id, item_id)
+                .await
+                .and_then(structured_get_result)
+        }
+        FfiOperation::SetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_structured_exact_item_id_cbor(namespace_id, item_id, value, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_v0_exact_item_id(namespace_id, item_id)
+                .await
+                .map(|value| get_result(value, bytes_result))
+        }
+        FfiOperation::SetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_v0_exact_item_id(namespace_id, item_id, value, set_options)
                 .await
                 .map(set_result)
         }
@@ -2071,6 +2155,18 @@ pub fn json_result(
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
+}
+
+fn json_value_result(
+    outcome: GetOutcome<JsonValue>,
+    budget: crate::RequestBudget,
+    limits: ValueLimits,
+) -> std::result::Result<FfiResult, crate::Error> {
+    let outcome = match outcome {
+        GetOutcome::Found(value) => GetOutcome::Found(Value::Json(value)),
+        GetOutcome::NotFound => GetOutcome::NotFound,
+    };
+    json_result(outcome, budget, limits)
 }
 
 fn write_json_canonical(
@@ -2801,10 +2897,12 @@ pub unsafe extern "C" fn openkache_client_execute(
     )
 }
 
-/// Executes one exact-item-ID operation without application-key derivation or
-/// value protection.
+/// Executes one exact-item-ID operation without application-key derivation.
 ///
-/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller.
+/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller and
+/// preserve their opaque value bytes. The generated `GET_JSON`/`SET_JSON`,
+/// `GET_STRUCTURED`/`SET_STRUCTURED`, and `GET_V0`/`SET_V0` operations use the
+/// same exact address while applying their documented value representation.
 ///
 /// # Safety
 ///
@@ -2904,8 +3002,9 @@ pub unsafe extern "C" fn openkache_client_execute_raw_with_options(
 
 /// Executes one exact-item-ID operation in an explicitly supplied namespace.
 ///
-/// `set_flags` is the complete wire SET flag byte. It is ignored for operations other than SET,
-/// which must pass zero for both `set_flags` and `ttl_ms`.
+/// `set_flags` is the complete wire SET flag byte. It is ignored for operations other than
+/// `SET`, `SET_JSON`, `SET_STRUCTURED`, and `SET_V0`, which must pass zero for both `set_flags`
+/// and `ttl_ms`.
 ///
 /// # Safety
 ///
@@ -2943,7 +3042,13 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             value_length,
             &client.request_budget(),
         )?;
-        let set_options = if operation == FfiOperation::Set {
+        let set_options = if matches!(
+            operation,
+            FfiOperation::Set
+                | FfiOperation::SetJson
+                | FfiOperation::SetStructured
+                | FfiOperation::SetV0
+        ) {
             set_options_from_flags(set_flags, ttl_ms)?
         } else {
             if set_flags != 0 || ttl_ms != 0 {
@@ -2952,7 +3057,15 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             SetOptions::new()
         };
         match operation {
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+            FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::SetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::SetV0
+            | FfiOperation::Delete
                 if item_id.len() > crate::MAX_ITEM_ID_BYTES =>
             {
                 Err(format!(
@@ -2961,7 +3074,13 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
                     item_id.len()
                 ))
             }
-            FfiOperation::Get | FfiOperation::Delete if !value.is_empty() => {
+            FfiOperation::Get
+            | FfiOperation::GetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::Delete
+                if !value.is_empty() =>
+            {
                 Err("operation does not accept a value".to_owned())
             }
             FfiOperation::Stats | FfiOperation::Sync if !item_id.is_empty() => {
@@ -2970,7 +3089,20 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
                 Err("operation does not accept a value".to_owned())
             }
-            FfiOperation::GetJson | FfiOperation::SetJson | FfiOperation::Ping => Err(
+            FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::SetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::SetV0 => Ok(client.execute_scoped(
+                operation,
+                namespace_id,
+                item_id,
+                value,
+                input_permit,
+                set_options,
+            )),
+            FfiOperation::Ping => Err(
                 "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
             ),
             FfiOperation::NamespaceOpen
@@ -3221,17 +3353,20 @@ fn validated_execute(
     operation: u32,
     key: Vec<u8>,
     value: Vec<u8>,
-    raw: bool,
+    _raw: bool,
     legacy_options: Option<(u32, u8, u64)>,
     complete_flags: Option<(u8, u64)>,
 ) -> std::result::Result<(FfiOperation, Vec<u8>, Vec<u8>, SetOptions), String> {
     let operation = FfiOperation::try_from(operation)
         .map_err(|operation| format!("unsupported operation {operation}"))?;
-    if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-        return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
-    }
     let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-        if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+        if matches!(
+            operation,
+            FfiOperation::Set
+                | FfiOperation::SetJson
+                | FfiOperation::SetStructured
+                | FfiOperation::SetV0
+        ) {
             set_options_from_flags(flags, ttl_ms)?
         } else {
             if flags != 0 || ttl_ms != 0 {
@@ -3253,6 +3388,8 @@ fn validated_execute(
         FfiOperation::Ping
         | FfiOperation::Get
         | FfiOperation::GetJson
+        | FfiOperation::GetStructured
+        | FfiOperation::GetV0
         | FfiOperation::Delete
         | FfiOperation::Stats
         | FfiOperation::Sync
@@ -3262,9 +3399,14 @@ fn validated_execute(
             Err("operation does not accept a value".to_owned())
         }
         operation
-            if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                && (set_options.condition() != SetCondition::Any
-                    || set_options.time_to_live_millis().is_some()) =>
+            if !matches!(
+                operation,
+                FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::SetStructured
+                    | FfiOperation::SetV0
+            ) && (set_options.condition() != SetCondition::Any
+                || set_options.time_to_live_millis().is_some()) =>
         {
             Err("SET options require a SET operation".to_owned())
         }
@@ -3419,9 +3561,6 @@ fn execute_entry_inner(
         };
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
-        }
         validate_input_lengths(operation, raw, application_key_length, value_length)?;
         let (application_key, value, input_permit) = copy_input_bytes(
             application_key,
@@ -3433,7 +3572,15 @@ fn execute_entry_inner(
         if raw
             && matches!(
                 operation,
-                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+                FfiOperation::Get
+                    | FfiOperation::Set
+                    | FfiOperation::GetJson
+                    | FfiOperation::SetJson
+                    | FfiOperation::GetStructured
+                    | FfiOperation::SetStructured
+                    | FfiOperation::GetV0
+                    | FfiOperation::SetV0
+                    | FfiOperation::Delete
             )
             && application_key.len() > crate::MAX_ITEM_ID_BYTES
         {
@@ -3444,7 +3591,13 @@ fn execute_entry_inner(
             ));
         }
         let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-            if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+            if matches!(
+                operation,
+                FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::SetStructured
+                    | FfiOperation::SetV0
+            ) {
                 set_options_from_flags(flags, ttl_ms)?
             } else {
                 if flags != 0 || ttl_ms != 0 {
@@ -3485,6 +3638,8 @@ fn execute_entry_inner(
             FfiOperation::Ping
             | FfiOperation::Get
             | FfiOperation::GetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::GetV0
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
@@ -3494,9 +3649,14 @@ fn execute_entry_inner(
                 Err("operation does not accept a value".to_owned())
             }
             operation
-                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                    && (set_options.condition() != SetCondition::Any
-                        || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(
+                    operation,
+                    FfiOperation::Set
+                        | FfiOperation::SetJson
+                        | FfiOperation::SetStructured
+                        | FfiOperation::SetV0
+                ) && (set_options.condition() != SetCondition::Any
+                    || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_owned())
             }
@@ -3764,7 +3924,15 @@ fn validate_input_lengths(
     if raw
         && matches!(
             operation,
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+            FfiOperation::Get
+                | FfiOperation::Set
+                | FfiOperation::GetJson
+                | FfiOperation::SetJson
+                | FfiOperation::GetStructured
+                | FfiOperation::SetStructured
+                | FfiOperation::GetV0
+                | FfiOperation::SetV0
+                | FfiOperation::Delete
         )
         && application_key_length > crate::MAX_ITEM_ID_BYTES
     {
@@ -3780,6 +3948,7 @@ fn validate_input_lengths(
             | FfiOperation::Get
             | FfiOperation::GetJson
             | FfiOperation::GetStructured
+            | FfiOperation::GetV0
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
@@ -3805,7 +3974,15 @@ fn validate_scoped_input_lengths(
 ) -> std::result::Result<(), String> {
     if matches!(
         operation,
-        FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+        FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::SetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::SetV0
+            | FfiOperation::Delete
     ) && item_id_length > crate::MAX_ITEM_ID_BYTES
     {
         return Err(format!(

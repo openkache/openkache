@@ -328,6 +328,7 @@ public enum Smithy_Value_Format: Sendable {
   public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
   public static let serializationRaw: UInt8 = ${value.serialization_raw}
   public static let serializationJson: UInt8 = ${value.serialization_json}
+  public static let serializationStructured: UInt8 = ${value.serialization_structured}
   public static let compressionNone: UInt8 = ${value.compression_none}
   public static let compressionZstandard: UInt8 = ${value.compression_zstandard}
   public static let encryptionNone: UInt8 = ${value.encryption_none}

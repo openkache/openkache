@@ -579,6 +579,58 @@ export class OpenKache_Client {
   }
 
   /**
+   * Retrieves a caller-owned version-0 envelope without interpreting or
+   * rewriting its body.
+   *
+   * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
+   * @returns The complete stored version-0 bytes, or `undefined` when absent.
+   * @throws {OpenKache_Error} When the client is closed or the operation fails.
+   */
+  async get_v0(key: Client_Key): Promise<Uint8Array | undefined> {
+    this.#assert_open()
+    try {
+      const value = await this.#native_client.get_v0(
+        owned_key_bytes(key, this.#key_spec),
+      )
+      return value === null ? undefined : value
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Stores a complete caller-owned version-0 envelope unchanged.
+   *
+   * The shared core validates only the canonical leading version field and
+   * the protocol value-size limit; all remaining version-0 interpretation
+   * belongs to the caller.
+   */
+  async set_v0(
+    key: Client_Key,
+    value: Uint8Array,
+    options: Set_Options = {},
+  ): Promise<Set_Outcome> {
+    this.#assert_open()
+    validate_set_options(options)
+    if (!(value instanceof Uint8Array)) {
+      throw new OpenKache_Error("value must be a Uint8Array")
+    }
+    try {
+      const outcome = await this.#native_client.set_v0(
+        owned_key_bytes(key, this.#key_spec),
+        owned_raw_value(value),
+        options.condition,
+        options.expiration_mode,
+        options.eviction_mode,
+        options.ttl_ms,
+      )
+      return parse_set_outcome(outcome)
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
    * Retrieves exact decrypted and decompressed bytes without envelope decoding.
    *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
@@ -841,6 +893,18 @@ function parse_json_value(value: unknown): Json_Value {
  * owns protocol item IDs and formatted value bytes.
  */
 export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
+  /** Reads canonical JSON UTF-8 bytes at an exact Item ID. */
+  get_json(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
+  /** Stores canonical JSON UTF-8 bytes at an exact Item ID. */
+  set_json(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
+  /** Reads StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  get_structured(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
+  /** Stores StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  set_structured(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
+  /** Reads a caller-owned version-0 envelope at an exact Item ID. */
+  get_v0(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
+  /** Stores a caller-owned version-0 envelope at an exact Item ID. */
+  set_v0(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
   /**
    * Reconnects the shared core client without replaying an operation.
    *
@@ -915,6 +979,21 @@ class Raw_Client implements OpenKache_Raw_Client {
     }
   }
 
+  async get_json(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.get_json_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+      )
+      return value === null
+        ? {}
+        : { value: new TextEncoder().encode(value) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
   /**
    * Invokes the Smithy SET operation for an exact item ID.
    *
@@ -926,6 +1005,86 @@ class Raw_Client implements OpenKache_Raw_Client {
     assert_lifecycle_open(this.#lifecycle)
     try {
       const outcome = await this.#native_client.raw_set_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+        owned_raw_value(input.value),
+        input.condition,
+        input.expiration_mode,
+        input.eviction_mode,
+        input.ttl_milliseconds,
+      )
+      return { outcome: parse_set_outcome(outcome) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async set_json(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const outcome = await this.#native_client.set_json_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+        new TextDecoder("utf-8", { fatal: true }).decode(input.value),
+        input.condition,
+        input.expiration_mode,
+        input.eviction_mode,
+        input.ttl_milliseconds,
+      )
+      return { outcome: parse_set_outcome(outcome) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async get_structured(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.get_structured_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+      )
+      return value === null ? {} : { value }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async set_structured(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const outcome = await this.#native_client.set_structured_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+        owned_raw_value(input.value),
+        input.condition,
+        input.expiration_mode,
+        input.eviction_mode,
+        input.ttl_milliseconds,
+      )
+      return { outcome: parse_set_outcome(outcome) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async get_v0(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.get_v0_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+      )
+      return value === null ? {} : { value }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async set_v0(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const outcome = await this.#native_client.set_v0_in_namespace(
         input.namespace_id,
         owned_item_id(input.item_id),
         owned_raw_value(input.value),

@@ -925,6 +925,7 @@ SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
 SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
 SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
 SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+SMITHY_VALUE_SERIALIZATION_STRUCTURED = ${value.serialization_structured}
 SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
 SMITHY_VALUE_COMPRESSION_ZSTANDARD = ${value.compression_zstandard}
 SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}

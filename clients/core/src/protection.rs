@@ -1,7 +1,9 @@
 //! Shared application-key hiding and value-protection composition.
 
 use crate::key::validate_canonical_key;
-use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec, ValueKeyring};
+use crate::value::{
+    Compression, Encryption, ItemValue, JsonValue, Value, ValueCodec, ValueKeyring,
+};
 use crate::{
     ClientRootKey, DataProtectionKey, ItemId, KeyFormat, KeyType, Result, TypedKey,
     transport::RequestBudget,
@@ -360,6 +362,19 @@ impl DataProtection {
             .map_err(Into::into)
     }
 
+    /// Serializes one canonical JSON helper value as selector-0
+    /// `OpaqueBytes`.
+    pub fn encode_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: JsonValue,
+    ) -> Result<ItemValue> {
+        self.codec
+            .seal_json_in_namespace(namespace_id, item_id, value)
+            .map_err(Into::into)
+    }
+
     /// Serializes and protects one canonical StructuredValue-CBOR-v1 value.
     ///
     /// The structured ABI accepts the value-model algebra directly; opaque
@@ -383,6 +398,25 @@ impl DataProtection {
         value: &StructuredValue,
     ) -> Result<ItemValue> {
         self.encode_structured_in_namespace(namespace_id, item_id, value)
+    }
+
+    /// Encodes one StructuredValue-CBOR-v1 payload with the configured
+    /// resource limits.
+    pub fn encode_structured_cbor(&self, value: &StructuredValue) -> Result<Vec<u8>> {
+        self.codec.encode_structured_cbor(value).map_err(Into::into)
+    }
+
+    /// Decodes and protects one complete StructuredValue-CBOR-v1 payload
+    /// while retaining parser permits through envelope encoding.
+    pub fn seal_structured_cbor_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        payload: &[u8],
+    ) -> Result<ItemValue> {
+        self.codec
+            .seal_structured_cbor_in_namespace(namespace_id, item_id, payload)
+            .map_err(Into::into)
     }
 
     /// Authenticates and decodes one stored value into the core logical model.
@@ -413,6 +447,19 @@ impl DataProtection {
     ) -> Result<Value> {
         self.codec
             .decode_in_namespace(namespace_id, item_id, encoded)
+            .map_err(Into::into)
+    }
+
+    /// Authenticates and decodes a canonical JSON helper value stored as
+    /// selector-0 `OpaqueBytes`.
+    pub fn decode_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<JsonValue> {
+        self.codec
+            .open_json_in_namespace(namespace_id, item_id, encoded)
             .map_err(Into::into)
     }
 
@@ -526,5 +573,15 @@ impl DataProtection {
             Value::Raw(bytes) => Ok(bytes),
             Value::Json(_) => Err(crate::value::Error::ExpectedRawValue.into()),
         }
+    }
+
+    /// Validates and passes through a caller-owned version-0 envelope.
+    pub fn pass_through_v0(&self, bytes: Vec<u8>) -> Result<ItemValue> {
+        self.codec.pass_through_v0(bytes).map_err(Into::into)
+    }
+
+    /// Opens a caller-owned version-0 envelope without interpreting its body.
+    pub fn open_v0(&self, encoded: ItemValue) -> Result<Vec<u8>> {
+        self.codec.open_v0(encoded).map_err(Into::into)
     }
 }

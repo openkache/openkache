@@ -57,6 +57,7 @@ export interface Native_Client {
   get_structured(key: Uint8Array): Promise<Uint8Array | null>
   get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
   get_json(key: Uint8Array): Promise<string | null>
+  get_v0(key: Uint8Array): Promise<Uint8Array | null>
   set(
     key: Uint8Array,
     value: Uint8Array,
@@ -91,6 +92,53 @@ export interface Native_Client {
     expiration_mode?: Smithy_Expiration_Mode,
     eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
+  ): Promise<Smithy_Set_Outcome>
+  set_v0(
+    key: Uint8Array,
+    value: Uint8Array,
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
+    ttl_ms?: number,
+  ): Promise<Smithy_Set_Outcome>
+  get_json_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+  ): Promise<string | null>
+  set_json_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+    value: string,
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
+    ttl_ms?: bigint,
+  ): Promise<Smithy_Set_Outcome>
+  get_structured_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+  ): Promise<Uint8Array | null>
+  set_structured_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+    value: Uint8Array,
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
+    ttl_ms?: bigint,
+  ): Promise<Smithy_Set_Outcome>
+  get_v0_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+  ): Promise<Uint8Array | null>
+  set_v0_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+    value: Uint8Array,
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
+    ttl_ms?: bigint,
   ): Promise<Smithy_Set_Outcome>
   delete(key: Uint8Array): Promise<boolean>
   stats(): Promise<string>

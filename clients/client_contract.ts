@@ -54,6 +54,8 @@ export interface Value_Format_Contract {
   readonly robust_tag_bytes: number
   readonly serialization_json: number
   readonly serialization_raw: number
+  /** Target selector for StructuredValue-CBOR-v1 (JSON has no selector). */
+  readonly serialization_structured: number
   readonly value_root_context: string
   readonly max_vu128_bytes: number
   readonly version: number
@@ -1418,6 +1420,13 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       0,
       0xff,
     ),
+    serialization_structured: integer_member(
+      contract,
+      "serializationStructured",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
     value_root_context: string_member(
       contract,
       "valueRootContext",
@@ -1479,10 +1488,15 @@ function value_format_contract(value: unknown): Value_Format_Contract {
   unique_wire_values(
     [
       { name: "Raw", value: values.serialization_raw },
-      { name: "Json", value: values.serialization_json },
+      { name: "Structured", value: values.serialization_structured },
     ],
     "serialization",
   )
+  if (values.serialization_structured !== 1) {
+    throw new Error(
+      `${VALUE_FORMAT_TRAIT_ID}.serializationStructured must be selector 1`,
+    )
+  }
   unique_wire_values(
     [
       { name: "None", value: values.compression_none },
