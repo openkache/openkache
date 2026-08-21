@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::lock::Mutex;
-use openkache_protocol::{MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+use openkache_protocol::{
+    MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, ResponseHeaderBytes, ResponseParts,
+};
 use rustls::crypto::SupportedKxGroup;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
@@ -104,6 +106,90 @@ impl TlsTcpTransport {
     /// Returns the negotiated ALPN protocol.
     pub(crate) fn negotiated_alpn(&self) -> Option<&[u8]> {
         Some(openkache_protocol::ALPN)
+    }
+}
+
+impl TlsTcpLane {
+    /// Reads one response while reserving the payload budget before allocation.
+    ///
+    /// The low-level [`TransportLane`] API intentionally returns one complete
+    /// frame for callers that own their own resource policy. The request
+    /// engine uses this variant so a declared response body cannot be read
+    /// into an unbudgeted frame before the shared aggregate byte permit is
+    /// acquired.
+    async fn read_response_with_budget(
+        &self,
+        maximum: usize,
+        budget: &RequestBudget,
+        timeout: Duration,
+    ) -> Result<(ResponseParts, RequestBudgetPermit)> {
+        if self.fatal.load(Ordering::Acquire) {
+            return Err(Error::Connection("TLS-over-TCP lane has failed".into()));
+        }
+        let maximum = maximum.min(MAX_RESPONSE_FRAME_BYTES);
+        if maximum == 0 {
+            return Err(Error::configuration(
+                "response maximum",
+                "must be greater than zero",
+            ));
+        }
+        let mut receive = self.receive.lock().await;
+        let mut header = ResponseHeaderBytes::new();
+        let frame_len = loop {
+            let mut byte = [0_u8; 1];
+            if let Err(error) = receive.read_exact(&mut byte).await {
+                close_after_transport_error(&self.send, &self.closed, &self.fatal);
+                return Err(Error::Connection(error.to_string()));
+            }
+            header.push(byte[0]).map_err(|error| {
+                close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+                Error::protocol(error)
+            })?;
+            match response_frame_len(header.as_slice(), maximum) {
+                Ok(Some(length)) => break length,
+                Ok(None) => continue,
+                Err(error) => {
+                    close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+                    return Err(Error::Connection(error));
+                }
+            }
+        };
+        let header_len = header.len();
+        if header_len > frame_len {
+            close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+            return Err(Error::Connection(
+                "response header exceeds complete frame".into(),
+            ));
+        }
+        let payload_len = frame_len - header_len;
+        let permit = match budget.acquire(payload_len, timeout).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                // The body is still unread, so this ordered TCP lane cannot
+                // be returned to the pool after an admission failure.
+                self.close();
+                return Err(error);
+            }
+        };
+        let mut payload = Vec::new();
+        if payload.try_reserve_exact(payload_len).is_err() {
+            drop(permit);
+            close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+            return Err(Error::Connection("response allocation failed".into()));
+        }
+        payload.resize(payload_len, 0);
+        if payload_len > 0
+            && let Err(error) = receive.read_exact(&mut payload).await
+        {
+            drop(permit);
+            close_after_transport_error(&self.send, &self.closed, &self.fatal);
+            return Err(Error::Connection(error.to_string()));
+        }
+        let response = ResponseParts::decode(header, payload).map_err(|error| {
+            close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+            Error::protocol(error)
+        })?;
+        Ok((response, permit))
     }
 }
 
@@ -416,13 +502,17 @@ impl ClientLane for Lane<'_> {
         deadline: Deadline,
     ) -> Result<openkache_protocol::ResponseParts> {
         let remaining = deadline.remaining(Operation::ResponseBodyRead)?;
-        let response = match tokio::time::timeout(
+        let (decoded, permit) = match tokio::time::timeout(
             remaining,
-            self.connection.inner.lane.read_response(maximum),
+            self.connection.inner.lane.read_response_with_budget(
+                maximum,
+                &self.connection.budget,
+                remaining,
+            ),
         )
         .await
         {
-            Ok(result) => result.map_err(|error| Error::Connection(error.to_string()))?,
+            Ok(result) => result?,
             Err(_) => {
                 self.connection.inner.close();
                 return Err(Error::Timeout {
@@ -430,17 +520,8 @@ impl ClientLane for Lane<'_> {
                 });
             }
         };
-        let decoded = openkache_protocol::Response::decode(&response).map_err(Error::protocol)?;
-        let permit = self
-            .connection
-            .budget
-            .acquire(
-                decoded.payload.len(),
-                deadline.remaining(Operation::ResponseBodyRead)?,
-            )
-            .await?;
         self.response_permit = Some(permit);
-        decoded.into_parts().map_err(Error::protocol)
+        Ok(decoded)
     }
 
     fn take_response_permit(&mut self) -> Option<RequestBudgetPermit> {
