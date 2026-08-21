@@ -12,6 +12,7 @@ import type {
 export type Compatibility_Response_Projection_Kind =
   | "raw_payload"
   | "optional_payload"
+  | "empty"
   | "status_outcome"
   | "boolean_outcome"
   | "text_payload"
