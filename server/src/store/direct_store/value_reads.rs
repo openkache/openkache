@@ -29,6 +29,11 @@ pub(super) async fn read_owned_extent(
         return Err(KvError::Worker(invalid_range.into()));
     }
     if value_ref.value_len == 0 {
+        if value_ref.value_checksum != crc32fast::hash(&[]) {
+            return Err(KvError::Worker(format!(
+                "{operation} checksum does not match the committed Blob payload"
+            )));
+        }
         return Ok(Vec::new());
     }
     let absolute = record_start + u64::from(value_ref.value_offset);
@@ -179,6 +184,11 @@ async fn read_ssd_extent(
     lease_response: bool,
 ) -> Result<StoredItemValue> {
     if value_ref.value_len == 0 {
+        if value_ref.value_checksum != crc32fast::hash(&[]) {
+            return Err(KvError::Worker(format!(
+                "{operation} checksum does not match the committed Blob payload"
+            )));
+        }
         return Ok(StoredItemValue::new(Vec::new()));
     }
     let absolute = record_start + u64::from(value_ref.value_offset);
