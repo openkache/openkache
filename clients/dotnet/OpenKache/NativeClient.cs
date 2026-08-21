@@ -180,6 +180,7 @@ internal sealed class NativeClient : IAsyncDisposable
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
         int maximumStreamLanes,
+        Transport transport,
         CancellationToken cancellationToken)
     {
         var task = Task.Run(
@@ -189,7 +190,8 @@ internal sealed class NativeClient : IAsyncDisposable
                 certificate,
                 connectTimeout,
                 requestTimeout,
-                maximumStreamLanes),
+                maximumStreamLanes,
+                transport),
             CancellationToken.None);
         try
         {
@@ -360,7 +362,8 @@ internal sealed class NativeClient : IAsyncDisposable
         ReadOnlyMemory<byte> certificate,
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
-        int maximumStreamLanes)
+        int maximumStreamLanes,
+        Transport transport)
     {
         if (NativeMethods.openkache_client_abi_version() != Protocol.FfiAbiVersion)
         {
@@ -392,7 +395,19 @@ internal sealed class NativeClient : IAsyncDisposable
             MaxInFlight = (nuint)maximumStreamLanes,
         };
 
-        var result = NativeMethods.openkache_client_connect_with_options(ref options);
+        IntPtr result;
+        try
+        {
+            result = transport == Transport.Quic
+                ? NativeMethods.openkache_client_connect_with_options(ref options)
+                : NativeMethods.openkache_client_connect_transport(
+                    ref options, (uint)transport);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            throw new NativeException(
+                "native OpenKache client does not export the optional transport selector");
+        }
         var nativeResult = NativeMethods.ReadResult(result, takeClient: true);
         if (nativeResult.Kind != Protocol.FfiResultConnected)
         {

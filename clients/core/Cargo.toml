@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 
 [features]
 default = ["quic-quinn"]
-ffi = ["quic-compio"]
+ffi = ["quic-compio", "tls-tcp"]
 quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
 tls-tcp = ["dep:tokio", "dep:tokio-rustls"]

@@ -15,6 +15,8 @@ use crate::{
 use crate::{LocalRawClient, LocalRawClientBuilder};
 #[cfg(feature = "quic-quinn")]
 use crate::{RawClient, RawClientBuilder};
+#[cfg(feature = "tls-tcp")]
+use crate::{TlsTcpRawClient, TlsTcpRawClientBuilder};
 use openkache_value::Value as StructuredValue;
 
 struct ProtectionSettings {
@@ -125,7 +127,10 @@ macro_rules! protected_builder_methods {
                 self
             }
 
-            /// Bounds simultaneous request lanes on one QUIC connection.
+            /// Bounds simultaneous request lanes on one connection.
+            ///
+            /// TLS-over-TCP retains one ordered lane regardless of this
+            /// value; the setting remains shared for API compatibility.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.raw = self.raw.max_in_flight(maximum);
                 self
@@ -688,6 +693,60 @@ impl ProtectedClient {
     }
 
     protected_client_methods!(RawClient);
+}
+
+#[cfg(feature = "tls-tcp")]
+/// Shared protected client running on Tokio and TLS-over-TCP.
+#[derive(Clone)]
+pub struct TlsTcpProtectedClient {
+    raw: TlsTcpRawClient,
+    protection: Arc<DataProtection>,
+}
+
+#[cfg(feature = "tls-tcp")]
+/// Connection and data-protection builder for the TLS-over-TCP client.
+pub struct TlsTcpProtectedClientBuilder {
+    raw: TlsTcpRawClientBuilder,
+    protection: ProtectionSettings,
+}
+
+#[cfg(feature = "tls-tcp")]
+protected_builder_methods!(TlsTcpProtectedClientBuilder);
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpProtectedClientBuilder {
+    /// Connects a TLS-over-TCP client with mandatory application-key and value protection.
+    pub async fn connect(self) -> Result<TlsTcpProtectedClient> {
+        let raw = self.raw.connect().await?;
+        let protection = self.protection.finish_with_budget(raw.request_budget())?;
+        Ok(TlsTcpProtectedClient { raw, protection })
+    }
+}
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpProtectedClient {
+    /// Connects with mandatory data protection, system trust, and default TLS-over-TCP behavior.
+    pub async fn connect(endpoint: &str, key: DataProtectionKey) -> Result<Self> {
+        Self::builder(endpoint.parse()?, key).connect().await
+    }
+
+    /// Starts explicit TLS-over-TCP client configuration.
+    pub fn builder(endpoint: Endpoint, key: DataProtectionKey) -> TlsTcpProtectedClientBuilder {
+        TlsTcpProtectedClientBuilder {
+            raw: TlsTcpRawClient::builder(endpoint),
+            protection: ProtectionSettings::new(key),
+        }
+    }
+
+    /// Starts an explicitly unprotected TLS-over-TCP client.
+    pub fn builder_unprotected(endpoint: Endpoint) -> TlsTcpProtectedClientBuilder {
+        TlsTcpProtectedClientBuilder {
+            raw: TlsTcpRawClient::builder(endpoint),
+            protection: ProtectionSettings::unprotected(),
+        }
+    }
+
+    protected_client_methods!(TlsTcpRawClient);
 }
 
 #[cfg(feature = "quic-compio")]

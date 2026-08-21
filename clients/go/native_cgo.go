@@ -28,6 +28,8 @@ typedef openkache_client_result *(*openkache_go_connect_ex_fn)(
     const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
     const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
     uint8_t, int32_t, size_t, size_t, uint32_t, size_t, size_t, uint64_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_connect_transport_fn)(
+    const openkache_client_connect_options_t *, uint32_t);
 typedef openkache_client_result *(*openkache_go_execute_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
@@ -71,6 +73,7 @@ typedef struct openkache_go_library {
     openkache_go_abi_fn abi;
     openkache_go_connect_fn connect;
     openkache_go_connect_ex_fn connect_ex;
+    openkache_go_connect_transport_fn connect_transport;
     openkache_go_execute_fn execute;
     openkache_go_execute_unary_fn execute_unary;
     openkache_go_execute_fields_fn execute_fields;
@@ -182,6 +185,7 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(abi, "openkache_client_abi_version");
     OPENKACHE_GO_LOAD(connect, "openkache_client_connect");
     OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
+    OPENKACHE_GO_LOAD(connect_transport, "openkache_client_connect_transport");
     OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
     OPENKACHE_GO_LOAD(execute_unary, "openkache_client_execute_unary");
     OPENKACHE_GO_LOAD(execute_fields, "openkache_client_execute_fields");
@@ -232,6 +236,19 @@ void openkache_go_library_free(openkache_go_library *library) {
 
 int openkache_go_has_connect_ex(const openkache_go_library *library) {
     return library != NULL && library->connect_ex != NULL;
+}
+
+int openkache_go_has_connect_transport(const openkache_go_library *library) {
+    return library != NULL && library->connect_transport != NULL;
+}
+
+openkache_client_result *openkache_go_connect_transport(
+    const openkache_go_library *library,
+    const openkache_client_connect_options_t *options,
+    uint32_t transport
+) {
+    if (library == NULL || library->connect_transport == NULL || options == NULL) return NULL;
+    return library->connect_transport(options, transport);
 }
 
 int openkache_go_has_execute_raw(const openkache_go_library *library) {
@@ -287,6 +304,34 @@ openkache_client_result *openkache_go_connect(
         data_protection_key_length, compression_enabled, compression_level,
         minimum_input_size, minimum_savings, connect_timeout_ms,
         request_timeout_ms);
+}
+
+openkache_client_result *openkache_go_connect_transport_values(
+    const openkache_go_library *library,
+    const uint8_t *address, size_t address_length,
+    const uint8_t *server_name, size_t server_name_length,
+    const uint8_t *certificate, size_t certificate_length,
+    const uint8_t *identity_certificate_chain, size_t identity_certificate_chain_length,
+    const uint8_t *identity_private_key, size_t identity_private_key_length,
+    const uint8_t *data_protection_key, size_t data_protection_key_length,
+    uint8_t compression_enabled, int32_t compression_level,
+    size_t minimum_input_size, size_t minimum_savings,
+    uint32_t encryption,
+    size_t retry_max_attempts, size_t max_in_flight,
+    uint64_t connect_timeout_ms, uint64_t request_timeout_ms,
+    uint32_t transport
+) {
+    if (library == NULL || library->connect_transport == NULL) return NULL;
+    const openkache_client_connect_options_t options = {
+        address, address_length, server_name, server_name_length,
+        certificate, certificate_length, identity_certificate_chain,
+        identity_certificate_chain_length, identity_private_key,
+        identity_private_key_length, data_protection_key,
+        data_protection_key_length, compression_enabled, compression_level,
+        minimum_input_size, minimum_savings, encryption, connect_timeout_ms,
+        request_timeout_ms, retry_max_attempts, max_in_flight
+    };
+    return library->connect_transport(&options, transport);
 }
 
 openkache_client_result *openkache_go_execute(
@@ -551,6 +596,20 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	if minimumSavings == 0 {
 		minimumSavings = SmithyDefaultZstandardMinimumSavingsBytes
 	}
+	hasTransport := C.openkache_go_has_connect_transport(library) != 0
+	if options.transport != TransportQuic && !hasTransport {
+		C.free(address)
+		C.free(serverName)
+		C.free(certificate)
+		C.free(identityCertificate)
+		C.free(identityPrivateKey)
+		C.free(dataProtectionKey)
+		C.openkache_go_library_free(library)
+		return nil, &Error{
+			Operation: "connect",
+			Message:   "native library does not support the requested transport selector",
+		}
+	}
 	hasExtended := C.openkache_go_has_connect_ex(library) != 0
 	useExtended := hasExtended
 	if !hasExtended &&
@@ -578,21 +637,40 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	}
 	reply := make(chan connectReply)
 	go func() {
-		result := C.openkache_go_connect(
-			library,
-			(*C.uint8_t)(address), C.size_t(len(options.address)),
-			(*C.uint8_t)(serverName), C.size_t(len(options.serverName)),
-			(*C.uint8_t)(certificate), C.size_t(len(options.certificate)),
-			(*C.uint8_t)(identityCertificate), C.size_t(len(options.identityCertificate)),
-			(*C.uint8_t)(identityPrivateKey), C.size_t(len(options.identityPrivateKey)),
-			(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
-			C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
-			C.size_t(minimumInputSize), C.size_t(minimumSavings),
-			C.uint32_t(options.encryption),
-			C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
-			C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
-			C.uint8_t(boolByte(useExtended)),
-		)
+		var result *C.openkache_client_result
+		if options.transport != TransportQuic {
+			result = C.openkache_go_connect_transport_values(
+				library,
+				(*C.uint8_t)(address), C.size_t(len(options.address)),
+				(*C.uint8_t)(serverName), C.size_t(len(options.serverName)),
+				(*C.uint8_t)(certificate), C.size_t(len(options.certificate)),
+				(*C.uint8_t)(identityCertificate), C.size_t(len(options.identityCertificate)),
+				(*C.uint8_t)(identityPrivateKey), C.size_t(len(options.identityPrivateKey)),
+				(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
+				C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
+				C.size_t(minimumInputSize), C.size_t(minimumSavings),
+				C.uint32_t(options.encryption),
+				C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
+				C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
+				C.uint32_t(options.transport),
+			)
+		} else {
+			result = C.openkache_go_connect(
+				library,
+				(*C.uint8_t)(address), C.size_t(len(options.address)),
+				(*C.uint8_t)(serverName), C.size_t(len(options.serverName)),
+				(*C.uint8_t)(certificate), C.size_t(len(options.certificate)),
+				(*C.uint8_t)(identityCertificate), C.size_t(len(options.identityCertificate)),
+				(*C.uint8_t)(identityPrivateKey), C.size_t(len(options.identityPrivateKey)),
+				(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
+				C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
+				C.size_t(minimumInputSize), C.size_t(minimumSavings),
+				C.uint32_t(options.encryption),
+				C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
+				C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
+				C.uint8_t(boolByte(useExtended)),
+			)
+		}
 		C.free(address)
 		C.free(serverName)
 		C.free(certificate)

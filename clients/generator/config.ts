@@ -19,6 +19,7 @@ export const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
 export const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
 export const FFI_ENUMS = {
   operations: { name: "FfiOperation", kind: "FFI operation" },
+  transports: { name: "FfiTransport", kind: "FFI transport" },
   result_kinds: { name: "FfiResultKind", kind: "FFI result" },
   connection_states: { name: "FfiConnectionState", kind: "FFI connection state" },
   set_conditions: { name: "FfiSetCondition", kind: "FFI SET condition" },

@@ -766,6 +766,12 @@ export function render_python_contract(contract: Client_Contract): string {
 SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSON.stringify(entry.text)}`,
     )
     .join("\n")
+  const ffi_transports = contract.ffi.transports
+    .map(
+      (entry) =>
+        `SMITHY_FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_set_conditions = contract.ffi.set_conditions
     .map(
       (entry) =>
@@ -894,6 +900,7 @@ ${ffi_result_kinds}
 ${ffi_status_categories}
 ${ffi_error_categories}
 ${ffi_connection_states}
+${ffi_transports}
 ${ffi_set_conditions}
 ${ffi_key_specs}
 ${ffi_namespace_descriptor_decode_statuses}

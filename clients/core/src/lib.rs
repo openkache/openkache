@@ -54,6 +54,8 @@ pub use openkache_value::{
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
 pub use protected::{ProtectedClient, ProtectedClientBuilder};
+#[cfg(feature = "tls-tcp")]
+pub use protected::{TlsTcpProtectedClient, TlsTcpProtectedClientBuilder};
 pub use protection::DataProtection;
 pub use protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
@@ -1401,7 +1403,10 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Bounds simultaneous request lanes on one QUIC connection.
+            /// Bounds simultaneous request lanes on one connection.
+            ///
+            /// TLS-over-TCP retains one ordered lane regardless of this
+            /// value; the setting remains shared for API compatibility.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.settings.max_in_flight = maximum;
                 self
@@ -1659,6 +1664,48 @@ impl RawClient {
 #[cfg(feature = "quic-quinn")]
 raw_client_methods!(RawClient);
 
+#[cfg(feature = "tls-tcp")]
+/// Exact-item-ID, exact-value protocol client running on Tokio and TLS-over-TCP.
+#[derive(Clone)]
+pub struct TlsTcpRawClient(Arc<Core<transport::tcp::Connection>>);
+
+#[cfg(feature = "tls-tcp")]
+/// Connection builder for the Tokio/TLS-over-TCP low-level client.
+pub struct TlsTcpRawClientBuilder {
+    settings: BuilderSettings,
+}
+
+#[cfg(feature = "tls-tcp")]
+builder_methods!(TlsTcpRawClientBuilder);
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpRawClientBuilder {
+    /// Connects the configured exact protocol client.
+    pub async fn connect(self) -> Result<TlsTcpRawClient> {
+        Ok(TlsTcpRawClient(
+            connect_tls_tcp(self.settings.finish()?).await?,
+        ))
+    }
+}
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpRawClient {
+    /// Connects an exact protocol client with system trust.
+    pub async fn connect(endpoint: &str) -> Result<Self> {
+        Self::builder(endpoint.parse()?).connect().await
+    }
+
+    /// Starts explicit configuration for an exact TLS-over-TCP protocol client.
+    pub fn builder(endpoint: Endpoint) -> TlsTcpRawClientBuilder {
+        TlsTcpRawClientBuilder {
+            settings: BuilderSettings::new(endpoint),
+        }
+    }
+}
+
+#[cfg(feature = "tls-tcp")]
+raw_client_methods!(TlsTcpRawClient);
+
 #[cfg(feature = "quic-compio")]
 /// Exact-item-ID, exact-value protocol client confined to a Compio runtime.
 #[derive(Clone)]
@@ -1757,6 +1804,34 @@ async fn connect_compio(
     .map(Arc::new)
 }
 
+#[cfg(feature = "tls-tcp")]
+async fn connect_tls_tcp(
+    settings: ConnectionSettings,
+) -> Result<Arc<Core<transport::tcp::Connection>>> {
+    let deadline = transport::Deadline::after(settings.timeouts.connect)?;
+    let address = resolve_tls_tcp(
+        &settings.endpoint,
+        deadline.remaining(Operation::DnsResolution)?,
+    )
+    .await?;
+    Core::connect(
+        address,
+        settings.endpoint.server_name().to_owned(),
+        settings.tls,
+        settings.alpn,
+        settings.timeouts,
+        settings.retry,
+        settings.max_in_flight,
+        settings.max_in_flight_bytes,
+        settings.namespace_id,
+        settings.namespace_name,
+        settings.namespace_policy,
+        deadline,
+    )
+    .await
+    .map(Arc::new)
+}
+
 #[cfg(feature = "quic-quinn")]
 async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
     if tokio::runtime::Handle::try_current().is_err() {
@@ -1813,12 +1888,41 @@ async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<Socket
     })
 }
 
+#[cfg(feature = "tls-tcp")]
+async fn resolve_tls_tcp(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(Error::Connection(
+            "an active Tokio runtime is required".into(),
+        ));
+    }
+    if let Some(address) = endpoint.resolved_address() {
+        return Ok(address);
+    }
+    let addresses = tokio::time::timeout(
+        timeout,
+        tokio::net::lookup_host((endpoint.host(), endpoint.port())),
+    )
+    .await
+    .map_err(|_| Error::Timeout {
+        operation: Operation::DnsResolution,
+    })?
+    .map_err(Error::io)?;
+    addresses.into_iter().next().ok_or_else(|| {
+        Error::Connection(format!(
+            "{}:{} resolved to no addresses",
+            endpoint.host(),
+            endpoint.port()
+        ))
+    })
+}
+
 fn make_tls_config(
     trust: ServerTrust,
     identity: Option<ClientIdentity>,
     alpn: &AlpnPolicy,
 ) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
+    let insecure = matches!(&trust, ServerTrust::Insecure);
     match trust {
         ServerTrust::System => {
             let result = rustls_native_certs::load_native_certs();
@@ -1847,6 +1951,7 @@ fn make_tls_config(
                     .map_err(|error| Error::Tls(error.to_string()))?;
             }
         }
+        ServerTrust::Insecure => {}
     }
     let builder = rustls::ClientConfig::builder_with_provider(config::strict_pq_provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -1861,12 +1966,79 @@ fn make_tls_config(
         }
         None => builder.with_no_client_auth(),
     };
+    if insecure {
+        config
+            .dangerous()
+            .set_certificate_verifier(std::sync::Arc::new(SkipServerVerification::new()));
+    }
     // A resumed TLS 1.3 PSK handshake has no negotiated key-exchange group to
     // validate. Disable resumption so every connection performs the mandatory
     // X25519MLKEM768 hybrid exchange.
     config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = alpn.protocols().to_vec();
     Ok(config)
+}
+
+/// Certificate verifier used only by the explicit [`ServerTrust::Insecure`]
+/// opt-out. TLS 1.3 and the mandatory hybrid key exchange remain enforced.
+#[derive(Debug)]
+struct SkipServerVerification {
+    provider: std::sync::Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl SkipServerVerification {
+    fn new() -> Self {
+        Self {
+            provider: config::strict_pq_provider(),
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 fn expect_status(operation: Operation, status: Status, expected: &[Status]) -> Result<()> {

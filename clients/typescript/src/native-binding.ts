@@ -35,6 +35,7 @@ export interface Native_Client_Options {
   readonly max_in_flight?: number
   readonly encryption?: "compact" | "robust"
   readonly key_spec?: "integer" | "text" | "bytes"
+  readonly transport?: "quic" | "tls_tcp" | "quic_insecure" | "tls_tcp_insecure"
 }
 
 export type Native_Namespace_Policy = Smithy_Namespace_Policy

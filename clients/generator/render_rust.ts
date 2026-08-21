@@ -195,6 +195,13 @@ pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_
 pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_transports = ffi.transports
+    .map(
+      (entry) =>
+        `/// Native FFI transport selector for ${entry.name}.
+pub const FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_set_conditions = ffi.set_conditions
     .map(
       (entry) =>
@@ -302,6 +309,7 @@ pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
+${ffi_transports}
 ${ffi_set_conditions}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
@@ -333,6 +341,13 @@ ${rust_ffi_enum(
   "Native FFI connection-state identifiers shared by every language adapter.",
   "Native FFI connection-state",
   ffi.connection_states,
+)}
+
+${rust_ffi_enum(
+  "FfiTransport",
+  "Native FFI transport selectors shared by every language adapter.",
+  "Native FFI transport",
+  ffi.transports,
 )}
 
 ${rust_ffi_enum(

@@ -324,6 +324,13 @@ ${contract.ffi.connection_states
 \tSmithyFFIConnectionState${go_ffi_name(entry.name)}Name = ${JSON.stringify(entry.text)}`,
   )
   .join("\n")}
+${contract.ffi.transports
+  .map(
+    (entry) =>
+      `\t// SmithyFFITransport${go_ffi_name(entry.name)} selects the native transport and trust policy.
+\tSmithyFFITransport${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
 ${contract.ffi.namespace_descriptor_decode_statuses
   .map(
     (entry) =>

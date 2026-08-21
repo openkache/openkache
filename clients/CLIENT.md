@@ -22,9 +22,10 @@ key and Item ID boundary is implemented in `clients/core`; the generated value
 model and envelope remain transitional until their respective migrations land.
 
 Package READMEs may expose those generated/core artifacts for compatibility, but
-they must label legacy fixed-width-ID assumptions, legacy JSON envelopes,
-threshold-based compression, and QUIC-only transport as current transitional
-behavior.
+they must label legacy fixed-width-ID assumptions, legacy JSON envelopes, and
+threshold-based compression as current transitional behavior. A package that
+does not implement both maintained transport profiles must identify itself as a
+scaffold or transitional limitation rather than claim full maintained support.
 
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.

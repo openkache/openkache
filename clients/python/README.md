@@ -1,11 +1,12 @@
 # OpenKache Python client
 
 The `openkache` package is an asyncio-friendly Python binding over the shared
-Rust client core. QUIC-over-TLS, retries, application-key derivation,
-compression, encryption, and the v1 value format stay in [`../core`](../core);
-Python only converts Python values and owns the async scheduling and resource
-lifecycle. The current binding is QUIC-only; TLS-over-TCP is part of the target
-maintained-client contract.
+Rust client core. TLS 1.3 over QUIC or TCP, retries, application-key
+derivation, compression, encryption, and the v1 value format stay in
+[`../core`](../core); Python only converts Python values and owns the async
+scheduling and resource lifecycle. Pass `Transport.TLS_TCP` for verified
+TLS-over-TCP or an explicit insecure enum member to disable certificate and
+server-identity verification; the default remains verified QUIC.
 
 The Smithy client model in [`../model/openkache.smithy`](../model/openkache.smithy), together with
 the wire model in [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy),

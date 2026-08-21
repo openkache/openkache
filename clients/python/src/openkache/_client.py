@@ -69,6 +69,10 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     SMITHY_FFI_SET_CONDITION_IF_PRESENT,
     SMITHY_FFI_SET_CONDITION_ANY,
+    SMITHY_FFI_TRANSPORT_QUIC,
+    SMITHY_FFI_TRANSPORT_TLS_TCP,
+    SMITHY_FFI_TRANSPORT_QUIC_INSECURE,
+    SMITHY_FFI_TRANSPORT_TLS_TCP_INSECURE,
     SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_MAX_IN_FLIGHT,
     SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
@@ -176,6 +180,15 @@ class Encryption(IntEnum):
 
     COMPACT = SMITHY_VALUE_ENCRYPTION_COMPACT
     ROBUST = SMITHY_VALUE_ENCRYPTION_ROBUST
+
+
+class Transport(IntEnum):
+    """Native transport and server-trust selector."""
+
+    QUIC = SMITHY_FFI_TRANSPORT_QUIC
+    TLS_TCP = SMITHY_FFI_TRANSPORT_TLS_TCP
+    QUIC_INSECURE = SMITHY_FFI_TRANSPORT_QUIC_INSECURE
+    TLS_TCP_INSECURE = SMITHY_FFI_TRANSPORT_TLS_TCP_INSECURE
 
 
 class KeySpec(StrEnum):
@@ -440,7 +453,7 @@ class OpenKacheClient:
         cls,
         address: str,
         *,
-        certificate: bytes | bytearray | memoryview | str | PathLike[str],
+        certificate: bytes | bytearray | memoryview | str | PathLike[str] = b"",
         data_protection_key: bytes | bytearray | memoryview | None = None,
         key_spec: KeySpec | str | None = None,
         server_name: str | None = None,
@@ -450,6 +463,7 @@ class OpenKacheClient:
         timeouts: ClientTimeouts | None = None,
         max_in_flight: int = SMITHY_DEFAULT_MAX_IN_FLIGHT,
         retry_max_attempts: int = SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+        transport: Transport = Transport.QUIC,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
         selected_key_spec = (
@@ -468,6 +482,7 @@ class OpenKacheClient:
                 timeouts=timeouts,
                 max_in_flight=max_in_flight,
                 retry_max_attempts=retry_max_attempts,
+                transport=transport,
                 native_path=native_path,
             )
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
@@ -979,6 +994,7 @@ def _connection_settings(
     timeouts: ClientTimeouts | None,
     max_in_flight: int,
     retry_max_attempts: int,
+    transport: Transport,
     native_path: str | PathLike[str] | None,
 ) -> dict[str, Any]:
     native_address, host = _resolve_address(address)
@@ -997,6 +1013,8 @@ def _connection_settings(
     timeouts = timeouts or ClientTimeouts()
     if not isinstance(encryption, Encryption):
         raise OpenKacheValueError("encryption must be an Encryption value")
+    if not isinstance(transport, Transport):
+        raise OpenKacheValueError("transport must be a Transport value")
     _positive_or_zero(
         max_in_flight,
         "max_in_flight",
@@ -1043,6 +1061,7 @@ def _connection_settings(
         "request_timeout_ms": timeouts.request_ms,
         "max_in_flight": max_in_flight,
         "retry_max_attempts": retry_max_attempts,
+        "transport": int(transport),
         "native_path": native_path,
     }
 
@@ -1059,14 +1078,14 @@ def _resolve_address(address: str) -> tuple[str, str]:
         try:
             host, port_text = address.rsplit(":", 1)
         except ValueError as error:
-            raise OpenKacheValueError("address must include a UDP port") from error
+            raise OpenKacheValueError("address must include a transport port") from error
     if not host or not port_text.isdecimal():
-        raise OpenKacheValueError("address must contain a host and numeric UDP port")
+        raise OpenKacheValueError("address must contain a host and numeric transport port")
     port = int(port_text)
     if not 1 <= port <= 65_535:
         raise OpenKacheValueError("address port must be between 1 and 65535")
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        infos = socket.getaddrinfo(host, port, type=0)
     except OSError as error:
         raise OpenKacheError(f"address DNS resolution failed: {error}") from error
     for family, _, _, _, sockaddr in infos:
@@ -1074,7 +1093,7 @@ def _resolve_address(address: str) -> tuple[str, str]:
             return f"{sockaddr[0]}:{sockaddr[1]}", host
         if family == socket.AF_INET6:
             return f"[{sockaddr[0]}]:{sockaddr[1]}", host
-    raise OpenKacheError(f"address did not resolve to a UDP endpoint: {address}")
+    raise OpenKacheError(f"address did not resolve to a transport endpoint: {address}")
 
 
 def _as_file_or_bytes(

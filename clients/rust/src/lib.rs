@@ -8,12 +8,12 @@ pub mod smithy {
     include!(concat!(env!("OUT_DIR"), "/smithy_api.rs"));
 }
 
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
 use std::future::{Future, IntoFuture};
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
 use std::time::Duration;
 
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
@@ -26,9 +26,9 @@ pub use openkache_client_core::{
     ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
     ItemValue, KeyError, KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
     NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
-    PrivateKey, Result, RetryPolicy, RequestBudget, ServerErrorCode, ServerTrust, SetCondition,
-    SetOptions, SetOutcome, TypedInteger, TypedKey, ValueKeyring,
-    canonical_key_bytes, value, value_envelope,
+    PrivateKey, RequestBudget, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition,
+    SetOptions, SetOutcome, TypedInteger, TypedKey, ValueKeyring, canonical_key_bytes, value,
+    value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -43,6 +43,13 @@ use openkache_client_core::{
 };
 #[cfg(feature = "quic-quinn")]
 pub use openkache_client_core::{RawClient, RawClientBuilder};
+#[cfg(feature = "tls-tcp")]
+use openkache_client_core::{
+    TlsTcpProtectedClient as SharedTlsTcpClient,
+    TlsTcpProtectedClientBuilder as SharedTlsTcpClientBuilder,
+};
+#[cfg(feature = "tls-tcp")]
+pub use openkache_client_core::{TlsTcpRawClient, TlsTcpRawClientBuilder};
 
 fn smithy_set_options(
     condition: Option<smithy::SetCondition>,
@@ -327,6 +334,9 @@ impl_smithy_api!(RawClient);
 #[cfg(feature = "quic-compio")]
 impl_smithy_api!(LocalRawClient);
 
+#[cfg(feature = "tls-tcp")]
+impl_smithy_api!(TlsTcpRawClient);
+
 macro_rules! builder_methods {
     ($builder:ident) => {
         impl $builder {
@@ -366,7 +376,11 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Bounds simultaneous request lanes on one QUIC connection.
+            /// Bounds simultaneous request lanes on one connection.
+            ///
+            /// TLS-over-TCP always exposes one ordered lane; for that
+            /// transport this setting is retained for source compatibility
+            /// and the shared core enforces the one-lane limit.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.inner = self.inner.max_in_flight(maximum);
                 self
@@ -447,7 +461,7 @@ macro_rules! builder_methods {
     };
 }
 
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
 macro_rules! client_methods {
     ($client:ident, $request:ident) => {
         impl $client {
@@ -632,6 +646,69 @@ impl Client {
 #[cfg(feature = "quic-quinn")]
 client_methods!(Client, SetRequest);
 
+#[cfg(feature = "tls-tcp")]
+/// High-level application-key and plaintext-value client running on Tokio and
+/// the one-lane TLS-over-TCP transport.
+#[derive(Clone)]
+pub struct TlsTcpClient {
+    inner: SharedTlsTcpClient,
+}
+
+#[cfg(feature = "tls-tcp")]
+/// Connection and value-layer builder for the Tokio/TLS-over-TCP client.
+pub struct TlsTcpClientBuilder {
+    inner: SharedTlsTcpClientBuilder,
+}
+
+#[cfg(feature = "tls-tcp")]
+builder_methods!(TlsTcpClientBuilder);
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpClientBuilder {
+    /// Connects a Tokio/TLS-over-TCP client with the configured layers.
+    pub async fn connect(self) -> Result<TlsTcpClient> {
+        self.inner
+            .connect()
+            .await
+            .map(|inner| TlsTcpClient { inner })
+    }
+}
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpClient {
+    /// Connects with data protection, system trust, and default TLS-over-TCP behavior.
+    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
+        Self::builder(endpoint.parse()?, data_protection_key)
+            .connect()
+            .await
+    }
+
+    /// Starts explicit TLS-over-TCP client configuration.
+    pub fn builder(
+        endpoint: Endpoint,
+        data_protection_key: DataProtectionKey,
+    ) -> TlsTcpClientBuilder {
+        TlsTcpClientBuilder {
+            inner: SharedTlsTcpClient::builder(endpoint, data_protection_key),
+        }
+    }
+
+    /// Starts an unprotected TLS-over-TCP client with namespace-bound Item IDs.
+    pub fn builder_unprotected(endpoint: Endpoint) -> TlsTcpClientBuilder {
+        TlsTcpClientBuilder {
+            inner: SharedTlsTcpClient::builder_unprotected(endpoint),
+        }
+    }
+
+    /// Borrows the exact protocol layer owned by this client.
+    pub fn raw(&self) -> &TlsTcpRawClient {
+        self.inner.raw()
+    }
+}
+
+#[cfg(feature = "tls-tcp")]
+client_methods!(TlsTcpClient, TlsTcpSetRequest);
+
 #[cfg(feature = "quic-compio")]
 /// High-level application-key and plaintext-value client confined to a Compio runtime.
 #[derive(Clone)]
@@ -778,6 +855,15 @@ pub struct LocalSetRequest<'a> {
     options: SetOptions,
 }
 
+#[cfg(feature = "tls-tcp")]
+/// Awaitable TLS-over-TCP set request with optional condition and TTL modifiers.
+pub struct TlsTcpSetRequest<'a> {
+    client: &'a TlsTcpClient,
+    application_key: TypedKey,
+    value: Vec<u8>,
+    options: SetOptions,
+}
+
 macro_rules! set_request_methods {
     ($request:ident) => {
         impl $request<'_> {
@@ -838,3 +924,9 @@ set_request_methods!(LocalSetRequest);
 
 #[cfg(feature = "quic-compio")]
 set_request_future!(LocalSetRequest);
+
+#[cfg(feature = "tls-tcp")]
+set_request_methods!(TlsTcpSetRequest);
+
+#[cfg(feature = "tls-tcp")]
+set_request_future!(TlsTcpSetRequest + Send);

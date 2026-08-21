@@ -23,7 +23,7 @@ mod compio;
 #[cfg(feature = "quic-quinn")]
 mod quinn;
 #[cfg(feature = "tls-tcp")]
-mod tcp;
+pub(crate) mod tcp;
 
 #[cfg(feature = "quic-quinn")]
 pub use quinn::{Lane as QuinnTransportLane, Transport as QuinnTransportConnection};

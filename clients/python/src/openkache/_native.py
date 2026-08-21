@@ -33,7 +33,10 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_SET_CONDITION_ANY,
 )
-from ._generated.smithy_native_abi import SmithyNativeOperationField
+from ._generated.smithy_native_abi import (
+    SmithyNativeConnectOptions,
+    SmithyNativeOperationField,
+)
 
 
 class NativeError(RuntimeError):
@@ -157,6 +160,11 @@ class _NativeApi:
                 ctypes.c_uint64,
                 ctypes.c_uint64,
             ),
+            _RESULT_POINTER,
+        )
+        self.connect_transport = self._optional_function(
+            "openkache_client_connect_transport",
+            (ctypes.POINTER(SmithyNativeConnectOptions), ctypes.c_uint32),
             _RESULT_POINTER,
         )
         self.execute = self._function(
@@ -427,6 +435,7 @@ class NativeClient:
         request_timeout_ms: int,
         max_in_flight: int,
         retry_max_attempts: int,
+        transport: int = 0,
         native_path: str | os.PathLike[str] | None = None,
     ) -> NativeClient:
         api = _NativeApi(native_path)
@@ -438,7 +447,29 @@ class NativeClient:
             _as_native_buffer(client_private_key),
             _as_native_buffer(data_protection_key),
         ]
-        result = api.connect(
+        if transport != 0 and api.connect_transport is None:
+            raise NativeError("native client does not support the requested transport selector")
+        if transport != 0:
+            options = SmithyNativeConnectOptions(
+                buffers[0][1], len(address),
+                buffers[1][1], len(server_name),
+                buffers[2][1], len(certificate),
+                buffers[3][1], len(client_certificate_chain),
+                buffers[4][1], len(client_private_key),
+                buffers[5][1], len(data_protection_key),
+                1 if compression_enabled else 0,
+                compression_level,
+                minimum_input_size,
+                minimum_savings,
+                encryption,
+                connect_timeout_ms,
+                request_timeout_ms,
+                retry_max_attempts,
+                max_in_flight,
+            )
+            result = api.connect_transport(ctypes.byref(options), transport)
+        else:
+            result = api.connect(
             buffers[0][1],
             len(address),
             buffers[1][1],
@@ -460,7 +491,7 @@ class NativeClient:
             max_in_flight,
             connect_timeout_ms,
             request_timeout_ms,
-        )
+            )
         kind, _, handle = api.read_result(result, take_client=True)
         if kind != SMITHY_FFI_RESULT_CONNECTED or not handle:
             raise NativeError("native client did not return a connected handle")
