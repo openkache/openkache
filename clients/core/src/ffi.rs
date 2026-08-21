@@ -1120,6 +1120,7 @@ fn run_tls_tcp_worker(
         None
     };
     let protected = item_id_root.is_some();
+    let mut value_keyring = value_keyring;
     macro_rules! connect_builder {
         ($builder:expr) => {{
             let mut builder = $builder
@@ -1134,7 +1135,7 @@ fn run_tls_tcp_worker(
             if protected {
                 builder = builder.encryption(encryption);
             }
-            if let Some(keyring) = value_keyring.clone() {
+            if let Some(keyring) = value_keyring.take() {
                 builder = builder.value_keyring(keyring);
             }
             runtime.block_on(builder.connect())
@@ -1353,13 +1354,21 @@ trait FfiProtectedClientApi: Clone + 'static {
         &self,
         canonical_key: &[u8],
     ) -> crate::Result<GetOutcome<Value>>;
-    async fn get_structured_canonical_key_unchecked(
-        &self,
-        canonical_key: &[u8],
-    ) -> crate::Result<GetOutcome<StructuredValue>>;
     async fn get_structured_canonical_key_cbor(
         &self,
         canonical_key: Vec<u8>,
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn get_json_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<JsonValue>>;
+    async fn get_structured_canonical_key_cbor_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn get_v0_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
     ) -> crate::Result<GetOutcome<Vec<u8>>>;
     async fn set_canonical_key_unchecked(
         &self,
@@ -1367,15 +1376,63 @@ trait FfiProtectedClientApi: Clone + 'static {
         value: Value,
         options: SetOptions,
     ) -> crate::Result<SetOutcome>;
-    async fn set_structured_canonical_key_unchecked(
-        &self,
-        canonical_key: &[u8],
-        value: StructuredValue,
-        options: SetOptions,
-    ) -> crate::Result<SetOutcome>;
     async fn set_structured_canonical_key_cbor(
         &self,
         canonical_key: Vec<u8>,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_json_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: JsonValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_structured_canonical_key_cbor_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: &[u8],
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_v0_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn get_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<JsonValue>>;
+    async fn set_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: JsonValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn get_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn set_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn get_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn set_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
         value: Vec<u8>,
         options: SetOptions,
     ) -> crate::Result<SetOutcome>;
@@ -1414,18 +1471,30 @@ macro_rules! impl_ffi_protected_client {
             ) -> crate::Result<GetOutcome<Value>> {
                 self.get_canonical_key_unchecked(canonical_key).await
             }
-            async fn get_structured_canonical_key_unchecked(
-                &self,
-                canonical_key: &[u8],
-            ) -> crate::Result<GetOutcome<StructuredValue>> {
-                self.get_structured_canonical_key_unchecked(canonical_key)
-                    .await
-            }
             async fn get_structured_canonical_key_cbor(
                 &self,
                 canonical_key: Vec<u8>,
             ) -> crate::Result<GetOutcome<Vec<u8>>> {
                 self.get_structured_canonical_key_cbor(canonical_key).await
+            }
+            async fn get_json_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<JsonValue>> {
+                self.get_json_canonical_key_unchecked(canonical_key).await
+            }
+            async fn get_structured_canonical_key_cbor_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_structured_canonical_key_cbor_unchecked(canonical_key)
+                    .await
+            }
+            async fn get_v0_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_v0_canonical_key_unchecked(canonical_key).await
             }
             async fn set_canonical_key_unchecked(
                 &self,
@@ -1436,15 +1505,6 @@ macro_rules! impl_ffi_protected_client {
                 self.set_canonical_key_unchecked(canonical_key, value, options)
                     .await
             }
-            async fn set_structured_canonical_key_unchecked(
-                &self,
-                canonical_key: &[u8],
-                value: StructuredValue,
-                options: SetOptions,
-            ) -> crate::Result<SetOutcome> {
-                self.set_structured_canonical_key_unchecked(canonical_key, value, options)
-                    .await
-            }
             async fn set_structured_canonical_key_cbor(
                 &self,
                 canonical_key: Vec<u8>,
@@ -1452,6 +1512,89 @@ macro_rules! impl_ffi_protected_client {
                 options: SetOptions,
             ) -> crate::Result<SetOutcome> {
                 self.set_structured_canonical_key_cbor(canonical_key, value, options)
+                    .await
+            }
+            async fn set_json_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: JsonValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_json_canonical_key_unchecked(canonical_key, value, options)
+                    .await
+            }
+            async fn set_structured_canonical_key_cbor_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: &[u8],
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_structured_canonical_key_cbor_unchecked(
+                    canonical_key,
+                    value,
+                    options,
+                )
+                .await
+            }
+            async fn set_v0_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_v0_canonical_key_unchecked(canonical_key, value, options)
+                    .await
+            }
+            async fn get_json_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<JsonValue>> {
+                self.get_json_exact_item_id(namespace_id, item_id).await
+            }
+            async fn set_json_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: JsonValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_json_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+            async fn get_structured_exact_item_id_cbor(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_structured_exact_item_id_cbor(namespace_id, item_id)
+                    .await
+            }
+            async fn set_structured_exact_item_id_cbor(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_structured_exact_item_id_cbor(namespace_id, item_id, value, options)
+                    .await
+            }
+            async fn get_v0_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_v0_exact_item_id(namespace_id, item_id).await
+            }
+            async fn set_v0_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_v0_exact_item_id(namespace_id, item_id, value, options)
                     .await
             }
             async fn delete_canonical_key_unchecked(

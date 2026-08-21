@@ -7,7 +7,7 @@ use napi::bindgen_prelude::{BigInt, Uint8Array};
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use openkache_client_core::value::{
-    Compression, Encryption, Value, ZstandardOptions, encode_json_output_with_budget,
+    Compression, Encryption, JsonValue, Value, ZstandardOptions, encode_json_output_with_budget,
     parse_json_input_with_budget,
 };
 use openkache_client_core::{
@@ -154,6 +154,36 @@ impl NativeBackend {
         }
     }
 
+    async fn get_structured_canonical_key_cbor(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => client.get_structured_canonical_key_cbor(key).await,
+            Self::TlsTcp(client) => client.get_structured_canonical_key_cbor(key).await,
+        }
+    }
+
+    async fn get_json_canonical_key(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<JsonValue>> {
+        match self {
+            Self::Quic(client) => client.get_json_canonical_key(key).await,
+            Self::TlsTcp(client) => client.get_json_canonical_key(key).await,
+        }
+    }
+
+    async fn get_v0_canonical_key(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => client.get_v0_canonical_key(key).await,
+            Self::TlsTcp(client) => client.get_v0_canonical_key(key).await,
+        }
+    }
+
     async fn set_canonical_key(
         &self,
         key: &[u8],
@@ -163,6 +193,154 @@ impl NativeBackend {
         match self {
             Self::Quic(client) => client.set_canonical_key(key, value, options).await,
             Self::TlsTcp(client) => client.set_canonical_key(key, value, options).await,
+        }
+    }
+
+    async fn set_structured_canonical_key_cbor(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_structured_canonical_key_cbor(key, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_structured_canonical_key_cbor(key, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn set_json_canonical_key(
+        &self,
+        key: &[u8],
+        value: JsonValue,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => client.set_json_canonical_key(key, value, options).await,
+            Self::TlsTcp(client) => client.set_json_canonical_key(key, value, options).await,
+        }
+    }
+
+    async fn set_v0_canonical_key(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => client.set_v0_canonical_key(key, value, options).await,
+            Self::TlsTcp(client) => client.set_v0_canonical_key(key, value, options).await,
+        }
+    }
+
+    async fn get_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<GetOutcome<JsonValue>> {
+        match self {
+            Self::Quic(client) => client.get_json_exact_item_id(namespace_id, item_id).await,
+            Self::TlsTcp(client) => client.get_json_exact_item_id(namespace_id, item_id).await,
+        }
+    }
+
+    async fn set_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: JsonValue,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_json_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_json_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn get_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .get_structured_exact_item_id_cbor(namespace_id, item_id)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .get_structured_exact_item_id_cbor(namespace_id, item_id)
+                    .await
+            }
+        }
+    }
+
+    async fn set_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: &[u8],
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_structured_exact_item_id_cbor(namespace_id, item_id, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_structured_exact_item_id_cbor(namespace_id, item_id, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn get_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => client.get_v0_exact_item_id(namespace_id, item_id).await,
+            Self::TlsTcp(client) => client.get_v0_exact_item_id(namespace_id, item_id).await,
+        }
+    }
+
+    async fn set_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_v0_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_v0_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
         }
     }
 

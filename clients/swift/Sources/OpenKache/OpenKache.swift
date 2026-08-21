@@ -109,6 +109,21 @@ public struct OpenKacheUnknownMutationError: Error, LocalizedError, Equatable, S
 /// Compatibility spelling for callers that use the shorter category name.
 public typealias UnknownMutationError = OpenKacheUnknownMutationError
 
+/// A read-only request was canceled before native admission.
+public struct OpenKacheCanceledError: Error, LocalizedError, Equatable, Sendable {
+    /// Human-readable diagnostic supplied by the core.
+    public let message: String
+
+    /// Creates an error with a caller-owned diagnostic.
+    public init(_ message: String) {
+        self.message = message
+    }
+
+    public var errorDescription: String? {
+        message
+    }
+}
+
 /// Optional mutual-TLS identity.
 public struct OpenKacheClientIdentity: Sendable {
     /// Leaf certificate and any intermediates as one DER certificate or PEM chain.
@@ -936,6 +951,17 @@ private func resultPayload(_ result: NativeResultPointer) throws -> Data {
     return Data(bytes: pointer, count: length)
 }
 
+private func resultMessage(
+    _ result: NativeResultPointer,
+    fallback: String
+) -> String {
+    guard let payload = try? resultPayload(result) else {
+        return fallback
+    }
+    let message = String(decoding: payload, as: UTF8.self)
+    return message.isEmpty ? fallback : message
+}
+
 private func resultError(_ result: NativeResultPointer) -> OpenKacheError {
     let payload: Data
     do {
@@ -955,22 +981,22 @@ private func consumeResult<T>(
 ) throws -> T {
     defer { nativeFreeResult(result) }
     let kind = nativeResultKind(result)
-    guard kind != Smithy_Native_Contract.resultError else {
-        throw resultError(result)
-    }
     if kind == Smithy_Native_Contract.resultUnknownMutation {
-        let payload = try resultPayload(result)
-        let message = String(decoding: payload, as: UTF8.self)
-        throw OpenKacheUnknownMutationError(
-            message.isEmpty
-                ? "OpenKache mutation outcome is unknown after cancellation"
-                : message
+        let message = resultMessage(
+            result,
+            fallback: "OpenKache mutation outcome is unknown after cancellation"
         )
+        throw OpenKacheUnknownMutationError(message)
     }
     if kind == Smithy_Native_Contract.resultCanceled {
-        // The native completion has been consumed before exposing Swift's
-        // normal cancellation error to the caller.
-        throw CancellationError()
+        let message = resultMessage(
+            result,
+            fallback: "OpenKache request was canceled before admission"
+        )
+        throw OpenKacheCanceledError(message)
+    }
+    guard kind != Smithy_Native_Contract.resultError else {
+        throw resultError(result)
     }
     return try transform(kind, resultPayload(result))
 }
