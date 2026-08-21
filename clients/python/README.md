@@ -27,11 +27,20 @@ StructuredValue-CBOR-v1 ABI without JSON or Raw fallback. The native boundary pr
 and cancellation outcomes as ``OpenKacheUnknownMutationError`` and
 ``OpenKacheCancelledError``.
 
+Mapped GET/SET/DELETE calls use the ABI v6 request handle
+(``poll``/``wait``/``cancel``/``free``), so task cancellation cannot abandon a
+native mutation. Cancellation before admission raises
+``OpenKacheCancelledError``; cancellation after a mutation starts raises
+``OpenKacheUnknownMutationError``. Structured, scoped, namespace, and complete
+raw-policy calls have no dedicated request entry point in ABI v6 and therefore
+drain a documented safe completion boundary before honoring cancellation.
+
 > **Current implementation:** This package exposes canonical-JSON mapped-key
 > operations and exact `0..=32`-byte Item ID operations. Native values are
-> converted to canonical key bytes in the adapter and the shared core applies
-> the default `NamespaceHash` profile; `PublicKeyOrHash` remains an explicit
-> core-only profile until the binding options are finalized.
+> converted to logical bytes plus a generated key discriminator at the adapter
+> boundary; the shared core performs canonical encoding and applies the default
+> `NamespaceHash` profile. `PublicKeyOrHash` remains an explicit core-only
+> profile until the binding options are finalized.
 
 ## Commands
 
@@ -76,8 +85,9 @@ finally:
 
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
 `get_raw` for exact bytes; empty raw values are supported. Each operation
-infers `Text`, `Bytes`, or signed-i64 `Integer` from the native key and
-converts it to canonical deterministic CBOR before the native ABI. The
+infers `Text`, `Bytes`, or signed-i64 `Integer` from the native key and passes
+the logical bytes plus the generated key discriminator through the native ABI;
+the shared core performs canonical deterministic CBOR encoding. The
 deprecated `key_spec` option is accepted for source compatibility but is not a
 namespace policy and does not override per-operation inference. Empty and
 NUL-containing keys are valid. JSON numbers

@@ -77,6 +77,15 @@ var deleted = await client.DeleteAsync(itemId);
 `DeleteAsync` reports whether the item ID existed. Every item-ID-taking operation
 accepts and sends exact opaque `0..=32`-byte IDs unchanged.
 
+ABI v6 request-handle operations use `poll`, `wait`, `cancel`, and `free` so a
+cancelled read or mutation is never left running after its managed task exits.
+Cancellation before admission propagates the normal
+`OperationCanceledException`; cancellation after a mutation starts is surfaced
+as an `OpenKacheException` with code `UNKNOWN_MUTATION`. Scoped operations and
+complete raw SET policy flags lack request-handle entry points in ABI v6 and
+therefore drain a safe synchronous completion boundary before honoring a
+`CancellationToken`.
+
 ## Protocol and configuration
 
 This package requires TLS 1.3 and ALPN `openkache/1`. The complete wire

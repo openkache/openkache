@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -59,6 +61,19 @@ inline Connect_Transport_Function optional_connect_transport() noexcept {
     return nullptr;
 #endif
 }
+/// A mutation crossed the native cancellation/admission boundary.
+class Unknown_Mutation_Error : public Error {
+public:
+    explicit Unknown_Mutation_Error(const std::string& message)
+        : Error(message) {}
+};
+
+/// A read-only request was canceled before native admission.
+class Canceled_Error : public Error {
+public:
+    explicit Canceled_Error(const std::string& message)
+        : Error(message) {}
+};
 
 /// Atomic existence condition for one SET operation.
 enum class Set_Condition : std::uint32_t {
@@ -334,7 +349,11 @@ public:
     /// Replaces a failed connection without replaying an operation.
     void reconnect() const {
         const auto result = execute(
-            OPENKACHE_SMITHY_FFI_OPERATION_RECONNECT, {}, {}, Set_Options{});
+            OPENKACHE_SMITHY_FFI_OPERATION_RECONNECT,
+            OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+            {},
+            {},
+            Set_Options{});
         if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
             throw Error("OpenKache returned an invalid RECONNECT outcome");
         }
@@ -343,7 +362,11 @@ public:
     /// Verifies the connection.
     void ping() const {
         const auto result = execute(
-            OPENKACHE_SMITHY_OPCODE_PING, {}, {}, Set_Options{});
+            OPENKACHE_SMITHY_OPCODE_PING,
+            OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+            {},
+            {},
+            Set_Options{});
         if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
             throw Error("OpenKache returned an invalid PING outcome");
         }
@@ -351,17 +374,25 @@ public:
 
     /// Retrieves a Bytes PortableKey value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
         return get_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
+            execute(
+                OPENKACHE_SMITHY_OPCODE_GET,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+                key,
+                {},
+                Set_Options{}),
             "GET");
     }
 
     /// Convenience overload for a Text PortableKey.
     std::optional<Bytes> get(std::string_view key) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return get_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
+            execute(
+                OPENKACHE_SMITHY_OPCODE_GET,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT,
+                as_bytes(key),
+                {},
+                Set_Options{}),
             "GET");
     }
 
@@ -370,9 +401,13 @@ public:
         std::span<const Byte> key,
         std::span<const Byte> value,
         Set_Options options = {}) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
         return set_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, value, options),
+            execute(
+                OPENKACHE_SMITHY_OPCODE_SET,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+                key,
+                value,
+                options),
             "SET");
     }
 
@@ -381,24 +416,36 @@ public:
         std::string_view key,
         std::string_view value,
         Set_Options options = {}) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return set_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, as_bytes(value), options),
+            execute(
+                OPENKACHE_SMITHY_OPCODE_SET,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT,
+                as_bytes(key),
+                as_bytes(value),
+                options),
             "SET");
     }
 
     /// Deletes a Bytes PortableKey value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
         return delete_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
+            execute(
+                OPENKACHE_SMITHY_OPCODE_DELETE,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+                key,
+                {},
+                Set_Options{}));
     }
 
     /// Convenience overload for a Text PortableKey.
     bool remove(std::string_view key) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return delete_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
+            execute(
+                OPENKACHE_SMITHY_OPCODE_DELETE,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT,
+                as_bytes(key),
+                {},
+                Set_Options{}));
     }
 
     /// Retrieves exact bytes for a `0..=32`-byte protocol item ID.
@@ -406,6 +453,7 @@ public:
         return get_outcome(
             execute(
                 OPENKACHE_SMITHY_OPCODE_GET,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
                 item_id,
                 {},
                 Set_Options{},
@@ -421,6 +469,7 @@ public:
         return set_outcome(
             execute(
                 OPENKACHE_SMITHY_OPCODE_SET,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
                 item_id,
                 value,
                 options,
@@ -433,6 +482,7 @@ public:
         return delete_outcome(
             execute(
                 OPENKACHE_SMITHY_OPCODE_DELETE,
+                OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
                 item_id,
                 {},
                 Set_Options{},
@@ -442,7 +492,11 @@ public:
     /// Returns the server's JSON statistics document.
     std::string stats() const {
         const auto result = execute(
-            OPENKACHE_SMITHY_OPCODE_STATS, {}, {}, Set_Options{});
+            OPENKACHE_SMITHY_OPCODE_STATS,
+            OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+            {},
+            {},
+            Set_Options{});
         if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_VALUE) {
             throw Error("OpenKache returned an invalid STATS outcome");
         }
@@ -457,7 +511,11 @@ public:
     /// Waits for the server durability barrier.
     void sync() const {
         const auto result = execute(
-            OPENKACHE_SMITHY_OPCODE_SYNC, {}, {}, Set_Options{});
+            OPENKACHE_SMITHY_OPCODE_SYNC,
+            OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+            {},
+            {},
+            Set_Options{});
         if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
             throw Error("OpenKache returned an invalid SYNC outcome");
         }
@@ -613,45 +671,6 @@ private:
         };
     }
 
-    static Bytes canonical_key_bytes(
-        std::span<const Byte> payload,
-        Byte major) {
-        if (major != 2 && major != 3) {
-            throw Error("OpenKache key type is not supported");
-        }
-        const auto length = payload.size();
-        Bytes encoded;
-        if (length <= 23) {
-            encoded.push_back(static_cast<Byte>((major << 5) | length));
-        } else if (length <= 0xff) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 24),
-                static_cast<Byte>(length),
-            };
-        } else if (length <= 0xffff) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 25),
-                static_cast<Byte>(length >> 8),
-                static_cast<Byte>(length),
-            };
-        } else if (length <= 0xffff'ffffu) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 26),
-                static_cast<Byte>(length >> 24),
-                static_cast<Byte>(length >> 16),
-                static_cast<Byte>(length >> 8),
-                static_cast<Byte>(length),
-            };
-        } else {
-            throw Error("OpenKache key length exceeds canonical CBOR uint32");
-        }
-        if (encoded.size() + payload.size() > (1u << 20)) {
-            throw Error("OpenKache canonical key exceeds 1048576 bytes");
-        }
-        encoded.insert(encoded.end(), payload.begin(), payload.end());
-        return encoded;
-    }
-
     static std::pair<Byte, std::uint64_t> namespace_policy_wire(
         const Namespace_Policy& policy) {
         Byte flags = OPENKACHE_SMITHY_POLICY_NO_EXPIRY;
@@ -751,6 +770,22 @@ private:
             openkache_client_result_free(result);
             throw Error(message.empty() ? "OpenKache operation failed" : message);
         }
+        if (kind == OPENKACHE_SMITHY_FFI_RESULT_UNKNOWN_MUTATION) {
+            const auto message = result_payload(result);
+            openkache_client_result_free(result);
+            throw Unknown_Mutation_Error(
+                message.empty()
+                    ? "OpenKache mutation outcome is unknown after cancellation"
+                    : message);
+        }
+        if (kind == OPENKACHE_SMITHY_FFI_RESULT_CANCELED) {
+            const auto message = result_payload(result);
+            openkache_client_result_free(result);
+            throw Canceled_Error(
+                message.empty()
+                    ? "OpenKache request was canceled before admission"
+                    : message);
+        }
         const auto length = openkache_client_result_data_length(result);
         const auto* data = openkache_client_result_data(result);
         Bytes payload;
@@ -765,8 +800,87 @@ private:
         return {kind, std::move(payload)};
     }
 
+    struct Request_Guard {
+        openkache_client_request_t* request;
+        bool result_consumed = false;
+
+        /// Publish cancellation before releasing an unconsumed request.
+        ///
+        /// C++ methods currently wait synchronously, so this is normally only
+        /// exercised when an exception interrupts the wait/decoding path. It
+        /// still closes the native admission boundary before `request_free`
+        /// can discard a pending result.
+        ~Request_Guard() noexcept {
+            if (request != nullptr && !result_consumed) {
+                (void)openkache_client_request_cancel(request);
+            }
+            openkache_client_request_free(request);
+        }
+
+        void mark_result_consumed() noexcept {
+            result_consumed = true;
+        }
+    };
+
+    static Operation_Result await_request(openkache_client_request_t* request) {
+        if (request == nullptr) {
+            throw Error("OpenKache operation returned a null request");
+        }
+        Request_Guard guard{request};
+        while (openkache_client_request_poll(request)
+            == OPENKACHE_SMITHY_FFI_REQUEST_STATE_PENDING) {
+            std::this_thread::yield();
+        }
+        auto* result = openkache_client_request_wait(request, 0);
+        guard.mark_result_consumed();
+        return take_result(result);
+    }
+
+    static std::optional<std::tuple<std::uint32_t, Byte, std::uint64_t>> legacy_options(
+        const Set_Options& options) {
+        std::uint32_t condition;
+        switch (options.condition) {
+        case Set_Condition::Any:
+            condition = OPENKACHE_SMITHY_FFI_SET_CONDITION_ANY;
+            break;
+        case Set_Condition::If_Absent:
+            condition = OPENKACHE_SMITHY_FFI_SET_CONDITION_IF_ABSENT;
+            break;
+        case Set_Condition::If_Present:
+            condition = OPENKACHE_SMITHY_FFI_SET_CONDITION_IF_PRESENT;
+            break;
+        default:
+            return std::nullopt;
+        }
+        if (options.eviction_mode.has_value()
+            && *options.eviction_mode != Eviction_Mode::Inherit) {
+            return std::nullopt;
+        }
+        const auto expiration = options.expiration_mode.value_or(
+            options.ttl_ms.has_value()
+                ? Expiration_Mode::Explicit_Ttl
+                : Expiration_Mode::Inherit);
+        switch (expiration) {
+        case Expiration_Mode::Inherit:
+            if (options.ttl_ms.has_value()) {
+                return std::nullopt;
+            }
+            return std::tuple{condition, Byte{0}, std::uint64_t{0}};
+        case Expiration_Mode::Explicit_Ttl:
+            if (!options.ttl_ms.has_value() || *options.ttl_ms == 0) {
+                return std::nullopt;
+            }
+            return std::tuple{condition, Byte{1}, *options.ttl_ms};
+        case Expiration_Mode::No_Expiry:
+            return std::nullopt;
+        default:
+            return std::nullopt;
+        }
+    }
+
     Operation_Result execute(
         std::uint32_t operation,
+        std::uint32_t key_spec,
         std::span<const Byte> key,
         std::span<const Byte> value,
         Set_Options options,
@@ -783,26 +897,42 @@ private:
         const auto [set_flags, ttl_ms] = wire_options(options);
         const auto* key_data = key.empty() ? nullptr : key.data();
         const auto* value_data = value.empty() ? nullptr : value.data();
-        auto* result = raw
-            ? openkache_client_execute_raw_with_options(
-                  client_,
-                  operation,
-                  key_data,
-                  key.size(),
-                  value_data,
-                  value.size(),
-                  set_flags,
-                  ttl_ms)
-            : openkache_client_execute_with_options(
-                  client_,
-                  operation,
-                  key_data,
-                  key.size(),
-                  value_data,
-                  value.size(),
-                  set_flags,
-                  ttl_ms);
-        return take_result(result);
+        if (raw) {
+            if (const auto legacy = legacy_options(options)) {
+                const auto [condition, ttl_enabled, legacy_ttl] = *legacy;
+                return await_request(openkache_client_execute_raw_async(
+                    client_,
+                    operation,
+                    key_data,
+                    key.size(),
+                    value_data,
+                    value.size(),
+                    condition,
+                    ttl_enabled,
+                    legacy_ttl));
+            }
+            // ABI v6 has no raw request handle for the complete policy flags.
+            // This synchronous call is the safe completion boundary.
+            return take_result(openkache_client_execute_raw_with_options(
+                client_,
+                operation,
+                key_data,
+                key.size(),
+                value_data,
+                value.size(),
+                set_flags,
+                ttl_ms));
+        }
+        return await_request(openkache_client_execute_with_options_async(
+            client_,
+            operation,
+            key_spec,
+            key_data,
+            key.size(),
+            value_data,
+            value.size(),
+            set_flags,
+            ttl_ms));
     }
 
     static std::pair<Byte, std::uint64_t> wire_options(const Set_Options& options) {
