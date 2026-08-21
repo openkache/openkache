@@ -593,8 +593,13 @@ def _smithy_decode_f64_array(payload: bytes, operation: int) -> list[float]:
     operation_uses_item_id_helpers,
   )
     ? `def _smithy_concat_item_ids(item_ids: list[bytes]) -> bytes:
-    if any(len(item_id) != ${contract.item_id_bytes} for item_id in item_ids):
-        raise ValueError("item IDs must contain exactly ${contract.item_id_bytes} bytes")
+    total = 0
+    for item_id in item_ids:
+        if len(item_id) > ${contract.item_id_bytes}:
+            raise ValueError("item IDs must contain at most ${contract.item_id_bytes} bytes")
+        if total > ${contract.item_id_bytes} - len(item_id):
+            raise ValueError("combined item IDs must contain at most ${contract.item_id_bytes} bytes")
+        total += len(item_id)
     return b"".join(item_ids)
 `
     : ""
