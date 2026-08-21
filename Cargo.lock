@@ -2730,6 +2730,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
+ "smallvec",
  "thiserror",
  "tokio",
  "tokio-rustls",
