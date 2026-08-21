@@ -1184,6 +1184,71 @@ impl ValueCodec {
         }
     }
 
+    /// Encode one canonical JSON document as an `OpaqueBytes` payload.
+    ///
+    /// JSON helpers are a convenience representation, not a value-format
+    /// selector. The complete canonical UTF-8 document is stored unchanged
+    /// as the payload of selector `0`; structured-value callers must use the
+    /// dedicated [`Self::seal_structured_in_namespace`] API.
+    pub fn seal_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        mut value: JsonValue,
+    ) -> Result<ItemValue> {
+        validate_json_limits(&value, self.limits, self.budget())?;
+        let (payload, permits) =
+            encode_json_output_with_budget(&mut value, self.limits, self.budget())?;
+        let result = self.encode_payload(
+            namespace_id,
+            item_id.as_bytes(),
+            PAYLOAD_OPAQUE_BYTES,
+            &payload,
+        );
+        drop(permits);
+        result
+    }
+
+    /// Encode canonical JSON using the compatibility namespace `1`.
+    pub fn seal_json(&self, item_id: ItemId, value: JsonValue) -> Result<ItemValue> {
+        self.seal_json_in_namespace(1, item_id, value)
+    }
+
+    /// Decode and validate one canonical JSON document stored as
+    /// `OpaqueBytes`.
+    ///
+    /// A raw value is not silently reinterpreted: the payload must be valid
+    /// JSON and its bytes must already be the canonical UTF-8 spelling emitted
+    /// by the shared helper.
+    pub fn open_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<JsonValue> {
+        let decoded = self.decode_payload(namespace_id, item_id.as_bytes(), encoded)?;
+        if decoded.format != PAYLOAD_OPAQUE_BYTES {
+            return Err(Error::ExpectedOpaqueBytes);
+        }
+        let (mut value, parse_permits) =
+            parse_json_input_with_budget(&decoded.payload, self.limits, self.budget())?;
+        let (canonical, canonical_permits) =
+            encode_json_output_with_budget(&mut value, self.limits, self.budget())?;
+        let result = if canonical == decoded.payload {
+            Ok(value)
+        } else {
+            Err(Error::NonCanonicalJson)
+        };
+        drop(canonical_permits);
+        drop(parse_permits);
+        result
+    }
+
+    /// Decode canonical JSON using the compatibility namespace `1`.
+    pub fn open_json(&self, item_id: ItemId, encoded: ItemValue) -> Result<JsonValue> {
+        self.open_json_in_namespace(1, item_id, encoded)
+    }
+
     /// Encode one exact OpaqueBytes payload.
     pub fn seal(&self, item_id: ItemId, plaintext: &[u8]) -> Result<ItemValue> {
         self.seal_opaque_in_namespace(1, item_id, plaintext)
@@ -1422,6 +1487,17 @@ impl ValueCodec {
         Ok((payload, payload_permit))
     }
 
+    /// Encode one StructuredValue-CBOR-v1 payload for a language adapter.
+    ///
+    /// The returned bytes are produced with the same depth, item, integer, and
+    /// aggregate-budget limits as envelope encoding. The temporary output
+    /// permit is released after the caller receives the owned bytes.
+    pub fn encode_structured_cbor(&self, value: &StructuredValue) -> Result<Vec<u8>> {
+        let (payload, permit) = self.encode_structured_payload(value)?;
+        drop(permit);
+        Ok(payload)
+    }
+
     fn decode_structured_payload(
         &self,
         payload: &[u8],
@@ -1444,6 +1520,20 @@ impl ValueCodec {
         Ok((structured, permits))
     }
 
+    /// Decode and seal one complete StructuredValue-CBOR-v1 payload while
+    /// retaining parser permits through envelope encoding.
+    pub fn seal_structured_cbor_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        payload: &[u8],
+    ) -> Result<ItemValue> {
+        let (value, permits) = self.decode_structured_payload(payload)?;
+        let result = self.seal_structured_in_namespace(namespace_id, item_id, &value);
+        drop(permits);
+        result
+    }
+
     /// Validate and pass through a caller-owned version-0 envelope.
     ///
     /// Version 0 is deliberately not parsed or transformed. This method only
@@ -1461,6 +1551,24 @@ impl ValueCodec {
             return Err(Error::UnsupportedVersion(u128::from(version)));
         }
         Ok(ItemValue::new(bytes))
+    }
+
+    /// Return a caller-owned version-0 envelope unchanged after validating its
+    /// canonical leading version field and complete byte limit.
+    pub fn open_v0(&self, encoded: ItemValue) -> Result<Vec<u8>> {
+        let bytes = encoded.into_bytes();
+        if bytes.len() > self.limits.max_envelope_bytes {
+            return Err(Error::ResourceLimit {
+                resource: Resource::EnvelopeBytes,
+                limit: self.limits.max_envelope_bytes,
+                actual: bytes.len(),
+            });
+        }
+        let (version, _) = decode_vu128(&bytes, "value envelope version")?;
+        if version != 0 {
+            return Err(Error::UnsupportedVersion(u128::from(version)));
+        }
+        Ok(bytes)
     }
 
     fn encode_payload(

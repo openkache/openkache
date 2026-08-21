@@ -20,9 +20,9 @@ The package also exposes the lossless ``StructuredValue-CBOR-v1`` model from
 byte strings, and both ``list`` and ``tuple`` map to model arrays.
 ``decode_value`` returns the complete lossless model, while ``decode_native``
 performs a strict conversion and rejects ``Undefined`` or map-key collisions
-instead of dropping information. Cache methods keep the legacy JSON selector
-explicit; structured payload operations use the generated structured-value ABI
-without JSON or Raw fallback. The native boundary preserves unknown mutation
+instead of dropping information. Cache methods use canonical UTF-8 JSON as
+`OpaqueBytes`; structured payload operations use the generated
+StructuredValue-CBOR-v1 ABI without JSON or Raw fallback. The native boundary preserves unknown mutation
 and cancellation outcomes as ``OpenKacheUnknownMutationError`` and
 ``OpenKacheCancelledError``.
 
@@ -86,10 +86,13 @@ native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
 core reparses that input and owns canonical serialization, compression,
 encryption, and value framing.
 
-This is the current transitional JSON API. The target structured operation
-uses `StructuredValue-CBOR-v1`; JSON helpers remain an explicitly documented
-compatibility surface rather than an implicit substitute for structured
-payloads.
+JSON helpers are an explicitly documented convenience surface: they carry
+canonical UTF-8 JSON as `OpaqueBytes`, while the structured operation uses
+`StructuredValue-CBOR-v1` and never substitutes JSON or Raw payloads.
+`set_v0` / `get_v0` accept a complete caller-owned version-0 envelope,
+validate only its canonical leading version field, and preserve the remaining
+bytes unchanged. The `client.raw` view exposes the same value modes for exact
+Item IDs.
 
 `client.raw` exposes the current transitional Smithy-shaped exact item-ID API.
 The namespace-open call below is an out-of-band WIP control-plane example, not

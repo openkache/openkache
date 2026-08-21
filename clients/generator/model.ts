@@ -25,6 +25,8 @@ export interface Value_Format_Contract {
   readonly robust_tag_bytes: number
   readonly serialization_json: number
   readonly serialization_raw: number
+  /** Target selector for StructuredValue-CBOR-v1 (JSON has no selector). */
+  readonly serialization_structured: number
   readonly value_root_context: string
   readonly max_vu128_bytes: number
   readonly version: number

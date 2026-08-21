@@ -108,8 +108,8 @@ optional generic parameter documents the expected result shape. Object
 properties whose value is `undefined` are omitted by this legacy JSON helper;
 the structured-value codec preserves them as ``Undefined``.
 
-This paragraph documents the current package compatibility path. The target
-structured operation must use `StructuredValue-CBOR-v1`; it must not silently
+This paragraph documents the current package compatibility path. The
+structured operation uses `StructuredValue-CBOR-v1`; it must not silently
 fall back to the legacy metadata envelope.
 
 Use `set_json` and `get_json` for the cross-language value API. These methods
@@ -121,6 +121,11 @@ Rust client can be read without a TypeScript-specific envelope:
 await client.set_json("shared", { z: 1, a: ["core", true] })
 const shared = await client.get_json("shared")
 ```
+
+Use `set_v0` and `get_v0` when the application owns a complete version-0
+envelope. The core validates only the canonical leading version `0` and the
+outer protocol size, preserving the remaining bytes unchanged. The
+`client.raw()` view provides the same v0 operations for exact Item IDs.
 
 Canonical JSON accepts only null, booleans, finite numbers, strings, dense
 arrays, and regular objects with string keys. Cycles, sparse arrays, binary

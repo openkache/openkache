@@ -54,8 +54,12 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
     SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED,
     SMITHY_FFI_OPERATION_GET_JSON,
+    SMITHY_FFI_OPERATION_GET_STRUCTURED,
+    SMITHY_FFI_OPERATION_GET_V0,
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
+    SMITHY_FFI_OPERATION_SET_STRUCTURED,
+    SMITHY_FFI_OPERATION_SET_V0,
     SMITHY_FFI_RESULT_CREATED,
     SMITHY_FFI_RESULT_CANCELED,
     SMITHY_FFI_RESULT_DELETED,
@@ -515,6 +519,30 @@ class OpenKacheClient:
         payload = _json_bytes(value)
         return await self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
 
+    async def get_v0(
+        self, key: str | int | bytes | bytearray | memoryview
+    ) -> bytes | None:
+        """Gets a caller-owned version-0 envelope without interpreting its body."""
+
+        self._assert_open()
+        return await self._value_operation(SMITHY_FFI_OPERATION_GET_V0, key, "GET_V0")
+
+    async def set_v0(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        value: bytes | bytearray | memoryview,
+        options: SetOptions | None = None,
+    ) -> SmithySetOutcome:
+        """Stores a caller-owned version-0 envelope without transforming its body."""
+
+        self._assert_open()
+        return await self._set_operation(
+            SMITHY_FFI_OPERATION_SET_V0,
+            key,
+            _value_bytes(value),
+            options,
+        )
+
     async def get_structured(
         self,
         key: str | int | bytes | bytearray | memoryview,
@@ -824,6 +852,34 @@ class RawClient(SmithyOpenKacheApi):
             raise OpenKacheError(f"GET returned unexpected native result {kind}")
         return SmithyGetOutput(value=payload)
 
+    async def get_json(self, input: SmithyGetInput) -> SmithyGetOutput:
+        """Gets canonical JSON UTF-8 bytes for an exact Item ID."""
+
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_GET_JSON,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+        )
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+            return SmithyGetOutput()
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(f"GET_JSON returned unexpected native result {kind}")
+        return SmithyGetOutput(value=payload)
+
+    async def get_v0(self, input: SmithyGetInput) -> SmithyGetOutput:
+        """Gets a caller-owned version-0 envelope for an exact Item ID."""
+
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_GET_V0,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+        )
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+            return SmithyGetOutput()
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(f"GET_V0 returned unexpected native result {kind}")
+        return SmithyGetOutput(value=payload)
+
     async def set(self, input: SmithySetInput) -> SmithySetOutput:
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
             raise OpenKacheValueError(
@@ -838,6 +894,91 @@ class RawClient(SmithyOpenKacheApi):
         )
         kind, _ = await self._owner._execute_scoped(
             SMITHY_OPCODE_SET,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+            value=_value_bytes(input.value),
+            options=options,
+        )
+        return SmithySetOutput(outcome=_set_outcome(kind))
+
+    async def set_json(self, input: SmithySetInput) -> SmithySetOutput:
+        """Stores canonical JSON UTF-8 bytes for an exact Item ID."""
+
+        if input.expiration_mode is None and input.ttl_milliseconds is not None:
+            raise OpenKacheValueError(
+                "ttl_milliseconds is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
+            )
+        options = SetOptions(
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_ms=input.ttl_milliseconds,
+        )
+        kind, _ = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_SET_JSON,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+            value=_value_bytes(input.value),
+            options=options,
+        )
+        return SmithySetOutput(outcome=_set_outcome(kind))
+
+    async def set_v0(self, input: SmithySetInput) -> SmithySetOutput:
+        """Stores a caller-owned version-0 envelope for an exact Item ID."""
+
+        if input.expiration_mode is None and input.ttl_milliseconds is not None:
+            raise OpenKacheValueError(
+                "ttl_milliseconds is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
+            )
+        options = SetOptions(
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_ms=input.ttl_milliseconds,
+        )
+        kind, _ = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_SET_V0,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+            value=_value_bytes(input.value),
+            options=options,
+        )
+        return SmithySetOutput(outcome=_set_outcome(kind))
+
+    async def get_structured(self, input: SmithyGetInput) -> SmithyGetOutput:
+        """Gets StructuredValue-CBOR-v1 bytes for an exact Item ID."""
+
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_GET_STRUCTURED,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+        )
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+            return SmithyGetOutput()
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(
+                f"GET_STRUCTURED returned unexpected native result {kind}"
+            )
+        return SmithyGetOutput(value=payload)
+
+    async def set_structured(self, input: SmithySetInput) -> SmithySetOutput:
+        """Stores StructuredValue-CBOR-v1 bytes for an exact Item ID."""
+
+        if input.expiration_mode is None and input.ttl_milliseconds is not None:
+            raise OpenKacheValueError(
+                "ttl_milliseconds is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
+            )
+        options = SetOptions(
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_ms=input.ttl_milliseconds,
+        )
+        kind, _ = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_SET_STRUCTURED,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
             value=_value_bytes(input.value),

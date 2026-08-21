@@ -116,6 +116,12 @@ let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```
 
+`ProtectedClient` keeps addressing and value representation independent:
+`get_json`/`set_json` carry canonical UTF-8 JSON as selector-0 `OpaqueBytes`,
+`get_structured`/`set_structured` use selector 1, and `get_v0`/`set_v0`
+validate only a caller-owned version-0 prefix. Each value family also has an
+exact-Item-ID variant; `RawClient` remains the opaque exact-byte path.
+
 ## Configuration
 
 `RawClient::connect("host:port")` and `ProtectedClient::connect` use system
@@ -178,8 +184,9 @@ when owning a connection lifecycle.
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
   C++, Python, and other non-Rust bindings. It exposes both protected
-  application-key operations and exact-item-ID raw operations, while the
-  worker owns one Compio runtime per native handle. The canonical declarations
+  application-key operations and exact-item-ID operations for raw, JSON,
+  StructuredValue-CBOR-v1, and caller-owned-v0 values, while the worker owns
+  one Compio runtime per native handle. The canonical declarations
   are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
   with [`include/openkache_client.h`](include/openkache_client.h) retained as
   a compatibility include. Generated ABI/protocol constants are emitted to

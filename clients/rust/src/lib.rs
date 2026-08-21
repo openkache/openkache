@@ -26,8 +26,8 @@ pub use openkache_client_core::{
     ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
     ItemValue, KeyError, KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
     NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
-    PrivateKey, Result, RetryPolicy, RequestBudget, ServerErrorCode, ServerTrust, SetCondition,
-    SetOptions, SetOutcome, TypedInteger, TypedKey, ValueKeyring,
+    PrivateKey, RequestBudget, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition,
+    SetOptions, SetOutcome, StructuredValue, TypedInteger, TypedKey, ValueKeyring,
     canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
@@ -509,6 +509,63 @@ macro_rules! client_methods {
                 self.inner.get_value(key).await
             }
 
+            /// Retrieves a canonical JSON helper value stored as selector-0
+            /// `OpaqueBytes`.
+            pub async fn get_json(
+                &self,
+                key: impl Into<PortableKey>,
+            ) -> Result<GetOutcome<value::JsonValue>> {
+                self.inner.get_json(key).await
+            }
+
+            /// Retrieves a StructuredValue-CBOR-v1 value without JSON
+            /// reinterpretation.
+            pub async fn get_structured(
+                &self,
+                key: impl Into<PortableKey>,
+            ) -> Result<GetOutcome<StructuredValue>> {
+                self.inner.get_structured(key).await
+            }
+
+            /// Retrieves canonical JSON at an exact Item ID.
+            pub async fn get_json_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<value::JsonValue>> {
+                self.inner
+                    .get_json_exact_item_id(namespace_id, item_id)
+                    .await
+            }
+
+            /// Retrieves StructuredValue-CBOR-v1 at an exact Item ID.
+            pub async fn get_structured_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<StructuredValue>> {
+                self.inner
+                    .get_structured_exact_item_id(namespace_id, item_id)
+                    .await
+            }
+
+            /// Retrieves a caller-owned version-0 envelope for a portable key.
+            pub async fn get_v0(
+                &self,
+                key: impl Into<PortableKey>,
+            ) -> Result<GetOutcome<Vec<u8>>> {
+                self.inner.get_v0(key).await
+            }
+
+            /// Retrieves a caller-owned version-0 envelope at an exact Item ID.
+            pub async fn get_v0_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<Vec<u8>>> {
+                self.inner.get_v0_exact_item_id(namespace_id, item_id).await
+            }
+
             /// Deletes a value for a portable key.
             pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
                 self.inner.delete(key).await
@@ -522,6 +579,77 @@ macro_rules! client_methods {
                 options: SetOptions,
             ) -> Result<SetOutcome> {
                 self.inner.set_value(key, value, options).await
+            }
+
+            /// Canonicalizes and stores a JSON helper value as selector-0
+            /// `OpaqueBytes`.
+            pub async fn set_json(
+                &self,
+                key: impl Into<PortableKey>,
+                value: value::JsonValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.inner.set_json(key, value, options).await
+            }
+
+            /// Stores a StructuredValue-CBOR-v1 value without JSON
+            /// reinterpretation.
+            pub async fn set_structured(
+                &self,
+                key: impl Into<PortableKey>,
+                value: StructuredValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.inner.set_structured(key, value, options).await
+            }
+
+            /// Stores canonical JSON at an exact Item ID.
+            pub async fn set_json_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: value::JsonValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.inner
+                    .set_json_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+
+            /// Stores StructuredValue-CBOR-v1 at an exact Item ID.
+            pub async fn set_structured_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: StructuredValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.inner
+                    .set_structured_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+
+            /// Stores a caller-owned version-0 envelope for a portable key.
+            pub async fn set_v0(
+                &self,
+                key: impl Into<PortableKey>,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.inner.set_v0(key, value, options).await
+            }
+
+            /// Stores a caller-owned version-0 envelope at an exact Item ID.
+            pub async fn set_v0_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.inner
+                    .set_v0_exact_item_id(namespace_id, item_id, value, options)
+                    .await
             }
 
             /// Returns server statistics as their JSON text.

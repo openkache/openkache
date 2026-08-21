@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ValueKeyring;
-use crate::value::{Compression, Encryption, Value};
+use crate::value::{Compression, Encryption, JsonValue, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
     DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
@@ -290,6 +290,14 @@ macro_rules! protected_client_methods {
             self.get_value_at_item_id(namespace_id, item_id).await
         }
 
+        /// Retrieves and validates a canonical JSON helper value for a
+        /// portable key. JSON is stored as selector-0 `OpaqueBytes`.
+        pub async fn get_json(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<JsonValue>> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
+            self.get_json_at_item_id(namespace_id, item_id).await
+        }
+
         /// Retrieves and decodes a StructuredValue-CBOR-v1 value for a portable key.
         pub async fn get_structured(
             &self,
@@ -312,6 +320,18 @@ macro_rules! protected_client_methods {
             self.get_value_at_item_id(namespace_id, item_id).await
         }
 
+        /// Retrieves a canonical JSON helper value for canonical key bytes.
+        pub async fn get_json_canonical_key(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<JsonValue>> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
+            self.get_json_at_item_id(namespace_id, item_id).await
+        }
+
         /// Retrieves a StructuredValue-CBOR-v1 value for canonical key bytes.
         pub async fn get_structured_canonical_key(
             &self,
@@ -331,10 +351,10 @@ macro_rules! protected_client_methods {
             canonical_key: impl AsRef<[u8]>,
         ) -> Result<GetOutcome<Vec<u8>>> {
             match self.get_structured_canonical_key(canonical_key).await? {
-                GetOutcome::Found(value) => value
-                    .to_cbor()
-                    .map(GetOutcome::Found)
-                    .map_err(|error| crate::value::Error::Structured(error).into()),
+                GetOutcome::Found(value) => self
+                    .protection
+                    .encode_structured_cbor(&value)
+                    .map(GetOutcome::Found),
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),
             }
         }
@@ -357,6 +377,19 @@ macro_rules! protected_client_methods {
             self.get_value_at_item_id(namespace_id, item_id).await
         }
 
+        /// Retrieves a canonical JSON helper value for native ABI key bytes.
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn get_json_canonical_key_unchecked(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<JsonValue>> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
+            self.get_json_at_item_id(namespace_id, item_id).await
+        }
+
         /// Retrieves a StructuredValue-CBOR-v1 value for canonical key bytes supplied by a
         /// low-level native adapter. The canonical key's explicit type is trusted at this
         /// boundary, while the value envelope and structured payload remain fully validated by
@@ -371,6 +404,25 @@ macro_rules! protected_client_methods {
                 .protection
                 .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
             self.get_structured_at_item_id(namespace_id, item_id).await
+        }
+
+        /// Retrieves StructuredValue-CBOR-v1 bytes for canonical key bytes
+        /// supplied by a low-level native adapter.
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn get_structured_canonical_key_cbor_unchecked(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            match self
+                .get_structured_canonical_key_unchecked(canonical_key)
+                .await?
+            {
+                GetOutcome::Found(value) => self
+                    .protection
+                    .encode_structured_cbor(&value)
+                    .map(GetOutcome::Found),
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
         }
 
         async fn get_value_at_item_id(
@@ -391,6 +443,24 @@ macro_rules! protected_client_methods {
             }
         }
 
+        async fn get_json_at_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+        ) -> Result<GetOutcome<JsonValue>> {
+            match self
+                .raw
+                .get_in_namespace_with_permit(namespace_id, item_id)
+                .await?
+            {
+                GetOutcome::Found(value) => self
+                    .protection
+                    .decode_json_in_namespace(namespace_id, item_id, value)
+                    .map(GetOutcome::Found),
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
         async fn get_structured_at_item_id(
             &self,
             namespace_id: u64,
@@ -404,6 +474,42 @@ macro_rules! protected_client_methods {
                 GetOutcome::Found(value) => self
                     .protection
                     .open_structured_in_namespace(namespace_id, item_id, value)
+                    .map(GetOutcome::Found),
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
+        /// Retrieves a formatted JSON helper value for an exact Item ID.
+        pub async fn get_json_exact_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+        ) -> Result<GetOutcome<JsonValue>> {
+            self.get_json_at_item_id(namespace_id, item_id).await
+        }
+
+        /// Retrieves a StructuredValue-CBOR-v1 value for an exact Item ID.
+        pub async fn get_structured_exact_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+        ) -> Result<GetOutcome<StructuredValue>> {
+            self.get_structured_at_item_id(namespace_id, item_id).await
+        }
+
+        /// Retrieves StructuredValue-CBOR-v1 bytes for an exact Item ID.
+        pub async fn get_structured_exact_item_id_cbor(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            match self
+                .get_structured_exact_item_id(namespace_id, item_id)
+                .await?
+            {
+                GetOutcome::Found(value) => self
+                    .protection
+                    .encode_structured_cbor(&value)
                     .map(GetOutcome::Found),
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),
             }
@@ -451,6 +557,24 @@ macro_rules! protected_client_methods {
                 .await
         }
 
+        /// Canonicalizes and stores a JSON helper value as selector-0
+        /// `OpaqueBytes`.
+        pub async fn set_json(
+            &self,
+            key: impl Into<PortableKey>,
+            value: JsonValue,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
+            let value = self
+                .protection
+                .encode_json_in_namespace(namespace_id, item_id, value)?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
         /// Serializes, protects, and stores a StructuredValue-CBOR-v1 value for a portable key.
         pub async fn set_structured(
             &self,
@@ -468,6 +592,128 @@ macro_rules! protected_client_methods {
                 .await
         }
 
+        /// Stores a JSON helper value at an exact Item ID.
+        pub async fn set_json_exact_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+            value: JsonValue,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let value = self
+                .protection
+                .encode_json_in_namespace(namespace_id, item_id, value)?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Stores a StructuredValue-CBOR-v1 value at an exact Item ID.
+        pub async fn set_structured_exact_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+            value: StructuredValue,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let value =
+                self.protection
+                    .seal_structured_in_namespace(namespace_id, item_id, &value)?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Decodes, protects, and stores one StructuredValue-CBOR-v1 payload
+        /// at an exact Item ID.
+        pub async fn set_structured_exact_item_id_cbor(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+            value: impl AsRef<[u8]>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let value = self.protection.seal_structured_cbor_in_namespace(
+                namespace_id,
+                item_id,
+                value.as_ref(),
+            )?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Stores a caller-owned version-0 envelope at a portable key.
+        pub async fn set_v0(
+            &self,
+            key: impl Into<PortableKey>,
+            bytes: Vec<u8>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
+            let value = self.protection.pass_through_v0(bytes)?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Retrieves a caller-owned version-0 envelope at a portable key.
+        pub async fn get_v0(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
+            match self
+                .raw
+                .get_in_namespace_with_permit(namespace_id, item_id)
+                .await?
+            {
+                GetOutcome::Found(value) => self.protection.open_v0(value).map(GetOutcome::Found),
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
+        /// Stores a caller-owned version-0 envelope at an exact Item ID.
+        pub async fn set_v0_exact_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+            bytes: Vec<u8>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let value = self.protection.pass_through_v0(bytes)?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Retrieves a caller-owned version-0 envelope at an exact Item ID.
+        pub async fn get_v0_exact_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            match self
+                .raw
+                .get_in_namespace_with_permit(namespace_id, item_id)
+                .await?
+            {
+                GetOutcome::Found(value) => self.protection.open_v0(value).map(GetOutcome::Found),
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
+        /// Retrieves a caller-owned version-0 envelope for canonical key bytes.
+        pub async fn get_v0_canonical_key(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
+            self.get_v0_exact_item_id(namespace_id, item_id).await
+        }
+
         /// Stores a value when the adapter already owns canonical key bytes.
         pub async fn set_canonical_key(
             &self,
@@ -482,6 +728,40 @@ macro_rules! protected_client_methods {
             let value = self
                 .protection
                 .encode_in_namespace(namespace_id, item_id, value)?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Stores a caller-owned version-0 envelope for canonical key bytes.
+        pub async fn set_v0_canonical_key(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+            bytes: Vec<u8>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
+            self.set_v0_exact_item_id(namespace_id, item_id, bytes, options)
+                .await
+        }
+
+        /// Stores a canonical JSON helper value for canonical key bytes.
+        pub async fn set_json_canonical_key(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+            value: JsonValue,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
+            let value = self
+                .protection
+                .encode_json_in_namespace(namespace_id, item_id, value)?;
             self.raw
                 .set_in_namespace(namespace_id, item_id, value, options)
                 .await
@@ -514,13 +794,17 @@ macro_rules! protected_client_methods {
             value: impl AsRef<[u8]>,
             options: SetOptions,
         ) -> Result<SetOutcome> {
-            let value = StructuredValue::from_cbor(value.as_ref()).map_err(|error| {
-                crate::Error::configuration(
-                    "structured_value",
-                    format!("StructuredValue-CBOR-v1 decode failed: {error}"),
-                )
-            })?;
-            self.set_structured_canonical_key(canonical_key, value, options)
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
+            let value = self.protection.seal_structured_cbor_in_namespace(
+                namespace_id,
+                item_id,
+                value.as_ref(),
+            )?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
                 .await
         }
 
@@ -545,22 +829,73 @@ macro_rules! protected_client_methods {
                 .await
         }
 
-        /// Stores a StructuredValue-CBOR-v1 value for canonical key bytes supplied by a
-        /// low-level native adapter.
+        /// Stores a canonical JSON helper value for native ABI key bytes.
         #[cfg(feature = "ffi")]
-        pub(crate) async fn set_structured_canonical_key_unchecked(
+        pub(crate) async fn set_json_canonical_key_unchecked(
             &self,
             canonical_key: impl AsRef<[u8]>,
-            value: StructuredValue,
+            value: JsonValue,
             options: SetOptions,
         ) -> Result<SetOutcome> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self
                 .protection
                 .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
-            let value =
-                self.protection
-                    .seal_structured_in_namespace(namespace_id, item_id, &value)?;
+            let value = self
+                .protection
+                .encode_json_in_namespace(namespace_id, item_id, value)?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        /// Retrieves a caller-owned version-0 envelope for native ABI key bytes.
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn get_v0_canonical_key_unchecked(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
+            self.get_v0_exact_item_id(namespace_id, item_id).await
+        }
+
+        /// Stores a caller-owned version-0 envelope for native ABI key bytes.
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn set_v0_canonical_key_unchecked(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+            bytes: Vec<u8>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
+            self.set_v0_exact_item_id(namespace_id, item_id, bytes, options)
+                .await
+        }
+
+        /// Decodes, protects, and stores one StructuredValue-CBOR-v1 payload
+        /// for canonical key bytes supplied by a low-level native adapter.
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn set_structured_canonical_key_cbor_unchecked(
+            &self,
+            canonical_key: impl AsRef<[u8]>,
+            value: impl AsRef<[u8]>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self
+                .protection
+                .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
+            let value = self.protection.seal_structured_cbor_in_namespace(
+                namespace_id,
+                item_id,
+                value.as_ref(),
+            )?;
             self.raw
                 .set_in_namespace(namespace_id, item_id, value, options)
                 .await

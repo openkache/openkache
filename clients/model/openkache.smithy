@@ -777,8 +777,9 @@ structure valueEnvelope {
 )
 @valueFormat(
     version: 1,
-    // Transitional current metadata. The target value-format document uses
-    // StructuredValue-CBOR-v1 as selector 1 and a maximum vu128 width of 9 bytes.
+    // The legacy JSON metadata name is retained for generated compatibility
+    // constants, but JSON helpers use OpaqueBytes (selector 0). The target
+    // value-format document assigns selector 1 to StructuredValue-CBOR-v1.
     // VU128 is currently used for unsigned 64-bit protocol lengths and
     // versions.  A canonical u64 varuint is at most nine bytes.
     maxVu128Bytes: 9,
@@ -787,6 +788,7 @@ structure valueEnvelope {
     formatEncryptionShift: 4,
     serializationRaw: 0,
     serializationJson: 1,
+    serializationStructured: 1,
     compressionNone: 0,
     compressionZstandard: 1,
     encryptionNone: 0,
@@ -852,8 +854,8 @@ enum FfiOperation {
         acceptsValue: false,
         acceptsSetOptions: false,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     GET_JSON = "get_json"
@@ -864,8 +866,8 @@ enum FfiOperation {
         acceptsValue: true,
         acceptsSetOptions: true,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     SET_JSON = "set_json"
@@ -876,8 +878,8 @@ enum FfiOperation {
         acceptsValue: false,
         acceptsSetOptions: false,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     GET_STRUCTURED = "get_structured"
@@ -888,11 +890,35 @@ enum FfiOperation {
         acceptsValue: true,
         acceptsSetOptions: true,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     SET_STRUCTURED = "set_structured"
+
+    @ffiValue(value: 20)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: false,
+        acceptsSetOptions: false,
+        supportsProtected: true,
+        supportsRaw: true,
+        supportsScoped: true,
+        dedicatedAbi: false
+    )
+    GET_V0 = "get_v0"
+
+    @ffiValue(value: 21)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: true,
+        acceptsSetOptions: true,
+        supportsProtected: true,
+        supportsRaw: true,
+        supportsScoped: true,
+        dedicatedAbi: false
+    )
+    SET_V0 = "set_v0"
 
     @ffiValue(value: 4294967041)
     @ffiOperationContract(

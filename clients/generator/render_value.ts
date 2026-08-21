@@ -27,8 +27,10 @@ export const SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_m
 export const SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
 /** Raw serialized-value identifier. */
 export const SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
-/** Canonical JSON serialized-value identifier. */
+/** Legacy metadata identifier; JSON helpers use OpaqueBytes selector 0. */
 export const SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+/** StructuredValue-CBOR-v1 payload-format selector. */
+export const SMITHY_VALUE_SERIALIZATION_STRUCTURED = ${value.serialization_structured}
 /** Uncompressed value-format identifier. */
 export const SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
 /** Zstandard value-format identifier. */
