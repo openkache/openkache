@@ -20,6 +20,9 @@ var ErrClosed = errors.New("openkache: client is closed")
 // not be confirmed after transmission.
 var ErrUnknownMutation = errors.New("openkache: mutation outcome is unknown")
 
+// ErrCanceled identifies a request canceled before native admission.
+var ErrCanceled = errors.New("openkache: request was canceled before admission")
+
 // Error is a failure returned by the shared native client.
 type Error struct {
 	// Operation identifies the Go operation that observed the failure.
@@ -75,6 +78,39 @@ func (e *UnknownMutationError) Unwrap() error {
 
 func (e *UnknownMutationError) Is(target error) bool {
 	return target == ErrUnknownMutation
+}
+
+// CanceledError preserves the operation and native detail for a request
+// canceled before it crossed the native admission boundary. Callers can use
+// errors.Is(err, ErrCanceled) and errors.As(err, *CanceledError).
+type CanceledError struct {
+	// Operation identifies the request that was canceled.
+	Operation string
+	// Message is the native diagnostic detail.
+	Message string
+	// Cause is an optional underlying native or transport error.
+	Cause error
+}
+
+func (e *CanceledError) Error() string {
+	if e.Operation == "" {
+		if e.Message == "" {
+			return ErrCanceled.Error()
+		}
+		return "openkache request was canceled: " + e.Message
+	}
+	if e.Message == "" {
+		return "openkache " + e.Operation + " was canceled before admission"
+	}
+	return "openkache " + e.Operation + " was canceled before admission: " + e.Message
+}
+
+func (e *CanceledError) Unwrap() error {
+	return e.Cause
+}
+
+func (e *CanceledError) Is(target error) bool {
+	return target == ErrCanceled
 }
 
 // Identity contains the certificate chain and private key for mutual TLS.
@@ -1110,6 +1146,12 @@ func operationError(operation string, err error) error {
 }
 
 func unexpectedResult(operation string, kind uint32) error {
+	if kind == SmithyFFIResultCanceled {
+		return &CanceledError{
+			Operation: operation,
+			Message:   "native ABI reported Canceled",
+		}
+	}
 	if kind == SmithyFFIResultUnknownMutation {
 		return &UnknownMutationError{
 			Operation: operation,
