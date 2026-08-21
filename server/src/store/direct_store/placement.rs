@@ -11,11 +11,73 @@ use super::values::{
 };
 use super::{
     BLOB_ITEM_THRESHOLD_BYTES, ITEM_EXPIRATION_BYTES, ITEM_FIXED_BYTES, Kvkache, LocatedItem,
-    MutablePlacement, MutableValueHandle, ReadBacking, STORED_BLOB_REF_BYTES,
+    MutablePlacement, MutableValueHandle, PersistentIndexEntry, ReadBacking, STORED_BLOB_REF_BYTES,
     STORED_LARGE_VALUE_REF_BYTES, STORED_VALUE_TAG_BYTES, TableLocation,
 };
 
 impl Kvkache {
+    /// Replaces a mutable Item with a Tombstone without consuming another
+    /// Bucket slot. Stable Items cannot be edited in place because their
+    /// committed generation is immutable; those callers use
+    /// [`try_append_tombstone`] instead.
+    pub(super) fn try_replace_tombstone_in_place(
+        &mut self,
+        storage_key: StorageKey,
+        previous_location: TableLocation,
+        previous_mutable_value: Option<MutableValueHandle>,
+    ) -> Result<Option<MutablePlacement>> {
+        let Some((lane, generation)) =
+            mutable_generation_for_location(&mut self.mutable, previous_location)
+        else {
+            return Ok(None);
+        };
+        if !generation
+            .segment
+            .replace(previous_location, super::Item::tombstone(storage_key), true)
+        {
+            return Ok(None);
+        }
+        clear_mutable_value(generation, lane, previous_mutable_value);
+        Ok(Some(MutablePlacement {
+            table_location: previous_location,
+            mutable_value: None,
+            in_place: true,
+        }))
+    }
+
+    /// Appends a Tombstone to the newest available mutable generation.
+    ///
+    /// Tombstones are indexed records rather than a Table-only deletion
+    /// marker. Keeping the record in the generation prevents an older exact
+    /// Item from resurfacing when another colliding key keeps the old
+    /// TableLocation as a candidate.
+    pub(super) fn try_append_tombstone(
+        &mut self,
+        storage_key: StorageKey,
+    ) -> Result<Option<MutablePlacement>> {
+        for generation in self.mutable.iter_mut().flatten() {
+            if generation
+                .segment
+                .choose_bucket(&storage_key, ITEM_FIXED_BYTES)
+                .is_none()
+            {
+                continue;
+            }
+            let item = super::Item::tombstone(storage_key);
+            let Some(table_location) = generation.segment.append(item, true) else {
+                return Err(KvError::Worker(
+                    "chosen mutable SG Bucket rejected a Tombstone".into(),
+                ));
+            };
+            return Ok(Some(MutablePlacement {
+                table_location,
+                mutable_value: None,
+                in_place: false,
+            }));
+        }
+        Ok(None)
+    }
+
     pub(super) fn try_append_value(
         &mut self,
         storage_key: StorageKey,
@@ -128,10 +190,49 @@ impl Kvkache {
         previous_mutable_value: Option<MutableValueHandle>,
         replacement: MutablePlacement,
     ) -> Result<bool> {
+        self.publish_table_location_inner(
+            storage_key,
+            previous,
+            previous_mutable_value,
+            replacement,
+            true,
+        )
+    }
+
+    pub(super) fn publish_tombstone_location(
+        &mut self,
+        storage_key: StorageKey,
+        previous: Option<TableLocation>,
+        previous_mutable_value: Option<MutableValueHandle>,
+        replacement: MutablePlacement,
+    ) -> Result<bool> {
+        self.publish_table_location_inner(
+            storage_key,
+            previous,
+            previous_mutable_value,
+            replacement,
+            false,
+        )
+    }
+
+    fn publish_table_location_inner(
+        &mut self,
+        storage_key: StorageKey,
+        previous: Option<TableLocation>,
+        previous_mutable_value: Option<MutableValueHandle>,
+        replacement: MutablePlacement,
+        live: bool,
+    ) -> Result<bool> {
         if replacement.in_place {
             debug_assert_eq!(previous, Some(replacement.table_location));
             if let Some(index) = self.persistent_index.as_mut() {
-                index.insert(storage_key, replacement.table_location);
+                index.insert(
+                    storage_key,
+                    PersistentIndexEntry {
+                        location: replacement.table_location,
+                        live,
+                    },
+                );
             }
             return Ok(false);
         }
@@ -175,7 +276,13 @@ impl Kvkache {
             self.remove_previous_mutable_item(&storage_key, previous, previous_mutable_value);
         }
         if let Some(index) = self.persistent_index.as_mut() {
-            index.insert(storage_key, replacement.table_location);
+            index.insert(
+                storage_key,
+                PersistentIndexEntry {
+                    location: replacement.table_location,
+                    live,
+                },
+            );
         }
         Ok(previous_disappeared)
     }
