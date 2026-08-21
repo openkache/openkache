@@ -19,7 +19,7 @@ use super::value_reads::read_mutable_value;
 use super::values::mutable_value_handle_for;
 use super::{
     CAPACITY_CHECK_INTERVAL, ItemState, Kvkache, MutableValueHandle, ReadBacking, SetOutcome,
-    TableLocation, bucket_hash, find_item_in_bucket,
+    TableLocation, bucket_hash, find_item_in_bucket, validate_bucket,
 };
 
 pub(crate) enum KeyedOperation {
@@ -224,6 +224,11 @@ impl Kvkache {
                         self.config.bucket_count(),
                     );
                     let start = bucket_index * BUCKET_BYTES;
+                    if let Err(error) =
+                        validate_bucket(&generation.segment.bytes[start..start + BUCKET_BYTES])
+                    {
+                        return KeyedObservationPlan::Error(error);
+                    }
                     let item = find_item_in_bucket(
                         &generation.segment.bytes[start..start + BUCKET_BYTES],
                         &storage_key,

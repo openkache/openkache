@@ -107,6 +107,13 @@ impl LargeValueLog {
                 "persisted large-value metadata does not match the configured geometry".into(),
             ));
         }
+        if !self.records.is_empty()
+            && self.next_record_start(u64::from(location.padded_len)) != Some(location.record_start)
+        {
+            return Err(KvError::Worker(
+                "persisted large-value metadata is not in circular allocation order".into(),
+            ));
+        }
         if self
             .records
             .iter()

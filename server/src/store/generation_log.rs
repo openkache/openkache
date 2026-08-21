@@ -125,6 +125,7 @@ impl GenerationLog {
                     .ok_or_else(|| {
                         KvError::Worker("persisted generation length overflowed".into())
                     })?
+            || (location.blob_logical_len == 0 && location.blob_padded_len != 0)
             || location.blob_logical_len > location.blob_padded_len
             || !u64::from(location.blob_padded_len).is_multiple_of(BUCKET_BYTES as u64)
             || record_end > self.capacity
@@ -132,6 +133,13 @@ impl GenerationLog {
         {
             return Err(KvError::Worker(
                 "persisted generation metadata does not match the configured geometry".into(),
+            ));
+        }
+        if !self.records.is_empty()
+            && self.next_record_start(location.record_len) != Some(location.record_start)
+        {
+            return Err(KvError::Worker(
+                "persisted generation metadata is not in circular allocation order".into(),
             ));
         }
         if self

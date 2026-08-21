@@ -24,6 +24,7 @@ pub(crate) fn encode_segment_file_header(
     bytes[40..44].copy_from_slice(&(BUCKET_BYTES as u32).to_le_bytes());
     bytes[44..52].copy_from_slice(&(config.blob_segment_size as u64).to_le_bytes());
     bytes[52..60].copy_from_slice(&(config.large_value_capacity as u64).to_le_bytes());
+    bytes[60..64].copy_from_slice(&(config.bucket_choice_count as u32).to_le_bytes());
     let checksum = crc32fast::hash(&bytes[..BUCKET_BYTES - 4]);
     bytes[BUCKET_BYTES - 4..].copy_from_slice(&checksum.to_le_bytes());
     bytes
@@ -62,11 +63,13 @@ pub(crate) fn validate_segment_file_header(
     let bucket_bytes = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
     let blob_segment_size = u64::from_le_bytes(bytes[44..52].try_into().unwrap());
     let large_value_capacity = u64::from_le_bytes(bytes[52..60].try_into().unwrap());
+    let bucket_choice_count = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
     if segment_size != config.segment_size as u64
         || segment_count != config.segment_count
         || bucket_bytes != BUCKET_BYTES
         || blob_segment_size != config.blob_segment_size as u64
         || large_value_capacity != config.large_value_capacity as u64
+        || bucket_choice_count != config.bucket_choice_count
     {
         return Err(KvError::Worker(
             "Segment file does not match the configured Segment geometry".into(),

@@ -467,6 +467,7 @@ fn validate_generation_metadata(
         .checked_add(config.segment_size as u64)
         .ok_or_else(|| KvError::Worker("committed generation length overflowed".into()))?;
     if location.record_start % BUCKET_BYTES as u64 != 0
+        || (location.blob_logical_len == 0 && location.blob_padded_len != 0)
         || location.blob_logical_len > location.blob_padded_len
         || u64::from(location.blob_padded_len) > config.blob_segment_size as u64
         || !u64::from(location.blob_padded_len).is_multiple_of(BUCKET_BYTES as u64)
@@ -752,7 +753,14 @@ impl Kvkache {
         let mut next_sequence = 0_u64;
         let mut recovered_live_keys = 0_usize;
         if let Some(checkpoint) = checkpoint {
+            let mut previous_sequence = None;
             for committed in checkpoint.generations {
+                if previous_sequence.is_some_and(|previous| committed.sequence <= previous) {
+                    return Err(KvError::Worker(
+                        "storage checkpoint generations are not in sequence order".into(),
+                    ));
+                }
+                previous_sequence = Some(committed.sequence);
                 validate_generation_integrity(
                     &data,
                     &large_values,
@@ -781,11 +789,21 @@ impl Kvkache {
                         table_location.sg_index
                     )));
                 }
-                table.insert(&storage_key, table_location)?;
-                persistent_index
+                if usize::from(table_location.bucket_hash_index) >= config.bucket_choice_count {
+                    return Err(KvError::Worker(
+                        "checkpoint Item has an invalid Bucket-hash choice".into(),
+                    ));
+                }
+                let persistent_index = persistent_index
                     .as_mut()
-                    .expect("persistent checkpoint index is enabled")
-                    .insert(storage_key, table_location);
+                    .expect("persistent checkpoint index is enabled");
+                if persistent_index.contains_key(&storage_key) {
+                    return Err(KvError::Worker(
+                        "storage checkpoint repeats an Item key".into(),
+                    ));
+                }
+                table.insert(&storage_key, table_location)?;
+                persistent_index.insert(storage_key, table_location);
                 recovered_live_keys = recovered_live_keys.saturating_add(1);
             }
         }
