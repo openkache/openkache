@@ -1022,9 +1022,22 @@ impl ClientRootKey {
         }
     }
 
-    /// Returns the all-zero root used for the unprotected formatted default.
+    /// Returns the public all-zero Item-ID root.
+    ///
+    /// Item IDs derived from this root are publicly derivable. Use this value
+    /// only when application-key confidentiality is not required; value
+    /// protection, when needed, must be configured with an independent
+    /// [`crate::ValueKeyring`].
     pub fn zero() -> Self {
         Self::from_bytes([0; DATA_PROTECTION_KEY_BYTES])
+    }
+
+    /// Returns the public all-zero Item-ID root.
+    ///
+    /// This named constructor makes the absence of application-key secrecy
+    /// explicit at call sites. It is equivalent to [`Self::zero`].
+    pub fn public() -> Self {
+        Self::zero()
     }
 
     pub(crate) fn is_zero(&self) -> bool {

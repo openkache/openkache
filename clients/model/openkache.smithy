@@ -402,6 +402,25 @@ structure valueEnvelope {
             ]
         },
         {
+            name: "openkache_client_abi_version_v7",
+            optional: true,
+            returnType: "uint32",
+            parameters: []
+        },
+        {
+            name: "openkache_client_connect_with_options_v7",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                {
+                    name: "options",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptionsV7",
+                    mutable: false
+                }
+            ]
+        },
+        {
             name: "openkache_client_execute_async",
             returnType: "request_pointer",
             returnOwnership: "owned",
@@ -778,6 +797,37 @@ structure valueEnvelope {
                 { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false },
                 { name: "retryMaxAttempts", type: "size", mutable: false },
                 { name: "maxInFlight", type: "size", mutable: false }
+            ]
+        },
+        {
+            name: "FfiValueKey",
+            fields: [
+                { name: "id", type: "uint64", mutable: false },
+                { name: "key", type: "u8_pointer", mutable: false },
+                { name: "keyLength", type: "size", mutable: false }
+            ]
+        },
+        {
+            name: "FfiConnectOptionsV7",
+            fields: [
+                { name: "abiVersion", type: "uint32", mutable: false },
+                {
+                    name: "base",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptions",
+                    mutable: false
+                },
+                { name: "itemIdRootKey", type: "u8_pointer", mutable: false },
+                { name: "itemIdRootKeyLength", type: "size", mutable: false },
+                {
+                    name: "valueKeys",
+                    type: "struct_pointer",
+                    structureName: "FfiValueKey",
+                    mutable: false
+                },
+                { name: "valueKeyCount", type: "size", mutable: false },
+                { name: "activeValueKeyId", type: "uint64", mutable: false },
+                { name: "valueEncryption", type: "uint32", mutable: false }
             ]
         },
         {

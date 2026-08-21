@@ -1019,6 +1019,27 @@ impl ProtectedClient {
         }
     }
 
+    /// Starts a client with an explicit Item-ID root and independent value
+    /// keyring.
+    ///
+    /// [`ClientRootKey::public`] (or [`ClientRootKey::zero`]) intentionally
+    /// selects publicly derivable Item IDs. Value confidentiality comes only
+    /// from the supplied keyring.
+    pub fn builder_with_keyring(
+        endpoint: Endpoint,
+        item_id_root: ClientRootKey,
+        keyring: ValueKeyring,
+    ) -> ProtectedClientBuilder {
+        ProtectedClientBuilder {
+            raw: RawClient::builder(endpoint),
+            protection: ProtectionSettings {
+                key: Some(item_id_root),
+                keyring: Some(keyring),
+                ..ProtectionSettings::unprotected()
+            },
+        }
+    }
+
     /// Starts an explicitly unprotected client with namespace-bound Item IDs.
     pub fn builder_unprotected(endpoint: Endpoint) -> ProtectedClientBuilder {
         ProtectedClientBuilder {
@@ -1124,6 +1145,27 @@ impl LocalProtectedClient {
         LocalProtectedClientBuilder {
             raw: LocalRawClient::builder(endpoint),
             protection: ProtectionSettings::new(key),
+        }
+    }
+
+    /// Starts a Compio client with an explicit Item-ID root and independent
+    /// value keyring.
+    ///
+    /// [`ClientRootKey::public`] (or [`ClientRootKey::zero`]) intentionally
+    /// selects publicly derivable Item IDs. Value confidentiality comes only
+    /// from the supplied keyring.
+    pub fn builder_with_keyring(
+        endpoint: Endpoint,
+        item_id_root: ClientRootKey,
+        keyring: ValueKeyring,
+    ) -> LocalProtectedClientBuilder {
+        LocalProtectedClientBuilder {
+            raw: LocalRawClient::builder(endpoint),
+            protection: ProtectionSettings {
+                key: Some(item_id_root),
+                keyring: Some(keyring),
+                ..ProtectionSettings::unprotected()
+            },
         }
     }
 

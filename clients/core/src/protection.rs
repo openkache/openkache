@@ -73,6 +73,21 @@ impl DataProtection {
         Self::with_keyring_and_key_spec(key, keyring, KeyType::Bytes, compression, encryption)
     }
 
+    /// Creates protected values with an independent Item-ID root and value
+    /// keyring.
+    ///
+    /// An all-zero [`ClientRootKey`] is valid here and deliberately produces
+    /// publicly derivable Item IDs. The value keyring remains the sole source
+    /// of value-protection keys; it is never derived from the Item-ID root.
+    pub fn with_item_id_root_and_keyring(
+        item_id_root: ClientRootKey,
+        keyring: ValueKeyring,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        Self::with_keyring(item_id_root, keyring, compression, encryption)
+    }
+
     /// Creates rotating value protection with an explicit formatted key spec.
     pub fn with_keyring_and_key_spec(
         key: ClientRootKey,
@@ -81,12 +96,6 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        if key.is_zero() && encryption != Encryption::Unprotected {
-            return Err(crate::Error::configuration(
-                "client_root_key",
-                "must not be all zero when value protection is enabled",
-            ));
-        }
         let codec = match encryption {
             Encryption::Unprotected => ValueCodec::compressed(compression)?,
             Encryption::Compact | Encryption::Robust => {
