@@ -32,6 +32,7 @@ use futures_util::stream::FuturesUnordered;
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV2\0\0";
 const CHECKPOINT_VERSION: u32 = 2;
+const LEGACY_CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_MAX_RECORDS: usize = 1_000_000;
 
 struct CheckpointGeneration {
@@ -138,7 +139,8 @@ fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
             "storage checkpoint magic is invalid".into(),
         ));
     }
-    if cursor.u32()? != CHECKPOINT_VERSION {
+    let version = cursor.u32()?;
+    if !matches!(version, LEGACY_CHECKPOINT_VERSION | CHECKPOINT_VERSION) {
         return Err(KvError::Worker(
             "storage checkpoint version is unsupported".into(),
         ));
@@ -189,8 +191,17 @@ fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
         let storage_key = StorageKey::new(cursor.array_32()?);
         let sg_index = cursor.u32()?;
         let bucket_hash_index = cursor.byte()?;
-        let live = cursor.byte()? != 0;
-        let _ = cursor.take(2)?;
+        // Version 1 never retained tombstones in its checkpoint index, so all
+        // legacy entries are live. Version 2 uses one of the three reserved
+        // bytes for this state while keeping the record width unchanged.
+        let live = if version == LEGACY_CHECKPOINT_VERSION {
+            let _ = cursor.take(3)?;
+            true
+        } else {
+            let live = cursor.byte()? != 0;
+            let _ = cursor.take(2)?;
+            live
+        };
         index.push((
             storage_key,
             TableLocation {

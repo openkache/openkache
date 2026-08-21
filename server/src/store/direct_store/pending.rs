@@ -153,11 +153,13 @@ impl Kvkache {
                 storage_key,
                 previous,
                 previous_mutable_value,
+                previous_state,
             } => {
                 // Capacity work may have evicted the observed generation
                 // before the tombstone became appendable. In that case the
                 // deleted record is already gone and no second live-key
                 // decrement or Table publication is needed.
+                let deleted = item_state_is_live_at(previous_state, unix_time_ms());
                 if !self
                     .table
                     .candidate_locations(&storage_key)
@@ -165,7 +167,7 @@ impl Kvkache {
                 {
                     return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
                         storage_key,
-                        outcome: KeyedOutcome::Deleted(true),
+                        outcome: KeyedOutcome::Deleted(deleted),
                         visible_state: Some(KeyedVisibleState::Missing),
                     }));
                 }
@@ -175,6 +177,7 @@ impl Kvkache {
                             storage_key,
                             previous,
                             previous_mutable_value,
+                            previous_state,
                         },
                     ));
                 };
@@ -187,7 +190,7 @@ impl Kvkache {
                 self.live_keys = self.live_keys.saturating_sub(1);
                 return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
                     storage_key,
-                    outcome: KeyedOutcome::Deleted(true),
+                    outcome: KeyedOutcome::Deleted(deleted),
                     visible_state: Some(KeyedVisibleState::Missing),
                 }));
             }

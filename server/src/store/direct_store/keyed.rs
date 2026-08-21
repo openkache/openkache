@@ -18,8 +18,8 @@ use super::read_plan::{
 use super::value_reads::read_mutable_value;
 use super::values::mutable_value_handle_for;
 use super::{
-    CAPACITY_CHECK_INTERVAL, ItemState, Kvkache, MutableValueHandle, ReadBacking, SetOutcome,
-    TableLocation, bucket_hash, find_item_in_bucket,
+    CAPACITY_CHECK_INTERVAL, ItemState, Kvkache, MutableValueHandle, ReadBacking,
+    SegmentFlushReason, SetOutcome, TableLocation, bucket_hash, find_item_in_bucket,
 };
 
 pub(crate) enum KeyedOperation {
@@ -130,6 +130,7 @@ pub(super) enum PendingKeyedMutation {
         storage_key: StorageKey,
         previous: TableLocation,
         previous_mutable_value: Option<MutableValueHandle>,
+        previous_state: ItemState,
     },
 }
 
@@ -348,11 +349,11 @@ impl Kvkache {
                 (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
                     match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous)
                     {
-                        Ok((deleted, flush_required)) => (
+                        Ok((deleted, pending)) => (
                             Ok(KeyedOutcome::Deleted(deleted)),
                             Some(KeyedVisibleState::Missing),
-                            flush_required,
-                            false,
+                            pending,
+                            pending,
                         ),
                         Err(error) => (Err(error), None, false, false),
                     }
@@ -422,11 +423,11 @@ impl Kvkache {
                                 unix_time_ms(),
                                 state,
                             ) {
-                                Ok((deleted, flush_required)) => (
+                                Ok((deleted, pending)) => (
                                     Ok(KeyedOutcome::CompareExchange(deleted)),
                                     Some(KeyedVisibleState::Missing),
-                                    flush_required,
-                                    false,
+                                    pending,
+                                    pending,
                                 ),
                                 Err(error) => (Err(error), None, false, false),
                             },
@@ -593,6 +594,7 @@ impl Kvkache {
                 storage_key,
                 previous: previous.table_location,
                 previous_mutable_value: previous.mutable_value,
+                previous_state: previous.item_state,
             });
         Ok((false, true))
     }
@@ -625,8 +627,27 @@ impl Kvkache {
         )? {
             replacement
         } else {
-            self.try_append_tombstone(storage_key)?
-                .ok_or_else(|| KvError::NoCapacity)?
+            match self.try_append_tombstone(storage_key)? {
+                Some(replacement) => replacement,
+                None => {
+                    // Expiration is discovered by a read, which cannot await
+                    // the asynchronous capacity driver. Close one mutable
+                    // generation synchronously when a flush slot is available,
+                    // then publish the tombstone into the fresh generation.
+                    // If all flush slots are occupied, preserve the existing
+                    // NoCapacity signal so the caller can retry after
+                    // background progress.
+                    if self.active_flush_count() >= self.config.max_flushes_in_flight {
+                        return Err(KvError::NoCapacity);
+                    }
+                    let lane = self.fullest_mutable_lane()?;
+                    self.close_lane(lane, SegmentFlushReason::Capacity)?;
+                    self.advance_closings()?;
+                    self.advance_flushes()?;
+                    self.try_append_tombstone(storage_key)?
+                        .ok_or_else(|| KvError::NoCapacity)?
+                }
+            }
         };
         self.publish_tombstone_location(
             storage_key,
