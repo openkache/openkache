@@ -953,10 +953,13 @@ export function decode_structured_value(
     cursor = head.next
     if (head.major === 0 || head.major === 1) {
       const number = head.value
-      const integer = new Integer_Value(head.major === 0 ? number : -number - 1n)
-      if (integer.value.toString(2).length / 8 > budget.max_integer_bytes) {
-        resource("integer bytes", budget.max_integer_bytes, Math.ceil(integer.value.toString(2).length / 8))
+      const magnitude = head.major === 0 ? number : number + 1n
+      const magnitude_bytes =
+        magnitude === 0n ? 0 : Math.ceil(magnitude.toString(2).length / 8)
+      if (magnitude_bytes > budget.max_integer_bytes) {
+        resource("integer bytes", budget.max_integer_bytes, magnitude_bytes)
       }
+      const integer = new Integer_Value(head.major === 0 ? number : -number - 1n)
       accept(integer)
     } else if (head.major === 2 || head.major === 3) {
       const length = safe_length(head.value, budget)
