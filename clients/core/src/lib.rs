@@ -1150,6 +1150,12 @@ impl<C: ClientConnection> Core<C> {
                 ),
             }));
         }
+        if !request_engine::stable_status_allowed(context.operation, response.status) {
+            return Err(RequestFailure::after_response(unexpected_status(
+                context.operation,
+                response.status,
+            )));
+        }
         if error_statuses.contains(&response.status) {
             // A server may reject a request before consuming its complete frame
             // and close the lane. Retiring every confirmed error lane is safe.
