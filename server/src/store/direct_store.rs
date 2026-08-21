@@ -30,10 +30,25 @@ use crate::storage_runtime::File;
 use crate::{BUCKET_BYTES, Config, KvError, Result, StorageKey};
 use futures_util::stream::FuturesUnordered;
 
+use self::policy::{item_state_is_live_at, unix_time_ms, validate_persisted_clock};
+
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
-const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV2\0\0";
-const CHECKPOINT_VERSION: u32 = 2;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV3\0\0";
+const CHECKPOINT_VERSION: u32 = 3;
 const CHECKPOINT_MAX_RECORDS: usize = 1_000_000;
+const CHECKPOINT_HEADER_BYTES: usize = 56;
+// sequence (8), generation location (36), large-value flag (1), and three
+// checksums (12). A present large-value location adds 20 bytes.
+const CHECKPOINT_GENERATION_FIXED_BYTES: usize = 57;
+const CHECKPOINT_LARGE_VALUE_LOCATION_BYTES: usize = 20;
+const CHECKPOINT_INDEX_BYTES: usize = 40;
+const CHECKPOINT_CLOCK_BYTES: usize = 8;
+const CHECKPOINT_CRC_BYTES: usize = 4;
+/// Reject a checkpoint before allocating or reading an unbounded amount of
+/// restart metadata. The record-count guard below remains the authoritative
+/// structural limit; this byte ceiling also covers malformed count fields
+/// and files grown concurrently with a metadata probe.
+const CHECKPOINT_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 struct CheckpointGeneration {
     sequence: u64,
@@ -45,6 +60,12 @@ struct CheckpointGeneration {
 struct Checkpoint {
     generations: Vec<CheckpointGeneration>,
     index: Vec<(StorageKey, TableLocation, bool)>,
+    /// Wall-clock reference captured when the checkpoint was published.
+    ///
+    /// Item deadlines are persisted as Unix-epoch milliseconds. A restart
+    /// whose wall clock is behind this reference cannot reconstruct elapsed
+    /// time safely, so startup fails closed instead of extending TTLs.
+    clock_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -57,16 +78,35 @@ fn checkpoint_path(config: &Config) -> std::path::PathBuf {
     config.data_path.with_extension("checkpoint")
 }
 
+fn checkpoint_size_error() -> KvError {
+    KvError::Worker(format!(
+        "storage checkpoint exceeds bounded size limit of {CHECKPOINT_MAX_BYTES} bytes"
+    ))
+}
+
 fn load_checkpoint(config: &Config) -> Result<Option<Checkpoint>> {
     let path = checkpoint_path(config);
-    let mut file = match fs::File::open(&path) {
+    let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(startup_io_error("opening the storage checkpoint", error)),
     };
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let file_len = file
+        .metadata()
+        .map_err(|error| startup_io_error("inspecting the storage checkpoint", error))?
+        .len();
+    if file_len > CHECKPOINT_MAX_BYTES {
+        return Err(checkpoint_size_error());
+    }
+    let capacity = usize::try_from(file_len)
+        .map_err(|_| KvError::Worker("storage checkpoint length overflows usize".into()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(CHECKPOINT_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| startup_io_error("reading the storage checkpoint", error))?;
+    if bytes.len() as u64 > CHECKPOINT_MAX_BYTES {
+        return Err(checkpoint_size_error());
+    }
     decode_checkpoint(config, &bytes)
         .map(Some)
         .map_err(|error| startup_storage_error("decoding the storage checkpoint", error))
@@ -76,12 +116,42 @@ fn encode_checkpoint(
     config: &Config,
     generations: &[CheckpointGeneration],
     index: &HashMap<StorageKey, PersistentIndexEntry>,
+    clock_ms: u64,
 ) -> Result<Vec<u8>> {
+    if generations.len() > CHECKPOINT_MAX_RECORDS || index.len() > CHECKPOINT_MAX_RECORDS {
+        return Err(KvError::Worker(
+            "storage checkpoint contains too many records".into(),
+        ));
+    }
     let generation_count = u32::try_from(generations.len())
         .map_err(|_| KvError::Worker("storage checkpoint generation count exceeds u32".into()))?;
     let index_count = u64::try_from(index.len())
         .map_err(|_| KvError::Worker("storage checkpoint Item count exceeds u64".into()))?;
-    let mut bytes = Vec::new();
+    // One generation with a large-value extent occupies at most 77 bytes:
+    // sequence, location, flag, large-value location, and three checksums.
+    // Each index entry is 40 bytes. Check this before allocating the output
+    // vector so checkpoint publication remains bounded even for malformed or
+    // unexpectedly large in-memory state.
+    let encoded_len = CHECKPOINT_HEADER_BYTES
+        .checked_add(
+            generations
+                .len()
+                .checked_mul(
+                    CHECKPOINT_GENERATION_FIXED_BYTES
+                        .checked_add(CHECKPOINT_LARGE_VALUE_LOCATION_BYTES)
+                        .expect("checkpoint generation width is fixed"),
+                )
+                .ok_or_else(|| KvError::Worker("storage checkpoint length overflowed".into()))?,
+        )
+        .and_then(|length| length.checked_add(index.len().checked_mul(CHECKPOINT_INDEX_BYTES)?))
+        .and_then(|length| length.checked_add(CHECKPOINT_CLOCK_BYTES + CHECKPOINT_CRC_BYTES))
+        .ok_or_else(|| KvError::Worker("storage checkpoint length overflowed".into()))?;
+    if encoded_len as u64 > CHECKPOINT_MAX_BYTES {
+        return Err(KvError::Worker(format!(
+            "storage checkpoint exceeds the {CHECKPOINT_MAX_BYTES}-byte limit"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(encoded_len);
     bytes.extend_from_slice(CHECKPOINT_MAGIC);
     bytes.extend_from_slice(&CHECKPOINT_VERSION.to_le_bytes());
     bytes.extend_from_slice(&(config.segment_size as u64).to_le_bytes());
@@ -113,13 +183,17 @@ fn encode_checkpoint(
         bytes.push(u8::from(entry.live));
         bytes.extend_from_slice(&[0; 2]);
     }
+    bytes.extend_from_slice(&clock_ms.to_le_bytes());
     let checksum = crc32fast::hash(&bytes);
     bytes.extend_from_slice(&checksum.to_le_bytes());
     Ok(bytes)
 }
 
 fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
-    if bytes.len() < CHECKPOINT_MAGIC.len() + 4 + 8 * 4 + 4 + 8 + 4
+    if bytes.len() as u64 > CHECKPOINT_MAX_BYTES {
+        return Err(checkpoint_size_error());
+    }
+    if bytes.len() < CHECKPOINT_HEADER_BYTES + CHECKPOINT_CLOCK_BYTES + CHECKPOINT_CRC_BYTES
         || &bytes[..CHECKPOINT_MAGIC.len()] != CHECKPOINT_MAGIC
     {
         return Err(KvError::Worker(
@@ -171,6 +245,36 @@ fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
             "storage checkpoint contains too many records".into(),
         ));
     }
+    let minimum_encoded_len = CHECKPOINT_HEADER_BYTES
+        .checked_add(
+            generation_count
+                .checked_mul(CHECKPOINT_GENERATION_FIXED_BYTES)
+                .ok_or_else(|| KvError::Worker("storage checkpoint length overflowed".into()))?,
+        )
+        .and_then(|length| length.checked_add(index_count.checked_mul(CHECKPOINT_INDEX_BYTES)?))
+        .and_then(|length| length.checked_add(CHECKPOINT_CLOCK_BYTES + CHECKPOINT_CRC_BYTES))
+        .ok_or_else(|| KvError::Worker("storage checkpoint length overflowed".into()))?;
+    if bytes.len() < minimum_encoded_len {
+        return Err(KvError::Worker(
+            "storage checkpoint is truncated for its declared record counts".into(),
+        ));
+    }
+    let maximum_encoded_len = CHECKPOINT_HEADER_BYTES
+        .checked_add(
+            generation_count
+                .checked_mul(
+                    CHECKPOINT_GENERATION_FIXED_BYTES
+                        .checked_add(CHECKPOINT_LARGE_VALUE_LOCATION_BYTES)
+                        .expect("checkpoint generation width is fixed"),
+                )
+                .ok_or_else(|| KvError::Worker("storage checkpoint length overflowed".into()))?,
+        )
+        .and_then(|length| length.checked_add(index_count.checked_mul(CHECKPOINT_INDEX_BYTES)?))
+        .and_then(|length| length.checked_add(CHECKPOINT_CLOCK_BYTES + CHECKPOINT_CRC_BYTES))
+        .ok_or_else(|| KvError::Worker("storage checkpoint length overflowed".into()))?;
+    if maximum_encoded_len as u64 > CHECKPOINT_MAX_BYTES {
+        return Err(checkpoint_size_error());
+    }
     let mut generations = Vec::with_capacity(generation_count);
     for _ in 0..generation_count {
         let sequence = cursor.u64()?;
@@ -212,12 +316,17 @@ fn decode_checkpoint(config: &Config, bytes: &[u8]) -> Result<Checkpoint> {
             live,
         ));
     }
+    let clock_ms = cursor.u64()?;
     if !cursor.is_empty() {
         return Err(KvError::Worker(
             "storage checkpoint contains trailing bytes".into(),
         ));
     }
-    Ok(Checkpoint { generations, index })
+    Ok(Checkpoint {
+        generations,
+        index,
+        clock_ms,
+    })
 }
 
 fn encode_generation_location(bytes: &mut Vec<u8>, location: GenerationLocation) {
@@ -457,6 +566,37 @@ async fn validate_generation_integrity(
         _ => {}
     }
     Ok(())
+}
+
+async fn recover_checkpoint_item_state(
+    data: &File,
+    config: &Config,
+    generation: GenerationLocation,
+    storage_key: &StorageKey,
+    bucket_hash_index: u8,
+) -> Result<ItemState> {
+    let bucket_index = bucket_hash(storage_key, bucket_hash_index, config.bucket_count());
+    let bucket_offset = SEGMENT_FILE_HEADER_BYTES
+        .checked_add(generation.sg_base)
+        .and_then(|offset| offset.checked_add((bucket_index * BUCKET_BYTES) as u64))
+        .ok_or_else(|| KvError::Worker("checkpoint Item bucket offset overflowed".into()))?;
+    let bucket = read_exact_direct(
+        data,
+        DirectIoBuffer::for_read(BUCKET_BYTES),
+        bucket_offset,
+        BUCKET_BYTES,
+        config.read_max_time_us,
+        "checkpoint Item Bucket read",
+    )
+    .await
+    .map_err(|error| startup_storage_error("reading checkpoint Item metadata", error))?;
+    validate_bucket(&bucket)?;
+    let Some((state, _)) = find_item_state_and_value_range(&bucket, storage_key) else {
+        return Err(KvError::Worker(
+            "checkpoint Item location does not contain the declared key".into(),
+        ));
+    };
+    Ok(state)
 }
 
 fn validate_generation_metadata(
@@ -776,6 +916,7 @@ impl Kvkache {
         let mut next_sequence = 0_u64;
         let mut recovered_live_keys = 0_usize;
         if let Some(checkpoint) = checkpoint {
+            validate_persisted_clock(checkpoint.clock_ms)?;
             let mut previous_sequence = None;
             for committed in checkpoint.generations {
                 if previous_sequence.is_some_and(|previous| committed.sequence <= previous) {
@@ -806,15 +947,39 @@ impl Kvkache {
                 })?;
             }
             for (storage_key, table_location, live) in checkpoint.index {
-                if !directory.is_stable(table_location.sg_index) {
-                    return Err(KvError::Worker(format!(
-                        "checkpoint Item points at non-stable logical SG {}",
-                        table_location.sg_index
-                    )));
-                }
+                let generation = directory
+                    .stable_states()
+                    .find(|(logical_sg_id, _)| *logical_sg_id == table_location.sg_index)
+                    .map(|(_, state)| state.location)
+                    .ok_or_else(|| {
+                        KvError::Worker(format!(
+                            "checkpoint Item points at non-stable logical SG {}",
+                            table_location.sg_index
+                        ))
+                    })?;
                 if usize::from(table_location.bucket_hash_index) >= config.bucket_choice_count {
                     return Err(KvError::Worker(
                         "checkpoint Item has an invalid Bucket-hash choice".into(),
+                    ));
+                }
+                let item_state = recover_checkpoint_item_state(
+                    &data,
+                    &config,
+                    generation,
+                    &storage_key,
+                    table_location.bucket_hash_index,
+                )
+                .await?;
+                let resolved_live =
+                    !item_state.is_tombstone && item_state_is_live_at(item_state, unix_time_ms());
+                if live && item_state.is_tombstone {
+                    return Err(KvError::Worker(
+                        "checkpoint Item marks a tombstone as live".into(),
+                    ));
+                }
+                if !live && !item_state.is_tombstone && resolved_live {
+                    return Err(KvError::Worker(
+                        "checkpoint Item marks a live record as deleted".into(),
                     ));
                 }
                 let persistent_index = persistent_index
@@ -830,10 +995,10 @@ impl Kvkache {
                     storage_key,
                     PersistentIndexEntry {
                         location: table_location,
-                        live,
+                        live: resolved_live,
                     },
                 );
-                if live {
+                if resolved_live {
                     recovered_live_keys = recovered_live_keys.saturating_add(1);
                 }
             }
@@ -925,7 +1090,7 @@ impl Kvkache {
                     })?,
             });
         }
-        let bytes = encode_checkpoint(&self.config, &generations, index)?;
+        let bytes = encode_checkpoint(&self.config, &generations, index, unix_time_ms())?;
         let path = checkpoint_path(&self.config);
         let temporary = path.with_extension("checkpoint.tmp");
         let write_result = (|| -> std::io::Result<()> {

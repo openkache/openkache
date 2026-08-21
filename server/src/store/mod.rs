@@ -413,7 +413,25 @@ impl DirectIoBufferPool {
             .recv_async_storage()
             .await
             .expect("direct-I/O pool sender remains owned by the pool");
-        debug_assert!(buffer.capacity() >= read_len);
+        if buffer.capacity() < read_len {
+            // A value-read pool is deliberately sized for the common
+            // zero-copy range. A future caller may request a larger aligned
+            // extent, though, and a debug assertion must not turn that
+            // request into an undersized I/O buffer in production.
+            self.stats.allocations.fetch_add(1, Ordering::Relaxed);
+            if let Some(recycle) = &self.recycle {
+                match recycle.try_send(buffer) {
+                    Ok(()) | Err(TrySendError::Disconnected(_)) => {}
+                    Err(TrySendError::Full(_)) => {
+                        debug_assert!(
+                            false,
+                            "direct-I/O recycle queue exceeded its fixed capacity"
+                        );
+                    }
+                }
+            }
+            return DirectIoBufferLease::unpooled(DirectIoBuffer::for_read(read_len));
+        }
         self.stats.reuses.fetch_add(1, Ordering::Relaxed);
         let active = self.stats.active.fetch_add(1, Ordering::Relaxed) + 1;
         self.stats.high_water.fetch_max(active, Ordering::Relaxed);
@@ -678,6 +696,7 @@ where
             Ok(read_bytes) => read_bytes,
             Err(error) if is_transient_io_error(&error) => {
                 buffer = returned;
+                storage_runtime::yield_now().await;
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -714,6 +733,7 @@ pub(crate) async fn write_all_direct(
             Ok(written) => written,
             Err(error) if is_transient_io_error(&error) => {
                 buffer = returned;
+                storage_runtime::yield_now().await;
                 continue;
             }
             Err(error) => return Err(error.into()),

@@ -186,17 +186,26 @@ impl Kvkache {
     #[allow(dead_code)]
     pub(crate) async fn delete(&mut self, storage_key: &StorageKey) -> Result<bool> {
         self.drive_background_once().await?;
-        let now_ms = unix_time_ms();
         let previous = self.locate_item(storage_key).await?;
         let Some(previous) = previous else {
             return Ok(false);
         };
-        if !previous.item.is_live_at(now_ms) {
+        // The lookup itself is asynchronous. Resolve expiration only after it
+        // completes so a value that expires while its bucket is being read is
+        // not reported as deleted at a stale observation time.
+        if !previous.item.is_live_at(unix_time_ms()) {
             self.remove_expired_item(storage_key, previous).await?;
             return Ok(false);
         }
         let previous_location = previous.table_location;
         let previous_mutable_value = self.mutable_value_handle(&previous);
+        if !self
+            .table
+            .candidate_locations(storage_key)
+            .contains(&previous_location)
+        {
+            return Ok(false);
+        }
         let replacement = if let Some(replacement) = self.try_replace_tombstone_in_place(
             *storage_key,
             previous_location,
@@ -205,6 +214,18 @@ impl Kvkache {
             replacement
         } else {
             loop {
+                // Capacity flushing below may retire the generation that was
+                // observed above. Re-check both liveness and table ownership
+                // before publishing a tombstone, otherwise DELETE could
+                // claim success for an item already expired or evicted.
+                if !previous.item.is_live_at(unix_time_ms())
+                    || !self
+                        .table
+                        .candidate_locations(storage_key)
+                        .contains(&previous_location)
+                {
+                    return Ok(false);
+                }
                 if let Some(replacement) = self.try_append_tombstone(*storage_key)? {
                     break replacement;
                 }
@@ -212,6 +233,7 @@ impl Kvkache {
                 self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
             }
         };
+        let deleted = previous.item.is_live_at(unix_time_ms());
         self.publish_tombstone_location(
             *storage_key,
             Some(previous_location),
@@ -219,7 +241,7 @@ impl Kvkache {
             replacement,
         )?;
         self.live_keys = self.live_keys.saturating_sub(1);
-        Ok(true)
+        Ok(deleted)
     }
 
     async fn remove_expired_item(
