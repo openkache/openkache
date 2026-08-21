@@ -25,6 +25,23 @@ public:
         : std::runtime_error(message) {}
 };
 
+/// A mutation crossed the native cancellation/admission boundary.
+///
+/// Callers must not automatically replay a mutation that raises this error:
+/// the server may have applied it even though no definitive response arrived.
+class Unknown_Mutation_Error : public Error {
+public:
+    explicit Unknown_Mutation_Error(const std::string& message)
+        : Error(message) {}
+};
+
+/// A read-only request was canceled before native admission.
+class Canceled_Error : public Error {
+public:
+    explicit Canceled_Error(const std::string& message)
+        : Error(message) {}
+};
+
 /// Atomic existence condition for one SET operation.
 enum class Set_Condition : std::uint32_t {
     Any = OPENKACHE_SMITHY_FFI_SET_CONDITION_ANY,
@@ -669,6 +686,22 @@ private:
             const auto message = result_payload(result);
             openkache_client_result_free(result);
             throw Error(message.empty() ? "OpenKache operation failed" : message);
+        }
+        if (kind == OPENKACHE_SMITHY_FFI_RESULT_UNKNOWN_MUTATION) {
+            const auto message = result_payload(result);
+            openkache_client_result_free(result);
+            throw Unknown_Mutation_Error(
+                message.empty()
+                    ? "OpenKache mutation outcome is unknown after cancellation"
+                    : message);
+        }
+        if (kind == OPENKACHE_SMITHY_FFI_RESULT_CANCELED) {
+            const auto message = result_payload(result);
+            openkache_client_result_free(result);
+            throw Canceled_Error(
+                message.empty()
+                    ? "OpenKache request was canceled before admission"
+                    : message);
         }
         const auto length = openkache_client_result_data_length(result);
         const auto* data = openkache_client_result_data(result);
