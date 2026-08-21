@@ -14,7 +14,10 @@ pub(crate) const STORAGE_KEY_PREFIX_BITS: usize = 8;
 pub(crate) const ITEM_BYTE_OFFSET_BITS: usize = 12;
 pub(crate) const ITEM_STORAGE_KEY_SUFFIX_BYTES: usize = STORAGE_KEY_BYTES - 1;
 pub(crate) const ITEM_KIND_BYTES: usize = 1;
-pub(crate) const ITEM_FIXED_BYTES: usize = ITEM_STORAGE_KEY_SUFFIX_BYTES + ITEM_KIND_BYTES;
+pub(crate) const ITEM_CHECKSUM_BYTES: usize = std::mem::size_of::<u32>();
+/// Key suffix, kind, and the per-Item checksum trailer.
+pub(crate) const ITEM_FIXED_BYTES: usize =
+    ITEM_STORAGE_KEY_SUFFIX_BYTES + ITEM_KIND_BYTES + ITEM_CHECKSUM_BYTES;
 pub(crate) const ITEM_EXPIRATION_BYTES: usize = std::mem::size_of::<u64>();
 pub(crate) const TOMBSTONE_KIND: u8 = 0;
 pub(crate) const LIVE_KIND: u8 = 1;
@@ -361,14 +364,18 @@ fn item_span(bucket: &[u8], item_slot: usize) -> Option<ItemSpan> {
 fn item_at(bucket: &[u8], item_slot: usize) -> Option<Item> {
     let entry = item_offset(bucket, item_slot)?;
     let span = item_span(bucket, item_slot)?;
+    if !item_checksum_is_valid(bucket, span) {
+        return None;
+    }
     let mut storage_key_bytes = [0u8; STORAGE_KEY_BYTES];
     storage_key_bytes[0] = entry.key_prefix;
     let storage_key_end = span.start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
     storage_key_bytes[1..].copy_from_slice(&bucket[span.start..storage_key_end]);
     let (state, value_start) = item_state_at(bucket, span)?;
+    let value_end = span.end.checked_sub(ITEM_CHECKSUM_BYTES)?;
     Some(Item {
         storage_key: StorageKey::new(storage_key_bytes),
-        value: bucket[value_start..span.end].to_vec(),
+        value: bucket[value_start..value_end].to_vec(),
         is_tombstone: state.is_tombstone,
         expires_at_ms: state.expires_at_ms,
         eviction_protected: state.eviction_protected,
@@ -377,6 +384,7 @@ fn item_at(bucket: &[u8], item_slot: usize) -> Option<Item> {
 
 fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
     let storage_key_end = span.start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
+    let value_end = span.end.checked_sub(ITEM_CHECKSUM_BYTES)?;
     let (state, value_start) = match bucket[storage_key_end] {
         TOMBSTONE_KIND => (
             ItemState {
@@ -397,7 +405,7 @@ fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
         EXPIRING_LIVE_KIND => {
             let expiration_start = storage_key_end + ITEM_KIND_BYTES;
             let expiration_end = expiration_start + ITEM_EXPIRATION_BYTES;
-            if expiration_end > span.end {
+            if expiration_end > value_end {
                 return None;
             }
             let expires_at_ms =
@@ -425,7 +433,7 @@ fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
         PROTECTED_EXPIRING_LIVE_KIND => {
             let expiration_start = storage_key_end + ITEM_KIND_BYTES;
             let expiration_end = expiration_start + ITEM_EXPIRATION_BYTES;
-            if expiration_end > span.end {
+            if expiration_end > value_end {
                 return None;
             }
             let expires_at_ms =
@@ -452,6 +460,7 @@ pub(crate) fn rewrite_segment_values(
     mut rewrite: impl FnMut(&[u8]) -> Result<Option<Vec<u8>>>,
 ) -> Result<()> {
     for bucket in segment.chunks_exact_mut(BUCKET_BYTES) {
+        validate_bucket(bucket)?;
         let count = bucket_item_count(bucket);
         for item_slot in 0..count {
             let span = item_span(bucket, item_slot)
@@ -462,7 +471,11 @@ pub(crate) fn rewrite_segment_values(
             if state.is_tombstone {
                 continue;
             }
-            let encoded = bucket[value_start..span.end].to_vec();
+            let value_end = span
+                .end
+                .checked_sub(ITEM_CHECKSUM_BYTES)
+                .ok_or_else(|| KvError::Worker("mutable SG Item checksum is truncated".into()))?;
+            let encoded = bucket[value_start..value_end].to_vec();
             let Some(replacement) = rewrite(&encoded)? else {
                 continue;
             };
@@ -471,7 +484,8 @@ pub(crate) fn rewrite_segment_values(
                     "seal-time value rewrite changed the encoded Item length".into(),
                 ));
             }
-            bucket[value_start..span.end].copy_from_slice(&replacement);
+            bucket[value_start..value_end].copy_from_slice(&replacement);
+            write_item_checksum(bucket, span);
         }
     }
     Ok(())
@@ -499,6 +513,7 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
 
 fn write_item_body(bucket: &mut [u8], start: usize, end: usize, item: &Item) {
     debug_assert_eq!(end - start, item.encoded_len());
+    let checksum_start = end - ITEM_CHECKSUM_BYTES;
     let storage_key_end = start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
     bucket[start..storage_key_end].copy_from_slice(&item.storage_key.as_bytes()[1..]);
     bucket[storage_key_end] = match (
@@ -518,7 +533,15 @@ fn write_item_body(bucket: &mut [u8], start: usize, end: usize, item: &Item) {
         bucket[value_start..expiration_end].copy_from_slice(&item.expires_at_ms.to_le_bytes());
         value_start = expiration_end;
     }
-    bucket[value_start..end].copy_from_slice(&item.value);
+    bucket[value_start..checksum_start].copy_from_slice(&item.value);
+    write_item_checksum(
+        bucket,
+        ItemSpan {
+            item_slot: 0,
+            start,
+            end,
+        },
+    );
 }
 
 pub(crate) fn replace_item_in_bucket(bucket: &mut [u8], replacement: &Item) -> bool {
@@ -624,8 +647,53 @@ pub(crate) fn find_item_state_and_value_range(
     storage_key: &StorageKey,
 ) -> Option<(ItemState, std::ops::Range<usize>)> {
     let span = find_item_span_in_bucket(bucket, storage_key)?;
+    if !item_checksum_is_valid(bucket, span) {
+        return None;
+    }
     let (state, value_start) = item_state_at(bucket, span)?;
-    Some((state, value_start..span.end))
+    let value_end = span.end.checked_sub(ITEM_CHECKSUM_BYTES)?;
+    Some((state, value_start..value_end))
+}
+
+/// Validates every encoded Item in one Bucket before callers use it as
+/// recovery or lookup input. A malformed offset, state, or checksum is a hard
+/// corruption error rather than an apparent cache miss.
+pub(crate) fn validate_bucket(bucket: &[u8]) -> Result<()> {
+    if bucket.len() != BUCKET_BYTES {
+        return Err(KvError::Worker("Segment Bucket has an invalid length".into()));
+    }
+    let count = bucket_item_count(bucket);
+    for item_slot in 0..count {
+        let span = item_span(bucket, item_slot)
+            .ok_or_else(|| KvError::Worker("Segment Bucket contains a malformed Item".into()))?;
+        if !item_checksum_is_valid(bucket, span) {
+            return Err(KvError::Worker(
+                "Segment Item checksum does not match committed bytes".into(),
+            ));
+        }
+        item_state_at(bucket, span)
+            .ok_or_else(|| KvError::Worker("Segment Item has an invalid state".into()))?;
+    }
+    Ok(())
+}
+
+fn item_checksum_is_valid(bucket: &[u8], span: ItemSpan) -> bool {
+    let Some(checksum_start) = span.end.checked_sub(ITEM_CHECKSUM_BYTES) else {
+        return false;
+    };
+    let Some(stored) = bucket.get(checksum_start..span.end) else {
+        return false;
+    };
+    let Ok(stored) = <[u8; ITEM_CHECKSUM_BYTES]>::try_from(stored) else {
+        return false;
+    };
+    crc32fast::hash(&bucket[span.start..checksum_start]) == u32::from_le_bytes(stored)
+}
+
+fn write_item_checksum(bucket: &mut [u8], span: ItemSpan) {
+    let checksum_start = span.end - ITEM_CHECKSUM_BYTES;
+    let checksum = crc32fast::hash(&bucket[span.start..checksum_start]);
+    bucket[checksum_start..span.end].copy_from_slice(&checksum.to_le_bytes());
 }
 
 fn matching_item_span(
