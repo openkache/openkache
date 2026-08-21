@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -447,7 +447,14 @@ async fn read_buffered_request<S: RequestByteStream, T>(
     progress: &AtomicBool,
     admit: impl FnOnce(RequestFrameHeader, &[u8]) -> Result<(), T>,
 ) -> Result<RequestRead<T>, StreamReadError> {
-    let header_read = read_request_header(stream, backend, maximum, timeout, progress).await?;
+    // A request deadline covers the complete frame, including admission,
+    // memory-budget waiting, and every partial transport read. Passing the
+    // configured timeout to each chunk would let a slow peer reset the budget
+    // indefinitely by dribbling one byte per interval.
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let header_read = read_request_header(stream, backend, maximum, deadline, progress).await?;
     let (mut frame, header) = match header_read {
         HeaderRead::Header { frame, header } => (frame, header),
         HeaderRead::Finished => return Ok(RequestRead::Finished),
@@ -463,7 +470,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
             stream,
             backend,
             frame_len.saturating_sub(frame.len()),
-            timeout,
+            deadline,
             progress,
         )
         .await?
@@ -475,7 +482,10 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         }
     }
 
-    let permit = match budget.acquire(header.body_len(), timeout).await {
+    let permit = match budget
+        .acquire(header.body_len(), remaining_request_timeout(deadline)?)
+        .await
+    {
         Ok(permit) => permit,
         Err(error @ (StreamReadError::Timeout | StreamReadError::TooLarge)) => {
             let timed_out = matches!(error, StreamReadError::Timeout);
@@ -487,7 +497,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
                 stream,
                 backend,
                 frame_len.saturating_sub(frame.len()),
-                timeout,
+                deadline,
                 progress,
             )
             .await?
@@ -508,7 +518,7 @@ async fn read_buffered_request<S: RequestByteStream, T>(
         }
         let actual = frame.len();
         let previous_len = frame.len();
-        match append_chunk(stream, frame, remaining, backend, timeout).await? {
+        match append_chunk(stream, frame, remaining, backend, deadline).await? {
             ChunkRead::Bytes(next) => {
                 // The caller may race this read against operation execution.
                 // Mark delivery after extending the local frame so it knows
@@ -530,7 +540,7 @@ async fn read_request_header<S: RequestByteStream>(
     stream: &mut S,
     backend: &'static str,
     maximum: usize,
-    timeout: Duration,
+    deadline: Instant,
     progress: &AtomicBool,
 ) -> Result<HeaderRead, StreamReadError> {
     let mut frame = Vec::new();
@@ -554,7 +564,7 @@ async fn read_request_header<S: RequestByteStream>(
         let was_empty = frame.is_empty();
         let actual = frame.len();
         let previous_len = frame.len();
-        match append_chunk(stream, frame, additional, backend, timeout).await? {
+        match append_chunk(stream, frame, additional, backend, deadline).await? {
             ChunkRead::Bytes(next) => {
                 if next.len() > previous_len {
                     progress.store(true, Ordering::Relaxed);
@@ -582,9 +592,12 @@ async fn append_chunk<S: RequestByteStream>(
     frame: Vec<u8>,
     capacity: usize,
     backend: &'static str,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<ChunkRead, StreamReadError> {
-    network_runtime::timeout(timeout, stream.append_chunk(frame, capacity, backend))
+    network_runtime::timeout(
+        remaining_request_timeout(deadline)?,
+        stream.append_chunk(frame, capacity, backend),
+    )
         .await
         .map_err(|_| StreamReadError::Timeout)?
         .map_err(StreamReadError::Transport)
@@ -599,7 +612,7 @@ async fn discard_body<S: RequestByteStream>(
     stream: &mut S,
     backend: &'static str,
     mut remaining: usize,
-    timeout: Duration,
+    deadline: Instant,
     progress: &AtomicBool,
 ) -> Result<BodyRead, StreamReadError> {
     const DISCARD_CHUNK_BYTES: usize = 16 * 1024;
@@ -607,7 +620,7 @@ async fn discard_body<S: RequestByteStream>(
     while remaining > 0 {
         let capacity = remaining.min(DISCARD_CHUNK_BYTES);
         let previous_len = scratch.len();
-        match append_chunk(stream, scratch, capacity, backend, timeout).await? {
+        match append_chunk(stream, scratch, capacity, backend, deadline).await? {
             ChunkRead::Bytes(next) => {
                 let read = next
                     .len()
@@ -629,6 +642,15 @@ async fn discard_body<S: RequestByteStream>(
         }
     }
     Ok(BodyRead::Complete)
+}
+
+fn remaining_request_timeout(deadline: Instant) -> Result<Duration, StreamReadError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(StreamReadError::Timeout)
+    } else {
+        Ok(remaining)
+    }
 }
 
 fn truncated_frame_error(actual: usize, expected: usize) -> StreamReadError {

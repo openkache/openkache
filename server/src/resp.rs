@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
@@ -42,7 +42,9 @@ pub struct RespServer {
     local_addr: SocketAddr,
     cache: Arc<ThreadedKvkache>,
     network: crate::NetworkConfig,
+    input_timeout: Duration,
     request_timeout: Duration,
+    output_timeout: Duration,
     experimental_api_enabled: bool,
     experimental_api_revision: Option<String>,
     observability: ObservabilityService,
@@ -73,7 +75,9 @@ impl RespServer {
         }
         config.validate()?;
         let network = config.network.clone();
+        let input_timeout = Duration::from_micros(config.timeouts.input_max_time_us);
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
+        let output_timeout = Duration::from_micros(config.timeouts.output_max_time_us);
         let experimental_api_enabled = config.enable_experimental_api;
         let experimental_api_revision = config.experimental_api_revision.clone();
         let observability = ObservabilityService::new(
@@ -99,7 +103,9 @@ impl RespServer {
             local_addr,
             cache: Arc::new(cache),
             network,
+            input_timeout,
             request_timeout,
+            output_timeout,
             experimental_api_enabled,
             experimental_api_revision,
             observability,
@@ -158,7 +164,9 @@ impl RespServer {
             sockets,
             cache,
             network,
+            input_timeout,
             request_timeout,
+            output_timeout,
             experimental_api_enabled,
             experimental_api_revision,
             observability: observability_service,
@@ -201,7 +209,9 @@ impl RespServer {
                         socket,
                         worker_cache,
                         worker_observability,
+                        input_timeout,
                         request_timeout,
+                        output_timeout,
                         experimental_api_enabled,
                         worker_experimental_api_revision,
                         stop_rx,
@@ -284,7 +294,9 @@ async fn run_resp_role(
     socket: std::net::TcpListener,
     cache: Arc<ThreadedKvkache>,
     observability: Arc<ObservabilityState>,
+    input_timeout: Duration,
     request_timeout: Duration,
+    output_timeout: Duration,
     experimental_api_enabled: bool,
     experimental_api_revision: Option<String>,
     stop: AsyncReceiver<()>,
@@ -315,7 +327,9 @@ async fn run_resp_role(
             Arc::clone(&cache),
             worker_id,
             observability,
+            input_timeout,
             request_timeout,
+            output_timeout,
             experimental_api_enabled,
             experimental_api_revision,
             stop,
@@ -355,7 +369,9 @@ async fn run_resp_worker(
     cache: Arc<ThreadedKvkache>,
     worker_id: usize,
     observability: Arc<ObservabilityState>,
+    input_timeout: Duration,
     request_timeout: Duration,
+    output_timeout: Duration,
     experimental_api_enabled: bool,
     experimental_api_revision: Option<String>,
     stop: AsyncReceiver<()>,
@@ -377,7 +393,9 @@ async fn run_resp_worker(
                         stream,
                         &cache,
                         network_shard,
+                        input_timeout,
                         request_timeout,
+                        output_timeout,
                         experimental_api_enabled,
                         experimental_api_revision.clone(),
                     ));
@@ -398,7 +416,9 @@ async fn run_resp_worker(
                         stream,
                         &cache,
                         network_shard,
+                        input_timeout,
                         request_timeout,
+                        output_timeout,
                         experimental_api_enabled,
                         experimental_api_revision.clone(),
                     ));
@@ -415,16 +435,36 @@ async fn serve_resp_connection(
     mut stream: TcpStream,
     cache: &NetworkWorkerCache,
     network_shard: NetworkShard<'_>,
+    input_timeout: Duration,
     request_timeout: Duration,
+    output_timeout: Duration,
     experimental_api_enabled: bool,
     experimental_api_revision: Option<String>,
 ) -> std::io::Result<()> {
     let _connection_guard = ActiveRespConnection { network_shard };
     let mut pending = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut responses = Vec::new();
+    let mut response_deadlines = Vec::new();
+    let mut input_deadline: Option<Instant> = None;
     loop {
         let input = vec![0_u8; READ_BUFFER_BYTES];
-        let (bytes_read, input) = match stream.read(input).await {
+        let read = stream.read(input);
+        let read_result = if let Some(deadline) = input_deadline {
+            let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            match network_runtime::timeout(timeout, read).await {
+                Ok(result) => result,
+                Err(_) => {
+                    network_shard.request_read_timeout();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "RESP request input timed out",
+                    ));
+                }
+            }
+        } else {
+            read.await
+        };
+        let (bytes_read, input) = match read_result {
             Ok(result) => result,
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::TimedOut {
@@ -436,12 +476,17 @@ async fn serve_resp_connection(
         if bytes_read == 0 {
             return Ok(());
         }
+        if input_deadline.is_none() {
+            input_deadline = Some(resp_deadline(input_timeout));
+        }
         pending.extend_from_slice(&input[..bytes_read]);
         if pending.len() > MAX_BUFFER_BYTES {
             network_shard.protocol_error();
             responses.clear();
             error(&mut responses, "request buffer exceeds RESP limit");
-            if let Err(error) = write_with_timeout(&mut stream, responses, request_timeout).await {
+            if let Err(error) =
+                write_with_timeout(&mut stream, responses, &[], output_timeout).await
+            {
                 network_shard.response_write_failure();
                 return Err(error);
             }
@@ -450,6 +495,7 @@ async fn serve_resp_connection(
 
         let mut consumed = 0;
         responses.clear();
+        response_deadlines.clear();
         let mut close = false;
         while consumed < pending.len() {
             match parse_command(&pending[consumed..]) {
@@ -503,6 +549,12 @@ async fn serve_resp_connection(
                             error(&mut responses, "request timed out");
                         }
                     }
+                    if responses.len() > response_start {
+                        // Each RESP response gets its own output budget. A
+                        // pipelined batch must not let earlier commands
+                        // consume the entire timeout for later responses.
+                        response_deadlines.push((responses.len(), resp_deadline(output_timeout)));
+                    }
                     let command_timed_out = timed_out
                         || (close
                             && responses[response_start..].is_empty()
@@ -524,6 +576,7 @@ async fn serve_resp_connection(
                 ParseResult::Invalid(message) => {
                     network_shard.protocol_error();
                     error(&mut responses, &message);
+                    response_deadlines.push((responses.len(), resp_deadline(output_timeout)));
                     close = true;
                     consumed = pending.len();
                     break;
@@ -532,11 +585,20 @@ async fn serve_resp_connection(
         }
         if consumed == pending.len() {
             pending.clear();
+            input_deadline = None;
         } else if consumed > 0 {
             pending.drain(..consumed);
+            input_deadline = Some(resp_deadline(input_timeout));
         }
         if !responses.is_empty() {
-            responses = match write_with_timeout(&mut stream, responses, request_timeout).await {
+            responses = match write_with_timeout(
+                &mut stream,
+                responses,
+                &response_deadlines,
+                output_timeout,
+            )
+            .await
+            {
                 Ok(responses) => responses,
                 Err(error) => {
                     network_shard.response_write_failure();
@@ -570,15 +632,57 @@ impl Drop for ActiveRespConnection<'_> {
 async fn write_with_timeout(
     stream: &mut TcpStream,
     response: Vec<u8>,
-    timeout: Duration,
+    deadlines: &[(usize, Instant)],
+    default_timeout: Duration,
 ) -> std::io::Result<Vec<u8>> {
-    match network_runtime::timeout(timeout, stream.write_all(response)).await {
-        Ok(result) => result,
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "RESP response write timed out",
-        )),
+    let mut start = 0;
+    for &(end, deadline) in deadlines {
+        if end < start || end > response.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RESP response deadline range is invalid",
+            ));
+        }
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        match network_runtime::timeout(timeout, stream.write_all(response[start..end].to_vec()))
+            .await
+        {
+            Ok(result) => {
+                let _ = result?;
+            }
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "RESP response write timed out",
+                ));
+            }
+        }
+        start = end;
     }
+    if start < response.len() {
+        match network_runtime::timeout(
+            default_timeout,
+            stream.write_all(response[start..].to_vec()),
+        )
+        .await
+        {
+            Ok(result) => {
+                let _ = result?;
+            }
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "RESP response write timed out",
+                ));
+            }
+        }
+    }
+    Ok(response)
+}
+
+fn resp_deadline(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or(now)
 }
 
 pub(crate) fn operation_for_command(command: &[&[u8]]) -> Operation {

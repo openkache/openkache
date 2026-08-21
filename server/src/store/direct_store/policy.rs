@@ -110,3 +110,21 @@ pub(super) fn unix_time_ms() -> u64 {
     });
     anchor_ms.saturating_add(u64::try_from(anchor.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
+
+/// Fails closed when a persisted TTL checkpoint is opened after the wall
+/// clock moved backwards. The persisted deadlines are Unix-epoch values, but
+/// the runtime elapsed clock is process-local; without this guard a rollback
+/// would make every deadline appear farther away and silently extend TTLs.
+/// A forward jump is intentionally accepted and may expire entries early.
+pub(super) fn validate_persisted_clock(reference_ms: u64) -> Result<()> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    if now_ms < reference_ms {
+        return Err(KvError::Worker(format!(
+            "persistent TTL checkpoint clock moved backwards from {reference_ms}ms to {now_ms}ms; refusing recovery because expiration deadlines are untrusted"
+        )));
+    }
+    Ok(())
+}

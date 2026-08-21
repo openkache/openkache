@@ -1,5 +1,6 @@
 //! Pending keyed mutation progress and capacity coordination.
 
+use crate::types::StorageWriteCondition;
 use crate::{Result, StorageKey};
 
 use super::keyed::{
@@ -72,14 +73,19 @@ impl Kvkache {
                 include_visible_state,
                 response,
             } => {
-                let previous_live = previous_state.is_some_and(|state| {
-                    item_state_is_live_at(state, unix_time_ms())
-                        && previous.is_some_and(|location| {
-                            self.table
-                                .candidate_locations(&storage_key)
-                                .contains(&location)
-                        })
+                let previous_observed_live = previous_state
+                    .is_some_and(|state| item_state_is_live_at(state, unix_time_ms()));
+                let previous_location_current = previous.is_some_and(|location| {
+                    self.table
+                        .candidate_locations(&storage_key)
+                        .contains(&location)
                 });
+                let previous_live = match condition {
+                    StorageWriteCondition::Any => previous_observed_live,
+                    StorageWriteCondition::IfAbsent | StorageWriteCondition::IfPresent => {
+                        previous_observed_live && previous_location_current
+                    }
+                };
                 if !set_condition_allows(condition, previous_live) {
                     if let (Some(previous), Some(previous_state)) = (previous, previous_state) {
                         self.remove_expired_location(
@@ -159,15 +165,18 @@ impl Kvkache {
                 // before the tombstone became appendable. In that case the
                 // deleted record is already gone and no second live-key
                 // decrement or Table publication is needed.
-                let deleted = item_state_is_live_at(previous_state, unix_time_ms());
                 if !self
                     .table
                     .candidate_locations(&storage_key)
                     .contains(&previous)
                 {
+                    // Capacity work may have evicted the observed location
+                    // before the pending tombstone became appendable. The
+                    // item is then already logically absent, so report the
+                    // same result as a delete that observed a miss.
                     return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
                         storage_key,
-                        outcome: KeyedOutcome::Deleted(deleted),
+                        outcome: KeyedOutcome::Deleted(false),
                         visible_state: Some(KeyedVisibleState::Missing),
                     }));
                 }
@@ -181,6 +190,11 @@ impl Kvkache {
                         },
                     ));
                 };
+                // Publishing the tombstone is the mutation linearization
+                // point. Resolve TTL immediately before it so a value that
+                // expired while capacity work was in flight reports the same
+                // result as an already-expired delete.
+                let deleted = item_state_is_live_at(previous_state, unix_time_ms());
                 self.publish_tombstone_location(
                     storage_key,
                     Some(previous),
