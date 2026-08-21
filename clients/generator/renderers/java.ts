@@ -497,8 +497,12 @@ export function render_java_operations(contract: Client_Contract): string {
         int total = 0;
         for (byte[] itemId : itemIds) {
             Objects.requireNonNull(itemId, "item ID");
-            if (itemId.length != SmithyContract.ITEM_ID_BYTES) {
-                throw new OpenKacheClientException("item IDs must contain exactly "
+            if (itemId.length > SmithyContract.ITEM_ID_BYTES) {
+                throw new OpenKacheClientException("item IDs must contain at most "
+                    + SmithyContract.ITEM_ID_BYTES + " bytes");
+            }
+            if (total > SmithyContract.ITEM_ID_BYTES - itemId.length) {
+                throw new OpenKacheClientException("combined item IDs must contain at most "
                     + SmithyContract.ITEM_ID_BYTES + " bytes");
             }
             total += itemId.length;

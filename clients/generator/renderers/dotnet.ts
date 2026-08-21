@@ -398,7 +398,7 @@ function render_csharp_operation_method_body(
     ? "ReadOnlyMemory<byte>.Empty"
     : input_item_ids.length <= 1
     ? `ValidateItemId(input.${input_item_id})`
-    : `ValidateItemIds(ConcatItemIds(${input_item_ids.map((name) => `input.${name}`).join(", ")}), ${operation_field_count(operation.plan.operation, "input", "item_id")})`
+    : `ConcatItemIds(${input_item_ids.map((name) => `input.${name}`).join(", ")})`
   const {
     policy_default_eviction,
     policy_default_expiration,
@@ -970,11 +970,17 @@ export function render_csharp_operations(contract: Client_Contract): string {
         var total = 0;
         foreach (var itemId in itemIds)
         {
-            if (itemId.Length != Protocol.ItemIdBytes)
+            if (itemId.Length > Protocol.ItemIdBytes)
             {
                 throw new OpenKacheException(
                     "PROTOCOL_ERROR",
-                    $"item IDs must contain exactly {Protocol.ItemIdBytes} bytes.");
+                    $"item IDs must contain at most {Protocol.ItemIdBytes} bytes.");
+            }
+            if (total > Protocol.ItemIdBytes - itemId.Length)
+            {
+                throw new OpenKacheException(
+                    "PROTOCOL_ERROR",
+                    $"combined item IDs must contain at most {Protocol.ItemIdBytes} bytes.");
             }
             total = checked(total + itemId.Length);
         }
@@ -986,17 +992,6 @@ export function render_csharp_operations(contract: Client_Contract): string {
             offset += itemId.Length;
         }
         return combined;
-    }
-
-    private static byte[] ValidateItemIds(byte[] itemIds, int itemCount)
-    {
-        if (itemIds.Length != checked(Protocol.ItemIdBytes * itemCount))
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                $"item IDs must contain exactly {Protocol.ItemIdBytes * itemCount} bytes.");
-        }
-        return itemIds;
     }
 `
     : ""
