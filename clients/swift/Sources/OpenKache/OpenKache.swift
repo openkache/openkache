@@ -234,6 +234,14 @@ public struct OpenKacheCompression: Sendable {
     /// A compressed value must save at least this many bytes.
     public let minimumSavings: Int
 
+    /// Automatic level-1 Zstandard compression with no size thresholds.
+    public static let automatic = OpenKacheCompression(
+        enabled: true,
+        level: Smithy_Value_Format.defaultZstandardLevel,
+        minimumInputSize: Smithy_Value_Format.defaultZstandardMinimumInputBytes,
+        minimumSavings: Smithy_Value_Format.defaultZstandardMinimumSavingsBytes
+    )
+
     /// Disables compression.
     public static let disabled = OpenKacheCompression(
         enabled: false,
@@ -319,7 +327,7 @@ public struct OpenKacheClientOptions: Sendable {
         serverName: String? = nil,
         certificate: Data? = nil,
         identity: OpenKacheClientIdentity? = nil,
-        compression: OpenKacheCompression = .disabled,
+        compression: OpenKacheCompression = .automatic,
         encryption: OpenKacheEncryption = .robust,
         connectTimeout: Duration = .milliseconds(
             Int64(Smithy_Value_Format.defaultConnectTimeoutMilliseconds)

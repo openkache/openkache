@@ -161,10 +161,10 @@ The runtime-neutral codec layer is available from
   application-managed 32-byte random secret; clients sharing protected values
   must use the same key. When omitted, Item IDs are still derived but values
   are stored unprotected.
-- `compression` currently controls Zstandard level, minimum input size, and
-  required savings. The target maintained policy has no input-size or
-  minimum-savings threshold and emits the compressed frame only when it is
-  smaller.
+- `compression` controls the Zstandard level and optional thresholds. The
+  maintained default is automatic level 1 with zero input-size and
+  minimum-savings thresholds; it emits the compressed frame only when it is
+  smaller. Set `compression.enabled` to `false` for an explicit opt-out.
 - `timeouts.connect_ms` and `timeouts.request_ms` bound connection and complete
   request operations.
 - `retry.max_attempts` controls retries for response-safe operations.

@@ -854,9 +854,9 @@ pub enum Value {
 pub struct ZstandardOptions {
     /// Compression level.
     pub level: i32,
-    /// Values smaller than this bypass compression.
+    /// Optional input-size threshold; the maintained default is zero.
     pub minimum_input_size: usize,
-    /// A compressed frame must save at least this many bytes.
+    /// Optional minimum savings threshold; the maintained default is zero.
     pub minimum_savings: usize,
 }
 
@@ -871,13 +871,20 @@ impl Default for ZstandardOptions {
 }
 
 /// Compression policy for formatted v1 writes.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Compression {
-    /// Emit the payload without compression.
-    #[default]
+    /// Emit the payload without compression. Use this for an explicit opt-out
+    /// from the maintained automatic policy.
     Disabled,
-    /// Try one declared-size Zstandard frame.
+    /// Try one declared-size Zstandard frame and retain it only when the
+    /// completed frame is smaller.
     Zstandard(ZstandardOptions),
+}
+
+impl Default for Compression {
+    fn default() -> Self {
+        Self::Zstandard(ZstandardOptions::default())
+    }
 }
 
 /// Protection profile selected by the v1 selector.

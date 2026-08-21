@@ -88,8 +88,13 @@ type Identity struct {
 
 // CompressionOptions controls optional Zstandard compression in the core.
 type CompressionOptions struct {
-	// Enabled enables Zstandard when true.
+	// Enabled explicitly enables automatic level-1 Zstandard compression. The
+	// zero value of CompressionOptions selects the maintained automatic
+	// default; set Disabled for an explicit uncompressed opt-out.
 	Enabled bool
+	// Disabled explicitly opts out of formatted-value compression. Enabled and
+	// Disabled must not both be true.
+	Disabled bool
 	// Level is the Zstandard level from the shared contract range. Zero selects
 	// the shared default level.
 	Level int32
@@ -207,6 +212,23 @@ func (o Options) normalize() (normalizedOptions, error) {
 	compression := o.Compression
 	if compression.MinimumInputSize < 0 || compression.MinimumSavings < 0 {
 		return normalizedOptions{}, validationError("compression", "size thresholds must not be negative")
+	}
+	if compression.Enabled && compression.Disabled {
+		return normalizedOptions{}, validationError(
+			"compression",
+			"enabled and disabled cannot both be true",
+		)
+	}
+	// CompressionOptions historically used a bool whose zero value disabled
+	// compression. Keep that field for source compatibility while making the
+	// all-zero Options value select the maintained automatic policy. Callers
+	// that need an explicit opt-out set Disabled=true.
+	if !compression.Disabled &&
+		!compression.Enabled &&
+		compression.Level == 0 &&
+		compression.MinimumInputSize == 0 &&
+		compression.MinimumSavings == 0 {
+		compression.Enabled = true
 	}
 	if compression.Enabled {
 		if compression.Level == 0 {

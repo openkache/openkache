@@ -144,9 +144,12 @@ result = await client.raw.get(
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private
   key for mutual TLS.
 - `compression`, `encryption`, `timeouts`, `max_in_flight`, and
-  `retry_max_attempts` map directly to shared-core settings. `Encryption.ROBUST`
-  is the default; select `Encryption.COMPACT` only when every client sharing
-  the protected entries uses that profile.
+  `retry_max_attempts` map directly to shared-core settings. Compression
+  defaults to automatic level-1 Zstandard with no input-size or
+  minimum-savings threshold; pass `CompressionOptions(enabled=False)` for an
+  explicit opt-out. `Encryption.ROBUST` is the default; select
+  `Encryption.COMPACT` only when every client sharing the protected entries
+  uses that profile.
 - `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
 
 Call `close()` when finished; it is idempotent. The client also supports

@@ -9,6 +9,12 @@ namespace OpenKache;
 public sealed class ClientOptions
 {
     /// <summary>
+    /// Enables the maintained automatic level-1 Zstandard formatted-value policy.
+    /// Set to <see langword="false"/> for an explicit uncompressed opt-out.
+    /// </summary>
+    public bool CompressionEnabled { get; init; } = true;
+
+    /// <summary>
     /// Maximum reusable bidirectional stream lanes opened on one connection.
     /// </summary>
     public int MaximumStreamLanes { get; init; } = Protocol.DefaultMaxInFlight;

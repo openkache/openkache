@@ -122,6 +122,11 @@ contain exactly 32 persistent random bytes.
 roots. A numeric address may provide a separate `serverName` for certificate
 verification.
 
+Formatted writes use automatic level-1 Zstandard compression by default and
+retain a completed frame only when it is smaller. Pass
+`compression: .disabled` to `OpenKacheClientOptions` for an explicit
+uncompressed opt-out.
+
 The Smithy operation, value-format, connection-state, and native ABI
 declarations are generated into SwiftPM's build directory from
 [`../model/openkache.smithy`](../model/openkache.smithy) and the wire model in

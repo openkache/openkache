@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ValueKeyring;
-use crate::value::{Compression, Encryption, Value, ZstandardOptions};
+use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
     DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
@@ -38,10 +38,7 @@ impl ProtectionSettings {
 
     fn with_optional_key(key: Option<DataProtectionKey>) -> Self {
         Self {
-            // Maintained formatted clients use automatic level-1 Zstandard
-            // with no size or savings thresholds. Raw protocol operations
-            // bypass this formatted-value policy.
-            compression: Compression::Zstandard(ZstandardOptions::default()),
+            compression: Compression::default(),
             encryption: Encryption::Robust,
             encryption_explicit: false,
             key,

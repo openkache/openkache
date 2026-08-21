@@ -108,13 +108,16 @@ pub struct FfiConnectOptions {
     pub data_protection_key: *const u8,
     /// Byte length of [`Self::data_protection_key`].
     pub data_protection_key_length: usize,
-    /// Non-zero to enable Zstandard compression.
+    /// Non-zero to enable automatic level-1 Zstandard compression. Zero is an
+    /// explicit uncompressed opt-out.
     pub compression_enabled: u8,
     /// Zstandard level, validated by the shared value codec.
     pub compression_level: i32,
-    /// Minimum serialized input size eligible for compression.
+    /// Optional minimum serialized input size; zero selects the maintained
+    /// no-threshold default.
     pub minimum_input_size: usize,
-    /// Minimum compressed-byte savings required.
+    /// Optional minimum compressed-byte savings; zero selects the maintained
+    /// no-threshold default.
     pub minimum_savings: usize,
     /// Value encryption profile: zero/default or two for Robust, one for Compact.
     pub encryption: u32,

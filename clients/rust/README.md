@@ -191,7 +191,10 @@ let result = <_ as OpenKacheApi>::get(client.raw(), GetInput {
 ## Configuration and lifecycle
 
 The builder configures explicit trust, mutual TLS, request deadlines, retries
-for response-safe operations, `max_in_flight`, and compression.
+for response-safe operations, `max_in_flight`, and compression. Formatted
+writes use automatic level-1 Zstandard compression by default and retain the
+compressed frame only when it is smaller; call
+`.compression(Compression::Disabled)` for an explicit opt-out.
 The optional `max_in_flight_bytes` setting bounds aggregate bytes retained
 across transport and value protection work.
 

@@ -81,8 +81,10 @@ contract is defined by [`protocol/SPEC.md`](../../protocol/SPEC.md).
 
 `ClientOptions` controls connection and request deadlines plus maximum reusable
 request lanes. Defaults come from the Smithy client-defaults contract: 5
-seconds, 2 seconds, and 256 lanes. `OperationTimeout` remains as a legacy
-compatibility alias for callers that need one deadline for both phases.
+seconds, 2 seconds, and 256 lanes. Formatted-value writes use automatic level-1
+Zstandard compression by default; set `ClientOptions.CompressionEnabled` to
+`false` for an explicit uncompressed opt-out. `OperationTimeout` remains as a
+legacy compatibility alias for callers that need one deadline for both phases.
 
 The generated Smithy operation, input, output, and enum types under
 `OpenKache.Smithy` are the current transitional .NET API types. `StatsAsync`
