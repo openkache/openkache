@@ -93,7 +93,7 @@ not treat generated Smithy metadata as a stable opcode or status registry.
 | Public Item ID root + protected value | Zero/public root may be paired with a separate value keyring | Current protected builders reject the zero root | Migration pending |
 | Key API shape | Exact Item ID accepts `0..=32` bytes; mapped profiles choose the output length | Core and maintained adapters accept the complete `0..=32` Item ID range | Implemented |
 | Structured value selector `1` | `StructuredValue-CBOR-v1` | Legacy JSON-compatible view backed by selector `1` | Migration pending |
-| Maintained compression | Automatic; use a completed frame when it is at least one byte smaller | Legacy per-core/default settings | Migration pending |
+| Maintained compression | Automatic level-1 Zstandard; use a completed frame only when it is smaller | All maintained bindings enable automatic compression by default; explicit opt-out remains available | Implemented |
 | Value-format `maxVu128Bytes` | Unsigned 64-bit values, at most 9 bytes | Smithy client model/generator emits 9-byte metadata | Implemented |
 
 The draft documents are the source of truth for the post-migration contract.

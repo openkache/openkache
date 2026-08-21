@@ -180,6 +180,7 @@ internal sealed class NativeClient : IAsyncDisposable
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
         int maximumStreamLanes,
+        bool compressionEnabled,
         CancellationToken cancellationToken)
     {
         var task = Task.Run(
@@ -189,7 +190,8 @@ internal sealed class NativeClient : IAsyncDisposable
                 certificate,
                 connectTimeout,
                 requestTimeout,
-                maximumStreamLanes),
+                maximumStreamLanes,
+                compressionEnabled),
             CancellationToken.None);
         try
         {
@@ -360,7 +362,8 @@ internal sealed class NativeClient : IAsyncDisposable
         ReadOnlyMemory<byte> certificate,
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
-        int maximumStreamLanes)
+        int maximumStreamLanes,
+        bool compressionEnabled)
     {
         if (NativeMethods.openkache_client_abi_version() != Protocol.FfiAbiVersion)
         {
@@ -381,7 +384,7 @@ internal sealed class NativeClient : IAsyncDisposable
             CertificateLength = certificateBuffer.Length,
             DataProtectionKey = dataProtectionKey.Pointer,
             DataProtectionKeyLength = dataProtectionKey.Length,
-            CompressionEnabled = 0,
+            CompressionEnabled = compressionEnabled ? (byte)1 : (byte)0,
             CompressionLevel = Protocol.DefaultZstandardLevel,
             MinimumInputSize = (nuint)Protocol.DefaultZstandardMinimumInputBytes,
             MinimumSavings = (nuint)Protocol.DefaultZstandardMinimumSavingsBytes,

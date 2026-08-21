@@ -303,15 +303,16 @@ structure valueEnvelope {
 }
 
 @clientDefaults(
-    // Transitional current defaults. The target maintained policy is owned by
-    // clients/CLIENT.md and intentionally has no minimum input/savings threshold.
+    // Maintained formatted-value defaults. Automatic compression uses one
+    // level-1 Zstandard frame and keeps it only when the complete frame is
+    // smaller; zero means no input-size or minimum-savings threshold.
     maxInFlight: 256,
     connectTimeoutMilliseconds: 5000,
     requestTimeoutMilliseconds: 2000,
     retryMaxAttempts: 2,
     zstandardLevel: 1,
-    zstandardMinimumInputBytes: 1024,
-    zstandardMinimumSavingsBytes: 64,
+    zstandardMinimumInputBytes: 0,
+    zstandardMinimumSavingsBytes: 0,
     serverName: "localhost",
     certificatePemType: "CERTIFICATE",
     minimumPositiveValue: 1,

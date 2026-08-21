@@ -66,6 +66,7 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
                 options.EffectiveConnectTimeout,
                 options.EffectiveRequestTimeout,
                 options.MaximumStreamLanes,
+                options.CompressionEnabled,
                 cancellationToken).ConfigureAwait(false);
             return new Client(nativeClient);
         }

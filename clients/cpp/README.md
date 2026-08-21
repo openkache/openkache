@@ -70,6 +70,11 @@ coordinate exact revision `draft-2026-08-19.4` out of band as described in
 them; the revision is not negotiated on the wire. Transport and validation
 failures throw `openkache::Error`.
 
+Formatted writes use automatic level-1 Zstandard compression by default and
+retain a completed frame only when it is smaller. Set
+`Connect_Options::compression_enabled` to `false` for an explicit
+uncompressed opt-out.
+
 The C++ layer does not duplicate protocol or protection logic. Its operation
 and outcome values come from the C ABI, whose Smithy-derived constants live in
 the shared core include directory.

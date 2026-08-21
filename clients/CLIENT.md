@@ -23,8 +23,9 @@ model and envelope remain transitional until their respective migrations land.
 
 Package READMEs may expose those generated/core artifacts for compatibility, but
 they must label legacy fixed-width-ID assumptions, legacy JSON envelopes,
-threshold-based compression, and QUIC-only transport as current transitional
-behavior.
+and QUIC-only transport as current transitional behavior. Threshold-based
+compression is no longer a maintained default; callers that need it may still
+select explicit per-operation settings.
 
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.

@@ -129,13 +129,13 @@ const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
  * Zstandard compression settings applied by the Rust value codec.
  */
 export interface Zstandard_Options {
-  /** Enables Zstandard compression before encryption. */
+  /** Enables automatic level-1 Zstandard compression before encryption. */
   readonly enabled?: boolean
   /** Zstandard compression level from the shared contract range. */
   readonly level?: number
-  /** Values below this byte length bypass compression. */
+  /** Optional input-size threshold; the maintained default is zero. */
   readonly minimum_input_size?: number
-  /** Compressed values must save at least this many bytes. */
+  /** Optional savings threshold; the maintained default is zero. */
   readonly minimum_savings?: number
 }
 

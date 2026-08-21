@@ -130,7 +130,9 @@ struct Connect_Options {
     std::vector<Byte> certificate;
     /// Optional exact 32-byte root key. Empty selects unprotected values.
     std::vector<Byte> data_protection_key;
-    bool compression_enabled = false;
+    /// Automatic level-1 Zstandard compression is enabled by default. Set to
+    /// false to preserve the exact uncompressed formatted-value behavior.
+    bool compression_enabled = true;
     std::int32_t compression_level = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL;
     std::size_t minimum_input_size = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES;
     std::size_t minimum_savings = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES;

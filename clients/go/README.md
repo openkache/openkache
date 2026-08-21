@@ -95,13 +95,15 @@ Use `client.Smithy()` when an application needs the generated
 - `Identity` optionally supplies a DER/PEM client certificate chain and private
   key for mutual TLS.
 - `Compression`, `Timeouts`, `Retry`, and `MaxInFlight` map directly to core
-  settings; zero values select documented core defaults.
+  settings; the zero `CompressionOptions` value selects automatic level-1
+  Zstandard with no input-size or minimum-savings threshold. Set
+  `CompressionOptions.Disabled` to opt out explicitly.
 - `EncryptionCompact` selects deterministic AES-256-SIV-CMAC protection;
   `EncryptionRobust` (the default) selects randomized AES-256-GCM-SIV.
 - An empty `DataProtectionKey` selects unprotected values while retaining
   client-side Item ID derivation.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 4 and the extended
+  artifact. The native artifact must have ABI version 6 and the extended
   connect symbol when `Identity` is used.
 
 Protocol operations, Smithy models, and value-format identifiers are generated

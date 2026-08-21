@@ -38,7 +38,7 @@ impl ProtectionSettings {
 
     fn with_optional_key(key: Option<DataProtectionKey>) -> Self {
         Self {
-            compression: Compression::Disabled,
+            compression: Compression::default(),
             encryption: Encryption::Robust,
             encryption_explicit: false,
             key,
