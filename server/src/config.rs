@@ -339,32 +339,15 @@ impl Config {
     }
 
     pub fn generation_file_bytes(&self) -> Result<u64> {
-        // Reserve one aligned format header before the circular generation
-        // ring. Generation locations remain relative to the ring and storage
-        // I/O adds this offset at the validation boundary.
-        (BUCKET_BYTES as u64)
-            .checked_add(
-                self.segment_size
-                    .checked_add(self.blob_segment_size)
-                    .and_then(|bytes| bytes.checked_mul(self.segment_count))
-                    .and_then(|bytes| u64::try_from(bytes).ok())
-                    .ok_or_else(|| KvError::InvalidConfig("generation file size is too large".into()))?,
-            )
-            .ok_or_else(|| KvError::InvalidConfig("generation file size is too large".into()))
-    }
-
-    /// Bytes available to the circular SG/Blob generation ring after the
-    /// versioned Segment-file header.
-    pub(crate) fn generation_data_file_bytes(&self) -> Result<u64> {
         self.segment_size
             .checked_add(self.blob_segment_size)
             .and_then(|bytes| bytes.checked_mul(self.segment_count))
             .and_then(|bytes| u64::try_from(bytes).ok())
-            .ok_or_else(|| KvError::InvalidConfig("generation data file size is too large".into()))
+            .ok_or_else(|| KvError::InvalidConfig("generation file size is too large".into()))
     }
 
     pub fn logical_sg_capacity(&self) -> Result<usize> {
-        let physical = usize::try_from(self.generation_data_file_bytes()?)
+        let physical = usize::try_from(self.generation_file_bytes()?)
             .map_err(|_| KvError::InvalidConfig("generation file does not fit usize".into()))?
             / self.segment_size;
         physical

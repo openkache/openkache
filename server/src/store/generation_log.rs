@@ -117,14 +117,7 @@ impl GenerationLog {
             .record_start
             .checked_add(location.record_len)
             .ok_or_else(|| KvError::Worker("persisted generation offset overflowed".into()))?;
-        if !location.record_start.is_multiple_of(BUCKET_BYTES as u64)
-            || u64::from(location.blob_padded_len) > self.blob_staging_limit
-            || location.record_len
-                != u64::from(location.blob_padded_len)
-                    .checked_add(self.segment_size)
-                    .ok_or_else(|| {
-                        KvError::Worker("persisted generation length overflowed".into())
-                    })?
+        if location.record_len != u64::from(location.blob_padded_len) + self.segment_size
             || location.blob_logical_len > location.blob_padded_len
             || !u64::from(location.blob_padded_len).is_multiple_of(BUCKET_BYTES as u64)
             || record_end > self.capacity
@@ -134,24 +127,14 @@ impl GenerationLog {
                 "persisted generation metadata does not match the configured geometry".into(),
             ));
         }
-        if self
-            .records
-            .iter()
-            .any(|previous| previous.logical_sg_id == location.logical_sg_id)
-        {
-            return Err(KvError::Worker(
-                "persisted generation metadata repeats a logical SG".into(),
-            ));
-        }
-        if self.records.iter().any(|previous| {
-            let previous_end = previous
+        if let Some(previous) = self.records.back()
+            && previous
                 .record_start
                 .checked_add(previous.record_len)
-                .unwrap_or(self.capacity);
-            location.record_start < previous_end && previous.record_start < record_end
-        }) {
+                .is_none()
+        {
             return Err(KvError::Worker(
-                "persisted generation metadata contains overlapping records".into(),
+                "persisted generation metadata contains an invalid predecessor".into(),
             ));
         }
         self.tail = if record_end == self.capacity {

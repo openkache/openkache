@@ -126,11 +126,6 @@ pub(super) enum PendingKeyedMutation {
         include_visible_state: bool,
         response: PendingKeyedResponse,
     },
-    Delete {
-        storage_key: StorageKey,
-        previous: TableLocation,
-        previous_mutable_value: Option<MutableValueHandle>,
-    },
 }
 
 impl Kvkache {
@@ -564,37 +559,9 @@ impl Kvkache {
             self.remove_expired_location(storage_key, previous)?;
             return Ok((false, false));
         }
-        if let Some(replacement) = self.try_replace_tombstone_in_place(
-            storage_key,
-            previous.table_location,
-            previous.mutable_value,
-        )? {
-            self.publish_tombstone_location(
-                storage_key,
-                Some(previous.table_location),
-                previous.mutable_value,
-                replacement,
-            )?;
-            self.live_keys = self.live_keys.saturating_sub(1);
-            return Ok((true, false));
-        }
-        if let Some(replacement) = self.try_append_tombstone(storage_key)? {
-            self.publish_tombstone_location(
-                storage_key,
-                Some(previous.table_location),
-                previous.mutable_value,
-                replacement,
-            )?;
-            self.live_keys = self.live_keys.saturating_sub(1);
-            return Ok((true, false));
-        }
-        self.pending_keyed_mutations
-            .push_back(PendingKeyedMutation::Delete {
-                storage_key,
-                previous: previous.table_location,
-                previous_mutable_value: previous.mutable_value,
-            });
-        Ok((false, true))
+        self.remove_table_location(storage_key, previous.table_location, previous.mutable_value)?;
+        self.live_keys = self.live_keys.saturating_sub(1);
+        Ok((true, false))
     }
 
     pub(super) fn remove_expired_location(
@@ -618,22 +585,7 @@ impl Kvkache {
         {
             return Ok(());
         }
-        let replacement = if let Some(replacement) = self.try_replace_tombstone_in_place(
-            storage_key,
-            previous.table_location,
-            previous.mutable_value,
-        )? {
-            replacement
-        } else {
-            self.try_append_tombstone(storage_key)?
-                .ok_or_else(|| KvError::NoCapacity)?
-        };
-        self.publish_tombstone_location(
-            storage_key,
-            Some(previous.table_location),
-            previous.mutable_value,
-            replacement,
-        )?;
+        self.remove_table_location(storage_key, previous.table_location, previous.mutable_value)?;
         self.live_keys = self.live_keys.saturating_sub(1);
         Ok(())
     }

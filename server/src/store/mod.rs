@@ -23,7 +23,6 @@ mod committed_generation;
 mod direct_store;
 #[allow(dead_code)]
 mod generation_log;
-mod format;
 mod large_value_log;
 mod sg_directory;
 
@@ -34,7 +33,6 @@ pub(crate) use self::committed_generation::*;
 pub(crate) use self::direct_store::*;
 #[allow(unused_imports)]
 pub(crate) use self::generation_log::*;
-pub(crate) use self::format::*;
 pub(crate) use self::large_value_log::*;
 pub(crate) use self::sg_directory::*;
 

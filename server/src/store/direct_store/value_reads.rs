@@ -6,8 +6,8 @@ use crate::{BUCKET_BYTES, Config, KvError, Result};
 
 use super::{
     BlobArena, BlobHandle, BlobRef, CommittedGenerationState, DirectIoBuffer, DirectStoreIo,
-    MAX_LEASED_SSD_VALUE_READ_BYTES, MutableGeneration, SEGMENT_FILE_HEADER_BYTES, StoredValue,
-    decode_stored_value, read_exact_direct, remove_stored_value_tag,
+    MAX_LEASED_SSD_VALUE_READ_BYTES, MutableGeneration, StoredValue, decode_stored_value,
+    read_exact_direct, remove_stored_value_tag,
 };
 
 pub(super) async fn read_owned_extent(
@@ -29,11 +29,6 @@ pub(super) async fn read_owned_extent(
         return Err(KvError::Worker(invalid_range.into()));
     }
     if value_ref.value_len == 0 {
-        if value_ref.value_checksum != crc32fast::hash(&[]) {
-            return Err(KvError::Worker(format!(
-                "{operation} checksum does not match the committed Blob payload"
-            )));
-        }
         return Ok(Vec::new());
     }
     let absolute = record_start + u64::from(value_ref.value_offset);
@@ -53,13 +48,7 @@ pub(super) async fn read_owned_extent(
     )
     .await?;
     io.data_read.set(io.data_read.get() + read_len as u64);
-    let value = bytes[prefix..prefix + value_ref.value_len as usize].to_vec();
-    if crc32fast::hash(&value) != value_ref.value_checksum {
-        return Err(KvError::Worker(format!(
-            "{operation} checksum does not match the committed Blob payload"
-        )));
-    }
-    Ok(value)
+    Ok(bytes[prefix..prefix + value_ref.value_len as usize].to_vec())
 }
 
 pub(super) fn read_mutable_value(
@@ -91,14 +80,12 @@ pub(super) fn read_arena_value(
             .get_value(BlobHandle {
                 slot: blob_ref.value_offset,
                 value_len: blob_ref.value_len,
-                value_checksum: blob_ref.value_checksum,
             })
             .ok_or_else(|| KvError::Worker(invalid_blob.into())),
         StoredValue::Large(value_ref) => large_value_arena
             .get_value(BlobHandle {
                 slot: value_ref.value_offset,
                 value_len: value_ref.value_len,
-                value_checksum: value_ref.value_checksum,
             })
             .ok_or_else(|| KvError::Worker(invalid_large_value.into())),
     }
@@ -138,7 +125,7 @@ pub(super) async fn read_ssd_value(
             }
             read_ssd_extent(
                 data,
-                SEGMENT_FILE_HEADER_BYTES + backing.location.record_start,
+                backing.location.record_start,
                 blob_ref,
                 config.read_max_time_us,
                 "generation Blob read",
@@ -184,11 +171,6 @@ async fn read_ssd_extent(
     lease_response: bool,
 ) -> Result<StoredItemValue> {
     if value_ref.value_len == 0 {
-        if value_ref.value_checksum != crc32fast::hash(&[]) {
-            return Err(KvError::Worker(format!(
-                "{operation} checksum does not match the committed Blob payload"
-            )));
-        }
         return Ok(StoredItemValue::new(Vec::new()));
     }
     let absolute = record_start + u64::from(value_ref.value_offset);
@@ -209,12 +191,6 @@ async fn read_ssd_extent(
         )
         .await?;
         io.data_read.set(io.data_read.get() + read_len as u64);
-        let value = &bytes[prefix..prefix + value_ref.value_len as usize];
-        if crc32fast::hash(value) != value_ref.value_checksum {
-            return Err(KvError::Worker(format!(
-                "{operation} checksum does not match the committed Blob payload"
-            )));
-        }
         return Ok(StoredItemValue::from_direct_read(
             bytes,
             prefix..prefix + value_ref.value_len as usize,
@@ -230,11 +206,7 @@ async fn read_ssd_extent(
     )
     .await?;
     io.data_read.set(io.data_read.get() + read_len as u64);
-    let value = bytes[prefix..prefix + value_ref.value_len as usize].to_vec();
-    if crc32fast::hash(&value) != value_ref.value_checksum {
-        return Err(KvError::Worker(format!(
-            "{operation} checksum does not match the committed Blob payload"
-        )));
-    }
-    Ok(StoredItemValue::new(value))
+    Ok(StoredItemValue::new(
+        bytes[prefix..prefix + value_ref.value_len as usize].to_vec(),
+    ))
 }

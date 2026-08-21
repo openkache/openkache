@@ -75,7 +75,7 @@ impl Kvkache {
         });
         if !set_condition_allows(options.condition, initial_previous_live) {
             if let Some(previous) = initial_previous {
-                self.remove_expired_item(&storage_key, previous).await?;
+                self.remove_expired_item(&storage_key, previous)?;
             }
             return Ok(SetOutcome::NotStored);
         }
@@ -98,7 +98,7 @@ impl Kvkache {
             });
             if !set_condition_allows(options.condition, previous_live) {
                 if let Some(previous) = previous {
-                    self.remove_expired_item(&storage_key, previous).await?;
+                    self.remove_expired_item(&storage_key, previous)?;
                 }
                 return Ok(SetOutcome::NotStored);
             }
@@ -192,37 +192,17 @@ impl Kvkache {
             return Ok(false);
         };
         if !previous.item.is_live_at(now_ms) {
-            self.remove_expired_item(storage_key, previous).await?;
+            self.remove_expired_item(storage_key, previous)?;
             return Ok(false);
         }
         let previous_location = previous.table_location;
         let previous_mutable_value = self.mutable_value_handle(&previous);
-        let replacement = if let Some(replacement) = self.try_replace_tombstone_in_place(
-            *storage_key,
-            previous_location,
-            previous_mutable_value,
-        )? {
-            replacement
-        } else {
-            loop {
-                if let Some(replacement) = self.try_append_tombstone(*storage_key)? {
-                    break replacement;
-                }
-                let lane = self.fullest_mutable_lane()?;
-                self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
-            }
-        };
-        self.publish_tombstone_location(
-            *storage_key,
-            Some(previous_location),
-            previous_mutable_value,
-            replacement,
-        )?;
+        self.remove_table_location(*storage_key, previous_location, previous_mutable_value)?;
         self.live_keys = self.live_keys.saturating_sub(1);
         Ok(true)
     }
 
-    async fn remove_expired_item(
+    fn remove_expired_item(
         &mut self,
         storage_key: &StorageKey,
         previous: super::LocatedItem,
@@ -236,26 +216,10 @@ impl Kvkache {
             return Ok(());
         }
         let previous_mutable_value = self.mutable_value_handle(&previous);
-        let replacement = if let Some(replacement) = self.try_replace_tombstone_in_place(
+        self.remove_table_location(
             *storage_key,
             previous.table_location,
             previous_mutable_value,
-        )? {
-            replacement
-        } else {
-            loop {
-                if let Some(replacement) = self.try_append_tombstone(*storage_key)? {
-                    break replacement;
-                }
-                let lane = self.fullest_mutable_lane()?;
-                self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
-            }
-        };
-        self.publish_tombstone_location(
-            *storage_key,
-            Some(previous.table_location),
-            previous_mutable_value,
-            replacement,
         )?;
         self.live_keys = self.live_keys.saturating_sub(1);
         Ok(())

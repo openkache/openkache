@@ -10,11 +10,11 @@ use futures_util::future::FutureExt;
 use futures_util::stream::StreamExt;
 
 use super::{
-    BlobArena, BlobHandle, ClosingFlush, CommittedGenerationState, DirectIoBuffer, FlushCompletion,
-    GenerationIntegrity, GenerationLocation, GenerationReservation, Kvkache, LargeValueLocation,
-    MutableGeneration, MutableSegment, PreparedFlush, RamBacking, SEGMENT_FILE_HEADER_BYTES,
-    SegmentFlushReason, StoredValue, decode_stored_value, encode_blob_ref, encode_large_value_ref,
-    rewrite_segment_values, storage_operation_error, write_all_direct,
+    BlobArena, BlobHandle, BlobRef, ClosingFlush, CommittedGenerationState, DirectIoBuffer,
+    FlushCompletion, GenerationLocation, GenerationReservation, Kvkache, LargeValueLocation,
+    MutableGeneration, MutableSegment, PreparedFlush, RamBacking, SegmentFlushReason, StoredValue,
+    decode_stored_value, encode_blob_ref, encode_large_value_ref, rewrite_segment_values,
+    storage_operation_error, write_all_direct,
 };
 
 fn direct_buffer_from_bytes(bytes: &[u8]) -> Result<Option<DirectIoBuffer>> {
@@ -48,7 +48,7 @@ async fn write_generation(
             Some(buffer) => write_all_direct(
                 &data,
                 buffer,
-                SEGMENT_FILE_HEADER_BYTES + location.record_start,
+                location.record_start,
                 blob_physical_len,
                 config.write_max_time_us,
                 "generation Blob write",
@@ -61,7 +61,7 @@ async fn write_generation(
     let segment_future = write_all_direct(
         &data,
         segment_write,
-        SEGMENT_FILE_HEADER_BYTES + location.sg_base,
+        location.sg_base,
         config.segment_size,
         config.write_max_time_us,
         "generation SG write",
@@ -115,10 +115,6 @@ impl Kvkache {
         while self.has_background_work() {
             self.wait_for_background_progress().await?;
         }
-        // The checkpoint is the durable publication record.  It is written
-        // only after both paired data files have synced and their checksums
-        // have been recorded.
-        self.checkpoint().await?;
         Ok(())
     }
 
@@ -219,18 +215,22 @@ impl Kvkache {
                     let handle = BlobHandle {
                         slot: blob_ref.value_offset,
                         value_len: blob_ref.value_len,
-                        value_checksum: blob_ref.value_checksum,
                     };
-                    let blob_ref = packed.blob_ref(handle)?;
+                    let blob_ref = packed.blob_ref(handle).unwrap_or(BlobRef {
+                        value_offset: 0,
+                        value_len: 0,
+                    });
                     Ok(Some(encode_blob_ref(blob_ref)))
                 }
                 StoredValue::Large(value_ref) => {
                     let handle = BlobHandle {
                         slot: value_ref.value_offset,
                         value_len: value_ref.value_len,
-                        value_checksum: value_ref.value_checksum,
                     };
-                    let value_ref = packed_large_values.blob_ref(handle)?;
+                    let value_ref = packed_large_values.blob_ref(handle).unwrap_or(BlobRef {
+                        value_offset: 0,
+                        value_len: 0,
+                    });
                     Ok(Some(encode_large_value_ref(value_ref)))
                 }
             }
@@ -283,9 +283,6 @@ impl Kvkache {
             .set(self.io.data_written.get() + physical_bytes);
         let retain_ram = self.config.stable_ram_segment_count != 0;
         let logical_sg_id = state.location.logical_sg_id;
-        if let Some(integrity) = self.pending_generation_integrity.remove(&logical_sg_id) {
-            self.generation_integrity.insert(logical_sg_id, integrity);
-        }
         let generation_capacity_bytes = state.location.record_len
             + state
                 .large_value_location
@@ -410,22 +407,6 @@ impl Kvkache {
         let file = self.data.clone();
         let large_values = self.large_values.clone();
         let config = self.config.clone();
-        let blob_checksum = prepared.blob_write.as_ref().map_or_else(
-            || crc32fast::hash(&[]),
-            |buffer| crc32fast::hash(&buffer[..prepared.blob_logical_len]),
-        );
-        let large_value_checksum = prepared.large_value_write.as_ref().map_or_else(
-            || crc32fast::hash(&[]),
-            |buffer| crc32fast::hash(&buffer[..prepared.large_value_logical_len]),
-        );
-        self.pending_generation_integrity.insert(
-            prepared.logical_sg_id,
-            GenerationIntegrity {
-                segment_checksum: crc32fast::hash(&prepared.segment_write),
-                blob_checksum,
-                large_value_checksum,
-            },
-        );
         self.inflight_flushes.push(
             async move {
                 let result = write_generation(
