@@ -191,6 +191,8 @@ export interface Client_Options {
   readonly retry?: Retry_Options
   /** Maximum concurrent request lanes on one connection (TCP uses one lane). */
   readonly max_in_flight?: number
+  /** Aggregate bytes retained across transport and value-protection work. */
+  readonly max_in_flight_bytes?: number
   /** Authenticated value-encryption profile; requires `data_protection_key`. */
   readonly encryption?: "compact" | "robust"
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
@@ -351,6 +353,7 @@ export class OpenKache_Client {
       retry_max_attempts:
         retry.max_attempts ?? SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
+      max_in_flight_bytes: options.max_in_flight_bytes,
       encryption: options.encryption,
       key_spec: options.key_spec,
       transport: options.transport ?? "quic",
@@ -432,7 +435,8 @@ export class OpenKache_Client {
    * @typeParam Value - Expected object shape selected by the caller.
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @returns The decoded value, or `undefined` when the key does not exist.
-   * @throws {OpenKache_Error} When transport, decryption, or decoding fails.
+   * @throws {OpenKache_Error} When the client is closed, the key is invalid,
+   * or transport, decryption, or decoding fails.
    */
   async get<Value = Json_Value>(
     key: Client_Key,
@@ -463,7 +467,8 @@ export class OpenKache_Client {
    * custom object codec.
    * @param options - Optional TTL and `if_absent` or `if_present` condition.
    * @returns Whether the operation created, replaced, or did not store the key.
-   * @throws {OpenKache_Error} When validation, encoding, transport, or storage fails.
+   * @throws {OpenKache_Error} When the client is closed or validation, encoding,
+   * transport, or storage fails.
    */
   async set<Value>(
     key: Client_Key,
@@ -502,6 +507,12 @@ export class OpenKache_Client {
    * undefined, scalar map-key identity, and map order.  Native projection
    * returns bigint/number/Uint8Array/Map and rejects values that cannot be
    * represented without loss.
+   *
+   * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
+   * @param representation - Lossless model wrappers by default, or a strict native projection.
+   * @returns The decoded value, or `undefined` when the key does not exist.
+   * @throws {OpenKache_Error} When the client is closed, the key or representation is invalid,
+   * or transport or decoding fails.
    */
   async get_structured(
     key: Client_Key,
@@ -546,6 +557,13 @@ export class OpenKache_Client {
    *
    * This method never routes through legacy JSON or Raw operations; the
    * generated native adapter owns the structured selector directly.
+   *
+   * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
+   * @param value - A runtime value accepted by `encode_structured_value`.
+   * @param options - Optional TTL and atomic existence condition.
+   * @returns Whether the operation created, replaced, or did not store the key.
+   * @throws {OpenKache_Error} When the client is closed or encoding, validation,
+   * transport, or storage fails.
    */
   async set_structured(
     key: Client_Key,
@@ -1509,6 +1527,7 @@ function validate_options(options: Client_Options): void {
   validate_timeout(options.timeouts?.request_ms, "timeouts.request_ms")
   validate_positive_integer(options.retry?.max_attempts, "retry.max_attempts")
   validate_positive_integer(options.max_in_flight, "max_in_flight")
+  validate_positive_integer(options.max_in_flight_bytes, "max_in_flight_bytes")
   if (
     options.encryption !== undefined &&
     options.encryption !== "compact" &&

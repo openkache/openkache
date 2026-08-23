@@ -33,6 +33,7 @@ export interface Native_Client_Options {
   readonly request_timeout_ms?: number
   readonly retry_max_attempts?: number
   readonly max_in_flight?: number
+  readonly max_in_flight_bytes?: number
   readonly encryption?: "compact" | "robust"
   readonly key_spec?: "integer" | "text" | "bytes"
   readonly transport?: "quic" | "tls_tcp" | "quic_insecure" | "tls_tcp_insecure"
