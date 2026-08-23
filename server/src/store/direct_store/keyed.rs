@@ -353,8 +353,7 @@ impl Kvkache {
                     }
                 }
                 (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
-                    match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous)
-                    {
+                    match self.finish_keyed_delete(completed.storage_key, previous) {
                         Ok((deleted, pending)) => (
                             Ok(KeyedOutcome::Deleted(deleted)),
                             Some(KeyedVisibleState::Missing),
@@ -424,11 +423,7 @@ impl Kvkache {
                                 ),
                                 Err(error) => (Err(error), None, false, false),
                             },
-                            None => match self.finish_keyed_delete(
-                                completed.storage_key,
-                                unix_time_ms(),
-                                state,
-                            ) {
+                            None => match self.finish_keyed_delete(completed.storage_key, state) {
                                 Ok((deleted, pending)) => (
                                     Ok(KeyedOutcome::CompareExchange(deleted)),
                                     Some(KeyedVisibleState::Missing),
@@ -471,9 +466,24 @@ impl Kvkache {
         include_visible_state: bool,
         pending_response: PendingKeyedResponse,
     ) -> Result<(SetOutcome, Option<KeyedVisibleState>, bool, bool)> {
-        let previous_live = previous
+        let previous_observed_live = previous
             .as_ref()
             .is_some_and(|located| item_state_is_live_at(located.item_state, evaluated_at_ms));
+        let previous_location_current = previous.as_ref().is_some_and(|located| {
+            self.table
+                .candidate_locations(&storage_key)
+                .contains(&located.table_location)
+        });
+        // Unconditional SET preserves the observed replacement result even
+        // when capacity retired the old location before publication. A
+        // conditional SET must treat that stale location as absent/present
+        // according to the state that is current at the mutation boundary.
+        let previous_live = match options.condition {
+            StorageWriteCondition::Any => previous_observed_live,
+            StorageWriteCondition::IfAbsent | StorageWriteCondition::IfPresent => {
+                previous_observed_live && previous_location_current
+            }
+        };
         if !set_condition_allows(options.condition, previous_live) {
             if let Some(previous) = previous {
                 self.remove_expired_location(storage_key, previous)?;
@@ -491,9 +501,20 @@ impl Kvkache {
         // Admission can wait for a capacity refresh. Re-evaluate the
         // condition at the mutation boundary so expiration is observed at
         // the same point that determines the replacement outcome.
-        let previous_live = previous
+        let previous_observed_live = previous
             .as_ref()
             .is_some_and(|located| item_state_is_live_at(located.item_state, unix_time_ms()));
+        let previous_location_current = previous.as_ref().is_some_and(|located| {
+            self.table
+                .candidate_locations(&storage_key)
+                .contains(&located.table_location)
+        });
+        let previous_live = match options.condition {
+            StorageWriteCondition::Any => previous_observed_live,
+            StorageWriteCondition::IfAbsent | StorageWriteCondition::IfPresent => {
+                previous_observed_live && previous_location_current
+            }
+        };
         if !set_condition_allows(options.condition, previous_live) {
             if let Some(previous) = previous {
                 self.remove_expired_location(storage_key, previous)?;
@@ -561,14 +582,23 @@ impl Kvkache {
     fn finish_keyed_delete(
         &mut self,
         storage_key: StorageKey,
-        evaluated_at_ms: u64,
         previous: Option<LocatedKeyState>,
     ) -> Result<(bool, bool)> {
         let Some(previous) = previous else {
             return Ok((false, false));
         };
-        if !item_state_is_live_at(previous.item_state, evaluated_at_ms) {
+        // The read observation may have waited on direct I/O. Evaluate the
+        // expiration at the mutation boundary rather than trusting the time
+        // captured before the asynchronous read completed.
+        if !item_state_is_live_at(previous.item_state, unix_time_ms()) {
             self.remove_expired_location(storage_key, previous)?;
+            return Ok((false, false));
+        }
+        if !self
+            .table
+            .candidate_locations(&storage_key)
+            .contains(&previous.table_location)
+        {
             return Ok((false, false));
         }
         if let Some(replacement) = self.try_replace_tombstone_in_place(
@@ -576,6 +606,7 @@ impl Kvkache {
             previous.table_location,
             previous.mutable_value,
         )? {
+            let deleted = item_state_is_live_at(previous.item_state, unix_time_ms());
             self.publish_tombstone_location(
                 storage_key,
                 Some(previous.table_location),
@@ -583,9 +614,10 @@ impl Kvkache {
                 replacement,
             )?;
             self.live_keys = self.live_keys.saturating_sub(1);
-            return Ok((true, false));
+            return Ok((deleted, false));
         }
         if let Some(replacement) = self.try_append_tombstone(storage_key)? {
+            let deleted = item_state_is_live_at(previous.item_state, unix_time_ms());
             self.publish_tombstone_location(
                 storage_key,
                 Some(previous.table_location),
@@ -593,7 +625,7 @@ impl Kvkache {
                 replacement,
             )?;
             self.live_keys = self.live_keys.saturating_sub(1);
-            return Ok((true, false));
+            return Ok((deleted, false));
         }
         self.pending_keyed_mutations
             .push_back(PendingKeyedMutation::Delete {

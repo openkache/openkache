@@ -2,20 +2,30 @@
 
 The Swift package is a thin actor-based adapter over the shared Rust client
 core. It accepts Foundation `Data`, exposes async cache operations, and does
-not duplicate QUIC framing, TLS validation, retries, key derivation,
-compression, encryption, or value parsing. The current binding is QUIC-only;
-TLS-over-TCP is part of the target maintained-client contract.
+not duplicate QUIC/TCP framing, TLS validation, retries, key derivation,
+compression, encryption, or value parsing. `OpenKacheClientOptions.transport`
+selects verified QUIC (the default), verified TLS-over-TCP, or an explicit
+TLS-preserving insecure selector.
 
 This README documents the current transitional Swift/FFI API. The target
 variable-width Item ID, structured-value, compression, and dual-transport
 contracts live in the shared draft documents linked by [`../README.md`](../README.md).
 
 `OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
-keys use the `Text` type and `Data` keys use the `Bytes` type; both are encoded
-as canonical deterministic CBOR before crossing the native ABI. Use
+keys use the `Text` type and `Data` keys use the `Bytes` type; the logical bytes
+and generated key discriminator cross the native ABI and the shared core
+performs canonical encoding. Use
 `OpenKacheRawClient` when an integration owns exact protocol item IDs and
 opaque value bytes; it implements the generated `Smithy_OpenKache_Api`
 contract.
+
+ABI v6 operations use the native request-handle lifecycle (`poll`, `wait`,
+`cancel`, and `free`). A canceled read is surfaced as Swift's
+`CancellationError`; a mutation that crossed native admission throws
+`OpenKacheUnknownMutationError` and must not be replayed. Raw SETs that request
+complete policy flags, and scoped or namespace calls without request handles,
+use a detached synchronous safe-completion boundary so native ownership and
+definitive outcomes are drained before cancellation returns.
 
 The native library exports the versioned ABI declared in
 [`../core/include/openkache/client_abi.h`](../core/include/openkache/client_abi.h).
@@ -121,6 +131,11 @@ contain exactly 32 persistent random bytes.
 `certificate` may be one DER certificate or a PEM chain; omit it to use system
 roots. A numeric address may provide a separate `serverName` for certificate
 verification.
+
+Formatted writes use automatic level-1 Zstandard compression by default and
+retain a completed frame only when it is smaller. Pass
+`compression: .disabled` to `OpenKacheClientOptions` for an explicit
+uncompressed opt-out.
 
 The Smithy operation, value-format, connection-state, and native ABI
 declarations are generated into SwiftPM's build directory from

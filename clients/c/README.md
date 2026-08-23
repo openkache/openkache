@@ -2,10 +2,15 @@
 
 The C package is a small C17 ABI over the shared Rust client core. It provides
 protected `PING`, `GET`, `SET`, `DELETE`, and transitional administrative
-operations while
-the core owns QUIC-over-TLS, retries, framing, compression, encryption, and the
-worker lifecycle. The current binding is QUIC-only; TLS-over-TCP is part of the
-target maintained-client contract.
+operations while the core owns TLS 1.3 over QUIC or TCP, retries, framing,
+compression, encryption, and the worker lifecycle. Select
+`OPENKACHE_CLIENT_TRANSPORT_QUIC` (the legacy default),
+`OPENKACHE_CLIENT_TRANSPORT_TLS_TCP`,
+`OPENKACHE_CLIENT_TRANSPORT_QUIC_INSECURE`, or
+`OPENKACHE_CLIENT_TRANSPORT_TLS_TCP_INSECURE` through the generated
+`openkache_client_connect_transport` entry point. The insecure selectors are
+explicit opt-outs: they keep TLS encryption but disable certificate and server
+identity verification.
 
 `STATS` and `SYNC` are transitional experimental maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
@@ -65,10 +70,22 @@ released with `openkache_client_free`.
 `openkache_client_connect_with_options` is a named-field convenience wrapper.
 An empty trust buffer selects system roots. `openkache_client_execute` accepts
 one complete canonical v1 key item and derives its protected Item ID, while
-`openkache_client_execute_raw` accepts `0..=32`-byte exact item IDs and sends
-opaque values unchanged. C callers that construct protected keys directly should use
+`openkache_client_execute_raw` accepts `0..=32`-byte exact item IDs. Raw
+`GET`/`SET`/`DELETE` preserve their opaque value bytes; the generated JSON,
+StructuredValue-CBOR-v1, and caller-owned-v0 operations retain the exact
+address while applying their documented value handling. C callers that construct
+protected keys directly should use the
 the `Integer`, `Text`, and `Bytes` rules in
 [`../KEY_FORMAT.md`](../KEY_FORMAT.md).
+
+The ABI v6 connect functions keep their historical coupled
+`data_protection_key` semantics. Bindings that need publicly derivable Item IDs
+with protected values can probe `openkache_client_abi_version_v7()` and, when
+it returns `7`, call `openkache_client_connect_with_options_v7`. The v7 options
+reference the v6 transport settings but require an explicit Item-ID root and
+an immutable array of value-key records; the legacy data-protection field must
+be empty and is never reinterpreted. A zero-length Item-ID root selects the
+public all-zero root, while value-key IDs and key material remain independent.
 
 `openkache_client_namespace_open`, `openkache_client_namespace_update_policy`,
 and `openkache_client_namespace_delete` expose those transitional

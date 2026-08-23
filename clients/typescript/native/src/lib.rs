@@ -7,14 +7,15 @@ use napi::bindgen_prelude::{BigInt, Uint8Array};
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use openkache_client_core::value::{
-    Compression, Encryption, Value, ZstandardOptions, encode_json_output_with_budget,
+    Compression, Encryption, JsonValue, Value, ZstandardOptions, encode_json_output_with_budget,
     parse_json_input_with_budget,
 };
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DeleteOutcome, Endpoint,
     EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpec,
-    NamespaceDescriptor, NamespacePolicy, OverridePolicy, PrivateKey, ProtectedClient, RetryPolicy,
-    SetCondition, SetOptions, SetOutcome,
+    NamespaceDescriptor, NamespacePolicy, OverridePolicy, PrivateKey, ProtectedClient, RawClient,
+    RetryPolicy, ServerTrust, SetCondition, SetOptions, SetOutcome, TlsTcpProtectedClient,
+    TlsTcpRawClient,
     contract::{
         ConnectionState, SMITHY_EVICTION_DEFAULT_EVICTABLE,
         SMITHY_EVICTION_DEFAULT_EVICTION_PROTECTED, SMITHY_EVICTION_MODE_EVICTABLE,
@@ -26,7 +27,6 @@ use openkache_client_core::{
         SMITHY_SET_CONDITION_IF_ABSENT, SMITHY_SET_CONDITION_IF_PRESENT,
         SMITHY_SET_OUTCOME_CREATED, SMITHY_SET_OUTCOME_NOT_STORED, SMITHY_SET_OUTCOME_REPLACED,
     },
-    decode_structured_value as decode_structured, encode_structured_value as encode_structured,
     value_envelope,
 };
 
@@ -72,6 +72,8 @@ pub struct NativeClientOptions {
     pub encryption: Option<String>,
     #[napi(js_name = "key_spec")]
     pub key_spec: Option<String>,
+    /// Explicit transport selector: quic, tls_tcp, quic_insecure, or tls_tcp_insecure.
+    pub transport: Option<String>,
 }
 
 /// Decoded components of a canonical OpenKache value envelope.
@@ -114,10 +116,469 @@ pub struct NativeNamespaceOpenOutput {
     pub created: bool,
 }
 
+enum NativeBackend {
+    Quic(ProtectedClient),
+    TlsTcp(TlsTcpProtectedClient),
+}
+
+enum NativeRaw<'a> {
+    Quic(&'a RawClient),
+    TlsTcp(&'a TlsTcpRawClient),
+}
+
+impl NativeBackend {
+    async fn ping(&self) -> openkache_client_core::Result<Duration> {
+        match self {
+            Self::Quic(client) => client.ping().await,
+            Self::TlsTcp(client) => client.ping().await,
+        }
+    }
+
+    async fn get_canonical_key(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<Value>> {
+        match self {
+            Self::Quic(client) => client.get_canonical_key(key).await,
+            Self::TlsTcp(client) => client.get_canonical_key(key).await,
+        }
+    }
+
+    async fn get_structured_canonical_key(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<openkache_client_core::StructuredValue>> {
+        match self {
+            Self::Quic(client) => client.get_structured_canonical_key(key).await,
+            Self::TlsTcp(client) => client.get_structured_canonical_key(key).await,
+        }
+    }
+
+    async fn get_structured_canonical_key_cbor(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => client.get_structured_canonical_key_cbor(key).await,
+            Self::TlsTcp(client) => client.get_structured_canonical_key_cbor(key).await,
+        }
+    }
+
+    async fn get_json_canonical_key(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<JsonValue>> {
+        match self {
+            Self::Quic(client) => client.get_json_canonical_key(key).await,
+            Self::TlsTcp(client) => client.get_json_canonical_key(key).await,
+        }
+    }
+
+    async fn get_v0_canonical_key(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => client.get_v0_canonical_key(key).await,
+            Self::TlsTcp(client) => client.get_v0_canonical_key(key).await,
+        }
+    }
+
+    async fn set_canonical_key(
+        &self,
+        key: &[u8],
+        value: Value,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => client.set_canonical_key(key, value, options).await,
+            Self::TlsTcp(client) => client.set_canonical_key(key, value, options).await,
+        }
+    }
+
+    async fn set_structured_canonical_key_cbor(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_structured_canonical_key_cbor(key, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_structured_canonical_key_cbor(key, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn set_json_canonical_key(
+        &self,
+        key: &[u8],
+        value: JsonValue,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => client.set_json_canonical_key(key, value, options).await,
+            Self::TlsTcp(client) => client.set_json_canonical_key(key, value, options).await,
+        }
+    }
+
+    async fn set_v0_canonical_key(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => client.set_v0_canonical_key(key, value, options).await,
+            Self::TlsTcp(client) => client.set_v0_canonical_key(key, value, options).await,
+        }
+    }
+
+    async fn get_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<GetOutcome<JsonValue>> {
+        match self {
+            Self::Quic(client) => client.get_json_exact_item_id(namespace_id, item_id).await,
+            Self::TlsTcp(client) => client.get_json_exact_item_id(namespace_id, item_id).await,
+        }
+    }
+
+    async fn set_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: JsonValue,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_json_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_json_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn get_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .get_structured_exact_item_id_cbor(namespace_id, item_id)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .get_structured_exact_item_id_cbor(namespace_id, item_id)
+                    .await
+            }
+        }
+    }
+
+    async fn set_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: &[u8],
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_structured_exact_item_id_cbor(namespace_id, item_id, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_structured_exact_item_id_cbor(namespace_id, item_id, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn get_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        match self {
+            Self::Quic(client) => client.get_v0_exact_item_id(namespace_id, item_id).await,
+            Self::TlsTcp(client) => client.get_v0_exact_item_id(namespace_id, item_id).await,
+        }
+    }
+
+    async fn set_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_v0_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_v0_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn set_structured_canonical_key(
+        &self,
+        key: &[u8],
+        value: openkache_client_core::StructuredValue,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_structured_canonical_key(key, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_structured_canonical_key(key, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn delete_canonical_key(
+        &self,
+        key: &[u8],
+    ) -> openkache_client_core::Result<DeleteOutcome> {
+        match self {
+            Self::Quic(client) => client.delete_canonical_key(key).await,
+            Self::TlsTcp(client) => client.delete_canonical_key(key).await,
+        }
+    }
+
+    async fn stats(&self) -> openkache_client_core::Result<String> {
+        match self {
+            Self::Quic(client) => client.stats().await,
+            Self::TlsTcp(client) => client.stats().await,
+        }
+    }
+
+    async fn sync(&self) -> openkache_client_core::Result<()> {
+        match self {
+            Self::Quic(client) => client.sync().await,
+            Self::TlsTcp(client) => client.sync().await,
+        }
+    }
+
+    async fn reconnect(&self) -> openkache_client_core::Result<()> {
+        match self {
+            Self::Quic(client) => client.reconnect().await,
+            Self::TlsTcp(client) => client.reconnect().await,
+        }
+    }
+
+    fn connection_state(&self) -> ConnectionState {
+        match self {
+            Self::Quic(client) => client.connection_state(),
+            Self::TlsTcp(client) => client.connection_state(),
+        }
+    }
+
+    fn request_budget(&self) -> openkache_client_core::RequestBudget {
+        match self {
+            Self::Quic(client) => client.request_budget(),
+            Self::TlsTcp(client) => client.request_budget(),
+        }
+    }
+
+    fn value_limits(&self) -> openkache_client_core::ValueLimits {
+        match self {
+            Self::Quic(client) => client.value_limits(),
+            Self::TlsTcp(client) => client.value_limits(),
+        }
+    }
+
+    async fn close(&self) -> openkache_client_core::Result<()> {
+        match self {
+            Self::Quic(client) => client.close().await,
+            Self::TlsTcp(client) => client.close().await,
+        }
+    }
+
+    fn raw(&self) -> NativeRaw<'_> {
+        match self {
+            Self::Quic(client) => NativeRaw::Quic(client.raw()),
+            Self::TlsTcp(client) => NativeRaw::TlsTcp(client.raw()),
+        }
+    }
+}
+
+impl NativeRaw<'_> {
+    async fn get(&self, item_id: ItemId) -> openkache_client_core::Result<GetOutcome<ItemValue>> {
+        match self {
+            Self::Quic(client) => client.get(item_id).await,
+            Self::TlsTcp(client) => client.get(item_id).await,
+        }
+    }
+
+    async fn get_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<GetOutcome<ItemValue>> {
+        match self {
+            Self::Quic(client) => client.get_in_namespace(namespace_id, item_id).await,
+            Self::TlsTcp(client) => client.get_in_namespace(namespace_id, item_id).await,
+        }
+    }
+
+    async fn set(
+        &self,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => client.set(item_id, value, options).await,
+            Self::TlsTcp(client) => client.set(item_id, value, options).await,
+        }
+    }
+
+    async fn set_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .set_in_namespace(namespace_id, item_id, value, options)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .set_in_namespace(namespace_id, item_id, value, options)
+                    .await
+            }
+        }
+    }
+
+    async fn delete(&self, item_id: ItemId) -> openkache_client_core::Result<DeleteOutcome> {
+        match self {
+            Self::Quic(client) => client.delete(item_id).await,
+            Self::TlsTcp(client) => client.delete(item_id).await,
+        }
+    }
+
+    async fn delete_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> openkache_client_core::Result<DeleteOutcome> {
+        match self {
+            Self::Quic(client) => client.delete_in_namespace(namespace_id, item_id).await,
+            Self::TlsTcp(client) => client.delete_in_namespace(namespace_id, item_id).await,
+        }
+    }
+
+    async fn stats_in_namespace(&self, namespace_id: u64) -> openkache_client_core::Result<String> {
+        match self {
+            Self::Quic(client) => client.stats_in_namespace(namespace_id).await,
+            Self::TlsTcp(client) => client.stats_in_namespace(namespace_id).await,
+        }
+    }
+
+    async fn sync_in_namespace(&self, namespace_id: u64) -> openkache_client_core::Result<()> {
+        match self {
+            Self::Quic(client) => client.sync_in_namespace(namespace_id).await,
+            Self::TlsTcp(client) => client.sync_in_namespace(namespace_id).await,
+        }
+    }
+
+    async fn namespace_open_with_outcome(
+        &self,
+        name: &[u8],
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> openkache_client_core::Result<(NamespaceDescriptor, bool)> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .namespace_open_with_outcome(name, create_if_missing, policy)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .namespace_open_with_outcome(name, create_if_missing, policy)
+                    .await
+            }
+        }
+    }
+
+    async fn namespace_update_policy(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> openkache_client_core::Result<NamespaceDescriptor> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .namespace_update_policy(namespace_id, expected_revision, policy)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .namespace_update_policy(namespace_id, expected_revision, policy)
+                    .await
+            }
+        }
+    }
+
+    async fn namespace_delete(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+    ) -> openkache_client_core::Result<()> {
+        match self {
+            Self::Quic(client) => {
+                client
+                    .namespace_delete(namespace_id, expected_revision)
+                    .await
+            }
+            Self::TlsTcp(client) => {
+                client
+                    .namespace_delete(namespace_id, expected_revision)
+                    .await
+            }
+        }
+    }
+}
+
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
-    client: RwLock<Option<Arc<ProtectedClient>>>,
+    client: RwLock<Option<Arc<NativeBackend>>>,
 }
 
 #[napi]
@@ -150,18 +611,16 @@ impl NativeClient {
     }
 
     /// Retrieves one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "get_structured")]
     pub async fn get_structured(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
         let outcome = self
             .active_client()?
-            .get_structured_canonical_key(key.as_ref())
+            .get_structured_canonical_key_cbor(key.as_ref())
             .await
             .map_err(native_core_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(value) => encode_structured(&value)
-                .map(|payload| Some(Uint8Array::new(payload)))
-                .map_err(native_error),
+            GetOutcome::Found(payload) => Ok(Some(Uint8Array::new(payload))),
         }
     }
 
@@ -204,12 +663,12 @@ impl NativeClient {
     pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
         let client = self.active_client()?;
         let outcome = client
-            .get_canonical_key(key.as_ref())
+            .get_json_canonical_key(key.as_ref())
             .await
             .map_err(native_core_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Json(mut value)) => {
+            GetOutcome::Found(mut value) => {
                 let (payload, _permits) = encode_json_output_with_budget(
                     &mut value,
                     client.value_limits(),
@@ -220,9 +679,20 @@ impl NativeClient {
                     .map(Some)
                     .map_err(|error| native_error(error.to_string()))
             }
-            GetOutcome::Found(Value::Raw(_)) => Err(native_error(
-                "stored value uses raw serialization, expected canonical JSON",
-            )),
+        }
+    }
+
+    /// Retrieves a caller-owned version-0 envelope for a canonical key.
+    #[napi(js_name = "get_v0")]
+    pub async fn get_v0(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
+        let outcome = self
+            .active_client()?
+            .get_v0_canonical_key(key.as_ref())
+            .await
+            .map_err(native_core_error)?;
+        match outcome {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(bytes) => Ok(Some(Uint8Array::new(bytes))),
         }
     }
 
@@ -249,7 +719,7 @@ impl NativeClient {
     }
 
     /// Stores one canonical StructuredValue-CBOR-v1 payload.
-    #[napi]
+    #[napi(js_name = "set_structured")]
     pub async fn set_structured(
         &self,
         key: Uint8Array,
@@ -259,7 +729,6 @@ impl NativeClient {
         eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
-        let structured = decode_structured(value.as_ref()).map_err(native_error)?;
         let options = parse_set_options(
             condition.as_deref(),
             expiration_mode.as_deref(),
@@ -267,7 +736,7 @@ impl NativeClient {
             ttl_ms,
         )?;
         self.active_client()?
-            .set_structured_canonical_key(key.as_ref(), structured, options)
+            .set_structured_canonical_key_cbor(key.as_ref(), value.as_ref(), options)
             .await
             .map(map_set_outcome)
             .map_err(native_core_error)
@@ -342,7 +811,187 @@ impl NativeClient {
         )?;
         let _input_permit = input_permit;
         client
-            .set_canonical_key(key.as_ref(), Value::Json(value), options)
+            .set_json_canonical_key(key.as_ref(), value, options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Stores a caller-owned version-0 envelope for a canonical key.
+    #[napi(js_name = "set_v0")]
+    pub async fn set_v0(
+        &self,
+        key: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<f64>,
+    ) -> Result<String> {
+        let options = parse_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .set_v0_canonical_key(key.as_ref(), value.as_ref().to_vec(), options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Retrieves canonical JSON for an exact Item ID in a namespace.
+    #[napi(js_name = "get_json_in_namespace")]
+    pub async fn get_json_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<Option<String>> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let client = self.active_client()?;
+        let outcome = client
+            .get_json_exact_item_id(namespace_id, item_id)
+            .await
+            .map_err(native_core_error)?;
+        match outcome {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(mut value) => {
+                let (payload, _permits) = encode_json_output_with_budget(
+                    &mut value,
+                    client.value_limits(),
+                    &client.request_budget(),
+                )
+                .map_err(native_error)?;
+                String::from_utf8(payload)
+                    .map(Some)
+                    .map_err(|error| native_error(error.to_string()))
+            }
+        }
+    }
+
+    /// Stores canonical JSON for an exact Item ID in a namespace.
+    #[napi(js_name = "set_json_in_namespace")]
+    pub async fn set_json_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: String,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let client = self.active_client()?;
+        let budget = client.request_budget();
+        let (value, _permits) =
+            parse_json_input_with_budget(value.as_bytes(), client.value_limits(), &budget)
+                .map_err(native_error)?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        client
+            .set_json_exact_item_id(namespace_id, item_id, value, options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Retrieves one StructuredValue-CBOR-v1 value for an exact Item ID.
+    #[napi(js_name = "get_structured_in_namespace")]
+    pub async fn get_structured_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<Option<Uint8Array>> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        match self
+            .active_client()?
+            .get_structured_exact_item_id_cbor(namespace_id, item_id)
+            .await
+            .map_err(native_core_error)?
+        {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(payload) => Ok(Some(Uint8Array::new(payload))),
+        }
+    }
+
+    /// Stores one StructuredValue-CBOR-v1 value for an exact Item ID.
+    #[napi(js_name = "set_structured_in_namespace")]
+    pub async fn set_structured_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .set_structured_exact_item_id_cbor(namespace_id, item_id, value.as_ref(), options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_core_error)
+    }
+
+    /// Retrieves a caller-owned version-0 envelope for an exact Item ID.
+    #[napi(js_name = "get_v0_in_namespace")]
+    pub async fn get_v0_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<Option<Uint8Array>> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        match self
+            .active_client()?
+            .get_v0_exact_item_id(namespace_id, item_id)
+            .await
+            .map_err(native_core_error)?
+        {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(bytes) => Ok(Some(Uint8Array::new(bytes))),
+        }
+    }
+
+    /// Stores a caller-owned version-0 envelope for an exact Item ID.
+    #[napi(js_name = "set_v0_in_namespace")]
+    pub async fn set_v0_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .set_v0_exact_item_id(namespace_id, item_id, value.as_ref().to_vec(), options)
             .await
             .map(map_set_outcome)
             .map_err(native_core_error)
@@ -646,7 +1295,7 @@ impl NativeClient {
             .map_err(native_core_error)
     }
 
-    fn take_client(&self) -> Result<Option<Arc<ProtectedClient>>> {
+    fn take_client(&self) -> Result<Option<Arc<NativeBackend>>> {
         Ok(self
             .client
             .write()
@@ -654,7 +1303,7 @@ impl NativeClient {
             .take())
     }
 
-    fn active_client(&self) -> Result<Arc<ProtectedClient>> {
+    fn active_client(&self) -> Result<Arc<NativeBackend>> {
         self.client
             .read()
             .map_err(|_| state_error("native client state lock is poisoned"))?
@@ -672,9 +1321,23 @@ impl NativeClient {
 /// failures.
 #[napi]
 pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
-    let mut trusted_certificates =
-        Certificate::from_der_or_pem_chain(options.certificate.as_ref()).map_err(native_error)?;
-    if trusted_certificates.len() != 1 {
+    let transport = match options.transport.as_deref().unwrap_or("quic") {
+        "quic" => (false, false),
+        "tls_tcp" => (true, false),
+        "quic_insecure" => (false, true),
+        "tls_tcp_insecure" => (true, true),
+        value => {
+            return Err(invalid_argument(format!(
+                "transport must be quic, tls_tcp, quic_insecure, or tls_tcp_insecure, got {value}"
+            )));
+        }
+    };
+    let mut trusted_certificates = if transport.1 {
+        Vec::new()
+    } else {
+        Certificate::from_der_or_pem_chain(options.certificate.as_ref()).map_err(native_error)?
+    };
+    if !transport.1 && trusted_certificates.len() != 1 {
         return Err(invalid_argument(format!(
             "certificate must contain exactly one DER or PEM certificate, got {}",
             trusted_certificates.len()
@@ -706,7 +1369,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     } else {
         Compression::Disabled
     };
-    let identity = parse_identity(options.identity)?;
+    let mut identity = parse_identity(options.identity)?;
     let mut timeouts = ClientTimeouts::default();
     if let Some(connect_timeout_ms) = options.connect_timeout_ms {
         timeouts.connect =
@@ -743,27 +1406,51 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     // each native input before crossing the core boundary.
     let key_spec = parse_key_spec(options.key_spec.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
-    let trusted_certificate = trusted_certificates.remove(0);
-    let mut builder = match data_protection_key {
-        Some(key) => ProtectedClient::builder(endpoint, key),
-        None => ProtectedClient::builder_unprotected(endpoint),
+    let mut trusted_certificate = trusted_certificates.pop();
+    macro_rules! configure_builder {
+        ($builder:expr) => {{
+            let mut builder = $builder
+                .compression(compression)
+                .timeouts(timeouts)
+                .retry_policy(retry)
+                .max_in_flight(max_in_flight)
+                .key_spec(key_spec);
+            builder = if transport.1 {
+                builder.server_trust(ServerTrust::Insecure)
+            } else {
+                builder.trust_certificate(
+                    trusted_certificate
+                        .take()
+                        .expect("verified transport has one certificate"),
+                )
+            };
+            if let Some(maximum) = max_in_flight_bytes {
+                builder = builder.max_in_flight_bytes(maximum);
+            }
+            if let Some(encryption) = encryption {
+                builder = builder.encryption(encryption);
+            }
+            if let Some(identity) = identity.take() {
+                builder = builder.client_identity(identity);
+            }
+            builder.connect().await.map_err(native_error)
+        }};
     }
-    .trust_certificate(trusted_certificate)
-    .compression(compression)
-    .timeouts(timeouts)
-    .retry_policy(retry)
-    .max_in_flight(max_in_flight)
-    .key_spec(key_spec);
-    if let Some(maximum) = max_in_flight_bytes {
-        builder = builder.max_in_flight_bytes(maximum);
-    }
-    if let Some(encryption) = encryption {
-        builder = builder.encryption(encryption);
-    }
-    if let Some(identity) = identity {
-        builder = builder.client_identity(identity);
-    }
-    let client = builder.connect().await.map_err(native_error)?;
+    let client = if transport.0 {
+        match data_protection_key {
+            Some(key) => configure_builder!(TlsTcpProtectedClient::builder(endpoint, key))
+                .map(NativeBackend::TlsTcp)?,
+            None => configure_builder!(TlsTcpProtectedClient::builder_unprotected(endpoint))
+                .map(NativeBackend::TlsTcp)?,
+        }
+    } else {
+        match data_protection_key {
+            Some(key) => configure_builder!(ProtectedClient::builder(endpoint, key))
+                .map(NativeBackend::Quic)?,
+            None => configure_builder!(ProtectedClient::builder_unprotected(endpoint))
+                .map(NativeBackend::Quic)?,
+        }
+    };
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
     })

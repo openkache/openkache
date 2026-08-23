@@ -50,12 +50,19 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
     SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
     SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
+    SMITHY_FFI_KEY_SPEC_BYTES,
+    SMITHY_FFI_KEY_SPEC_INTEGER,
+    SMITHY_FFI_KEY_SPEC_TEXT,
     SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
     SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
     SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED,
     SMITHY_FFI_OPERATION_GET_JSON,
+    SMITHY_FFI_OPERATION_GET_STRUCTURED,
+    SMITHY_FFI_OPERATION_GET_V0,
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
+    SMITHY_FFI_OPERATION_SET_STRUCTURED,
+    SMITHY_FFI_OPERATION_SET_V0,
     SMITHY_FFI_RESULT_CREATED,
     SMITHY_FFI_RESULT_CANCELED,
     SMITHY_FFI_RESULT_DELETED,
@@ -69,6 +76,10 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     SMITHY_FFI_SET_CONDITION_IF_PRESENT,
     SMITHY_FFI_SET_CONDITION_ANY,
+    SMITHY_FFI_TRANSPORT_QUIC,
+    SMITHY_FFI_TRANSPORT_TLS_TCP,
+    SMITHY_FFI_TRANSPORT_QUIC_INSECURE,
+    SMITHY_FFI_TRANSPORT_TLS_TCP_INSECURE,
     SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_MAX_IN_FLIGHT,
     SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
@@ -176,6 +187,15 @@ class Encryption(IntEnum):
 
     COMPACT = SMITHY_VALUE_ENCRYPTION_COMPACT
     ROBUST = SMITHY_VALUE_ENCRYPTION_ROBUST
+
+
+class Transport(IntEnum):
+    """Native transport and server-trust selector."""
+
+    QUIC = SMITHY_FFI_TRANSPORT_QUIC
+    TLS_TCP = SMITHY_FFI_TRANSPORT_TLS_TCP
+    QUIC_INSECURE = SMITHY_FFI_TRANSPORT_QUIC_INSECURE
+    TLS_TCP_INSECURE = SMITHY_FFI_TRANSPORT_TLS_TCP_INSECURE
 
 
 class KeySpec(StrEnum):
@@ -440,7 +460,7 @@ class OpenKacheClient:
         cls,
         address: str,
         *,
-        certificate: bytes | bytearray | memoryview | str | PathLike[str],
+        certificate: bytes | bytearray | memoryview | str | PathLike[str] = b"",
         data_protection_key: bytes | bytearray | memoryview | None = None,
         key_spec: KeySpec | str | None = None,
         server_name: str | None = None,
@@ -450,6 +470,7 @@ class OpenKacheClient:
         timeouts: ClientTimeouts | None = None,
         max_in_flight: int = SMITHY_DEFAULT_MAX_IN_FLIGHT,
         retry_max_attempts: int = SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+        transport: Transport = Transport.QUIC,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
         selected_key_spec = (
@@ -468,6 +489,7 @@ class OpenKacheClient:
                 timeouts=timeouts,
                 max_in_flight=max_in_flight,
                 retry_max_attempts=retry_max_attempts,
+                transport=transport,
                 native_path=native_path,
             )
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
@@ -515,6 +537,30 @@ class OpenKacheClient:
         payload = _json_bytes(value)
         return await self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
 
+    async def get_v0(
+        self, key: str | int | bytes | bytearray | memoryview
+    ) -> bytes | None:
+        """Gets a caller-owned version-0 envelope without interpreting its body."""
+
+        self._assert_open()
+        return await self._value_operation(SMITHY_FFI_OPERATION_GET_V0, key, "GET_V0")
+
+    async def set_v0(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        value: bytes | bytearray | memoryview,
+        options: SetOptions | None = None,
+    ) -> SmithySetOutcome:
+        """Stores a caller-owned version-0 envelope without transforming its body."""
+
+        self._assert_open()
+        return await self._set_operation(
+            SMITHY_FFI_OPERATION_SET_V0,
+            key,
+            _value_bytes(value),
+            options,
+        )
+
     async def get_structured(
         self,
         key: str | int | bytes | bytearray | memoryview,
@@ -538,7 +584,7 @@ class OpenKacheClient:
                 "structured-value ABI is unavailable in the loaded native adapter"
             )
         try:
-            payload = await asyncio.to_thread(
+            payload = await _await_sync_boundary(
                 operation,
                 key=_key_bytes(key, self._key_spec),
             )
@@ -583,7 +629,7 @@ class OpenKacheClient:
             ) from error
         selected = options or SetOptions()
         try:
-            result = await asyncio.to_thread(
+            result = await _await_sync_boundary(
                 operation,
                 key=_key_bytes(key, self._key_spec),
                 value=payload,
@@ -627,9 +673,11 @@ class OpenKacheClient:
         self, key: str | int | bytes | bytearray | memoryview
     ) -> bool:
         self._assert_open()
+        key_spec, key_bytes = _typed_key_input(key)
         kind, _ = await self._execute(
             SMITHY_OPCODE_DELETE,
-            key=_key_bytes(key, self._key_spec),
+            key=key_bytes,
+            key_spec=key_spec,
         )
         return _delete_outcome(kind)
 
@@ -700,15 +748,26 @@ class OpenKacheClient:
         *,
         key: bytes = b"",
         value: bytes = b"",
+        key_spec: int = SMITHY_FFI_KEY_SPEC_BYTES,
         options: SetOptions | None = None,
     ) -> tuple[int, bytes]:
         self._assert_open()
         selected = options or SetOptions()
         try:
-            return await asyncio.to_thread(
+            execute_async = getattr(self._native, "execute_with_options_async", None)
+            if callable(execute_async):
+                return await execute_async(
+                    operation,
+                    key=key,
+                    value=value,
+                    key_spec=key_spec,
+                    set_flags=selected._wire_flags,
+                    ttl_ms=selected.ttl_ms or 0,
+                )
+            return await _await_sync_boundary(
                 self._native.execute_with_options,
                 operation,
-                key=key,
+                key=_canonical_key_bytes(key, key_spec),
                 value=value,
                 set_flags=selected._wire_flags,
                 ttl_ms=selected.ttl_ms or 0,
@@ -722,10 +781,8 @@ class OpenKacheClient:
         key: str | int | bytes | bytearray | memoryview,
         operation_name: str = "GET",
     ) -> bytes | None:
-        kind, payload = await self._execute(
-            operation,
-            key=_key_bytes(key, self._key_spec),
-        )
+        key_spec, key_bytes = _typed_key_input(key)
+        kind, payload = await self._execute(operation, key=key_bytes, key_spec=key_spec)
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return None
         if kind != SMITHY_FFI_RESULT_VALUE:
@@ -745,7 +802,16 @@ class OpenKacheClient:
         self._assert_open()
         selected = options or SetOptions()
         try:
-            return await asyncio.to_thread(
+            execute_async = getattr(self._native, "execute_raw_with_options_async", None)
+            if callable(execute_async):
+                return await execute_async(
+                    operation,
+                    item_id=item_id,
+                    value=value,
+                    set_flags=selected._wire_flags,
+                    ttl_ms=selected.ttl_ms or 0,
+                )
+            return await _await_sync_boundary(
                 self._native.execute_raw_with_options,
                 operation,
                 item_id=item_id,
@@ -772,7 +838,7 @@ class OpenKacheClient:
             )
         selected = options or SetOptions()
         try:
-            return await asyncio.to_thread(
+            return await _await_sync_boundary(
                 self._native.execute_scoped,
                 operation,
                 namespace_id=namespace_id,
@@ -791,9 +857,11 @@ class OpenKacheClient:
         value: bytes,
         options: SetOptions | None,
     ) -> SmithySetOutcome:
+        key_spec, key_bytes = _typed_key_input(key)
         kind, _ = await self._execute(
             operation,
-            key=_key_bytes(key, self._key_spec),
+            key=key_bytes,
+            key_spec=key_spec,
             value=value,
             options=options,
         )
@@ -824,6 +892,34 @@ class RawClient(SmithyOpenKacheApi):
             raise OpenKacheError(f"GET returned unexpected native result {kind}")
         return SmithyGetOutput(value=payload)
 
+    async def get_json(self, input: SmithyGetInput) -> SmithyGetOutput:
+        """Gets canonical JSON UTF-8 bytes for an exact Item ID."""
+
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_GET_JSON,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+        )
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+            return SmithyGetOutput()
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(f"GET_JSON returned unexpected native result {kind}")
+        return SmithyGetOutput(value=payload)
+
+    async def get_v0(self, input: SmithyGetInput) -> SmithyGetOutput:
+        """Gets a caller-owned version-0 envelope for an exact Item ID."""
+
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_GET_V0,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+        )
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+            return SmithyGetOutput()
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(f"GET_V0 returned unexpected native result {kind}")
+        return SmithyGetOutput(value=payload)
+
     async def set(self, input: SmithySetInput) -> SmithySetOutput:
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
             raise OpenKacheValueError(
@@ -838,6 +934,91 @@ class RawClient(SmithyOpenKacheApi):
         )
         kind, _ = await self._owner._execute_scoped(
             SMITHY_OPCODE_SET,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+            value=_value_bytes(input.value),
+            options=options,
+        )
+        return SmithySetOutput(outcome=_set_outcome(kind))
+
+    async def set_json(self, input: SmithySetInput) -> SmithySetOutput:
+        """Stores canonical JSON UTF-8 bytes for an exact Item ID."""
+
+        if input.expiration_mode is None and input.ttl_milliseconds is not None:
+            raise OpenKacheValueError(
+                "ttl_milliseconds is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
+            )
+        options = SetOptions(
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_ms=input.ttl_milliseconds,
+        )
+        kind, _ = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_SET_JSON,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+            value=_value_bytes(input.value),
+            options=options,
+        )
+        return SmithySetOutput(outcome=_set_outcome(kind))
+
+    async def set_v0(self, input: SmithySetInput) -> SmithySetOutput:
+        """Stores a caller-owned version-0 envelope for an exact Item ID."""
+
+        if input.expiration_mode is None and input.ttl_milliseconds is not None:
+            raise OpenKacheValueError(
+                "ttl_milliseconds is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
+            )
+        options = SetOptions(
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_ms=input.ttl_milliseconds,
+        )
+        kind, _ = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_SET_V0,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+            value=_value_bytes(input.value),
+            options=options,
+        )
+        return SmithySetOutput(outcome=_set_outcome(kind))
+
+    async def get_structured(self, input: SmithyGetInput) -> SmithyGetOutput:
+        """Gets StructuredValue-CBOR-v1 bytes for an exact Item ID."""
+
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_GET_STRUCTURED,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
+        )
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
+            return SmithyGetOutput()
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(
+                f"GET_STRUCTURED returned unexpected native result {kind}"
+            )
+        return SmithyGetOutput(value=payload)
+
+    async def set_structured(self, input: SmithySetInput) -> SmithySetOutput:
+        """Stores StructuredValue-CBOR-v1 bytes for an exact Item ID."""
+
+        if input.expiration_mode is None and input.ttl_milliseconds is not None:
+            raise OpenKacheValueError(
+                "ttl_milliseconds is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
+            )
+        options = SetOptions(
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_ms=input.ttl_milliseconds,
+        )
+        kind, _ = await self._owner._execute_scoped(
+            SMITHY_FFI_OPERATION_SET_STRUCTURED,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
             value=_value_bytes(input.value),
@@ -885,7 +1066,7 @@ class RawClient(SmithyOpenKacheApi):
             )
         policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
         try:
-            kind, payload = await asyncio.to_thread(
+            kind, payload = await _await_sync_boundary(
                 self._owner._native.namespace_open,
                 name=input.name.encode("utf-8"),
                 create_if_missing=input.create_if_missing,
@@ -913,7 +1094,7 @@ class RawClient(SmithyOpenKacheApi):
     ) -> SmithyNamespaceUpdatePolicyOutput:
         policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
         try:
-            kind, payload = await asyncio.to_thread(
+            kind, payload = await _await_sync_boundary(
                 self._owner._native.namespace_update_policy,
                 namespace_id=input.namespace_id,
                 expected_revision=input.expected_revision,
@@ -941,7 +1122,7 @@ class RawClient(SmithyOpenKacheApi):
         self, input: SmithyNamespaceDeleteInput
     ) -> SmithyNamespaceDeleteOutput:
         try:
-            await asyncio.to_thread(
+            await _await_sync_boundary(
                 self._owner._native.namespace_delete,
                 namespace_id=input.namespace_id,
                 expected_revision=input.expected_revision,
@@ -955,6 +1136,79 @@ class RawClient(SmithyOpenKacheApi):
 
 
 Client = OpenKacheClient
+
+
+async def _await_sync_boundary(
+    function: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Wait for a legacy synchronous ABI call before honoring cancellation.
+
+    Structured, scoped, and namespace operations do not yet have dedicated
+    request-handle entry points in ABI v6.  Keeping their native call alive
+    until its core deadline is the safe ownership boundary: a canceled task
+    never abandons a mutation whose result could still become unknown.
+    """
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Shield the native call from task cancellation, then return its
+        # definitive result (including UnknownMutation) to the caller.
+        current = asyncio.current_task()
+        while True:
+            if current is not None:
+                current.uncancel()
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+
+
+def _typed_key_input(
+    value: str | int | bytes | bytearray | memoryview,
+) -> tuple[int, bytes]:
+    """Return the logical key bytes and generated FFI key discriminator."""
+
+    if isinstance(value, str):
+        try:
+            return SMITHY_FFI_KEY_SPEC_TEXT, value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise OpenKacheValueError("key must contain valid UTF-8 text") from error
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return SMITHY_FFI_KEY_SPEC_BYTES, _as_bytes(value, "key")
+    if isinstance(value, bool):
+        raise OpenKacheValueError("boolean keys are not supported")
+    if isinstance(value, int):
+        if not _I64_MIN <= value <= _I64_MAX:
+            raise OpenKacheValueError("integer key must fit in signed i64")
+        return SMITHY_FFI_KEY_SPEC_INTEGER, str(value).encode("ascii")
+    raise OpenKacheValueError(
+        "key must be a signed-i64 integer, UTF-8 string, or bytes-like value"
+    )
+
+
+def _canonical_key_bytes(key: bytes, key_spec: int) -> bytes:
+    """Recreate the legacy canonical-key ABI representation for fallback calls."""
+
+    if not key:
+        return b""
+    if key_spec == SMITHY_FFI_KEY_SPEC_BYTES:
+        return _canonical_cbor_string(2, key)
+    if key_spec == SMITHY_FFI_KEY_SPEC_TEXT:
+        try:
+            return _canonical_cbor_string(3, key)
+        except UnicodeEncodeError as error:
+            raise OpenKacheValueError("key must contain valid UTF-8 text") from error
+    if key_spec == SMITHY_FFI_KEY_SPEC_INTEGER:
+        try:
+            value = int(key.decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise OpenKacheValueError("integer key must be a signed-i64 value") from error
+        return _canonical_cbor_integer(value)
+    raise OpenKacheValueError("native ABI returned an unknown key specification")
 
 
 def _raise_native_error(error: NativeError) -> NoReturn:
@@ -979,6 +1233,7 @@ def _connection_settings(
     timeouts: ClientTimeouts | None,
     max_in_flight: int,
     retry_max_attempts: int,
+    transport: Transport,
     native_path: str | PathLike[str] | None,
 ) -> dict[str, Any]:
     native_address, host = _resolve_address(address)
@@ -997,6 +1252,8 @@ def _connection_settings(
     timeouts = timeouts or ClientTimeouts()
     if not isinstance(encryption, Encryption):
         raise OpenKacheValueError("encryption must be an Encryption value")
+    if not isinstance(transport, Transport):
+        raise OpenKacheValueError("transport must be a Transport value")
     _positive_or_zero(
         max_in_flight,
         "max_in_flight",
@@ -1043,6 +1300,7 @@ def _connection_settings(
         "request_timeout_ms": timeouts.request_ms,
         "max_in_flight": max_in_flight,
         "retry_max_attempts": retry_max_attempts,
+        "transport": int(transport),
         "native_path": native_path,
     }
 
@@ -1059,14 +1317,14 @@ def _resolve_address(address: str) -> tuple[str, str]:
         try:
             host, port_text = address.rsplit(":", 1)
         except ValueError as error:
-            raise OpenKacheValueError("address must include a UDP port") from error
+            raise OpenKacheValueError("address must include a transport port") from error
     if not host or not port_text.isdecimal():
-        raise OpenKacheValueError("address must contain a host and numeric UDP port")
+        raise OpenKacheValueError("address must contain a host and numeric transport port")
     port = int(port_text)
     if not 1 <= port <= 65_535:
         raise OpenKacheValueError("address port must be between 1 and 65535")
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        infos = socket.getaddrinfo(host, port, type=0)
     except OSError as error:
         raise OpenKacheError(f"address DNS resolution failed: {error}") from error
     for family, _, _, _, sockaddr in infos:
@@ -1074,7 +1332,7 @@ def _resolve_address(address: str) -> tuple[str, str]:
             return f"{sockaddr[0]}:{sockaddr[1]}", host
         if family == socket.AF_INET6:
             return f"[{sockaddr[0]}]:{sockaddr[1]}", host
-    raise OpenKacheError(f"address did not resolve to a UDP endpoint: {address}")
+    raise OpenKacheError(f"address did not resolve to a transport endpoint: {address}")
 
 
 def _as_file_or_bytes(

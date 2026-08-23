@@ -206,6 +206,15 @@ export function ffi_contract(
       FFI_ENUMS.connection_states.name,
       FFI_ENUMS.connection_states.kind,
     ),
+    transports:
+      shapes[`${namespace}#${FFI_ENUMS.transports.name}`] === undefined
+        ? []
+        : ffi_enum_entries(
+            shapes,
+            namespace,
+            FFI_ENUMS.transports.name,
+            FFI_ENUMS.transports.kind,
+          ),
     namespace_default_evictions: ffi_enum_entries(
       shapes,
       namespace,

@@ -209,6 +209,7 @@ ${assignments}
   const swift_native_constants = [
     ["operation", ffi.operations],
     ["result", ffi.result_kinds],
+    ["transport", ffi.transports],
     ["setCondition", ffi.set_conditions],
     ["keySpec", ffi.key_specs],
     ["namespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
@@ -327,6 +328,7 @@ public enum Smithy_Value_Format: Sendable {
   public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
   public static let serializationRaw: UInt8 = ${value.serialization_raw}
   public static let serializationJson: UInt8 = ${value.serialization_json}
+  public static let serializationStructured: UInt8 = ${value.serialization_structured}
   public static let compressionNone: UInt8 = ${value.compression_none}
   public static let compressionZstandard: UInt8 = ${value.compression_zstandard}
   public static let encryptionNone: UInt8 = ${value.encryption_none}
@@ -853,12 +855,20 @@ private func smithyDecodeF64Array(
     operation_uses_item_id_helpers,
   )
     ? `private func smithyConcatItemIDs(_ itemIDs: [Data]) -> Data {
-  var combined = Data(capacity: itemIDs.count * Smithy_Value_Format.itemIdBytes)
+  var total = 0
   for itemID in itemIDs {
     precondition(
-      itemID.count == Smithy_Value_Format.itemIdBytes,
-      "item IDs must contain exactly \(Smithy_Value_Format.itemIdBytes) bytes"
+      itemID.count <= Smithy_Value_Format.itemIdBytes,
+      "item IDs must contain at most \(Smithy_Value_Format.itemIdBytes) bytes"
     )
+    precondition(
+      total <= Smithy_Value_Format.itemIdBytes - itemID.count,
+      "combined item IDs must contain at most \(Smithy_Value_Format.itemIdBytes) bytes"
+    )
+    total += itemID.count
+  }
+  var combined = Data(capacity: total)
+  for itemID in itemIDs {
     combined.append(itemID)
   }
   return combined

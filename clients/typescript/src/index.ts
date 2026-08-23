@@ -129,13 +129,13 @@ const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
  * Zstandard compression settings applied by the Rust value codec.
  */
 export interface Zstandard_Options {
-  /** Enables Zstandard compression before encryption. */
+  /** Enables automatic level-1 Zstandard compression before encryption. */
   readonly enabled?: boolean
   /** Zstandard compression level from the shared contract range. */
   readonly level?: number
-  /** Values below this byte length bypass compression. */
+  /** Optional input-size threshold; the maintained default is zero. */
   readonly minimum_input_size?: number
-  /** Compressed values must save at least this many bytes. */
+  /** Optional savings threshold; the maintained default is zero. */
   readonly minimum_savings?: number
 }
 
@@ -153,7 +153,7 @@ export interface Client_Identity {
  * Native connection and complete request/response deadlines.
  */
 export interface Client_Timeouts {
-  /** Maximum duration for connection setup and the QUIC/TLS handshake. */
+  /** Maximum duration for connection setup and the TLS handshake. */
   readonly connect_ms?: number
   /** Maximum duration for one complete cache operation. */
   readonly request_ms?: number
@@ -171,9 +171,9 @@ export interface Retry_Options {
  * Connection settings for the Rust-backed Node.js, Bun, and Deno client.
  */
 export interface Client_Options {
-  /** Server UDP socket address, such as `127.0.0.1:4433`. */
+  /** Server transport address, such as `127.0.0.1:4433`. */
   readonly address: string
-  /** Server or CA certificate trusted for the QUIC connection, encoded as DER or PEM. */
+  /** Server or CA certificate trusted for the selected TLS transport, encoded as DER or PEM. */
   readonly certificate: Uint8Array
   /** Optional exact 32-byte root secret; omitted means unprotected values. */
   readonly data_protection_key?: Uint8Array
@@ -189,7 +189,7 @@ export interface Client_Options {
   readonly timeouts?: Client_Timeouts
   /** Automatic retry policy for response-safe operations. */
   readonly retry?: Retry_Options
-  /** Maximum concurrent request lanes on one connection. */
+  /** Maximum concurrent request lanes on one connection (TCP uses one lane). */
   readonly max_in_flight?: number
   /** Authenticated value-encryption profile; requires `data_protection_key`. */
   readonly encryption?: "compact" | "robust"
@@ -197,6 +197,8 @@ export interface Client_Options {
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
   readonly native_path?: string
+  /** Verified QUIC (default), TLS-over-TCP, or explicit TLS-preserving insecure variants. */
+  readonly transport?: "quic" | "tls_tcp" | "quic_insecure" | "tls_tcp_insecure"
 }
 
 /**
@@ -313,8 +315,8 @@ export class OpenKache_Client {
    * Connects Node.js, Bun, or Deno through the packaged asynchronous Node-API adapter.
    *
    * @param options - Address, trust, mTLS identity, encryption, and compression settings.
-   * @returns A connected client that reuses one QUIC connection.
-   * @throws {OpenKache_Error} When configuration, native loading, TLS, or QUIC fails.
+   * @returns A connected client that reuses the selected transport connection.
+   * @throws {OpenKache_Error} When configuration, native loading, or transport setup fails.
    */
   static async connect(options: Client_Options): Promise<OpenKache_Client> {
     validate_options(options)
@@ -351,6 +353,7 @@ export class OpenKache_Client {
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
       key_spec: options.key_spec,
+      transport: options.transport ?? "quic",
     }
     try {
       const native_module = load_native_module(options.native_path)
@@ -564,6 +567,58 @@ export class OpenKache_Client {
       const outcome = await this.#native_client.set_structured(
         owned_key_bytes(key, this.#key_spec),
         payload,
+        options.condition,
+        options.expiration_mode,
+        options.eviction_mode,
+        options.ttl_ms,
+      )
+      return parse_set_outcome(outcome)
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Retrieves a caller-owned version-0 envelope without interpreting or
+   * rewriting its body.
+   *
+   * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
+   * @returns The complete stored version-0 bytes, or `undefined` when absent.
+   * @throws {OpenKache_Error} When the client is closed or the operation fails.
+   */
+  async get_v0(key: Client_Key): Promise<Uint8Array | undefined> {
+    this.#assert_open()
+    try {
+      const value = await this.#native_client.get_v0(
+        owned_key_bytes(key, this.#key_spec),
+      )
+      return value === null ? undefined : value
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Stores a complete caller-owned version-0 envelope unchanged.
+   *
+   * The shared core validates only the canonical leading version field and
+   * the protocol value-size limit; all remaining version-0 interpretation
+   * belongs to the caller.
+   */
+  async set_v0(
+    key: Client_Key,
+    value: Uint8Array,
+    options: Set_Options = {},
+  ): Promise<Set_Outcome> {
+    this.#assert_open()
+    validate_set_options(options)
+    if (!(value instanceof Uint8Array)) {
+      throw new OpenKache_Error("value must be a Uint8Array")
+    }
+    try {
+      const outcome = await this.#native_client.set_v0(
+        owned_key_bytes(key, this.#key_spec),
+        owned_raw_value(value),
         options.condition,
         options.expiration_mode,
         options.eviction_mode,
@@ -834,10 +889,22 @@ function parse_json_value(value: unknown): Json_Value {
  * Exact-item-ID client implementing the Smithy-generated service contract.
  *
  * This view shares the protected connection owned by `OpenKache_Client`; it
- * does not open a second QUIC connection. Use it when an application already
+ * does not open a second transport connection. Use it when an application already
  * owns protocol item IDs and formatted value bytes.
  */
 export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
+  /** Reads canonical JSON UTF-8 bytes at an exact Item ID. */
+  get_json(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
+  /** Stores canonical JSON UTF-8 bytes at an exact Item ID. */
+  set_json(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
+  /** Reads StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  get_structured(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
+  /** Stores StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  set_structured(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
+  /** Reads a caller-owned version-0 envelope at an exact Item ID. */
+  get_v0(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
+  /** Stores a caller-owned version-0 envelope at an exact Item ID. */
+  set_v0(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
   /**
    * Reconnects the shared core client without replaying an operation.
    *
@@ -912,6 +979,21 @@ class Raw_Client implements OpenKache_Raw_Client {
     }
   }
 
+  async get_json(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.get_json_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+      )
+      return value === null
+        ? {}
+        : { value: new TextEncoder().encode(value) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
   /**
    * Invokes the Smithy SET operation for an exact item ID.
    *
@@ -923,6 +1005,86 @@ class Raw_Client implements OpenKache_Raw_Client {
     assert_lifecycle_open(this.#lifecycle)
     try {
       const outcome = await this.#native_client.raw_set_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+        owned_raw_value(input.value),
+        input.condition,
+        input.expiration_mode,
+        input.eviction_mode,
+        input.ttl_milliseconds,
+      )
+      return { outcome: parse_set_outcome(outcome) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async set_json(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const outcome = await this.#native_client.set_json_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+        new TextDecoder("utf-8", { fatal: true }).decode(input.value),
+        input.condition,
+        input.expiration_mode,
+        input.eviction_mode,
+        input.ttl_milliseconds,
+      )
+      return { outcome: parse_set_outcome(outcome) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async get_structured(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.get_structured_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+      )
+      return value === null ? {} : { value }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async set_structured(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const outcome = await this.#native_client.set_structured_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+        owned_raw_value(input.value),
+        input.condition,
+        input.expiration_mode,
+        input.eviction_mode,
+        input.ttl_milliseconds,
+      )
+      return { outcome: parse_set_outcome(outcome) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async get_v0(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.get_v0_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+      )
+      return value === null ? {} : { value }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  async set_v0(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const outcome = await this.#native_client.set_v0_in_namespace(
         input.namespace_id,
         owned_item_id(input.item_id),
         owned_raw_value(input.value),
@@ -1279,8 +1441,22 @@ function validate_options(options: Client_Options): void {
   if (typeof options.address !== "string" || options.address.length === 0) {
     throw new OpenKache_Error("address must be a non-empty string")
   }
-  if (!(options.certificate instanceof Uint8Array) || options.certificate.byteLength === 0) {
+  const insecure_transport =
+    options.transport === "quic_insecure" || options.transport === "tls_tcp_insecure"
+  if (
+    (!(options.certificate instanceof Uint8Array) || options.certificate.byteLength === 0) &&
+    !insecure_transport
+  ) {
     throw new OpenKache_Error("certificate must be a non-empty Uint8Array")
+  }
+  if (
+    options.transport !== undefined &&
+    options.transport !== "quic" &&
+    options.transport !== "tls_tcp" &&
+    options.transport !== "quic_insecure" &&
+    options.transport !== "tls_tcp_insecure"
+  ) {
+    throw new OpenKache_Error("transport must be quic, tls_tcp, quic_insecure, or tls_tcp_insecure")
   }
   if (
     options.data_protection_key !== undefined &&

@@ -108,8 +108,8 @@ optional generic parameter documents the expected result shape. Object
 properties whose value is `undefined` are omitted by this legacy JSON helper;
 the structured-value codec preserves them as ``Undefined``.
 
-This paragraph documents the current package compatibility path. The target
-structured operation must use `StructuredValue-CBOR-v1`; it must not silently
+This paragraph documents the current package compatibility path. The
+structured operation uses `StructuredValue-CBOR-v1`; it must not silently
 fall back to the legacy metadata envelope.
 
 Use `set_json` and `get_json` for the cross-language value API. These methods
@@ -121,6 +121,11 @@ Rust client can be read without a TypeScript-specific envelope:
 await client.set_json("shared", { z: 1, a: ["core", true] })
 const shared = await client.get_json("shared")
 ```
+
+Use `set_v0` and `get_v0` when the application owns a complete version-0
+envelope. The core validates only the canonical leading version `0` and the
+outer protocol size, preserving the remaining bytes unchanged. The
+`client.raw()` view provides the same v0 operations for exact Item IDs.
 
 Canonical JSON accepts only null, booleans, finite numbers, strings, dense
 arrays, and regular objects with string keys. Cycles, sparse arrays, binary
@@ -152,7 +157,7 @@ The runtime-neutral codec layer is available from
 
 ## Configuration
 
-- `address` is the server UDP address.
+- `address` is the server transport address.
 - `server_name` is the certificate identity for a pre-resolved address.
 - `certificate` is one trusted DER or PEM server or CA certificate.
 - `identity` contains the DER or PEM client certificate chain and private key
@@ -161,10 +166,10 @@ The runtime-neutral codec layer is available from
   application-managed 32-byte random secret; clients sharing protected values
   must use the same key. When omitted, Item IDs are still derived but values
   are stored unprotected.
-- `compression` currently controls Zstandard level, minimum input size, and
-  required savings. The target maintained policy has no input-size or
-  minimum-savings threshold and emits the compressed frame only when it is
-  smaller.
+- `compression` controls the Zstandard level and optional thresholds. The
+  maintained default is automatic level 1 with zero input-size and
+  minimum-savings thresholds; it emits the compressed frame only when it is
+  smaller. Set `compression.enabled` to `false` for an explicit opt-out.
 - `timeouts.connect_ms` and `timeouts.request_ms` bound connection and complete
   request operations.
 - `retry.max_attempts` controls retries for response-safe operations.
@@ -188,8 +193,10 @@ Linux x64 and ARM64 (glibc 2.17 or newer) plus Apple Silicon macOS.
 
 The browser cannot load the native adapter or open the UDP-based QUIC
 transport. The `value-codec` subpath is runtime-neutral, but the client
-connection API is not a browser transport. The current connection API is
-QUIC-only; TLS-over-TCP is part of the target maintained-client contract.
+connection API is not a browser transport. Set `transport: "tls_tcp"` for
+verified TLS-over-TCP or use an explicit `*_insecure` selector to disable
+certificate and server-identity verification; the default remains verified
+QUIC.
 
 Every connection and cache method returns a Promise. The adapter runs native
 networking outside the JavaScript event loop and maintains one reusable

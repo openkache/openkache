@@ -303,15 +303,16 @@ structure valueEnvelope {
 }
 
 @clientDefaults(
-    // Transitional current defaults. The target maintained policy is owned by
-    // clients/CLIENT.md and intentionally has no minimum input/savings threshold.
+    // Maintained formatted-value defaults. Automatic compression uses one
+    // level-1 Zstandard frame and keeps it only when the complete frame is
+    // smaller; zero means no input-size or minimum-savings threshold.
     maxInFlight: 256,
     connectTimeoutMilliseconds: 5000,
     requestTimeoutMilliseconds: 2000,
     retryMaxAttempts: 2,
     zstandardLevel: 1,
-    zstandardMinimumInputBytes: 1024,
-    zstandardMinimumSavingsBytes: 64,
+    zstandardMinimumInputBytes: 0,
+    zstandardMinimumSavingsBytes: 0,
     serverName: "localhost",
     certificatePemType: "CERTIFICATE",
     minimumPositiveValue: 1,
@@ -382,6 +383,39 @@ structure valueEnvelope {
                     name: "options",
                     type: "struct_pointer",
                     structureName: "FfiConnectOptions",
+                    mutable: false
+                }
+            ]
+        },
+        {
+            name: "openkache_client_connect_transport",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                {
+                    name: "options",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptions",
+                    mutable: false
+                },
+                { name: "transport", type: "uint32", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_abi_version_v7",
+            optional: true,
+            returnType: "uint32",
+            parameters: []
+        },
+        {
+            name: "openkache_client_connect_with_options_v7",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                {
+                    name: "options",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptionsV7",
                     mutable: false
                 }
             ]
@@ -766,6 +800,37 @@ structure valueEnvelope {
             ]
         },
         {
+            name: "FfiValueKey",
+            fields: [
+                { name: "id", type: "uint64", mutable: false },
+                { name: "key", type: "u8_pointer", mutable: false },
+                { name: "keyLength", type: "size", mutable: false }
+            ]
+        },
+        {
+            name: "FfiConnectOptionsV7",
+            fields: [
+                { name: "abiVersion", type: "uint32", mutable: false },
+                {
+                    name: "base",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptions",
+                    mutable: false
+                },
+                { name: "itemIdRootKey", type: "u8_pointer", mutable: false },
+                { name: "itemIdRootKeyLength", type: "size", mutable: false },
+                {
+                    name: "valueKeys",
+                    type: "struct_pointer",
+                    structureName: "FfiValueKey",
+                    mutable: false
+                },
+                { name: "valueKeyCount", type: "size", mutable: false },
+                { name: "activeValueKeyId", type: "uint64", mutable: false },
+                { name: "valueEncryption", type: "uint32", mutable: false }
+            ]
+        },
+        {
             name: "FfiOperationField",
             fields: [
                 { name: "data", type: "u8_pointer", mutable: false },
@@ -777,8 +842,9 @@ structure valueEnvelope {
 )
 @valueFormat(
     version: 1,
-    // Transitional current metadata. The target value-format document uses
-    // StructuredValue-CBOR-v1 as selector 1 and a maximum vu128 width of 9 bytes.
+    // The legacy JSON metadata name is retained for generated compatibility
+    // constants, but JSON helpers use OpaqueBytes (selector 0). The target
+    // value-format document assigns selector 1 to StructuredValue-CBOR-v1.
     // VU128 is currently used for unsigned 64-bit protocol lengths and
     // versions.  A canonical u64 varuint is at most nine bytes.
     maxVu128Bytes: 9,
@@ -787,6 +853,7 @@ structure valueEnvelope {
     formatEncryptionShift: 4,
     serializationRaw: 0,
     serializationJson: 1,
+    serializationStructured: 1,
     compressionNone: 0,
     compressionZstandard: 1,
     encryptionNone: 0,
@@ -852,8 +919,8 @@ enum FfiOperation {
         acceptsValue: false,
         acceptsSetOptions: false,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     GET_JSON = "get_json"
@@ -864,8 +931,8 @@ enum FfiOperation {
         acceptsValue: true,
         acceptsSetOptions: true,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     SET_JSON = "set_json"
@@ -876,8 +943,8 @@ enum FfiOperation {
         acceptsValue: false,
         acceptsSetOptions: false,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     GET_STRUCTURED = "get_structured"
@@ -888,11 +955,35 @@ enum FfiOperation {
         acceptsValue: true,
         acceptsSetOptions: true,
         supportsProtected: true,
-        supportsRaw: false,
-        supportsScoped: false,
+        supportsRaw: true,
+        supportsScoped: true,
         dedicatedAbi: false
     )
     SET_STRUCTURED = "set_structured"
+
+    @ffiValue(value: 20)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: false,
+        acceptsSetOptions: false,
+        supportsProtected: true,
+        supportsRaw: true,
+        supportsScoped: true,
+        dedicatedAbi: false
+    )
+    GET_V0 = "get_v0"
+
+    @ffiValue(value: 21)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: true,
+        acceptsSetOptions: true,
+        supportsProtected: true,
+        supportsRaw: true,
+        supportsScoped: true,
+        dedicatedAbi: false
+    )
+    SET_V0 = "set_v0"
 
     @ffiValue(value: 4294967041)
     @ffiOperationContract(
@@ -905,6 +996,22 @@ enum FfiOperation {
         dedicatedAbi: false
     )
     RECONNECT = "reconnect"
+}
+
+/// Explicit native transport and trust selection. Legacy connection symbols
+/// remain verified QUIC for source and ABI compatibility.
+enum FfiTransport {
+    @ffiValue(value: 0)
+    QUIC = "quic"
+
+    @ffiValue(value: 1)
+    TLS_TCP = "tls_tcp"
+
+    @ffiValue(value: 2)
+    QUIC_INSECURE = "quic_insecure"
+
+    @ffiValue(value: 3)
+    TLS_TCP_INSECURE = "tls_tcp_insecure"
 }
 
 enum FfiResultKind {

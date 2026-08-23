@@ -61,6 +61,19 @@ impl OwnedRequestFrame {
     pub const fn is_empty(&self) -> bool {
         self.encoded_len == 0
     }
+
+    /// Copies this frame into one self-contained owner.
+    ///
+    /// Retry plans may retain external owners that intentionally are not
+    /// cloneable. A transport that needs an owned replay copy can use this
+    /// explicit compatibility boundary rather than coalescing normal request
+    /// segments on the hot path.
+    pub fn clone_owned(&self) -> Result<Self> {
+        let bytes = self.segments().flatten().copied().collect::<Vec<_>>();
+        let mut prefix = RequestPrefix::with_capacity(bytes.len());
+        prefix.try_extend_from_slice(&bytes)?;
+        Self::from_parts(prefix, SmallVec::new())
+    }
 }
 
 const _: () = assert!(std::mem::size_of::<OwnedRequestFrame>() <= 192);

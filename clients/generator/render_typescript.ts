@@ -167,6 +167,12 @@ ${contract.ffi.connection_states
 export const SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSON.stringify(entry.text)} as const`,
   )
   .join("\n")}
+${contract.ffi.transports
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
 ${contract.ffi.set_conditions
   .map(
     (entry) =>

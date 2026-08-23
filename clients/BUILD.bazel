@@ -147,6 +147,7 @@ alias(
 filegroup(
     name = "runtime_sources",
     srcs = [
+        "CLIENT.md",
         "README.md",
         ":client_generator_inputs",
         ":client_native_sources",

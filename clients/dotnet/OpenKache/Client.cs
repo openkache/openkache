@@ -22,7 +22,7 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     /// Connects to an OpenKache server through the shared Rust client core.
     /// </summary>
     /// <param name="host">Server host or IP address.</param>
-    /// <param name="port">Server UDP port.</param>
+    /// <param name="port">Server transport port.</param>
     /// <param name="serverName">DNS name required by the server certificate.</param>
     /// <param name="trustedCertificateDer">Exact DER certificate trusted for this connection.</param>
     /// <param name="options">Optional shared-core timeout and lane settings.</param>
@@ -44,7 +44,8 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         ArgumentException.ThrowIfNullOrWhiteSpace(serverName);
         ArgumentOutOfRangeException.ThrowIfLessThan(port, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(port, 65_535);
-        if (trustedCertificateDer.IsEmpty)
+        if (trustedCertificateDer.IsEmpty
+            && options?.Transport is not (Transport.QuicInsecure or Transport.TlsTcpInsecure))
         {
             throw new ArgumentException(
                 "A trusted DER certificate is required.",
@@ -66,6 +67,8 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
                 options.EffectiveConnectTimeout,
                 options.EffectiveRequestTimeout,
                 options.MaximumStreamLanes,
+                options.CompressionEnabled,
+                options.Transport,
                 cancellationToken).ConfigureAwait(false);
             return new Client(nativeClient);
         }
@@ -521,6 +524,18 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
 
     private static OpenKacheException UnexpectedKind(string operation, uint kind)
     {
+        if (kind == Protocol.FfiResultUnknownMutation)
+        {
+            return new OpenKacheException(
+                "UNKNOWN_MUTATION",
+                $"{operation} crossed the native mutation cancellation boundary.");
+        }
+        if (kind == Protocol.FfiResultCanceled)
+        {
+            return new OpenKacheException(
+                "CANCELED",
+                $"{operation} was canceled before native admission.");
+        }
         return new OpenKacheException(
             "PROTOCOL_ERROR",
             $"{operation} returned unexpected native result kind {kind}.");

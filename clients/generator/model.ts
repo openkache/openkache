@@ -25,6 +25,8 @@ export interface Value_Format_Contract {
   readonly robust_tag_bytes: number
   readonly serialization_json: number
   readonly serialization_raw: number
+  /** Target selector for StructuredValue-CBOR-v1 (JSON has no selector). */
+  readonly serialization_structured: number
   readonly value_root_context: string
   readonly max_vu128_bytes: number
   readonly version: number
@@ -118,6 +120,7 @@ export interface Ffi_Entry extends Wire_Entry {
 export interface Ffi_Contract {
   readonly abi_version: number
   readonly connection_states: readonly Ffi_Entry[]
+  readonly transports: readonly Ffi_Entry[]
   readonly namespace_default_evictions: readonly Ffi_Entry[]
   readonly namespace_default_expirations: readonly Ffi_Entry[]
   readonly namespace_descriptor_decode_statuses: readonly Ffi_Entry[]

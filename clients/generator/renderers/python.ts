@@ -593,8 +593,13 @@ def _smithy_decode_f64_array(payload: bytes, operation: int) -> list[float]:
     operation_uses_item_id_helpers,
   )
     ? `def _smithy_concat_item_ids(item_ids: list[bytes]) -> bytes:
-    if any(len(item_id) != ${contract.item_id_bytes} for item_id in item_ids):
-        raise ValueError("item IDs must contain exactly ${contract.item_id_bytes} bytes")
+    total = 0
+    for item_id in item_ids:
+        if len(item_id) > ${contract.item_id_bytes}:
+            raise ValueError("item IDs must contain at most ${contract.item_id_bytes} bytes")
+        if total > ${contract.item_id_bytes} - len(item_id):
+            raise ValueError("combined item IDs must contain at most ${contract.item_id_bytes} bytes")
+        total += len(item_id)
     return b"".join(item_ids)
 `
     : ""
@@ -766,6 +771,12 @@ export function render_python_contract(contract: Client_Contract): string {
 SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSON.stringify(entry.text)}`,
     )
     .join("\n")
+  const ffi_transports = contract.ffi.transports
+    .map(
+      (entry) =>
+        `SMITHY_FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_set_conditions = contract.ffi.set_conditions
     .map(
       (entry) =>
@@ -894,6 +905,7 @@ ${ffi_result_kinds}
 ${ffi_status_categories}
 ${ffi_error_categories}
 ${ffi_connection_states}
+${ffi_transports}
 ${ffi_set_conditions}
 ${ffi_key_specs}
 ${ffi_namespace_descriptor_decode_statuses}
@@ -913,6 +925,7 @@ SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
 SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
 SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
 SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+SMITHY_VALUE_SERIALIZATION_STRUCTURED = ${value.serialization_structured}
 SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
 SMITHY_VALUE_COMPRESSION_ZSTANDARD = ${value.compression_zstandard}
 SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}

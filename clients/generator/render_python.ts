@@ -151,6 +151,12 @@ export function render_python_contract(contract: Client_Contract): string {
 SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSON.stringify(entry.text)}`,
     )
     .join("\n")
+  const ffi_transports = contract.ffi.transports
+    .map(
+      (entry) =>
+        `SMITHY_FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_set_conditions = contract.ffi.set_conditions
     .map(
       (entry) =>
@@ -273,6 +279,7 @@ ${ffi_result_kinds}
 ${ffi_status_categories}
 ${ffi_error_categories}
 ${ffi_connection_states}
+${ffi_transports}
 ${ffi_set_conditions}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
@@ -291,6 +298,7 @@ SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
 SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
 SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
 SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+SMITHY_VALUE_SERIALIZATION_STRUCTURED = ${value.serialization_structured}
 SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
 SMITHY_VALUE_COMPRESSION_ZSTANDARD = ${value.compression_zstandard}
 SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}

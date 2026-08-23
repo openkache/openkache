@@ -4,6 +4,7 @@
 //! other native bindings only marshal buffers and interpret result discriminators; connection
 //! management, retries, protocol framing, and value protection remain in this crate.
 
+use std::future::Future;
 use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -14,8 +15,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openkache_value::{Value as StructuredValue, decode, encode};
-
+#[cfg(feature = "tls-tcp")]
+use crate::TlsTcpProtectedClient;
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::FfiOperationField;
@@ -34,7 +35,7 @@ pub use crate::contract::{
 };
 pub use crate::contract::{
     FfiErrorCategory, FfiKeySpec, FfiOperation, FfiRequestState, FfiResultKind, FfiSetCondition,
-    FfiStatusCategory, FfiValueMode, FfiValueRepresentation,
+    FfiStatusCategory, FfiTransport, FfiValueMode, FfiValueRepresentation,
 };
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
@@ -42,15 +43,20 @@ use crate::contract::{
 use crate::ffi_admission::{AdmissionState, FfiAdmission};
 use crate::transport::BytePermit;
 use crate::value::{
-    Compression, Encryption, JsonValue, Resource, Value, ValueLimits, ZstandardOptions,
+    Compression, Encryption, JsonValue, Resource, Value, ValueKeyring, ValueLimits,
+    ZstandardOptions,
 };
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpace, KeyType,
-    LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
-    SetCondition, SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState, DataProtectionKey,
+    DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
+    KeySpace, KeyType, LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey,
+    RetryPolicy, ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// Additive native connection contract for independent Item-ID and value
+/// protection roots.
+pub const FFI_ABI_VERSION_V7: u32 = 7;
 
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
@@ -82,8 +88,9 @@ struct FfiRequestControl {
 
 /// Native connection options passed by C and C++ bindings.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct FfiConnectOptions {
-    /// UTF-8 host and UDP port such as `127.0.0.1:4433` or `cache.example.com:4433`.
+    /// UTF-8 host and transport port such as `127.0.0.1:4433` or `cache.example.com:4433`.
     pub address: *const u8,
     /// Byte length of [`Self::address`].
     pub address_length: usize,
@@ -108,13 +115,16 @@ pub struct FfiConnectOptions {
     pub data_protection_key: *const u8,
     /// Byte length of [`Self::data_protection_key`].
     pub data_protection_key_length: usize,
-    /// Non-zero to enable Zstandard compression.
+    /// Non-zero to enable automatic level-1 Zstandard compression. Zero is an
+    /// explicit uncompressed opt-out.
     pub compression_enabled: u8,
     /// Zstandard level, validated by the shared value codec.
     pub compression_level: i32,
-    /// Minimum serialized input size eligible for compression.
+    /// Optional minimum serialized input size; zero selects the maintained
+    /// no-threshold default.
     pub minimum_input_size: usize,
-    /// Minimum compressed-byte savings required.
+    /// Optional minimum compressed-byte savings; zero selects the maintained
+    /// no-threshold default.
     pub minimum_savings: usize,
     /// Value encryption profile: zero/default or two for Robust, one for Compact.
     pub encryption: u32,
@@ -126,6 +136,28 @@ pub struct FfiConnectOptions {
     pub retry_max_attempts: usize,
     /// Maximum in-flight lanes; zero selects the core default.
     pub max_in_flight: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiValueKey {
+    pub id: u64,
+    pub key: *const u8,
+    pub key_length: usize,
+}
+
+/// ABI v7 options with independent Item-ID root and value keyring.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiConnectOptionsV7 {
+    pub abi_version: u32,
+    pub base: *const FfiConnectOptions,
+    pub item_id_root_key: *const u8,
+    pub item_id_root_key_length: usize,
+    pub value_keys: *const FfiValueKey,
+    pub value_key_count: usize,
+    pub active_value_key_id: u64,
+    pub value_encryption: u32,
 }
 
 /// Opaque native handle to a dedicated Rust client worker.
@@ -195,12 +227,14 @@ enum Command {
 }
 
 type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
-type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
+type CommandReceiver = crossfire::AsyncRx<crossfire::mpsc::Array<Command>>;
 
 struct WorkerOptions {
+    transport: TransportSelection,
     endpoint: Endpoint,
     certificate: Vec<u8>,
-    data_protection_key: Option<DataProtectionKey>,
+    item_id_root: Option<DataProtectionKey>,
+    value_keyring: Option<ValueKeyring>,
     client_certificate_chain: Vec<u8>,
     client_private_key: Vec<u8>,
     compression: Compression,
@@ -208,6 +242,33 @@ struct WorkerOptions {
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+}
+
+/// Internal transport selector used by the additive ABI entry point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportSelection {
+    Quic { verify_server: bool },
+    TlsTcp { verify_server: bool },
+}
+
+impl TransportSelection {
+    fn from_code(code: u32) -> std::result::Result<Self, String> {
+        match FfiTransport::try_from(code) {
+            Ok(FfiTransport::Quic) => Ok(Self::Quic {
+                verify_server: true,
+            }),
+            Ok(FfiTransport::TlsTcp) => Ok(Self::TlsTcp {
+                verify_server: true,
+            }),
+            Ok(FfiTransport::QuicInsecure) => Ok(Self::Quic {
+                verify_server: false,
+            }),
+            Ok(FfiTransport::TlsTcpInsecure) => Ok(Self::TlsTcp {
+                verify_server: false,
+            }),
+            Err(value) => Err(format!("unsupported transport selector {value}")),
+        }
+    }
 }
 
 impl FfiResult {
@@ -366,9 +427,11 @@ impl FfiClient {
     // The argument list mirrors the stable native connection contract.
     #[allow(clippy::too_many_arguments)]
     fn connect(
+        transport: TransportSelection,
         endpoint: Endpoint,
         certificate: Vec<u8>,
-        data_protection_key: Option<DataProtectionKey>,
+        item_id_root: Option<DataProtectionKey>,
+        value_keyring: Option<ValueKeyring>,
         client_certificate_chain: Vec<u8>,
         client_private_key: Vec<u8>,
         compression: Compression,
@@ -377,7 +440,8 @@ impl FfiClient {
         retry: RetryPolicy,
         max_in_flight: usize,
     ) -> std::result::Result<Self, String> {
-        let (commands, receiver) = crossfire::mpsc::bounded_blocking(COMMAND_QUEUE_CAPACITY);
+        let (commands, receiver) =
+            crossfire::mpsc::bounded_blocking_async(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
@@ -386,9 +450,11 @@ impl FfiClient {
         )));
         let worker_state = Arc::clone(&state);
         let options = WorkerOptions {
+            transport,
             endpoint,
             certificate,
-            data_protection_key,
+            item_id_root,
+            value_keyring,
             client_certificate_chain,
             client_private_key,
             compression,
@@ -503,7 +569,11 @@ impl FfiClient {
             admission: FfiAdmission::new(),
             mutating: matches!(
                 operation,
-                FfiOperation::Set | FfiOperation::SetJson | FfiOperation::Delete
+                FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::SetStructured
+                    | FfiOperation::SetV0
+                    | FfiOperation::Delete
             ),
         });
         let request = FfiRequest {
@@ -852,10 +922,29 @@ fn run_worker(
     shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
 ) {
+    match options.transport {
+        TransportSelection::Quic { .. } => {
+            run_quic_worker(commands, ready, options, shutdown, state)
+        }
+        TransportSelection::TlsTcp { .. } => {
+            run_tls_tcp_worker(commands, ready, options, shutdown, state)
+        }
+    }
+}
+
+fn run_quic_worker(
+    commands: CommandReceiver,
+    ready: SyncSender<std::result::Result<crate::RequestBudget, String>>,
+    options: WorkerOptions,
+    shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
+) {
     let WorkerOptions {
+        transport,
         endpoint,
         certificate,
-        data_protection_key,
+        item_id_root,
+        value_keyring,
         client_certificate_chain,
         client_private_key,
         compression,
@@ -877,8 +966,12 @@ fn run_worker(
         ));
         return;
     }
-    let protected = data_protection_key.is_some();
-    let mut builder = match data_protection_key {
+    let verify_server = match transport {
+        TransportSelection::Quic { verify_server } => verify_server,
+        TransportSelection::TlsTcp { .. } => unreachable!("transport dispatch selected QUIC"),
+    };
+    let protected = item_id_root.is_some();
+    let mut builder = match item_id_root {
         Some(key) => LocalProtectedClient::builder(endpoint, key),
         None => LocalProtectedClient::builder_unprotected(endpoint),
     }
@@ -889,7 +982,16 @@ fn run_worker(
     if protected {
         builder = builder.encryption(encryption);
     }
-    if !certificate.is_empty() {
+    if let Some(keyring) = value_keyring {
+        builder = builder.value_keyring(keyring);
+    }
+    if !verify_server {
+        // The explicit insecure selector takes precedence over any supplied
+        // certificate bytes.  A caller that opts out of verification must not
+        // accidentally regain certificate validation merely by leaving a
+        // legacy trust buffer populated.
+        builder = builder.server_trust(ServerTrust::Insecure);
+    } else if !certificate.is_empty() {
         let certificates = match Certificate::from_der_or_pem_chain(&certificate) {
             Ok(certificates) => certificates,
             Err(error) => {
@@ -939,8 +1041,599 @@ fn run_worker(
         return;
     }
 
+    run_command_loop(&runtime, client, commands, shutdown, state, true);
+}
+
+fn run_tls_tcp_worker(
+    commands: CommandReceiver,
+    ready: SyncSender<std::result::Result<crate::RequestBudget, String>>,
+    options: WorkerOptions,
+    shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
+) {
+    let WorkerOptions {
+        transport,
+        endpoint,
+        certificate,
+        item_id_root,
+        value_keyring,
+        client_certificate_chain,
+        client_private_key,
+        compression,
+        encryption,
+        timeouts,
+        retry,
+        max_in_flight,
+    } = options;
+    let verify_server = match transport {
+        TransportSelection::TlsTcp { verify_server } => verify_server,
+        TransportSelection::Quic { .. } => unreachable!("transport dispatch selected TLS/TCP"),
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = ready.send(Err(format!("failed to create Tokio runtime: {error}")));
+            return;
+        }
+    };
+    let trust = if !verify_server {
+        ServerTrust::Insecure
+    } else if certificate.is_empty() {
+        ServerTrust::System
+    } else {
+        match Certificate::from_der_or_pem_chain(&certificate) {
+            Ok(certificates) => ServerTrust::Custom(certificates),
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        }
+    };
+    let mut identity = if !client_certificate_chain.is_empty() || !client_private_key.is_empty() {
+        let certificate_chain = match Certificate::from_der_or_pem_chain(&client_certificate_chain)
+        {
+            Ok(certificate_chain) => certificate_chain,
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        };
+        let private_key = match PrivateKey::from_der_or_pem(&client_private_key) {
+            Ok(private_key) => private_key,
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        };
+        match ClientIdentity::new(certificate_chain, private_key) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let protected = item_id_root.is_some();
+    let mut value_keyring = value_keyring;
+    macro_rules! connect_builder {
+        ($builder:expr) => {{
+            let mut builder = $builder
+                .compression(compression)
+                .timeouts(timeouts)
+                .retry_policy(retry)
+                .max_in_flight(max_in_flight)
+                .server_trust(trust.clone());
+            if let Some(identity) = identity.take() {
+                builder = builder.client_identity(identity);
+            }
+            if protected {
+                builder = builder.encryption(encryption);
+            }
+            if let Some(keyring) = value_keyring.take() {
+                builder = builder.value_keyring(keyring);
+            }
+            runtime.block_on(builder.connect())
+        }};
+    }
+    let client = match item_id_root {
+        Some(key) => connect_builder!(TlsTcpProtectedClient::builder(endpoint, key)),
+        None => connect_builder!(TlsTcpProtectedClient::builder_unprotected(endpoint)),
+    };
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
+    state.store(
+        connection_state_value(client.connection_state()),
+        Ordering::Release,
+    );
+    if ready.send(Ok(client.request_budget())).is_err() {
+        return;
+    }
+    run_command_loop(&runtime, client, commands, shutdown, state, false);
+}
+
+trait WorkerRuntime {
+    fn block_on<F: Future>(&self, future: F) -> F::Output;
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static;
+}
+
+impl WorkerRuntime for compio::runtime::Runtime {
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        compio::runtime::Runtime::block_on(self, future)
+    }
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        compio::runtime::Runtime::spawn(self, future).detach();
+    }
+}
+
+impl WorkerRuntime for tokio::runtime::Runtime {
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        tokio::runtime::Runtime::block_on(self, future)
+    }
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        // Tokio's current-thread worker uses the synchronous command loop,
+        // so TLS-over-TCP dispatch never calls this method.
+        drop(future);
+    }
+}
+
+trait FfiRawClientApi {
+    async fn ping(&self) -> crate::Result<Duration>;
+    async fn get(&self, item_id: ItemId) -> crate::Result<GetOutcome<ItemValue>>;
+    async fn set(
+        &self,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn delete(&self, item_id: ItemId) -> crate::Result<DeleteOutcome>;
+    async fn stats(&self) -> crate::Result<String>;
+    async fn sync(&self) -> crate::Result<()>;
+    async fn reconnect(&self) -> crate::Result<()>;
+    async fn get_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<ItemValue>>;
+    async fn set_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn delete_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<DeleteOutcome>;
+    async fn stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String>;
+    async fn sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()>;
+    async fn namespace_open_with_outcome(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> crate::Result<(crate::NamespaceDescriptor, bool)>;
+    async fn namespace_update_policy(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> crate::Result<crate::NamespaceDescriptor>;
+    async fn namespace_delete(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+    ) -> crate::Result<()>;
+}
+
+macro_rules! impl_ffi_raw_client {
+    ($client:ty) => {
+        impl FfiRawClientApi for $client {
+            async fn ping(&self) -> crate::Result<Duration> {
+                self.ping().await
+            }
+            async fn get(&self, item_id: ItemId) -> crate::Result<GetOutcome<ItemValue>> {
+                self.get(item_id).await
+            }
+            async fn set(
+                &self,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set(item_id, value, options).await
+            }
+            async fn delete(&self, item_id: ItemId) -> crate::Result<DeleteOutcome> {
+                self.delete(item_id).await
+            }
+            async fn stats(&self) -> crate::Result<String> {
+                self.stats().await
+            }
+            async fn sync(&self) -> crate::Result<()> {
+                self.sync().await
+            }
+            async fn reconnect(&self) -> crate::Result<()> {
+                self.reconnect().await
+            }
+            async fn get_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<ItemValue>> {
+                self.get_in_namespace(namespace_id, item_id).await
+            }
+            async fn set_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_in_namespace(namespace_id, item_id, value, options)
+                    .await
+            }
+            async fn delete_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<DeleteOutcome> {
+                self.delete_in_namespace(namespace_id, item_id).await
+            }
+            async fn stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String> {
+                self.stats_in_namespace(namespace_id).await
+            }
+            async fn sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()> {
+                self.sync_in_namespace(namespace_id).await
+            }
+            async fn namespace_open_with_outcome(
+                &self,
+                name: Vec<u8>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> crate::Result<(crate::NamespaceDescriptor, bool)> {
+                self.namespace_open_with_outcome(name, create_if_missing, policy)
+                    .await
+            }
+            async fn namespace_update_policy(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+                policy: NamespacePolicy,
+            ) -> crate::Result<crate::NamespaceDescriptor> {
+                self.namespace_update_policy(namespace_id, expected_revision, policy)
+                    .await
+            }
+            async fn namespace_delete(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+            ) -> crate::Result<()> {
+                self.namespace_delete(namespace_id, expected_revision).await
+            }
+        }
+    };
+}
+
+#[cfg(feature = "quic-compio")]
+impl_ffi_raw_client!(crate::LocalRawClient);
+#[cfg(feature = "tls-tcp")]
+impl_ffi_raw_client!(crate::TlsTcpRawClient);
+
+trait FfiProtectedClientApi: Clone + 'static {
+    type Raw: FfiRawClientApi;
+
+    fn raw(&self) -> &Self::Raw;
+    fn request_budget(&self) -> crate::RequestBudget;
+    fn value_limits(&self) -> ValueLimits;
+    fn connection_state(&self) -> ConnectionState;
+    async fn ping(&self) -> crate::Result<Duration>;
+    async fn get_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<Value>>;
+    async fn get_structured_canonical_key_cbor(
+        &self,
+        canonical_key: Vec<u8>,
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn get_json_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<JsonValue>>;
+    async fn get_structured_canonical_key_cbor_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn get_v0_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn set_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: Value,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_structured_canonical_key_cbor(
+        &self,
+        canonical_key: Vec<u8>,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_json_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: JsonValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_structured_canonical_key_cbor_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: &[u8],
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn set_v0_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn get_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<JsonValue>>;
+    async fn set_json_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: JsonValue,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn get_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn set_structured_exact_item_id_cbor(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn get_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> crate::Result<GetOutcome<Vec<u8>>>;
+    async fn set_v0_exact_item_id(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> crate::Result<SetOutcome>;
+    async fn delete_canonical_key_unchecked(
+        &self,
+        canonical_key: &[u8],
+    ) -> crate::Result<DeleteOutcome>;
+    async fn stats(&self) -> crate::Result<String>;
+    async fn sync(&self) -> crate::Result<()>;
+    async fn reconnect(&self) -> crate::Result<()>;
+}
+
+macro_rules! impl_ffi_protected_client {
+    ($client:ty, $raw:ty) => {
+        impl FfiProtectedClientApi for $client {
+            type Raw = $raw;
+
+            fn raw(&self) -> &Self::Raw {
+                self.raw()
+            }
+            fn request_budget(&self) -> crate::RequestBudget {
+                self.request_budget()
+            }
+            fn value_limits(&self) -> ValueLimits {
+                self.value_limits()
+            }
+            fn connection_state(&self) -> ConnectionState {
+                self.connection_state()
+            }
+            async fn ping(&self) -> crate::Result<Duration> {
+                self.ping().await
+            }
+            async fn get_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<Value>> {
+                self.get_canonical_key_unchecked(canonical_key).await
+            }
+            async fn get_structured_canonical_key_cbor(
+                &self,
+                canonical_key: Vec<u8>,
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_structured_canonical_key_cbor(canonical_key).await
+            }
+            async fn get_json_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<JsonValue>> {
+                self.get_json_canonical_key_unchecked(canonical_key).await
+            }
+            async fn get_structured_canonical_key_cbor_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_structured_canonical_key_cbor_unchecked(canonical_key)
+                    .await
+            }
+            async fn get_v0_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_v0_canonical_key_unchecked(canonical_key).await
+            }
+            async fn set_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: Value,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_canonical_key_unchecked(canonical_key, value, options)
+                    .await
+            }
+            async fn set_structured_canonical_key_cbor(
+                &self,
+                canonical_key: Vec<u8>,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_structured_canonical_key_cbor(canonical_key, value, options)
+                    .await
+            }
+            async fn set_json_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: JsonValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_json_canonical_key_unchecked(canonical_key, value, options)
+                    .await
+            }
+            async fn set_structured_canonical_key_cbor_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: &[u8],
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_structured_canonical_key_cbor_unchecked(
+                    canonical_key,
+                    value,
+                    options,
+                )
+                .await
+            }
+            async fn set_v0_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_v0_canonical_key_unchecked(canonical_key, value, options)
+                    .await
+            }
+            async fn get_json_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<JsonValue>> {
+                self.get_json_exact_item_id(namespace_id, item_id).await
+            }
+            async fn set_json_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: JsonValue,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_json_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+            async fn get_structured_exact_item_id_cbor(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_structured_exact_item_id_cbor(namespace_id, item_id)
+                    .await
+            }
+            async fn set_structured_exact_item_id_cbor(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_structured_exact_item_id_cbor(namespace_id, item_id, value, options)
+                    .await
+            }
+            async fn get_v0_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> crate::Result<GetOutcome<Vec<u8>>> {
+                self.get_v0_exact_item_id(namespace_id, item_id).await
+            }
+            async fn set_v0_exact_item_id(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: Vec<u8>,
+                options: SetOptions,
+            ) -> crate::Result<SetOutcome> {
+                self.set_v0_exact_item_id(namespace_id, item_id, value, options)
+                    .await
+            }
+            async fn delete_canonical_key_unchecked(
+                &self,
+                canonical_key: &[u8],
+            ) -> crate::Result<DeleteOutcome> {
+                self.delete_canonical_key_unchecked(canonical_key).await
+            }
+            async fn stats(&self) -> crate::Result<String> {
+                self.stats().await
+            }
+            async fn sync(&self) -> crate::Result<()> {
+                self.sync().await
+            }
+            async fn reconnect(&self) -> crate::Result<()> {
+                self.reconnect().await
+            }
+        }
+    };
+}
+
+#[cfg(feature = "quic-compio")]
+impl_ffi_protected_client!(crate::LocalProtectedClient, crate::LocalRawClient);
+#[cfg(feature = "tls-tcp")]
+impl_ffi_protected_client!(crate::TlsTcpProtectedClient, crate::TlsTcpRawClient);
+
+fn run_command_loop<R, C>(
+    runtime: &R,
+    client: C,
+    commands: CommandReceiver,
+    shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
+    async_dispatch: bool,
+) where
+    R: WorkerRuntime,
+    C: FfiProtectedClientApi,
+{
     while !shutdown.load(Ordering::Acquire) {
-        let Ok(command) = commands.recv() else {
+        let Ok(command) = runtime.block_on(commands.recv()) else {
             break;
         };
         match command {
@@ -1037,53 +1730,27 @@ fn run_worker(
                 request,
                 response,
             } => {
-                // Claim admission atomically with cancellation. A queued
-                // request canceled before this point is definitive and must
-                // never enter the mutation execution path.
                 if !request.admission.try_start() {
                     drop(response);
                     continue;
                 }
-                let task_request = Arc::clone(&request);
-                let task_client = client.clone();
-                let task = async move {
-                    let result = execute(
-                        &task_client,
-                        operation,
-                        application_key,
-                        value,
-                        input_permit,
-                        set_options,
-                        raw,
-                    )
-                    .await;
-                    let completion = task_request.admission.complete();
-                    if completion == AdmissionState::CompletedCanceled {
-                        if task_request.mutating {
-                            FfiResult::with_status(
-                                FfiResultKind::UnknownMutation,
-                                FfiStatusCategory::UnknownMutation,
-                                FfiErrorCategory::UnknownMutation,
-                                b"mutation outcome is unknown after cancellation".to_vec(),
-                            )
-                        } else {
-                            FfiResult::with_status(
-                                FfiResultKind::Canceled,
-                                FfiStatusCategory::Canceled,
-                                FfiErrorCategory::Canceled,
-                                b"request canceled".to_vec(),
-                            )
-                        }
-                    } else {
-                        result
-                    }
-                };
-                let response_sender = response;
-                runtime
-                    .spawn(async move {
-                        let _ = response_sender.send(task.await);
-                    })
-                    .detach();
+                let task = execute_async_request(
+                    client.clone(),
+                    operation,
+                    application_key,
+                    value,
+                    input_permit,
+                    set_options,
+                    raw,
+                    request,
+                );
+                if async_dispatch {
+                    runtime.spawn(async move {
+                        let _ = response.send(task.await);
+                    });
+                } else {
+                    let _ = response.send(runtime.block_on(task));
+                }
             }
             Command::NamespaceOpen {
                 name,
@@ -1142,8 +1809,53 @@ fn run_worker(
     }
 }
 
+async fn execute_async_request<C>(
+    client: C,
+    operation: FfiOperation,
+    application_key: Vec<u8>,
+    value: Vec<u8>,
+    input_permit: BytePermit,
+    set_options: SetOptions,
+    raw: bool,
+    request: Arc<FfiRequestControl>,
+) -> FfiResult
+where
+    C: FfiProtectedClientApi,
+{
+    let result = execute(
+        &client,
+        operation,
+        application_key,
+        value,
+        input_permit,
+        set_options,
+        raw,
+    )
+    .await;
+    let completion = request.admission.complete();
+    if completion == AdmissionState::CompletedCanceled {
+        if request.mutating {
+            FfiResult::with_status(
+                FfiResultKind::UnknownMutation,
+                FfiStatusCategory::UnknownMutation,
+                FfiErrorCategory::UnknownMutation,
+                b"mutation outcome is unknown after cancellation".to_vec(),
+            )
+        } else {
+            FfiResult::with_status(
+                FfiResultKind::Canceled,
+                FfiStatusCategory::Canceled,
+                FfiErrorCategory::Canceled,
+                b"request canceled".to_vec(),
+            )
+        }
+    } else {
+        result
+    }
+}
+
 async fn execute(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     application_key: Vec<u8>,
     value: Vec<u8>,
@@ -1167,7 +1879,7 @@ async fn execute(
 /// operation fields; keeping the value-model decode here ensures no Raw or
 /// JSON compatibility fallback can silently change its semantics.
 async fn execute_structured(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     canonical_key: Vec<u8>,
     value: Vec<u8>,
@@ -1199,19 +1911,8 @@ fn structured_get_result(
     }
 }
 
-fn structured_result(
-    outcome: GetOutcome<StructuredValue>,
-) -> std::result::Result<FfiResult, crate::Error> {
-    match outcome {
-        GetOutcome::Found(value) => encode(&value)
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| crate::value::Error::Structured(error).into()),
-        GetOutcome::NotFound => Ok(not_found_result()),
-    }
-}
-
 async fn execute_protected(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     canonical_key: Vec<u8>,
     value: Vec<u8>,
@@ -1224,15 +1925,19 @@ async fn execute_protected(
             .await
             .map(|value| get_result(value, raw_value_result)),
         FfiOperation::GetJson => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
+            .get_json_canonical_key_unchecked(canonical_key.as_slice())
             .await
             .and_then(|outcome| {
-                json_result(outcome, client.request_budget(), client.value_limits())
+                json_value_result(outcome, client.request_budget(), client.value_limits())
             }),
         FfiOperation::GetStructured => client
-            .get_structured_canonical_key_unchecked(canonical_key.as_slice())
+            .get_structured_canonical_key_cbor_unchecked(canonical_key.as_slice())
             .await
-            .and_then(structured_result),
+            .and_then(structured_get_result),
+        FfiOperation::GetV0 => client
+            .get_v0_canonical_key_unchecked(canonical_key.as_slice())
+            .await
+            .map(|value| get_result(value, bytes_result)),
         FfiOperation::Set => client
             .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
             .await
@@ -1243,25 +1948,22 @@ async fn execute_protected(
             let (json, _json_permits) =
                 crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
             client
-                .set_canonical_key_unchecked(
-                    canonical_key.as_slice(),
-                    Value::Json(json),
-                    set_options,
-                )
+                .set_json_canonical_key_unchecked(canonical_key.as_slice(), json, set_options)
                 .await
                 .map(set_result)
         }
-        FfiOperation::SetStructured => {
-            let structured = decode(&value).map_err(crate::value::Error::Structured)?;
-            client
-                .set_structured_canonical_key_unchecked(
-                    canonical_key.as_slice(),
-                    structured,
-                    set_options,
-                )
-                .await
-                .map(set_result)
-        }
+        FfiOperation::SetStructured => client
+            .set_structured_canonical_key_cbor_unchecked(
+                canonical_key.as_slice(),
+                value.as_slice(),
+                set_options,
+            )
+            .await
+            .map(set_result),
+        FfiOperation::SetV0 => client
+            .set_v0_canonical_key_unchecked(canonical_key.as_slice(), value, set_options)
+            .await
+            .map(set_result),
         FfiOperation::Delete => client
             .delete_canonical_key_unchecked(canonical_key.as_slice())
             .await
@@ -1280,7 +1982,7 @@ async fn execute_protected(
 }
 
 async fn execute_raw(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     item_id: Vec<u8>,
     value: Vec<u8>,
@@ -1304,6 +2006,54 @@ async fn execute_raw(
                 .await
                 .map(set_result)
         }
+        FfiOperation::GetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_json_exact_item_id(1, item_id)
+                .await
+                .and_then(|outcome| {
+                    json_value_result(outcome, client.request_budget(), client.value_limits())
+                })
+        }
+        FfiOperation::SetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            let budget = client.request_budget();
+            let limits = client.value_limits();
+            let (json, _json_permits) =
+                crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
+            client
+                .set_json_exact_item_id(1, item_id, json, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_structured_exact_item_id_cbor(1, item_id)
+                .await
+                .and_then(structured_get_result)
+        }
+        FfiOperation::SetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_structured_exact_item_id_cbor(1, item_id, value, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_v0_exact_item_id(1, item_id)
+                .await
+                .map(|value| get_result(value, bytes_result))
+        }
+        FfiOperation::SetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_v0_exact_item_id(1, item_id, value, set_options)
+                .await
+                .map(set_result)
+        }
         FfiOperation::Delete => {
             let item_id = ItemId::from_slice(&item_id)?;
             client.raw().delete(item_id).await.map(delete_result)
@@ -1315,10 +2065,6 @@ async fn execute_raw(
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
         FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
-        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
-            "operation",
-            "exact item-ID calls do not support formatted JSON operations",
-        )),
         _ => Err(crate::Error::configuration(
             "operation",
             "unsupported operation from the generated Smithy contract",
@@ -1327,7 +2073,7 @@ async fn execute_raw(
 }
 
 async fn execute_scoped(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
     namespace_id: u64,
     item_id: Vec<u8>,
@@ -1350,6 +2096,54 @@ async fn execute_scoped(
             client
                 .raw()
                 .set_in_namespace(namespace_id, item_id, ItemValue::new(value), set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_json_exact_item_id(namespace_id, item_id)
+                .await
+                .and_then(|outcome| {
+                    json_value_result(outcome, client.request_budget(), client.value_limits())
+                })
+        }
+        FfiOperation::SetJson => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            let budget = client.request_budget();
+            let limits = client.value_limits();
+            let (json, _json_permits) =
+                crate::value::parse_json_input_with_budget(&value, limits, &budget)?;
+            client
+                .set_json_exact_item_id(namespace_id, item_id, json, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_structured_exact_item_id_cbor(namespace_id, item_id)
+                .await
+                .and_then(structured_get_result)
+        }
+        FfiOperation::SetStructured => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_structured_exact_item_id_cbor(namespace_id, item_id, value, set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::GetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .get_v0_exact_item_id(namespace_id, item_id)
+                .await
+                .map(|value| get_result(value, bytes_result))
+        }
+        FfiOperation::SetV0 => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .set_v0_exact_item_id(namespace_id, item_id, value, set_options)
                 .await
                 .map(set_result)
         }
@@ -1379,7 +2173,7 @@ async fn execute_scoped(
 }
 
 async fn namespace_open(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     name: Vec<u8>,
     create_if_missing: bool,
     policy: Option<NamespacePolicy>,
@@ -1407,7 +2201,7 @@ async fn namespace_open(
 }
 
 async fn namespace_update_policy(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     namespace_id: u64,
     expected_revision: u64,
     policy: NamespacePolicy,
@@ -1428,7 +2222,7 @@ async fn namespace_update_policy(
 }
 
 async fn namespace_delete(
-    client: &LocalProtectedClient,
+    client: &impl FfiProtectedClientApi,
     namespace_id: u64,
     expected_revision: u64,
 ) -> FfiResult {
@@ -1544,6 +2338,18 @@ pub fn json_result(
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
+}
+
+fn json_value_result(
+    outcome: GetOutcome<JsonValue>,
+    budget: crate::RequestBudget,
+    limits: ValueLimits,
+) -> std::result::Result<FfiResult, crate::Error> {
+    let outcome = match outcome {
+        GetOutcome::Found(value) => GetOutcome::Found(Value::Json(value)),
+        GetOutcome::NotFound => GetOutcome::NotFound,
+    };
+    json_result(outcome, budget, limits)
 }
 
 fn write_json_canonical(
@@ -1765,7 +2571,14 @@ pub unsafe extern "C" fn openkache_client_connect(
         retry_max_attempts: 0,
         max_in_flight: 0,
     };
-    boxed_result(catch_result(|| connect_options(&options)))
+    boxed_result(catch_result(|| {
+        connect_options(
+            &options,
+            TransportSelection::Quic {
+                verify_server: true,
+            },
+        )
+    }))
 }
 
 /// Connects a native client with the complete shared-core configuration.
@@ -1824,7 +2637,14 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
         connect_timeout_ms,
         request_timeout_ms,
     };
-    boxed_result(catch_result(|| connect_options(&options)))
+    boxed_result(catch_result(|| {
+        connect_options(
+            &options,
+            TransportSelection::Quic {
+                verify_server: true,
+            },
+        )
+    }))
 }
 
 /// Connects using a caller-owned options structure.
@@ -1846,11 +2666,217 @@ pub unsafe extern "C" fn openkache_client_connect_with_options(
                 .as_ref()
                 .ok_or_else(|| "connect options pointer must not be null".to_owned())?
         };
-        connect_options(options)
+        connect_options(
+            options,
+            TransportSelection::Quic {
+                verify_server: true,
+            },
+        )
     }))
 }
 
-fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult, String> {
+/// Connects using the stable options structure and an explicit transport selector.
+///
+/// This additive symbol leaves the ABI v6 options structure unchanged. Older
+/// native libraries may omit it; callers must probe the symbol before use.
+///
+/// # Safety
+///
+/// `options` must be either null or a valid, initialized pointer. Every non-empty
+/// pointer/length pair in the structure must identify readable memory for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_transport(
+    options: *const FfiConnectOptions,
+    transport: u32,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let options = unsafe {
+            options
+                .as_ref()
+                .ok_or_else(|| "connect options pointer must not be null".to_owned())?
+        };
+        let transport = TransportSelection::from_code(transport)?;
+        connect_options(options, transport)
+    }))
+}
+
+/// Returns the additive ABI version that supports independent Item-ID and
+/// value-key configuration.
+#[unsafe(no_mangle)]
+pub extern "C" fn openkache_client_abi_version_v7() -> u32 {
+    FFI_ABI_VERSION_V7
+}
+
+/// Connects through the additive ABI v7 configuration path.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_with_options_v7(
+    options: *const FfiConnectOptionsV7,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let options = unsafe {
+            options
+                .as_ref()
+                .ok_or_else(|| "v7 connect options pointer must not be null".to_owned())?
+        };
+        connect_options_v7(options)
+    }))
+}
+
+fn connect_options_v7(options: &FfiConnectOptionsV7) -> std::result::Result<FfiResult, String> {
+    if options.abi_version != FFI_ABI_VERSION_V7 {
+        return Err(format!(
+            "unsupported native ABI v7 options version {}, expected {}",
+            options.abi_version, FFI_ABI_VERSION_V7
+        ));
+    }
+    let base = unsafe {
+        options
+            .base
+            .as_ref()
+            .ok_or_else(|| "v7 base options pointer must not be null".to_owned())?
+    };
+    if base.data_protection_key_length != 0 {
+        return Err(
+            "v7 base data_protection_key must be empty; configure item_id_root_key and value_keys"
+                .to_owned(),
+        );
+    }
+    let item_id_root = if options.item_id_root_key_length == 0 {
+        ClientRootKey::public()
+    } else {
+        copy_data_protection_key(options.item_id_root_key, options.item_id_root_key_length)?
+            .ok_or_else(|| "item_id_root_key must contain exactly 32 bytes".to_owned())?
+    };
+    let encryption = match options.value_encryption {
+        value if value == VALUE_FORMAT_ENCRYPTION_NONE as u32 => Encryption::Unprotected,
+        value if value == VALUE_FORMAT_ENCRYPTION_COMPACT as u32 => Encryption::Compact,
+        value if value == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 => Encryption::Robust,
+        value => return Err(format!("unsupported v7 encryption profile {value}")),
+    };
+    if options.value_key_count == 0 && encryption != Encryption::Unprotected {
+        return Err("protected v7 values require at least one value key".to_owned());
+    }
+    if options.value_key_count > 0 && encryption == Encryption::Unprotected {
+        return Err("unprotected v7 values must not supply value keys".to_owned());
+    }
+    if options.value_key_count > 0 && options.value_keys.is_null() {
+        return Err(format!(
+            "value_keys pointer is null for {} entries",
+            options.value_key_count
+        ));
+    }
+    if options.value_key_count > (isize::MAX as usize) / std::mem::size_of::<FfiValueKey>() {
+        return Err("value_keys array is too large".to_owned());
+    }
+    let value_keyring = if options.value_key_count == 0 {
+        None
+    } else {
+        let entries =
+            unsafe { std::slice::from_raw_parts(options.value_keys, options.value_key_count) };
+        let mut keyring = ValueKeyring::new();
+        for entry in entries {
+            let key = copy_fixed_value_key(entry.key, entry.key_length)?;
+            keyring
+                .insert(entry.id, key)
+                .map_err(|error| error.to_string())?;
+        }
+        if options.active_value_key_id != 0 {
+            keyring
+                .set_active_id(Some(options.active_value_key_id))
+                .map_err(|error| error.to_string())?;
+        }
+        Some(keyring)
+    };
+    let address = copy_utf8(base.address, base.address_length, "address")?;
+    let mut endpoint: Endpoint = address
+        .parse()
+        .map_err(|error| format!("invalid server address: {error}"))?;
+    let server_name = copy_utf8(base.server_name, base.server_name_length, "server name")?;
+    if !server_name.is_empty() {
+        endpoint = endpoint
+            .with_server_name(server_name)
+            .map_err(|error| error.to_string())?;
+    }
+    let certificate = copy_bytes(base.certificate, base.certificate_length, "certificate")?;
+    let client_certificate_chain = copy_bytes(
+        base.client_certificate_chain,
+        base.client_certificate_chain_length,
+        "client certificate chain",
+    )?;
+    let client_private_key = copy_bytes(
+        base.client_private_key,
+        base.client_private_key_length,
+        "client private key",
+    )?;
+    if client_certificate_chain.is_empty() != client_private_key.is_empty() {
+        return Err(
+            "client certificate chain and private key must be supplied together".to_owned(),
+        );
+    }
+    let compression = if base.compression_enabled == 0 {
+        Compression::Disabled
+    } else {
+        let defaults = ZstandardOptions::default();
+        Compression::Zstandard(ZstandardOptions {
+            level: if base.compression_level == 0 {
+                defaults.level
+            } else {
+                base.compression_level
+            },
+            minimum_input_size: if base.minimum_input_size == 0 {
+                defaults.minimum_input_size
+            } else {
+                base.minimum_input_size
+            },
+            minimum_savings: if base.minimum_savings == 0 {
+                defaults.minimum_savings
+            } else {
+                base.minimum_savings
+            },
+        })
+    };
+    if base.connect_timeout_ms == 0 || base.request_timeout_ms == 0 {
+        return Err("client timeouts must be greater than zero milliseconds".to_owned());
+    }
+    let timeouts = ClientTimeouts {
+        connect: Duration::from_millis(base.connect_timeout_ms),
+        request: Duration::from_millis(base.request_timeout_ms),
+    };
+    let retry = if base.retry_max_attempts == 0 {
+        RetryPolicy::default()
+    } else {
+        RetryPolicy {
+            max_attempts: base.retry_max_attempts,
+        }
+    };
+    let max_in_flight = if base.max_in_flight == 0 {
+        crate::DEFAULT_MAX_IN_FLIGHT
+    } else {
+        base.max_in_flight
+    };
+    FfiClient::connect(
+        TransportSelection::Quic {
+            verify_server: true,
+        },
+        endpoint,
+        certificate,
+        Some(item_id_root),
+        value_keyring,
+        client_certificate_chain,
+        client_private_key,
+        compression,
+        encryption,
+        timeouts,
+        retry,
+        max_in_flight,
+    )
+    .map(FfiResult::connected)
+}
+
+fn connect_options(
+    options: &FfiConnectOptions,
+    transport: TransportSelection,
+) -> std::result::Result<FfiResult, String> {
     let address = copy_utf8(options.address, options.address_length, "address")?;
     let mut endpoint: Endpoint = address
         .parse()
@@ -1941,9 +2967,11 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
         options.max_in_flight
     };
     FfiClient::connect(
+        transport,
         endpoint,
         certificate,
         data_protection_key,
+        None,
         client_certificate_chain,
         client_private_key,
         compression,
@@ -2226,10 +3254,12 @@ pub unsafe extern "C" fn openkache_client_execute(
     )
 }
 
-/// Executes one exact-item-ID operation without application-key derivation or
-/// value protection.
+/// Executes one exact-item-ID operation without application-key derivation.
 ///
-/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller.
+/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller and
+/// preserve their opaque value bytes. The generated `GET_JSON`/`SET_JSON`,
+/// `GET_STRUCTURED`/`SET_STRUCTURED`, and `GET_V0`/`SET_V0` operations use the
+/// same exact address while applying their documented value representation.
 ///
 /// # Safety
 ///
@@ -2329,8 +3359,9 @@ pub unsafe extern "C" fn openkache_client_execute_raw_with_options(
 
 /// Executes one exact-item-ID operation in an explicitly supplied namespace.
 ///
-/// `set_flags` is the complete wire SET flag byte. It is ignored for operations other than SET,
-/// which must pass zero for both `set_flags` and `ttl_ms`.
+/// `set_flags` is the complete wire SET flag byte. It is ignored for operations other than
+/// `SET`, `SET_JSON`, `SET_STRUCTURED`, and `SET_V0`, which must pass zero for both `set_flags`
+/// and `ttl_ms`.
 ///
 /// # Safety
 ///
@@ -2368,7 +3399,13 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             value_length,
             &client.request_budget(),
         )?;
-        let set_options = if operation == FfiOperation::Set {
+        let set_options = if matches!(
+            operation,
+            FfiOperation::Set
+                | FfiOperation::SetJson
+                | FfiOperation::SetStructured
+                | FfiOperation::SetV0
+        ) {
             set_options_from_flags(set_flags, ttl_ms)?
         } else {
             if set_flags != 0 || ttl_ms != 0 {
@@ -2377,7 +3414,15 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             SetOptions::new()
         };
         match operation {
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+            FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::SetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::SetV0
+            | FfiOperation::Delete
                 if item_id.len() > crate::MAX_ITEM_ID_BYTES =>
             {
                 Err(format!(
@@ -2386,7 +3431,13 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
                     item_id.len()
                 ))
             }
-            FfiOperation::Get | FfiOperation::Delete if !value.is_empty() => {
+            FfiOperation::Get
+            | FfiOperation::GetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::Delete
+                if !value.is_empty() =>
+            {
                 Err("operation does not accept a value".to_owned())
             }
             FfiOperation::Stats | FfiOperation::Sync if !item_id.is_empty() => {
@@ -2395,7 +3446,20 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
                 Err("operation does not accept a value".to_owned())
             }
-            FfiOperation::GetJson | FfiOperation::SetJson | FfiOperation::Ping => Err(
+            FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::SetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::SetV0 => Ok(client.execute_scoped(
+                operation,
+                namespace_id,
+                item_id,
+                value,
+                input_permit,
+                set_options,
+            )),
+            FfiOperation::Ping => Err(
                 "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
             ),
             FfiOperation::NamespaceOpen
@@ -2646,17 +3710,20 @@ fn validated_execute(
     operation: u32,
     key: Vec<u8>,
     value: Vec<u8>,
-    raw: bool,
+    _raw: bool,
     legacy_options: Option<(u32, u8, u64)>,
     complete_flags: Option<(u8, u64)>,
 ) -> std::result::Result<(FfiOperation, Vec<u8>, Vec<u8>, SetOptions), String> {
     let operation = FfiOperation::try_from(operation)
         .map_err(|operation| format!("unsupported operation {operation}"))?;
-    if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-        return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
-    }
     let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-        if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+        if matches!(
+            operation,
+            FfiOperation::Set
+                | FfiOperation::SetJson
+                | FfiOperation::SetStructured
+                | FfiOperation::SetV0
+        ) {
             set_options_from_flags(flags, ttl_ms)?
         } else {
             if flags != 0 || ttl_ms != 0 {
@@ -2678,6 +3745,8 @@ fn validated_execute(
         FfiOperation::Ping
         | FfiOperation::Get
         | FfiOperation::GetJson
+        | FfiOperation::GetStructured
+        | FfiOperation::GetV0
         | FfiOperation::Delete
         | FfiOperation::Stats
         | FfiOperation::Sync
@@ -2687,9 +3756,14 @@ fn validated_execute(
             Err("operation does not accept a value".to_owned())
         }
         operation
-            if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                && (set_options.condition() != SetCondition::Any
-                    || set_options.time_to_live_millis().is_some()) =>
+            if !matches!(
+                operation,
+                FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::SetStructured
+                    | FfiOperation::SetV0
+            ) && (set_options.condition() != SetCondition::Any
+                || set_options.time_to_live_millis().is_some()) =>
         {
             Err("SET options require a SET operation".to_owned())
         }
@@ -2725,7 +3799,17 @@ fn typed_execute_entry(
             value_length,
             &client.request_budget(),
         )?;
-        let key = ffi_key_bytes(key_spec, key_input, false)?;
+        let key = if matches!(
+            operation,
+            FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync | FfiOperation::Reconnect
+        ) {
+            // Keyless operations use an empty application-key buffer.  Do
+            // not turn that buffer into a canonical empty Bytes key before
+            // `validated_execute` checks the operation's empty-key contract.
+            key_input
+        } else {
+            ffi_key_bytes(key_spec, key_input, false)?
+        };
         let (operation, key, value, set_options) = validated_execute(
             operation.code(),
             key,
@@ -2767,7 +3851,21 @@ fn typed_async_entry(
             value_length,
             &client.request_budget(),
         )?;
-        let key = ffi_key_bytes(key_spec, key_input, raw)?;
+        let key = if !raw
+            && matches!(
+                operation,
+                FfiOperation::Ping
+                    | FfiOperation::Stats
+                    | FfiOperation::Sync
+                    | FfiOperation::Reconnect
+            ) {
+            // Keyless operations use an empty application-key buffer.  Do
+            // not turn that buffer into a canonical empty Bytes key before
+            // `validated_execute` checks the operation's empty-key contract.
+            key_input
+        } else {
+            ffi_key_bytes(key_spec, key_input, raw)?
+        };
         let (operation, key, value, set_options) = validated_execute(
             operation.code(),
             key,
@@ -2844,9 +3942,6 @@ fn execute_entry_inner(
         };
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
-        }
         validate_input_lengths(operation, raw, application_key_length, value_length)?;
         let (application_key, value, input_permit) = copy_input_bytes(
             application_key,
@@ -2858,7 +3953,15 @@ fn execute_entry_inner(
         if raw
             && matches!(
                 operation,
-                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+                FfiOperation::Get
+                    | FfiOperation::Set
+                    | FfiOperation::GetJson
+                    | FfiOperation::SetJson
+                    | FfiOperation::GetStructured
+                    | FfiOperation::SetStructured
+                    | FfiOperation::GetV0
+                    | FfiOperation::SetV0
+                    | FfiOperation::Delete
             )
             && application_key.len() > crate::MAX_ITEM_ID_BYTES
         {
@@ -2869,7 +3972,13 @@ fn execute_entry_inner(
             ));
         }
         let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-            if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+            if matches!(
+                operation,
+                FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::SetStructured
+                    | FfiOperation::SetV0
+            ) {
                 set_options_from_flags(flags, ttl_ms)?
             } else {
                 if flags != 0 || ttl_ms != 0 {
@@ -2910,6 +4019,8 @@ fn execute_entry_inner(
             FfiOperation::Ping
             | FfiOperation::Get
             | FfiOperation::GetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::GetV0
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
@@ -2919,9 +4030,14 @@ fn execute_entry_inner(
                 Err("operation does not accept a value".to_owned())
             }
             operation
-                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                    && (set_options.condition() != SetCondition::Any
-                        || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(
+                    operation,
+                    FfiOperation::Set
+                        | FfiOperation::SetJson
+                        | FfiOperation::SetStructured
+                        | FfiOperation::SetV0
+                ) && (set_options.condition() != SetCondition::Any
+                    || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_owned())
             }
@@ -3180,6 +4296,20 @@ fn copy_data_protection_key(
         .map_err(|error| error.to_string())
 }
 
+fn copy_fixed_value_key(
+    pointer: *const u8,
+    length: usize,
+) -> std::result::Result<[u8; crate::DATA_PROTECTION_KEY_BYTES], String> {
+    let bytes = copy_bytes(pointer, length, "value key")?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        format!(
+            "value key must contain exactly {} bytes, got {}",
+            crate::DATA_PROTECTION_KEY_BYTES,
+            bytes.len()
+        )
+    })
+}
+
 fn validate_input_lengths(
     operation: FfiOperation,
     raw: bool,
@@ -3189,7 +4319,15 @@ fn validate_input_lengths(
     if raw
         && matches!(
             operation,
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+            FfiOperation::Get
+                | FfiOperation::Set
+                | FfiOperation::GetJson
+                | FfiOperation::SetJson
+                | FfiOperation::GetStructured
+                | FfiOperation::SetStructured
+                | FfiOperation::GetV0
+                | FfiOperation::SetV0
+                | FfiOperation::Delete
         )
         && application_key_length > crate::MAX_ITEM_ID_BYTES
     {
@@ -3205,6 +4343,7 @@ fn validate_input_lengths(
             | FfiOperation::Get
             | FfiOperation::GetJson
             | FfiOperation::GetStructured
+            | FfiOperation::GetV0
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
@@ -3230,7 +4369,15 @@ fn validate_scoped_input_lengths(
 ) -> std::result::Result<(), String> {
     if matches!(
         operation,
-        FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+        FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::GetStructured
+            | FfiOperation::SetStructured
+            | FfiOperation::GetV0
+            | FfiOperation::SetV0
+            | FfiOperation::Delete
     ) && item_id_length > crate::MAX_ITEM_ID_BYTES
     {
         return Err(format!(

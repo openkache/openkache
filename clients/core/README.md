@@ -116,6 +116,31 @@ let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```
 
+`ProtectedClient` keeps addressing and value representation independent:
+`get_json`/`set_json` carry canonical UTF-8 JSON as selector-0 `OpaqueBytes`,
+`get_structured`/`set_structured` use selector 1, and `get_v0`/`set_v0`
+validate only a caller-owned version-0 prefix. Each value family also has an
+exact-Item-ID variant; `RawClient` remains the opaque exact-byte path.
+
+When Item-ID identity must remain public while values are protected, use the
+explicit keyring builder:
+
+```rust
+use openkache_client_core::{ClientRootKey, ProtectedClient, ValueKeyring};
+
+let value_keys = ValueKeyring::single(1, [0x24; 32])?;
+let client = ProtectedClient::builder_with_keyring(
+    "cache.example.com:4433".parse()?,
+    ClientRootKey::public(),
+    value_keys,
+);
+```
+
+`ClientRootKey::public()` (equivalent to `zero()`) deliberately makes mapped
+Item IDs publicly derivable; it never claims application-key confidentiality.
+The original `ProtectedClient::builder` remains source-compatible and keeps
+its explicit secret-root-plus-derived-value-key behavior.
+
 ## Configuration
 
 `RawClient::connect("host:port")` and `ProtectedClient::connect` use system
@@ -132,6 +157,12 @@ surface.
 `Endpoint` requires a positive port. A pre-resolved socket address also
 requires an explicit certificate server name because the network destination
 does not provide one.
+
+The native ABI v6 connection functions retain their historical
+`data_protection_key` coupling. ABI v7 adds
+`openkache_client_connect_with_options_v7`, which references v6 transport
+options while accepting an explicit Item-ID root and an immutable value-key
+array; callers must check `openkache_client_abi_version_v7()` before use.
 
 ## Request-engine migration
 
@@ -178,8 +209,9 @@ when owning a connection lifecycle.
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
   C++, Python, and other non-Rust bindings. It exposes both protected
-  application-key operations and exact-item-ID raw operations, while the
-  worker owns one Compio runtime per native handle. The canonical declarations
+  application-key operations and exact-item-ID operations for raw, JSON,
+  StructuredValue-CBOR-v1, and caller-owned-v0 values, while the worker owns
+  one Compio runtime per native handle. The canonical declarations
   are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
   with [`include/openkache_client.h`](include/openkache_client.h) retained as
   a compatibility include. Generated ABI/protocol constants are emitted to

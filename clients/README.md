@@ -54,18 +54,18 @@ their API shape or local policy a requirement for third-party clients. The
 value envelope carries the selected value profile opaquely; the server does
 not interpret it. TypeScript's legacy metadata envelope remains a
 package-level compatibility detail. In the current implementation, use
-`set_json` / `get_json` for the legacy cross-language JSON API and Exact Item ID
-or raw methods for caller-owned opaque bytes. Exact Item ID methods do not
-perform cross-language serialization.
+`set_json` / `get_json` for canonical UTF-8 JSON carried as `OpaqueBytes`,
+`set_structured` / `get_structured` for selector-1 structured values, and Exact
+Item ID or raw methods for caller-owned opaque bytes. The mapped and exact
+surfaces also expose explicit caller-owned-v0 operations; those validate only
+the leading canonical version `0` and preserve the complete envelope bytes.
+Every address mode has explicit JSON, structured, raw, and v0 value operations;
+no mode silently interprets legacy metadata.
 
 During this migration, the current high-level `set`/`get` compatibility paths
 may use the legacy TypeScript metadata envelope. The shared-core `set_json` /
-`get_json` helpers parse or serialize a JSON-compatible logical view while
-encoding or decoding through selector `1` (`StructuredValue-CBOR-v1`);
-`set_structured` / `get_structured` expose the full structured model. Neither
-is the target JSON-helper contract: after migration, JSON helpers described in
-[`CLIENT.md`](CLIENT.md) carry canonical UTF-8 JSON as `OpaqueBytes`, while
-structured helpers use selector 1.
+`get_json` helpers carry canonical UTF-8 JSON as `OpaqueBytes`;
+`set_structured` / `get_structured` use selector 1.
 
 The documents above are target drafts. Package READMEs describe current
 behavior; no package claims conformance until the generated contract and core
@@ -88,12 +88,12 @@ not treat generated Smithy metadata as a stable opcode or status registry.
 | Item ID | `0..=32` bytes | Exact `0..=32` bytes in core/FFI and maintained adapters | Implemented |
 | Integer key | Signed `i64` deterministic-CBOR subset | Core and maintained adapters enforce signed `i64`; CBOR bignum tags are rejected | Implemented |
 | `NamespaceHash` input | Domain string \| namespace ID \| canonical key bytes | Namespace-bound BLAKE3 uses the documented domain, namespace ID, and canonical key bytes | Implemented |
-| Item ID/value keys | Independent Item ID root and value-key rotation | Convenience root key couples both; explicit keyrings separate rotation, but protected profiles reject an all-zero Item-ID root | Migration pending |
+| Item ID/value keys | Independent Item ID root and value-key rotation | `builder_with_keyring`/`with_item_id_root_and_keyring` keep identity and value keys independent; legacy root builders remain coupled for compatibility | Implemented |
 | Item ID mapping | `NamespaceHash` plus explicit `PublicKeyOrHash` | `NamespaceHash` by default; `PublicKeyOrHash` is explicit; raw Exact Item ID remains available | Implemented |
-| Public Item ID root + protected value | Zero/public root may be paired with a separate value keyring | Current protected builders reject the zero root | Migration pending |
+| Public Item ID root + protected value | Zero/public root may be paired with a separate value keyring | Explicit keyring builders and native ABI v7 accept a public zero root; legacy ABI v6 keeps its coupled semantics | Implemented |
 | Key API shape | Exact Item ID accepts `0..=32` bytes; mapped profiles choose the output length | Core and maintained adapters accept the complete `0..=32` Item ID range | Implemented |
-| Structured value selector `1` | `StructuredValue-CBOR-v1` | Legacy JSON-compatible view backed by selector `1` | Migration pending |
-| Maintained compression | Automatic; use a completed frame when it is at least one byte smaller | Legacy per-core/default settings | Migration pending |
+| Structured value selector `1` | `StructuredValue-CBOR-v1` | Dedicated structured helpers use selector `1`; JSON helpers use selector `0` | Implemented |
+| Maintained compression | Automatic level-1 Zstandard; use a completed frame only when it is smaller | All maintained bindings enable automatic compression by default; explicit opt-out remains available | Implemented |
 | Value-format `maxVu128Bytes` | Unsigned 64-bit values, at most 9 bytes | Smithy client model/generator emits 9-byte metadata | Implemented |
 
 The draft documents are the source of truth for the post-migration contract.

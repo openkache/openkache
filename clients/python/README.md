@@ -1,11 +1,12 @@
 # OpenKache Python client
 
 The `openkache` package is an asyncio-friendly Python binding over the shared
-Rust client core. QUIC-over-TLS, retries, application-key derivation,
-compression, encryption, and the v1 value format stay in [`../core`](../core);
-Python only converts Python values and owns the async scheduling and resource
-lifecycle. The current binding is QUIC-only; TLS-over-TCP is part of the target
-maintained-client contract.
+Rust client core. TLS 1.3 over QUIC or TCP, retries, application-key
+derivation, compression, encryption, and the v1 value format stay in
+[`../core`](../core); Python only converts Python values and owns the async
+scheduling and resource lifecycle. Pass `Transport.TLS_TCP` for verified
+TLS-over-TCP or an explicit insecure enum member to disable certificate and
+server-identity verification; the default remains verified QUIC.
 
 The Smithy client model in [`../model/openkache.smithy`](../model/openkache.smithy), together with
 the wire model in [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy),
@@ -20,17 +21,26 @@ The package also exposes the lossless ``StructuredValue-CBOR-v1`` model from
 byte strings, and both ``list`` and ``tuple`` map to model arrays.
 ``decode_value`` returns the complete lossless model, while ``decode_native``
 performs a strict conversion and rejects ``Undefined`` or map-key collisions
-instead of dropping information. Cache methods keep the legacy JSON selector
-explicit; structured payload operations use the generated structured-value ABI
-without JSON or Raw fallback. The native boundary preserves unknown mutation
+instead of dropping information. Cache methods use canonical UTF-8 JSON as
+`OpaqueBytes`; structured payload operations use the generated
+StructuredValue-CBOR-v1 ABI without JSON or Raw fallback. The native boundary preserves unknown mutation
 and cancellation outcomes as ``OpenKacheUnknownMutationError`` and
 ``OpenKacheCancelledError``.
 
+Mapped GET/SET/DELETE calls use the ABI v6 request handle
+(``poll``/``wait``/``cancel``/``free``), so task cancellation cannot abandon a
+native mutation. Cancellation before admission raises
+``OpenKacheCancelledError``; cancellation after a mutation starts raises
+``OpenKacheUnknownMutationError``. Structured, scoped, namespace, and complete
+raw-policy calls have no dedicated request entry point in ABI v6 and therefore
+drain a documented safe completion boundary before honoring cancellation.
+
 > **Current implementation:** This package exposes canonical-JSON mapped-key
 > operations and exact `0..=32`-byte Item ID operations. Native values are
-> converted to canonical key bytes in the adapter and the shared core applies
-> the default `NamespaceHash` profile; `PublicKeyOrHash` remains an explicit
-> core-only profile until the binding options are finalized.
+> converted to logical bytes plus a generated key discriminator at the adapter
+> boundary; the shared core performs canonical encoding and applies the default
+> `NamespaceHash` profile. `PublicKeyOrHash` remains an explicit core-only
+> profile until the binding options are finalized.
 
 ## Commands
 
@@ -75,8 +85,9 @@ finally:
 
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
 `get_raw` for exact bytes; empty raw values are supported. Each operation
-infers `Text`, `Bytes`, or signed-i64 `Integer` from the native key and
-converts it to canonical deterministic CBOR before the native ABI. The
+infers `Text`, `Bytes`, or signed-i64 `Integer` from the native key and passes
+the logical bytes plus the generated key discriminator through the native ABI;
+the shared core performs canonical deterministic CBOR encoding. The
 deprecated `key_spec` option is accepted for source compatibility but is not a
 namespace policy and does not override per-operation inference. Empty and
 NUL-containing keys are valid. JSON numbers
@@ -86,10 +97,13 @@ native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
 core reparses that input and owns canonical serialization, compression,
 encryption, and value framing.
 
-This is the current transitional JSON API. The target structured operation
-uses `StructuredValue-CBOR-v1`; JSON helpers remain an explicitly documented
-compatibility surface rather than an implicit substitute for structured
-payloads.
+JSON helpers are an explicitly documented convenience surface: they carry
+canonical UTF-8 JSON as `OpaqueBytes`, while the structured operation uses
+`StructuredValue-CBOR-v1` and never substitutes JSON or Raw payloads.
+`set_v0` / `get_v0` accept a complete caller-owned version-0 envelope,
+validate only its canonical leading version field, and preserve the remaining
+bytes unchanged. The `client.raw` view exposes the same value modes for exact
+Item IDs.
 
 `client.raw` exposes the current transitional Smithy-shaped exact item-ID API.
 The namespace-open call below is an out-of-band WIP control-plane example, not
@@ -144,9 +158,12 @@ result = await client.raw.get(
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private
   key for mutual TLS.
 - `compression`, `encryption`, `timeouts`, `max_in_flight`, and
-  `retry_max_attempts` map directly to shared-core settings. `Encryption.ROBUST`
-  is the default; select `Encryption.COMPACT` only when every client sharing
-  the protected entries uses that profile.
+  `retry_max_attempts` map directly to shared-core settings. Compression
+  defaults to automatic level-1 Zstandard with no input-size or
+  minimum-savings threshold; pass `CompressionOptions(enabled=False)` for an
+  explicit opt-out. `Encryption.ROBUST` is the default; select
+  `Encryption.COMPACT` only when every client sharing the protected entries
+  uses that profile.
 - `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
 
 Call `close()` when finished; it is idempotent. The client also supports

@@ -54,6 +54,8 @@ export interface Value_Format_Contract {
   readonly robust_tag_bytes: number
   readonly serialization_json: number
   readonly serialization_raw: number
+  /** Target selector for StructuredValue-CBOR-v1 (JSON has no selector). */
+  readonly serialization_structured: number
   readonly value_root_context: string
   readonly max_vu128_bytes: number
   readonly version: number
@@ -108,6 +110,7 @@ export interface Ffi_Entry extends Wire_Entry {
 export interface Ffi_Contract {
   readonly abi_version: number
   readonly connection_states: readonly Ffi_Entry[]
+  readonly transports: readonly Ffi_Entry[]
   readonly native_abi_functions: readonly Native_Abi_Function[]
   readonly native_abi_structures: readonly Native_Abi_Structure[]
   readonly error_categories: readonly Ffi_Entry[]
@@ -215,6 +218,7 @@ const UNSIGNED_LONG_TRAIT_ID = "openkache.protocol#unsignedLong"
 const LEGACY_UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
 const FFI_ENUMS = {
   operations: { name: "FfiOperation", kind: "FFI operation" },
+  transports: { name: "FfiTransport", kind: "FFI transport" },
   result_kinds: { name: "FfiResultKind", kind: "FFI result" },
   status_categories: { name: "FfiStatusCategory", kind: "FFI status category" },
   error_categories: { name: "FfiErrorCategory", kind: "FFI error category" },
@@ -1220,6 +1224,15 @@ function ffi_contract(
       FFI_ENUMS.connection_states.name,
       FFI_ENUMS.connection_states.kind,
     ),
+    transports:
+      shapes[`${namespace}#${FFI_ENUMS.transports.name}`] === undefined
+        ? []
+        : ffi_enum_entries(
+            shapes,
+            namespace,
+            FFI_ENUMS.transports.name,
+            FFI_ENUMS.transports.kind,
+          ),
     error_categories: ffi_enum_entries(
       shapes,
       namespace,
@@ -1407,6 +1420,13 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       0,
       0xff,
     ),
+    serialization_structured: integer_member(
+      contract,
+      "serializationStructured",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
     value_root_context: string_member(
       contract,
       "valueRootContext",
@@ -1468,10 +1488,15 @@ function value_format_contract(value: unknown): Value_Format_Contract {
   unique_wire_values(
     [
       { name: "Raw", value: values.serialization_raw },
-      { name: "Json", value: values.serialization_json },
+      { name: "Structured", value: values.serialization_structured },
     ],
     "serialization",
   )
+  if (values.serialization_structured !== 1) {
+    throw new Error(
+      `${VALUE_FORMAT_TRAIT_ID}.serializationStructured must be selector 1`,
+    )
+  }
   unique_wire_values(
     [
       { name: "None", value: values.compression_none },

@@ -97,6 +97,7 @@ export function render_csharp(contract: Client_Contract): string {
     ["FfiOperation", ffi.operations],
     ["FfiResult", ffi.result_kinds],
     ["FfiConnection", ffi.connection_states],
+    ["FfiTransport", ffi.transports],
     ["FfiSetCondition", ffi.set_conditions],
     ["FfiKeySpec", ffi.key_specs],
     ["FfiNamespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
@@ -203,6 +204,7 @@ ${csharp_descriptor_offsets}
     internal const byte ValueFormatEncryptionShift = ${formatted_byte(value.format_encryption_shift)};
     internal const byte ValueFormatSerializationRaw = ${formatted_byte(value.serialization_raw)};
     internal const byte ValueFormatSerializationJson = ${formatted_byte(value.serialization_json)};
+    internal const byte ValueFormatSerializationStructured = ${formatted_byte(value.serialization_structured)};
     internal const byte ValueFormatCompressionNone = ${formatted_byte(value.compression_none)};
     internal const byte ValueFormatCompressionZstandard = ${formatted_byte(value.compression_zstandard)};
     internal const byte ValueFormatEncryptionNone = ${formatted_byte(value.encryption_none)};
@@ -398,7 +400,7 @@ function render_csharp_operation_method_body(
     ? "ReadOnlyMemory<byte>.Empty"
     : input_item_ids.length <= 1
     ? `ValidateItemId(input.${input_item_id})`
-    : `ValidateItemIds(ConcatItemIds(${input_item_ids.map((name) => `input.${name}`).join(", ")}), ${operation_field_count(operation.plan.operation, "input", "item_id")})`
+    : `ConcatItemIds(${input_item_ids.map((name) => `input.${name}`).join(", ")})`
   const {
     policy_default_eviction,
     policy_default_expiration,
@@ -970,11 +972,17 @@ export function render_csharp_operations(contract: Client_Contract): string {
         var total = 0;
         foreach (var itemId in itemIds)
         {
-            if (itemId.Length != Protocol.ItemIdBytes)
+            if (itemId.Length > Protocol.ItemIdBytes)
             {
                 throw new OpenKacheException(
                     "PROTOCOL_ERROR",
-                    $"item IDs must contain exactly {Protocol.ItemIdBytes} bytes.");
+                    $"item IDs must contain at most {Protocol.ItemIdBytes} bytes.");
+            }
+            if (total > Protocol.ItemIdBytes - itemId.Length)
+            {
+                throw new OpenKacheException(
+                    "PROTOCOL_ERROR",
+                    $"combined item IDs must contain at most {Protocol.ItemIdBytes} bytes.");
             }
             total = checked(total + itemId.Length);
         }
@@ -986,17 +994,6 @@ export function render_csharp_operations(contract: Client_Contract): string {
             offset += itemId.Length;
         }
         return combined;
-    }
-
-    private static byte[] ValidateItemIds(byte[] itemIds, int itemCount)
-    {
-        if (itemIds.Length != checked(Protocol.ItemIdBytes * itemCount))
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                $"item IDs must contain exactly {Protocol.ItemIdBytes * itemCount} bytes.");
-        }
-        return itemIds;
     }
 `
     : ""

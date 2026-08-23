@@ -1,10 +1,12 @@
 # OpenKache Go client
 
 The Go package exposes context-aware cache operations while delegating
-QUIC-over-TLS, retries, key derivation, compression, encryption, and value
-limits to the shared `openkache-client-core` native ABI. The package contains
-no duplicate wire or cryptographic implementation. The current binding is
-QUIC-only; TLS-over-TCP is part of the target maintained-client contract.
+TLS 1.3 over QUIC or TCP, retries, key derivation, compression, encryption,
+and value limits to the shared `openkache-client-core` native ABI. The package
+contains no duplicate wire or cryptographic implementation. Set
+`Options.Transport` to `TransportTlsTcp` for verified TLS-over-TCP or to an
+explicit insecure selector when certificate and server-identity verification
+is intentionally disabled; the zero value remains verified QUIC.
 
 The generated Smithy API and current native ABI are transitional references.
 Stable-v1 operation assignments and target client/value behavior come from the
@@ -75,8 +77,9 @@ _ = outcome
 value, found, err := client.Get(ctx, []byte("profile"))
 ```
 
-`Get` and `Set` treat the `[]byte` key as a v1 `Bytes` PortableKey and encode
-it as canonical deterministic CBOR before crossing the native ABI. `Get`
+`Get` and `Set` treat the `[]byte` key as a v1 `Bytes` PortableKey and pass
+its logical bytes with the generated key discriminator; the shared core
+performs canonical deterministic CBOR encoding. `Get`
 returns `found` separately so an empty stored value is not confused with a
 cache miss. `Close` is idempotent and waits for in-flight native operations.
 `Reconnect` explicitly replaces the connection without replaying an operation,
@@ -89,19 +92,29 @@ item-ID/raw-value layer when an application already owns protocol IDs.
 Use `client.Smithy()` when an application needs the generated
 `SmithyOpenKacheAPI` operation structures shared with other bindings.
 
+Protected and legacy raw operations use the ABI v6 request handle lifecycle
+when an async entry point carries their options. A context cancellation before
+native admission returns the context error; cancellation after a mutation has
+started preserves `ErrUnknownMutation` and never replays the mutation. Complete
+raw SET policy flags, structured calls, scoped calls, and namespace control
+operations do not have request-handle entry points in ABI v6, so the adapter
+drains a safe synchronous completion boundary before returning.
+
 ## Configuration
 
 - `Certificate` accepts one DER certificate or a PEM trust chain.
 - `Identity` optionally supplies a DER/PEM client certificate chain and private
   key for mutual TLS.
 - `Compression`, `Timeouts`, `Retry`, and `MaxInFlight` map directly to core
-  settings; zero values select documented core defaults.
+  settings; the zero `CompressionOptions` value selects automatic level-1
+  Zstandard with no input-size or minimum-savings threshold. Set
+  `CompressionOptions.Disabled` to opt out explicitly.
 - `EncryptionCompact` selects deterministic AES-256-SIV-CMAC protection;
   `EncryptionRobust` (the default) selects randomized AES-256-GCM-SIV.
 - An empty `DataProtectionKey` selects unprotected values while retaining
   client-side Item ID derivation.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 4 and the extended
+  artifact. The native artifact must have ABI version 6 and the extended
   connect symbol when `Identity` is used.
 
 Protocol operations, Smithy models, and value-format identifiers are generated

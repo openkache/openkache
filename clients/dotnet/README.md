@@ -5,11 +5,13 @@ core's C ABI.
 
 ## Purpose
 
-The package provides binary-safe cache operations over one authenticated QUIC
-connection owned by the shared core. It accepts exact opaque `0..=32`-byte
-item IDs and plaintext values. Framing, TLS, retries, stream lanes, and
-protocol validation remain in `clients/core`. The current package is
-QUIC-only; TLS-over-TCP is part of the target maintained-client contract.
+The package provides binary-safe cache operations over the authenticated
+transport selected by `ClientOptions.Transport` (verified QUIC by default or
+verified TLS-over-TCP). It accepts exact opaque `0..=32`-byte item IDs and
+plaintext values. Framing, TLS, retries, stream lanes, and protocol validation
+remain in `clients/core`. `QuicInsecure` and `TlsTcpInsecure` are explicit
+TLS-preserving opt-outs that disable certificate and server-identity
+verification.
 
 The [client status table](../README.md#sdk-status) describes this package's
 implementation and migration status.
@@ -37,8 +39,9 @@ generates ignored wire values and Smithy API contracts before compilation.
 
 ## Connect and use
 
-Pass the DER bytes of a server or CA certificate; the client has no
-certificate-verification bypass.
+Pass the DER bytes of a server or CA certificate for verified transports. The
+insecure selectors explicitly opt out of certificate and server-identity
+verification and may omit that buffer.
 
 ```csharp
 using OpenKache;
@@ -74,6 +77,15 @@ var deleted = await client.DeleteAsync(itemId);
 `DeleteAsync` reports whether the item ID existed. Every item-ID-taking operation
 accepts and sends exact opaque `0..=32`-byte IDs unchanged.
 
+ABI v6 request-handle operations use `poll`, `wait`, `cancel`, and `free` so a
+cancelled read or mutation is never left running after its managed task exits.
+Cancellation before admission propagates the normal
+`OperationCanceledException`; cancellation after a mutation starts is surfaced
+as an `OpenKacheException` with code `UNKNOWN_MUTATION`. Scoped operations and
+complete raw SET policy flags lack request-handle entry points in ABI v6 and
+therefore drain a safe synchronous completion boundary before honoring a
+`CancellationToken`.
+
 ## Protocol and configuration
 
 This package requires TLS 1.3 and ALPN `openkache/1`. The complete wire
@@ -81,8 +93,10 @@ contract is defined by [`protocol/SPEC.md`](../../protocol/SPEC.md).
 
 `ClientOptions` controls connection and request deadlines plus maximum reusable
 request lanes. Defaults come from the Smithy client-defaults contract: 5
-seconds, 2 seconds, and 256 lanes. `OperationTimeout` remains as a legacy
-compatibility alias for callers that need one deadline for both phases.
+seconds, 2 seconds, and 256 lanes. Formatted-value writes use automatic level-1
+Zstandard compression by default; set `ClientOptions.CompressionEnabled` to
+`false` for an explicit uncompressed opt-out. `OperationTimeout` remains as a
+legacy compatibility alias for callers that need one deadline for both phases.
 
 The generated Smithy operation, input, output, and enum types under
 `OpenKache.Smithy` are the current transitional .NET API types. `StatsAsync`

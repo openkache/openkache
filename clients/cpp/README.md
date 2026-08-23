@@ -7,8 +7,13 @@ operations. CMake propagates the C++20 requirement only through the imported
 target; it does not change the consuming project's global standard.
 Projects using C++23 or newer can consume the same target; C++17 is not a
 supported minimum because the public API uses `std::span`.
-The current binding uses QUIC over TLS; TLS-over-TCP is part of the target
-maintained-client contract.
+`Connect_Options::transport` selects verified QUIC (the source-compatible
+default), verified TLS-over-TCP, or one of the explicit TLS-preserving
+insecure variants. Both profiles use TLS 1.3, `openkache/1`, and
+`X25519MLKEM768`, with identical v1 frame bytes. Non-default selectors require
+the additive `openkache_client_connect_transport` symbol; older native
+libraries report a clear unsupported-selector error through the runtime symbol
+probe.
 
 ## Build
 
@@ -68,7 +73,19 @@ disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending
 them; the revision is not negotiated on the wire. Transport and validation
-failures throw `openkache::Error`.
+failures throw `openkache::Error`. Logical `std::span` and `std::string_view`
+keys cross the ABI with their generated `Bytes` or `Text` discriminator; the
+shared core performs canonical key encoding. ABI v6 requests use the
+`poll`/`wait`/`free` request lifecycle and preserve
+`Unknown_Mutation_Error` or `Canceled_Error` categories. Complete raw SET
+policy flags and namespace/scoped operations have no request-handle entry
+point, so the adapter drains their synchronous native result at a documented
+safe completion boundary.
+
+Formatted writes use automatic level-1 Zstandard compression by default and
+retain a completed frame only when it is smaller. Set
+`Connect_Options::compression_enabled` to `false` for an explicit
+uncompressed opt-out.
 
 The C++ layer does not duplicate protocol or protection logic. Its operation
 and outcome values come from the C ABI, whose Smithy-derived constants live in

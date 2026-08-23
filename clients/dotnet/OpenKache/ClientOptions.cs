@@ -3,11 +3,30 @@
 
 namespace OpenKache;
 
+/// <summary>Native transport and server-trust selection.</summary>
+public enum Transport : uint
+{
+    Quic = Protocol.FfiTransportQuic,
+    TlsTcp = Protocol.FfiTransportTlsTcp,
+    QuicInsecure = Protocol.FfiTransportQuicInsecure,
+    TlsTcpInsecure = Protocol.FfiTransportTlsTcpInsecure,
+}
+
 /// <summary>
 /// Controls shared-core request timeouts and concurrent request lanes.
 /// </summary>
 public sealed class ClientOptions
 {
+    /// <summary>
+    /// Enables the maintained automatic level-1 Zstandard formatted-value policy.
+    /// Set to <see langword="false"/> for an explicit uncompressed opt-out.
+    /// </summary>
+    public bool CompressionEnabled { get; init; } = true;
+
+    /// Selects verified QUIC by default; insecure variants are explicit
+    /// opt-outs and retain TLS encryption.
+    /// </summary>
+    public Transport Transport { get; init; } = Transport.Quic;
     /// <summary>
     /// Maximum reusable bidirectional stream lanes opened on one connection.
     /// </summary>

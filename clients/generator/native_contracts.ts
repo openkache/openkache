@@ -454,6 +454,13 @@ pub const FFI_VALUE_MODE_${snake_case(entry.name).toUpperCase()}: u32 = ${format
 pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_transports = ffi.transports
+    .map(
+      (entry) =>
+        `/// Native FFI transport selector for ${entry.name}.
+pub const FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_set_conditions = ffi.set_conditions
     .map(
       (entry) =>
@@ -597,6 +604,7 @@ ${ffi_request_states}
 ${ffi_value_representations}
 ${ffi_value_modes}
 ${ffi_connection_states}
+${ffi_transports}
 ${ffi_set_conditions}
 ${ffi_key_specs}
 ${ffi_namespace_descriptor_decode_statuses}
@@ -633,6 +641,13 @@ ${rust_ffi_enum(
   "Native FFI completion-status categories shared by every language adapter.",
   "Native FFI status category",
   ffi.status_categories,
+)}
+
+${rust_ffi_enum(
+  "FfiTransport",
+  "Native FFI transport selectors shared by every language adapter.",
+  "Native FFI transport",
+  ffi.transports,
 )}
 
 ${rust_ffi_enum(
@@ -698,8 +713,10 @@ pub const VALUE_FORMAT_COMPRESSION_MASK: u8 = ${formatted_byte(value.format_comp
 pub const VALUE_FORMAT_ENCRYPTION_SHIFT: u8 = ${formatted_byte(value.format_encryption_shift)};
 /// Raw serialized-value identifier.
 pub const VALUE_FORMAT_SERIALIZATION_RAW: u8 = ${formatted_byte(value.serialization_raw)};
-/// Canonical JSON serialized-value identifier.
+/// Legacy metadata identifier; JSON helpers use OpaqueBytes selector 0.
 pub const VALUE_FORMAT_SERIALIZATION_JSON: u8 = ${formatted_byte(value.serialization_json)};
+/// StructuredValue-CBOR-v1 payload-format selector.
+pub const VALUE_FORMAT_SERIALIZATION_STRUCTURED: u8 = ${formatted_byte(value.serialization_structured)};
 /// Uncompressed value-format identifier.
 pub const VALUE_FORMAT_COMPRESSION_NONE: u8 = ${formatted_byte(value.compression_none)};
 /// Zstandard value-format identifier.
@@ -829,6 +846,12 @@ function c_contract_client_compatibility(contract: Client_Contract): string {
         `    OPENKACHE_CLIENT_CONNECTION_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()},`,
     )
     .join("\n")
+  const transport_entries = contract.ffi.transports
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_TRANSPORT_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
   const set_condition_entries = contract.ffi.set_conditions
     .map(
       (entry) =>
@@ -897,6 +920,10 @@ ${result_entries}
 typedef enum openkache_client_connection_state {
 ${connection_entries}
 } openkache_client_connection_state_t;
+
+typedef enum openkache_client_transport {
+${transport_entries}
+} openkache_client_transport_t;
 
 typedef enum openkache_client_set_condition {
 ${set_condition_entries}
@@ -974,6 +1001,10 @@ export function render_c_contract(contract: Client_Contract): string {
     ...ffi.connection_states.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.transports.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
     ),
     ...ffi.set_conditions.map(
       (entry) =>
@@ -1143,6 +1174,7 @@ ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT ${formatted_byte(value.format_encryption_shift)}u
 #define OPENKACHE_SMITHY_VALUE_SERIALIZATION_RAW ${formatted_byte(value.serialization_raw)}u
 #define OPENKACHE_SMITHY_VALUE_SERIALIZATION_JSON ${formatted_byte(value.serialization_json)}u
+#define OPENKACHE_SMITHY_VALUE_SERIALIZATION_STRUCTURED ${formatted_byte(value.serialization_structured)}u
 #define OPENKACHE_SMITHY_VALUE_COMPRESSION_NONE ${formatted_byte(value.compression_none)}u
 #define OPENKACHE_SMITHY_VALUE_COMPRESSION_ZSTANDARD ${formatted_byte(value.compression_zstandard)}u
 #define OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE ${formatted_byte(value.encryption_none)}u

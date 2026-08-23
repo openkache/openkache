@@ -22,9 +22,12 @@ key and Item ID boundary is implemented in `clients/core`; the generated value
 model and envelope remain transitional until their respective migrations land.
 
 Package READMEs may expose those generated/core artifacts for compatibility, but
-they must label legacy fixed-width-ID assumptions, legacy JSON envelopes,
-threshold-based compression, and QUIC-only transport as current transitional
-behavior.
+they must label legacy fixed-width-ID assumptions and legacy JSON envelopes as
+current transitional behavior. Threshold-based compression is no longer a
+maintained default; callers that need it may still select explicit
+per-operation settings. A package that does not implement both maintained
+transport profiles must identify itself as a scaffold or transitional
+limitation rather than claim full maintained support.
 
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.
@@ -157,6 +160,32 @@ Client shutdown prevents new admission, cancels or drains owned transport
 tasks according to the selected shutdown mode, and completes every pending
 caller exactly once. Native adapters MUST keep the underlying handle and
 runtime alive until those completions no longer reference them.
+
+### 3.4 Native request handles and safe boundaries
+
+ABI v6 exposes asynchronous execute entry points that return an owned request
+handle. A managed adapter MUST keep the copied input buffers and client active
+slot owned until the request lifecycle is complete, then consume at most one
+result and call `request_free` exactly once. The required sequence is:
+`request_poll` until ready, `request_wait` to take the result,
+`request_cancel` when language cancellation wins, and `request_free` in every
+exit path. A result returned by `request_wait` has independent ownership and
+MUST be released through the result API.
+
+Cancellation before worker admission is a definitive `Canceled` result.
+Cancellation after a mutating request crosses admission is
+`UnknownMutation`; adapters MUST preserve that category instead of returning a
+generic runtime cancellation or retrying the mutation. Read-only cancellation
+may map to the language's normal cancellation exception after the native result
+has been consumed.
+
+ABI v6 does not expose a request-handle entry point for every operation shape
+(for example, complete raw SET policy flags and namespace/scoped calls).
+Adapters MAY use a documented **safe completion boundary** for those calls:
+shield the synchronous native task from language cancellation, drain its
+definitive result, release the result, and only then return control. This
+boundary keeps ownership and mutation outcomes correct; it does not claim that
+the native call was interrupted.
 
 ## 4. Retries, outcomes, and errors
 
@@ -358,6 +387,12 @@ Configuration is divided into:
 An adapter MUST keep identity configuration separate from value-protection
 configuration even when a language offers a convenience constructor. The key
 and value specifications define the actual fields and validity rules.
+
+The shared core's explicit keyring builders accept an Item-ID root and a
+separate `ValueKeyring`. `ClientRootKey::public()`/`zero()` deliberately select
+publicly derivable Item IDs and MUST NOT be documented as application-key
+secrets. Existing root-key convenience builders remain available for source
+compatibility and retain their derived value-key behavior.
 
 The maintained identity default is `NamespaceHash`. When no value key is configured,
 formatted values use `Unprotected`; this does not change key mapping.

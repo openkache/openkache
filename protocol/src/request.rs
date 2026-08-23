@@ -391,8 +391,15 @@ fn decode_request_frame_metadata_progress<const PROJECT_FIELDS: bool>(
             .checked_add(request_id_len)
             .ok_or(ProtocolError::FrameLengthOverflow)?,
     );
-    if let DecodeProgress::Need(additional) =
-        decode_request_frame_steps::<PROJECT_FIELDS>(prefix, layout.steps, &mut state, projections)?
+    let mut conditional_selectors = [false; MAX_REQUEST_FRAME_STATE_SLOTS];
+    collect_conditional_selectors(layout.steps, &mut conditional_selectors)?;
+    if let DecodeProgress::Need(additional) = decode_request_frame_steps::<PROJECT_FIELDS>(
+        prefix,
+        layout.steps,
+        &mut state,
+        projections,
+        &conditional_selectors,
+    )?
     {
         return Ok(DecodeProgress::Need(additional));
     }
@@ -481,6 +488,7 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
     steps: &[RequestFrameStep],
     state: &mut RequestFrameDecodeState,
     projections: &mut [RequestFieldProjection],
+    conditional_selectors: &[bool; MAX_REQUEST_FRAME_STATE_SLOTS],
 ) -> Result<DecodeProgress<()>> {
     for step in steps {
         if state.terminal_body {
@@ -618,9 +626,12 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                         .ok_or(ProtocolError::FrameLengthOverflow)?;
                     return incomplete(prefix.len(), end);
                 };
-                if byte & reserved_mask != 0 || byte & constant_bits != constant_bits {
-                    return Err(ProtocolError::InvalidRequestPackedBits { offset });
-                }
+                // Reserved and constant-bit violations do not affect frame
+                // shape. Keep delimiting the complete frame and project a
+                // raw packed-byte marker so the operation codec reports
+                // `InvalidRequest` after the boundary is preserved.
+                let packed_bits_invalid =
+                    byte & reserved_mask != 0 || byte & constant_bits != constant_bits;
                 for field in fields {
                     if field.slot >= MAX_REQUEST_FRAME_STATE_SLOTS {
                         return Err(ProtocolError::InvalidFieldSequence(
@@ -636,16 +647,45 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     state.packed_values[field.slot] = byte & field.mask;
                     state.packed_present |= bit;
                     let bits = byte & field.mask;
-                    let value = field
-                        .values
-                        .iter()
-                        .find(|value| value.bits == bits)
-                        .ok_or(ProtocolError::InvalidRequestPackedBits { offset })?;
-                    project_request_field::<PROJECT_FIELDS>(
-                        projections,
-                        field.field,
-                        RequestFieldProjection::Static(value.bytes),
-                    )?;
+                    let Some(value) = field.values.iter().find(|value| value.bits == bits) else {
+                        // An unknown selector is terminal only when a later
+                        // conditional uses it to decide whether another
+                        // field exists. For all other packed fields the
+                        // complete frame remains delimited and semantic
+                        // validation rejects the raw marker.
+                        if conditional_selectors[field.slot] {
+                            return Err(ProtocolError::InvalidRequestPackedBits { offset });
+                        }
+                        project_request_field::<PROJECT_FIELDS>(
+                            projections,
+                            field.field,
+                            RequestFieldProjection::Borrowed {
+                                start: offset,
+                                end: offset
+                                    .checked_add(1)
+                                    .ok_or(ProtocolError::FrameLengthOverflow)?,
+                            },
+                        )?;
+                        continue;
+                    };
+                    if packed_bits_invalid {
+                        project_request_field::<PROJECT_FIELDS>(
+                            projections,
+                            field.field,
+                            RequestFieldProjection::Borrowed {
+                                start: offset,
+                                end: offset
+                                    .checked_add(1)
+                                    .ok_or(ProtocolError::FrameLengthOverflow)?,
+                            },
+                        )?;
+                    } else {
+                        project_request_field::<PROJECT_FIELDS>(
+                            projections,
+                            field.field,
+                            RequestFieldProjection::Static(value.bytes),
+                        )?;
+                    }
                 }
                 state.cursor = state
                     .cursor
@@ -668,7 +708,11 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     && let DecodeProgress::Need(additional) = decode_request_frame_steps::<
                         PROJECT_FIELDS,
                     >(
-                        prefix, steps, state, projections
+                        prefix,
+                        steps,
+                        state,
+                        projections,
+                        conditional_selectors,
                     )?
                 {
                     return Ok(DecodeProgress::Need(additional));
@@ -794,6 +838,27 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
         }
     }
     Ok(DecodeProgress::Complete(()))
+}
+
+fn collect_conditional_selectors(
+    steps: &[RequestFrameStep],
+    selectors: &mut [bool; MAX_REQUEST_FRAME_STATE_SLOTS],
+) -> Result<()> {
+    for step in steps {
+        if let RequestFrameStep::Conditional {
+            selector, steps, ..
+        } = *step
+        {
+            let selected = selectors.get_mut(selector).ok_or(
+                ProtocolError::InvalidFieldSequence(
+                    "conditional step references an unavailable packed selector",
+                ),
+            )?;
+            *selected = true;
+            collect_conditional_selectors(steps, selectors)?;
+        }
+    }
+    Ok(())
 }
 
 fn incomplete(available: usize, required: usize) -> Result<DecodeProgress<()>> {

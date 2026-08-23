@@ -516,12 +516,17 @@ function smithy_decode_f64_array(payload: Uint8Array, operation: number): readon
     operation_uses_item_id_helpers,
   )
     ? `function smithy_concat_item_ids(itemIds: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
   for (const itemId of itemIds) {
-    if (itemId.byteLength !== ${contract.item_id_bytes}) {
-      throw new Error("item IDs must contain exactly ${contract.item_id_bytes} bytes");
+    if (itemId.byteLength > ${contract.item_id_bytes}) {
+      throw new Error("item IDs must contain at most ${contract.item_id_bytes} bytes");
     }
+    if (total > ${contract.item_id_bytes} - itemId.byteLength) {
+      throw new Error("combined item IDs must contain at most ${contract.item_id_bytes} bytes");
+    }
+    total += itemId.byteLength;
   }
-  const combined = new Uint8Array(itemIds.length * ${contract.item_id_bytes});
+  const combined = new Uint8Array(total);
   let offset = 0;
   for (const itemId of itemIds) {
     combined.set(itemId, offset);
@@ -667,8 +672,10 @@ export const SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_m
 export const SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
 /** Raw serialized-value identifier. */
 export const SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
-/** Canonical JSON serialized-value identifier. */
+/** Legacy metadata identifier; JSON helpers use OpaqueBytes selector 0. */
 export const SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+/** StructuredValue-CBOR-v1 payload-format selector. */
+export const SMITHY_VALUE_SERIALIZATION_STRUCTURED = ${value.serialization_structured}
 /** Uncompressed value-format identifier. */
 export const SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
 /** Zstandard value-format identifier. */

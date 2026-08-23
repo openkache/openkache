@@ -180,6 +180,8 @@ internal sealed class NativeClient : IAsyncDisposable
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
         int maximumStreamLanes,
+        bool compressionEnabled,
+        Transport transport,
         CancellationToken cancellationToken)
     {
         var task = Task.Run(
@@ -189,7 +191,9 @@ internal sealed class NativeClient : IAsyncDisposable
                 certificate,
                 connectTimeout,
                 requestTimeout,
-                maximumStreamLanes),
+                maximumStreamLanes,
+                compressionEnabled,
+                transport),
             CancellationToken.None);
         try
         {
@@ -221,16 +225,14 @@ internal sealed class NativeClient : IAsyncDisposable
         ulong ttlMilliseconds,
         CancellationToken cancellationToken)
     {
-        var task = Task.Run(
-            () => ExecuteNative(
-                operation,
-                itemId,
-                value,
-                setCondition,
-                ttlEnabled,
-                ttlMilliseconds),
-            CancellationToken.None);
-        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await ExecuteRawRequestAsync(
+            operation,
+            itemId,
+            value,
+            setCondition,
+            ttlEnabled,
+            ttlMilliseconds,
+            cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<NativeResult> ExecuteRawWithOptionsAsync(
@@ -249,7 +251,7 @@ internal sealed class NativeClient : IAsyncDisposable
                 setFlags,
                 ttlMilliseconds),
             CancellationToken.None);
-        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await AwaitSafeBoundary(task, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<NativeResult> ExecuteScopedAsync(
@@ -270,7 +272,7 @@ internal sealed class NativeClient : IAsyncDisposable
                 setFlags,
                 ttlMilliseconds),
             CancellationToken.None);
-        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await AwaitSafeBoundary(task, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<NativeResult> NamespaceOpenAsync(
@@ -283,7 +285,7 @@ internal sealed class NativeClient : IAsyncDisposable
         var task = Task.Run(
             () => NamespaceOpenNative(name, createIfMissing, policyFlags, ttlMilliseconds),
             CancellationToken.None);
-        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await AwaitSafeBoundary(task, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<NativeResult> NamespaceUpdatePolicyAsync(
@@ -300,7 +302,7 @@ internal sealed class NativeClient : IAsyncDisposable
                 policyFlags,
                 ttlMilliseconds),
             CancellationToken.None);
-        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await AwaitSafeBoundary(task, cancellationToken).ConfigureAwait(false);
     }
 
     internal async ValueTask<NativeResult> NamespaceDeleteAsync(
@@ -311,7 +313,7 @@ internal sealed class NativeClient : IAsyncDisposable
         var task = Task.Run(
             () => NamespaceDeleteNative(namespaceId, expectedRevision),
             CancellationToken.None);
-        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await AwaitSafeBoundary(task, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -360,7 +362,9 @@ internal sealed class NativeClient : IAsyncDisposable
         ReadOnlyMemory<byte> certificate,
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
-        int maximumStreamLanes)
+        int maximumStreamLanes,
+        bool compressionEnabled,
+        Transport transport)
     {
         if (NativeMethods.openkache_client_abi_version() != Protocol.FfiAbiVersion)
         {
@@ -381,7 +385,7 @@ internal sealed class NativeClient : IAsyncDisposable
             CertificateLength = certificateBuffer.Length,
             DataProtectionKey = dataProtectionKey.Pointer,
             DataProtectionKeyLength = dataProtectionKey.Length,
-            CompressionEnabled = 0,
+            CompressionEnabled = compressionEnabled ? (byte)1 : (byte)0,
             CompressionLevel = Protocol.DefaultZstandardLevel,
             MinimumInputSize = (nuint)Protocol.DefaultZstandardMinimumInputBytes,
             MinimumSavings = (nuint)Protocol.DefaultZstandardMinimumSavingsBytes,
@@ -392,7 +396,19 @@ internal sealed class NativeClient : IAsyncDisposable
             MaxInFlight = (nuint)maximumStreamLanes,
         };
 
-        var result = NativeMethods.openkache_client_connect_with_options(ref options);
+        IntPtr result;
+        try
+        {
+            result = transport == Transport.Quic
+                ? NativeMethods.openkache_client_connect_with_options(ref options)
+                : NativeMethods.openkache_client_connect_transport(
+                    ref options, (uint)transport);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            throw new NativeException(
+                "native OpenKache client does not export the optional transport selector");
+        }
         var nativeResult = NativeMethods.ReadResult(result, takeClient: true);
         if (nativeResult.Kind != Protocol.FfiResultConnected)
         {
@@ -401,20 +417,21 @@ internal sealed class NativeClient : IAsyncDisposable
         return new NativeClient(nativeResult.Client);
     }
 
-    private NativeResult ExecuteNative(
+    private async ValueTask<NativeResult> ExecuteRawRequestAsync(
         uint operation,
         ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
         uint setCondition,
         bool ttlEnabled,
-        ulong ttlMilliseconds)
+        ulong ttlMilliseconds,
+        CancellationToken cancellationToken)
     {
         var handle = AcquireHandle();
-        try
+        IntPtr request;
+        using (var itemIdBuffer = new NativeBuffer(itemId))
+        using (var valueBuffer = new NativeBuffer(value))
         {
-            using var itemIdBuffer = new NativeBuffer(itemId);
-            using var valueBuffer = new NativeBuffer(value);
-            var result = NativeMethods.openkache_client_execute_raw(
+            request = NativeMethods.openkache_client_execute_raw_async(
                 handle,
                 operation,
                 itemIdBuffer.Pointer,
@@ -424,11 +441,81 @@ internal sealed class NativeClient : IAsyncDisposable
                 setCondition,
                 ttlEnabled ? (byte)1 : (byte)0,
                 ttlMilliseconds);
-            return NativeMethods.ReadResult(result);
+        }
+
+        if (request == IntPtr.Zero)
+        {
+            ReleaseCall();
+            throw new NativeException("native client returned a null request");
+        }
+
+        try
+        {
+            return await AwaitRequestAsync(request, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
+            NativeMethods.openkache_client_request_free(request);
             ReleaseCall();
+        }
+    }
+
+    private static async ValueTask<NativeResult> AwaitRequestAsync(
+        IntPtr request,
+        CancellationToken cancellationToken)
+    {
+        var cancellationPublished = false;
+        while (true)
+        {
+            var state = NativeMethods.openkache_client_request_poll(request);
+            if (state != 0)
+            {
+                var result = NativeMethods.ReadResult(
+                    NativeMethods.openkache_client_request_wait(request, 0));
+                if (cancellationPublished
+                    && result.Kind == Protocol.FfiResultCanceled)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                return result;
+            }
+
+            if (!cancellationPublished)
+            {
+                try
+                {
+                    await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                    when (cancellationToken.IsCancellationRequested)
+                {
+                    NativeMethods.openkache_client_request_cancel(request);
+                    cancellationPublished = true;
+                }
+            }
+            else
+            {
+                await Task.Delay(1).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async ValueTask<T> AwaitSafeBoundary<T>(
+        Task<T> task,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            // The legacy synchronous ABI has no request handle.  Await its
+            // native completion before allowing cancellation to escape so a
+            // mutation is never abandoned with an unknown owner.
+            return await task.ConfigureAwait(false);
         }
     }
 

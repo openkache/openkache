@@ -324,6 +324,13 @@ ${contract.ffi.connection_states
 \tSmithyFFIConnectionState${go_ffi_name(entry.name)}Name = ${JSON.stringify(entry.text)}`,
   )
   .join("\n")}
+${contract.ffi.transports
+  .map(
+    (entry) =>
+      `\t// SmithyFFITransport${go_ffi_name(entry.name)} selects the native transport and trust policy.
+\tSmithyFFITransport${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
 ${contract.ffi.namespace_descriptor_decode_statuses
   .map(
     (entry) =>
@@ -1053,15 +1060,23 @@ func smithyDecodeF64Array(payload []byte) ([]float64, error) {
     operation_uses_item_id_helpers,
   )
     ? `func smithyConcatItemIDs(itemIDs ...[]byte) ([]byte, error) {
+	total := 0
 	for _, itemID := range itemIDs {
-		if len(itemID) != SmithyItemIDBytes {
+		if len(itemID) > SmithyItemIDBytes {
 			return nil, validationError(
 				"item_id",
-				fmt.Sprintf("each item ID must contain exactly %d bytes", SmithyItemIDBytes),
+				fmt.Sprintf("each item ID must contain at most %d bytes", SmithyItemIDBytes),
 			)
 		}
+		if total > SmithyItemIDBytes-len(itemID) {
+			return nil, validationError(
+				"item_id",
+				fmt.Sprintf("combined item IDs must contain at most %d bytes", SmithyItemIDBytes),
+			)
+		}
+		total += len(itemID)
 	}
-	combined := make([]byte, 0, len(itemIDs)*SmithyItemIDBytes)
+	combined := make([]byte, 0, total)
 	for _, itemID := range itemIDs {
 		combined = append(combined, itemID...)
 	}

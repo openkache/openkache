@@ -20,10 +20,10 @@ Target selector `1` means `StructuredValue-CBOR-v1`; canonical JSON helpers
 use the `OpaqueBytes` payload profile unless a binding documents a separate
 structured operation.
 
-The current shared FFI's transitional `set_json` / `get_json` helpers parse or
-serialize a JSON-compatible view while encoding or decoding through selector
-`1` (`StructuredValue-CBOR-v1`). `set_structured` / `get_structured` expose the
-full structured model. In current-status documentation, `Legacy JSON
+The current shared FFI's `set_json` / `get_json` helpers parse or serialize a
+JSON-compatible view while carrying canonical UTF-8 JSON as selector-0
+`OpaqueBytes`. `set_structured` / `get_structured` expose the full structured
+model through selector 1. In current-status documentation, `Legacy JSON
 container` names this compatibility logical view, not a selector or payload
 format.
 

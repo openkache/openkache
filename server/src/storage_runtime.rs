@@ -15,6 +15,26 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
+/// Yields the selected storage executor once.
+///
+/// Storage runtimes are single-threaded, so a retry loop that receives an
+/// immediately-ready transient I/O error must still give other worker tasks a
+/// chance to make progress. Waking the current task keeps this helper
+/// runtime-neutral while avoiding a blocking sleep on the storage thread.
+pub(crate) async fn yield_now() {
+    let mut yielded = false;
+    std::future::poll_fn(|context| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+
 #[cfg(any(
     feature = "storage-runtime-compio",
     feature = "storage-runtime-simulated"

@@ -11,17 +11,24 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::lock::Mutex;
-use openkache_protocol::{MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+use openkache_protocol::{
+    MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, ResponseHeaderBytes, ResponseParts,
+};
 use rustls::crypto::SupportedKxGroup;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
-use super::{enforce_client_profile, response_frame_len, validate_response_frame};
+use super::{
+    ClientConnection, ClientLane, Deadline, RequestBudget, RequestBudgetPermit,
+    enforce_client_profile, response_frame_len, validate_response_frame,
+};
 use crate::config::PQ_GROUP;
+use crate::request::RequestAttempt;
 use crate::request_engine::{
     RequestBytes, TransportConnection, TransportError, TransportKind, TransportLane,
 };
+use crate::{Error, Operation, Result};
 
 type ClientTlsStream = TlsStream<TcpStream>;
 
@@ -94,6 +101,95 @@ impl TlsTcpTransport {
                 fatal: Arc::new(AtomicBool::new(false)),
             }),
         })
+    }
+
+    /// Returns the negotiated ALPN protocol.
+    pub(crate) fn negotiated_alpn(&self) -> Option<&[u8]> {
+        Some(openkache_protocol::ALPN)
+    }
+}
+
+impl TlsTcpLane {
+    /// Reads one response while reserving the payload budget before allocation.
+    ///
+    /// The low-level [`TransportLane`] API intentionally returns one complete
+    /// frame for callers that own their own resource policy. The request
+    /// engine uses this variant so a declared response body cannot be read
+    /// into an unbudgeted frame before the shared aggregate byte permit is
+    /// acquired.
+    async fn read_response_with_budget(
+        &self,
+        maximum: usize,
+        budget: &RequestBudget,
+        timeout: Duration,
+    ) -> Result<(ResponseParts, RequestBudgetPermit)> {
+        if self.fatal.load(Ordering::Acquire) {
+            return Err(Error::Connection("TLS-over-TCP lane has failed".into()));
+        }
+        let maximum = maximum.min(MAX_RESPONSE_FRAME_BYTES);
+        if maximum == 0 {
+            return Err(Error::configuration(
+                "response maximum",
+                "must be greater than zero",
+            ));
+        }
+        let mut receive = self.receive.lock().await;
+        let mut header = ResponseHeaderBytes::new();
+        let frame_len = loop {
+            let mut byte = [0_u8; 1];
+            if let Err(error) = receive.read_exact(&mut byte).await {
+                close_after_transport_error(&self.send, &self.closed, &self.fatal);
+                return Err(Error::Connection(error.to_string()));
+            }
+            header.push(byte[0]).map_err(|error| {
+                close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+                Error::protocol(error)
+            })?;
+            match response_frame_len(header.as_slice(), maximum) {
+                Ok(Some(length)) => break length,
+                Ok(None) => continue,
+                Err(error) => {
+                    close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+                    return Err(Error::Connection(error));
+                }
+            }
+        };
+        let header_len = header.len();
+        if header_len > frame_len {
+            close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+            return Err(Error::Connection(
+                "response header exceeds complete frame".into(),
+            ));
+        }
+        let payload_len = frame_len - header_len;
+        let permit = match budget.acquire(payload_len, timeout).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                // The body is still unread, so this ordered TCP lane cannot
+                // be returned to the pool after an admission failure.
+                self.close();
+                return Err(error);
+            }
+        };
+        let mut payload = Vec::new();
+        if payload.try_reserve_exact(payload_len).is_err() {
+            drop(permit);
+            close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+            return Err(Error::Connection("response allocation failed".into()));
+        }
+        payload.resize(payload_len, 0);
+        if payload_len > 0
+            && let Err(error) = receive.read_exact(&mut payload).await
+        {
+            drop(permit);
+            close_after_transport_error(&self.send, &self.closed, &self.fatal);
+            return Err(Error::Connection(error.to_string()));
+        }
+        let response = ResponseParts::decode(header, payload).map_err(|error| {
+            close_after_protocol_error(&self.send, &self.closed, &self.fatal);
+            Error::protocol(error)
+        })?;
+        Ok((response, permit))
     }
 }
 
@@ -307,4 +403,130 @@ fn validate_handshake(stream: &ClientTlsStream) -> crate::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Internal request-engine connection wrapper for the one-lane TCP profile.
+///
+/// The public [`TransportConnection`] surface permits pipelined writes, while
+/// the legacy high-level request API expects one request/response exchange per
+/// acquired lane.  A single async gate preserves that API's correlation
+/// invariant without inventing a second TCP lane.
+pub(crate) struct Connection {
+    inner: TlsTcpTransport,
+    gate: Mutex<()>,
+    budget: RequestBudget,
+}
+
+pub(crate) struct Lane<'a> {
+    connection: &'a Connection,
+    _gate: futures_util::lock::MutexGuard<'a, ()>,
+    response_permit: Option<RequestBudgetPermit>,
+}
+
+impl ClientConnection for Connection {
+    type Lane<'a> = Lane<'a>;
+
+    async fn connect(
+        address: SocketAddr,
+        server_name: &str,
+        tls: rustls::ClientConfig,
+        timeout: Duration,
+        _max_stream_lanes: usize,
+        budget: RequestBudget,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: TlsTcpTransport::connect(address, server_name, tls, timeout).await?,
+            gate: Mutex::new(()),
+            budget,
+        })
+    }
+
+    async fn acquire_lane(&self, deadline: Deadline) -> Result<Self::Lane<'_>> {
+        let remaining = deadline.remaining(Operation::StreamAcquisition)?;
+        let gate = tokio::time::timeout(remaining, self.gate.lock())
+            .await
+            .map_err(|_| Error::Timeout {
+                operation: Operation::StreamAcquisition,
+            })?;
+        Ok(Lane {
+            connection: self,
+            _gate: gate,
+            response_permit: None,
+        })
+    }
+
+    fn negotiated_alpn(&self) -> Option<&[u8]> {
+        self.inner.negotiated_alpn()
+    }
+
+    async fn timeout<F: std::future::Future>(
+        duration: Duration,
+        future: F,
+    ) -> Result<Option<F::Output>> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(Error::Connection(
+                "an active Tokio runtime is required".into(),
+            ));
+        }
+        Ok(tokio::time::timeout(duration, future).await.ok())
+    }
+
+    fn close(&self) {
+        self.inner.close();
+    }
+}
+
+impl ClientLane for Lane<'_> {
+    async fn write_request(&mut self, request: RequestAttempt, timeout: Duration) -> Result<()> {
+        let frame = match request {
+            RequestAttempt::Once(frame) => frame,
+            RequestAttempt::Replay(frame) => frame.clone_owned().map_err(Error::protocol)?,
+        };
+        let request = RequestBytes::new(frame);
+        let _permit = self.connection.budget.try_reserve(request.len())?;
+        match tokio::time::timeout(timeout, self.connection.inner.lane.write_request(request)).await
+        {
+            Ok(result) => result.map_err(|error| Error::Connection(error.to_string())),
+            Err(_) => {
+                self.connection.inner.close();
+                Err(Error::Timeout {
+                    operation: Operation::RequestWrite,
+                })
+            }
+        }
+    }
+
+    async fn read_response(
+        &mut self,
+        maximum: usize,
+        deadline: Deadline,
+    ) -> Result<openkache_protocol::ResponseParts> {
+        let remaining = deadline.remaining(Operation::ResponseBodyRead)?;
+        let (decoded, permit) = match tokio::time::timeout(
+            remaining,
+            self.connection.inner.lane.read_response_with_budget(
+                maximum,
+                &self.connection.budget,
+                remaining,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                self.connection.inner.close();
+                return Err(Error::Timeout {
+                    operation: Operation::ResponseBodyRead,
+                });
+            }
+        };
+        self.response_permit = Some(permit);
+        Ok(decoded)
+    }
+
+    fn take_response_permit(&mut self) -> Option<RequestBudgetPermit> {
+        self.response_permit.take()
+    }
+
+    fn release(self) {}
 }

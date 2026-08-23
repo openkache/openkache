@@ -195,6 +195,13 @@ pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_
 pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_transports = ffi.transports
+    .map(
+      (entry) =>
+        `/// Native FFI transport selector for ${entry.name}.
+pub const FFI_TRANSPORT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_set_conditions = ffi.set_conditions
     .map(
       (entry) =>
@@ -302,6 +309,7 @@ pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
+${ffi_transports}
 ${ffi_set_conditions}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
@@ -336,6 +344,13 @@ ${rust_ffi_enum(
 )}
 
 ${rust_ffi_enum(
+  "FfiTransport",
+  "Native FFI transport selectors shared by every language adapter.",
+  "Native FFI transport",
+  ffi.transports,
+)}
+
+${rust_ffi_enum(
   "FfiSetCondition",
   "Native FFI SET-condition identifiers shared by every language adapter.",
   "Native FFI SET-condition",
@@ -356,8 +371,10 @@ pub const VALUE_FORMAT_COMPRESSION_MASK: u8 = ${formatted_byte(value.format_comp
 pub const VALUE_FORMAT_ENCRYPTION_SHIFT: u8 = ${formatted_byte(value.format_encryption_shift)};
 /// Raw serialized-value identifier.
 pub const VALUE_FORMAT_SERIALIZATION_RAW: u8 = ${formatted_byte(value.serialization_raw)};
-/// Canonical JSON serialized-value identifier.
+/// Legacy metadata identifier; JSON helpers use OpaqueBytes selector 0.
 pub const VALUE_FORMAT_SERIALIZATION_JSON: u8 = ${formatted_byte(value.serialization_json)};
+/// StructuredValue-CBOR-v1 payload-format selector.
+pub const VALUE_FORMAT_SERIALIZATION_STRUCTURED: u8 = ${formatted_byte(value.serialization_structured)};
 /// Uncompressed value-format identifier.
 pub const VALUE_FORMAT_COMPRESSION_NONE: u8 = ${formatted_byte(value.compression_none)};
 /// Zstandard value-format identifier.

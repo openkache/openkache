@@ -52,6 +52,60 @@ pub struct RequestMetadata {
     pub maximum_response_bytes: usize,
 }
 
+/// Returns whether a response status is assigned to the stable-v1 operation.
+///
+/// Generated operation metadata still carries transitional lifecycle and
+/// experimental statuses for compatibility adapters. Stable data operations
+/// must apply the protocol specification's narrower status applicability
+/// before accepting any generated status list.
+pub(crate) const fn stable_status_allowed(operation: Operation, status: Status) -> bool {
+    match operation {
+        Operation::Ping => matches!(
+            status,
+            Status::Ok
+                | Status::InvalidRequest
+                | Status::Overloaded
+                | Status::Forbidden
+                | Status::InternalError
+        ),
+        Operation::Get => matches!(
+            status,
+            Status::Ok
+                | Status::NotFound
+                | Status::InvalidRequest
+                | Status::Overloaded
+                | Status::Forbidden
+                | Status::InternalError
+                | Status::NamespaceNotFound
+        ),
+        Operation::Set => matches!(
+            status,
+            Status::Created
+                | Status::Replaced
+                | Status::NotStored
+                | Status::InvalidRequest
+                | Status::TooLarge
+                | Status::Overloaded
+                | Status::Forbidden
+                | Status::InternalError
+                | Status::NoCapacity
+                | Status::PolicyConflict
+                | Status::NamespaceNotFound
+        ),
+        Operation::Delete => matches!(
+            status,
+            Status::Deleted
+                | Status::NotFound
+                | Status::InvalidRequest
+                | Status::Overloaded
+                | Status::Forbidden
+                | Status::InternalError
+                | Status::NamespaceNotFound
+        ),
+        _ => true,
+    }
+}
+
 /// An owned request frame that keeps the exact segment bytes sent by a lane.
 #[derive(Clone, Debug)]
 pub struct RequestBytes(Arc<OwnedRequestFrame>);
@@ -130,8 +184,9 @@ impl ResponseBytes {
             )));
         }
         let status = header.status();
-        if !metadata.success_statuses.contains(&status)
-            && !metadata.error_statuses.contains(&status)
+        if !stable_status_allowed(metadata.operation, status)
+            || (!metadata.success_statuses.contains(&status)
+                && !metadata.error_statuses.contains(&status))
         {
             return Err(EngineError::Protocol(format!(
                 "status {status:?} is not valid for {}",

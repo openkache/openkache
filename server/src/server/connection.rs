@@ -369,6 +369,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
     let mut queue = VecDeque::with_capacity(MAX_ADMITTED_REQUESTS);
     let mut request_direction_open = true;
     let mut stop_receive = false;
+    let mut read_paused = false;
 
     loop {
         if stop_receive {
@@ -400,6 +401,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
             ) {
                 ReadDisposition::Malformed => return LaneOutcome::Malformed,
                 ReadDisposition::Transport => return LaneOutcome::Transport,
+                ReadDisposition::Pause => read_paused = true,
                 ReadDisposition::Stop => stop_receive = true,
                 ReadDisposition::Continue => {}
             }
@@ -421,7 +423,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
         .fuse();
         pin_mut!(execute);
         loop {
-            if request_direction_open && queue.len() < MAX_ADMITTED_REQUESTS {
+            if request_direction_open && !read_paused && queue.len() < MAX_ADMITTED_REQUESTS {
                 // Once a read has delivered bytes, its local frame buffer owns
                 // the only copy. Finish that read before writing the response
                 // if execution wins the race; otherwise dropping it would
@@ -453,6 +455,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         ) {
                             ReadDisposition::Malformed => return LaneOutcome::Malformed,
                             ReadDisposition::Transport => return LaneOutcome::Transport,
+                            ReadDisposition::Pause => read_paused = true,
                             ReadDisposition::Stop => stop_receive = true,
                             ReadDisposition::Continue => {}
                         }
@@ -468,6 +471,10 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 ) {
                                     ReadDisposition::Malformed => return LaneOutcome::Malformed,
                                     ReadDisposition::Transport => return LaneOutcome::Transport,
+                                    // The operation already won this race;
+                                    // its response will release the lane
+                                    // window before another read is polled.
+                                    ReadDisposition::Pause => {}
                                     ReadDisposition::Stop => stop_receive = true,
                                     ReadDisposition::Continue => {}
                                 },
@@ -500,6 +507,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 }
                                 drop(permit);
                                 drop(request_permit);
+                                read_paused = false;
                                 if terminal {
                                     return LaneOutcome::Finished;
                                 }
@@ -529,6 +537,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         }
                         drop(permit);
                         drop(request_permit);
+                        read_paused = false;
                         if terminal {
                             return LaneOutcome::Finished;
                         }
@@ -542,6 +551,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
 
 enum ReadDisposition {
     Continue,
+    Pause,
     Stop,
     Malformed,
     Transport,
@@ -574,6 +584,7 @@ fn enqueue_read_result(
         Ok(RequestRead::Overloaded { header, timed_out }) => {
             queue.push_back(LaneRequest::Overloaded { header, timed_out });
         }
+        Ok(RequestRead::Backpressured) => return ReadDisposition::Pause,
         Ok(RequestRead::Finished) => *request_direction_open = false,
         Ok(RequestRead::Cancelled) => {
             *request_direction_open = false;
