@@ -78,7 +78,7 @@ require a trusted certificate and normally a client identity.
 | `set_structured` / `get_structured` | Exact `StructuredValue-CBOR-v1` | Integers, floats, bytes, `undefined`, and ordered maps need distinct types |
 | `set_raw` / `get_raw` | Exact bytes after compression and protection | The application already owns serialization |
 | `set_v0` / `get_v0` | Complete caller-owned version-0 envelope | Migrating or embedding another envelope format |
-| `set` / `get` | Backwards-compatible TypeScript metadata envelope or registered custom codec | Existing package users need source compatibility |
+| `set` / `get` | Package-local metadata envelope or registered custom codec | Existing package users and codec integrations |
 
 Canonical JSON accepts only null, booleans, finite numbers, strings, dense
 arrays, and regular objects with string keys. Cycles, sparse arrays, binary
@@ -210,10 +210,21 @@ test("native projection rejects lossy Map key collisions", (): void => {
 the lossless wrapper classes. It rejects cycles, sparse arrays, unsupported
 native objects, non-scalar map keys, and duplicate map keys.
 
-### Custom legacy codecs
+### Compatibility envelope and codecs
 
-The compatibility `set` / `get` path can select an application codec by its
-stable encoding name:
+The compatibility `set` / `get` path is package-local. It stores a
+TypeScript-specific `{ encoding, type_name, payload }` metadata envelope, not
+the shared-core canonical JSON or structured-value format used by
+`set_json`, `set_structured`, or other OpenKache clients. Use it when an
+application must remain compatible with data already written by this package
+or must plug in its own object codec:
+
+- Built-in fallback: plain JSON values encode as the package-local `"json"`
+  envelope.
+- Custom codecs: objects matching `can_encode` store under the codec's stable
+  encoding name.
+- Cross-language reads: prefer `set_json` / `set_structured`; this path does
+  not interoperate with them.
 
 ```typescript
 import type { Value_Codec } from "@openkache/client"
@@ -354,7 +365,7 @@ integer-valued `number`, or signed-i64 `bigint`.
 
 | Method | Signature | Value contract |
 |---|---|---|
-| `get` | `get<Value = Json_Value>(key: Client_Key): Promise<Value \| undefined>` | Reads the backwards-compatible package envelope or registered custom codec |
+| `get` | `get<Value = Json_Value>(key: Client_Key): Promise<Value \| undefined>` | Reads the package-local metadata envelope or registered custom codec |
 | `set` | `set<Value>(key: Client_Key, value: Value, options?: Set_Options): Promise<Set_Outcome>` | Encodes with the built-in envelope or first matching custom codec |
 | `get_json` | `get_json(key: Client_Key): Promise<Json_Value \| undefined>` | Reads shared-core canonical JSON |
 | `set_json` | `set_json(key: Client_Key, value: Json_Value, options?: Set_Options): Promise<Set_Outcome>` | Writes shared-core canonical JSON |
