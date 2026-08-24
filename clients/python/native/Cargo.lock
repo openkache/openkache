@@ -887,6 +887,7 @@ name = "openkache-client-python-native"
 version = "0.1.0"
 dependencies = [
  "openkache-client-core",
+ "tokio",
 ]
 
 [[package]]

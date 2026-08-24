@@ -69,6 +69,30 @@ structure clientDefaults {
     @required
     serverName: String
 
+    /// Gate 0's fixed ALPN version.
+    @required
+    gate0AlpnVersion: Integer
+
+    /// Gate 0's fixed value-compression selector.
+    @required
+    gate0Compression: Integer
+
+    /// Gate 0's fixed value-encryption selector.
+    @required
+    gate0Encryption: Integer
+
+    /// Gate 0's fixed public Item-ID root, encoded as lowercase hexadecimal.
+    @required
+    gate0ItemIdRootKeyHex: String
+
+    /// Gate 0's fixed server-assigned namespace ID.
+    @required
+    gate0NamespaceId: Long
+
+    /// Gate 0's fixed value-format selector byte.
+    @required
+    gate0ValueSelector: Integer
+
     /// PEM label for certificate chains assembled by an adapter.
     @required
     certificatePemType: String
@@ -317,7 +341,13 @@ structure valueEnvelope {
     certificatePemType: "CERTIFICATE",
     minimumPositiveValue: 1,
     zstandardLevelMin: 1,
-    zstandardLevelMax: 22
+    zstandardLevelMax: 22,
+    gate0AlpnVersion: 1,
+    gate0Compression: 0,
+    gate0Encryption: 0,
+    gate0ItemIdRootKeyHex: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    gate0NamespaceId: 1,
+    gate0ValueSelector: 16
 )
 @ffiContract(
     abiVersion: 1,
