@@ -42,8 +42,11 @@ export {
 const TEXT_ENCODER = new TextEncoder()
 const MAX_CANONICAL_KEY_BYTES = 1_048_576
 
-/** A Gate 0 mapped key: UTF-8 text, exact bytes, or a signed i64 bigint. */
-export type Client_Key = string | Uint8Array | bigint
+/**
+ * A Gate 0 mapped key: UTF-8 text, exact bytes, a safe integer number, or a
+ * signed i64 bigint.
+ */
+export type Client_Key = string | Uint8Array | number | bigint
 
 /** The only accepted Gate 0 connection shape. */
 export interface Client_Options {
@@ -191,7 +194,8 @@ export class OpenKache_Client {
    * `Undefined_Value` is always wrapped in `Found_Result`, so JavaScript
    * `undefined` is never used as the missing marker.
    *
-   * @param key - UTF-8 text, exact bytes, or a signed-i64 bigint key.
+   * @param key - UTF-8 text, exact bytes, a safe integer number, or a
+   * signed-i64 bigint key.
    * @returns A tagged missing/found result.
    * @throws {OpenKache_Error} When validation, transport, or decoding fails.
    */
@@ -220,7 +224,8 @@ export class OpenKache_Client {
    * The write is unconditional. The result is `created` when the item was
    * absent and `replaced` when a live item was overwritten.
    *
-   * @param key - UTF-8 text, exact bytes, or a signed-i64 bigint key.
+   * @param key - UTF-8 text, exact bytes, a safe integer number, or a
+   * signed-i64 bigint key.
    * @param value - Native or lossless structured value.
    * @returns The created/replaced outcome.
    * @throws {OpenKache_Error} When validation, encoding, transport, or storage fails.
@@ -268,7 +273,8 @@ export class OpenKache_Client {
   /**
    * Deletes one mapped key.
    *
-   * @param key - UTF-8 text, exact bytes, or a signed-i64 bigint key.
+   * @param key - UTF-8 text, exact bytes, a safe integer number, or a
+   * signed-i64 bigint key.
    * @returns `deleted` when an item existed, otherwise `not_found`.
    * @throws {OpenKache_Error} When validation, transport, or storage fails.
    */
@@ -345,6 +351,14 @@ function owned_key_bytes(key: Client_Key): Uint8Array {
   if (key instanceof Uint8Array) {
     return encode_cbor_bytes_or_text(2, key)
   }
+  if (typeof key === "number") {
+    if (!Number.isSafeInteger(key) || Object.is(key, -0)) {
+      throw new OpenKache_Error(
+        "number keys must be finite safe integers and must not be negative zero",
+      )
+    }
+    return encode_cbor_integer(BigInt(key))
+  }
   if (typeof key === "bigint") {
     if (key < -(1n << 63n) || key > (1n << 63n) - 1n) {
       throw new OpenKache_Error("integer keys must fit the signed 64-bit range")
@@ -352,7 +366,8 @@ function owned_key_bytes(key: Client_Key): Uint8Array {
     return encode_cbor_integer(key)
   }
   throw new OpenKache_Error(
-    "key must be a UTF-8 string, Uint8Array, or signed-i64 bigint",
+    "key must be a UTF-8 string, Uint8Array, a safe integer number, or " +
+      "signed-i64 bigint",
   )
 }
 

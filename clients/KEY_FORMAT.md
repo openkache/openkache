@@ -116,10 +116,11 @@ legacy mapping paths, canonical-byte arguments, or per-operation identity
 overrides. Those capabilities remain fully specified below for the shared core
 and a future facade revision.
 
-Gate 0 treats JavaScript `number` as ambiguous and rejects it even when it is
-an integral safe integer; JavaScript callers use `bigint` within signed `i64`
-for `Integer`. The complete profile's optional safe-integer normalization in
-§2.2 is not a Gate 0 API.
+Gate 0 accepts JavaScript `number` through the safe-integer normalization in
+§3.2. A finite safe integer other than negative zero maps to `Integer`; other
+numbers remain invalid. This is only a key-input convenience and does not
+change the structured-value rule that JavaScript `number` values encode as
+`Float(width=64, raw_bits)`.
 
 ## 2. Typed key
 

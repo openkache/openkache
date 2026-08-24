@@ -106,12 +106,15 @@ Each operation infers one typed key independently:
 
 - `string` → valid UTF-8 `Text`; empty and NUL-containing strings are valid.
 - `Uint8Array` → exact `Bytes`, including empty and zero bytes.
+- `number` → `Integer` only when it is a finite safe integer other than
+  negative zero; the adapter converts it with `BigInt(number)`.
 - `bigint` → signed `i64` `Integer` (`-2^63..=2^63-1`).
 
-JavaScript `number`, booleans, `null`, arrays, objects, invalid UTF-16
-surrogates, and out-of-range integers are rejected. A number is never guessed
-to be an integer. The adapter canonicalizes each key and derives its Item ID
-with the fixed Gate 0 `NamespaceHash` profile.
+JavaScript fractional numbers, `-0`, `NaN`, infinities, unsafe numbers,
+booleans, `null`, arrays, objects, invalid UTF-16 surrogates, and out-of-range
+integers are rejected. The adapter canonicalizes each key and derives its Item
+ID with the fixed Gate 0 `NamespaceHash` profile. A safe integer `number` and
+the same-valued `bigint` produce the same canonical integer key.
 
 ## Structured values
 
