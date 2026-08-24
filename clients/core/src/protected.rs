@@ -53,10 +53,11 @@ impl ProtectionSettings {
     fn finish_with_budget(self, budget: crate::RequestBudget) -> Result<Arc<DataProtection>> {
         let protection = match self.key {
             Some(key) => match self.keyring {
-                Some(keyring) => DataProtection::with_keyring_and_key_spec(
+                Some(keyring) => DataProtection::with_keyring_and_key_spec_and_format(
                     key,
                     keyring,
                     self.key_spec,
+                    self.key_format,
                     self.compression,
                     self.encryption,
                 ),

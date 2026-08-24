@@ -23,8 +23,9 @@ pub mod value_envelope;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
@@ -432,6 +433,8 @@ struct Core<C: ClientConnection> {
     namespace_name: Vec<u8>,
     namespace_policy: NamespacePolicy,
     state: AtomicU32,
+    close_requested: AtomicBool,
+    close_waiters: Mutex<Vec<Waker>>,
     next_request_id: AtomicU64,
     // Correlation entries are touched only while performing short,
     // synchronous map operations.  A synchronous mutex lets the reservation
@@ -471,12 +474,7 @@ impl<C: ClientConnection> Drop for PendingRequestReservation<'_, C> {
         if self.completed {
             return;
         }
-        let entry = self
-            .core
-            .pending
-            .lock()
-            .expect("request correlation table lock is not poisoned")
-            .remove(&self.request_id);
+        let entry = self.core.remove_request(self.request_id);
         // A dropped transmitted mutation cannot be reported to a caller whose
         // future was cancelled.  Retire the connection so a later operation
         // cannot accidentally treat that abandoned lane as a known outcome.
@@ -595,6 +593,8 @@ impl<C: ClientConnection> Core<C> {
             state: AtomicU32::new(ConnectionState::Connected.code()),
             next_request_id: AtomicU64::new(0),
             pending: Mutex::new(HashMap::new()),
+            close_requested: AtomicBool::new(false),
+            close_waiters: Mutex::new(Vec::new()),
         };
         Ok(core)
     }
@@ -606,6 +606,11 @@ impl<C: ClientConnection> Core<C> {
 
     fn request_budget(&self) -> RequestBudget {
         self.request_budget.clone()
+    }
+
+    fn is_closing(&self) -> bool {
+        self.close_requested.load(Ordering::Acquire)
+            || self.connection_state() == ConnectionState::Closed
     }
 
     async fn ping(&self) -> Result<Duration> {
@@ -809,7 +814,7 @@ impl<C: ClientConnection> Core<C> {
     where
         R: RequestBuilder,
     {
-        if self.connection_state() == ConnectionState::Closed {
+        if self.is_closing() {
             return Err(Error::ClientClosed);
         }
         let deadline = transport::Deadline::after(self.request_timeout)?;
@@ -870,7 +875,11 @@ impl<C: ClientConnection> Core<C> {
                     if failure.invalidates_connection {
                         self.mark_disconnected(&connection);
                     }
-                    if response_safe && failure.invalidates_connection && attempt < max_attempts {
+                    if !self.is_closing()
+                        && response_safe
+                        && failure.invalidates_connection
+                        && attempt < max_attempts
+                    {
                         self.reconnect_failed(&connection, deadline).await?;
                         continue;
                     }
@@ -898,6 +907,9 @@ impl<C: ClientConnection> Core<C> {
             .pending
             .lock()
             .expect("request correlation table lock is not poisoned");
+        if self.is_closing() {
+            return Err(Error::ClientClosed);
+        }
         for _ in 0..=u64::MAX {
             let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
             if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(request_id) {
@@ -937,10 +949,78 @@ impl<C: ClientConnection> Core<C> {
     }
 
     fn complete_request(&self, request_id: u64) {
-        self.pending
-            .lock()
-            .expect("request correlation table lock is not poisoned")
-            .remove(&request_id);
+        let _ = self.remove_request(request_id);
+    }
+
+    fn remove_request(&self, request_id: u64) -> Option<PendingEntry> {
+        let (entry, empty) = {
+            let mut pending = self
+                .pending
+                .lock()
+                .expect("request correlation table lock is not poisoned");
+            let entry = pending.remove(&request_id);
+            (entry, pending.is_empty())
+        };
+        if empty {
+            self.wake_close_waiters();
+        }
+        entry
+    }
+
+    fn wake_close_waiters(&self) {
+        let waiters = std::mem::take(
+            &mut *self
+                .close_waiters
+                .lock()
+                .expect("close waiter lock is not poisoned"),
+        );
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+
+    async fn wait_for_pending_requests(&self) {
+        futures_util::future::poll_fn(|context| {
+            let pending = self
+                .pending
+                .lock()
+                .expect("request correlation table lock is not poisoned");
+            if pending.is_empty() {
+                return Poll::Ready(());
+            }
+            let mut waiters = self
+                .close_waiters
+                .lock()
+                .expect("close waiter lock is not poisoned");
+            if !waiters
+                .iter()
+                .any(|waiter| waiter.will_wake(context.waker()))
+            {
+                waiters.push(context.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await;
+    }
+
+    async fn wait_for_closed(&self) {
+        futures_util::future::poll_fn(|context| {
+            let mut waiters = self
+                .close_waiters
+                .lock()
+                .expect("close waiter lock is not poisoned");
+            if self.connection_state() == ConnectionState::Closed {
+                return Poll::Ready(());
+            }
+            if !waiters
+                .iter()
+                .any(|waiter| waiter.will_wake(context.waker()))
+            {
+                waiters.push(context.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await;
     }
 
     fn selected_namespace_id(&self) -> Result<u64> {
@@ -1197,6 +1277,9 @@ impl<C: ClientConnection> Core<C> {
     }
 
     fn set_state_unless_closed(&self, next: ConnectionState) -> Result<()> {
+        if self.is_closing() {
+            return Err(Error::ClientClosed);
+        }
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (state != ConnectionState::Closed.code()).then_some(next.code())
@@ -1221,13 +1304,16 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn reconnect_failed(&self, failed: &Arc<C>, deadline: transport::Deadline) -> Result<()> {
+        if self.is_closing() {
+            return Err(Error::ClientClosed);
+        }
         let remaining = deadline.remaining(Operation::ConnectionRetry)?;
         let Some(_guard) = C::timeout(remaining, self.reconnect.lock()).await? else {
             return Err(Error::Timeout {
                 operation: Operation::ConnectionRetry,
             });
         };
-        if self.connection_state() == ConnectionState::Closed {
+        if self.is_closing() {
             return Err(Error::ClientClosed);
         }
         if self.connection_state() == ConnectionState::Connected {
@@ -1274,7 +1360,7 @@ impl<C: ClientConnection> Core<C> {
             .connection
             .write()
             .map_err(|_| Error::Connection("connection state lock is poisoned".into()))?;
-        if self.connection_state() == ConnectionState::Closed {
+        if self.is_closing() {
             replacement.close();
             return Err(Error::ClientClosed);
         }
@@ -1289,6 +1375,9 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn reconnect(&self) -> Result<()> {
+        if self.is_closing() {
+            return Err(Error::ClientClosed);
+        }
         let deadline = transport::Deadline::after(self.connect_timeout)?;
         let current = self.current_connection()?;
         self.mark_disconnected(&current);
@@ -1296,17 +1385,24 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn close(&self) -> Result<()> {
-        let previous = self
-            .state
-            .swap(ConnectionState::Closed.code(), Ordering::AcqRel);
-        if previous != ConnectionState::Closed.code() {
-            let connection = self
-                .connection
-                .read()
-                .map_err(|_| Error::Connection("connection state lock is poisoned".into()))?;
-            connection.close();
+        if self
+            .close_requested
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            self.wait_for_closed().await;
+            return Ok(());
         }
-        Ok(())
+        self.wait_for_pending_requests().await;
+        let result = self
+            .connection
+            .read()
+            .map_err(|_| Error::Connection("connection state lock is poisoned".into()))
+            .map(|connection| connection.close());
+        self.state
+            .store(ConnectionState::Closed.code(), Ordering::Release);
+        self.wake_close_waiters();
+        result
     }
 }
 
@@ -1689,7 +1785,8 @@ macro_rules! raw_client_methods {
                 self.0.reconnect().await
             }
 
-            /// Permanently and idempotently closes this client instance.
+            /// Permanently and idempotently closes this client instance after
+            /// admitted operations settle and their transport lanes release.
             pub async fn close(&self) -> Result<()> {
                 self.0.close().await
             }

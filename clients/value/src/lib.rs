@@ -1063,6 +1063,9 @@ fn validate_limits(limits: Limits) -> Result<()> {
     if limits.max_items == 0 {
         return Err(resource(Resource::Items, 1, 0));
     }
+    if limits.max_integer_bytes == 0 {
+        return Err(resource(Resource::IntegerBytes, 1, 0));
+    }
     Ok(())
 }
 

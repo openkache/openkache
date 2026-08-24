@@ -204,7 +204,8 @@ mod maintained {
                 })
         }
 
-        /// Idempotently closes the client and waits for owned work to finish.
+        /// Idempotently closes the client and waits for admitted work to
+        /// settle before releasing the transport.
         pub async fn close(&self) -> Result<()> {
             self.inner.close().await.map_err(map_core_error)
         }

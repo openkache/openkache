@@ -18,7 +18,8 @@ The facade exposes exactly five operations:
 - `Client::get(key)` returns `GetResult::Missing` or `GetResult::Found(Value)`.
 - `Client::set(key, value)` returns `SetOutcome::Created` or `Replaced`.
 - `Client::delete(key)` returns `DeleteOutcome::Deleted` or `NotFound`.
-- `Client::close()` is idempotent.
+- `Client::close()` is idempotent and waits for admitted operations to settle
+  before releasing the transport.
 
 `Value` is the lossless cross-language model encoded as
 `StructuredValue-CBOR-v1`. It preserves undefined versus null, arbitrary

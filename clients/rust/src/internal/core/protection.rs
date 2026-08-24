@@ -70,7 +70,14 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        Self::with_keyring_and_key_spec(key, keyring, KeyType::Bytes, compression, encryption)
+        Self::with_keyring_and_key_spec_and_format(
+            key,
+            keyring,
+            KeyType::Bytes,
+            KeyFormat::NamespaceHash,
+            compression,
+            encryption,
+        )
     }
 
     /// Creates protected values with an independent Item-ID root and value
@@ -96,6 +103,29 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
+        Self::with_keyring_and_key_spec_and_format(
+            key,
+            keyring,
+            key_spec,
+            KeyFormat::NamespaceHash,
+            compression,
+            encryption,
+        )
+    }
+
+    /// Creates rotating value protection with an explicit key type and
+    /// Item ID mapping profile.
+    pub fn with_keyring_and_key_spec_and_format(
+        key: ClientRootKey,
+        keyring: ValueKeyring,
+        key_spec: KeyType,
+        key_format: KeyFormat,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        crate::internal_core::KeySpace::with_format(key_spec, key_format)
+            .validate()
+            .map_err(crate::internal_core::Error::from)?;
         let codec = match encryption {
             Encryption::Unprotected => ValueCodec::compressed(compression)?,
             Encryption::Compact | Encryption::Robust => {
@@ -111,7 +141,7 @@ impl DataProtection {
         Ok(Self {
             key,
             key_spec,
-            key_format: KeyFormat::NamespaceHash,
+            key_format,
             codec,
         })
     }
