@@ -20,7 +20,6 @@ use openkache_protocol::{RequestFrameHeader, ResponseParts};
 
 #[path = "transport/tls.rs"]
 mod tls;
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 pub(super) use tls::strict_server_config;
 #[path = "transport/tcp.rs"]
 pub(super) mod tcp;

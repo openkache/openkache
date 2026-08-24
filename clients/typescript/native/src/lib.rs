@@ -1008,7 +1008,7 @@ impl NativeClient {
     }
 
     /// Returns the server's JSON statistics payload.
-    #[napi]
+    #[napi(js_name = "experimental_stats")]
     pub async fn experimental_stats(&self) -> Result<String> {
         self.active_client()?
             .experimental_stats()
@@ -1017,7 +1017,7 @@ impl NativeClient {
     }
 
     /// Requests a server durability barrier.
-    #[napi]
+    #[napi(js_name = "experimental_sync")]
     pub async fn experimental_sync(&self) -> Result<()> {
         self.active_client()?
             .experimental_sync()

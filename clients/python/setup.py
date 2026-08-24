@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from setuptools import Command, setup
@@ -195,6 +196,44 @@ class sdist(_sdist):
     def run(self) -> None:
         self.run_command("generate_smithy")
         super().run()
+
+    def make_distribution(self) -> None:
+        """Build the release tree outside the checkout.
+
+        ``setuptools`` normally creates ``<name>-<version>`` beside
+        ``setup.py`` while assembling an sdist.  The public checkout is also
+        a Bazel source tree, so that transient directory can race Bazel's
+        package scanner during parallel CI.  Keep the archive assembly in a
+        temporary directory and publish only the finished archive.
+        """
+
+        staging_root = Path(
+            tempfile.mkdtemp(prefix=f"{self.distribution.get_fullname()}-")
+        )
+        try:
+            with self._remove_os_link():
+                base_dir = self.distribution.get_fullname()
+                release_root = staging_root / base_dir
+                base_name = os.path.join(self.dist_dir, base_dir)
+                self.make_release_tree(str(release_root), self.filelist.files)
+                archive_files = []
+                if "tar" in self.formats:
+                    self.formats.append(self.formats.pop(self.formats.index("tar")))
+                for fmt in self.formats:
+                    archive_file = self.make_archive(
+                        base_name,
+                        fmt,
+                        root_dir=str(staging_root),
+                        base_dir=base_dir,
+                        owner=self.owner,
+                        group=self.group,
+                    )
+                    archive_files.append(archive_file)
+                    self.distribution.dist_files.append(("sdist", "", archive_file))
+                self.archive_files = archive_files
+        finally:
+            if not self.keep_temp:
+                shutil.rmtree(staging_root, ignore_errors=True)
 
     def make_release_tree(self, base_dir: str, files: list[str]) -> None:
         super().make_release_tree(base_dir, files)
