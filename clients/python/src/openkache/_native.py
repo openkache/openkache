@@ -7,13 +7,12 @@ and native-resource lifetime.
 
 from __future__ import annotations
 
-import asyncio
 import ctypes
 import os
 import sys
 from pathlib import Path
-from threading import Condition, Lock
-from collections.abc import Callable, Sequence
+from threading import Condition
+from collections.abc import Sequence
 
 from ._generated.smithy_contract import (
     SmithyFFINamespaceDescriptor,
@@ -51,7 +50,6 @@ class NativeError(RuntimeError):
 _U8 = ctypes.c_uint8
 _U8_POINTER = ctypes.POINTER(_U8)
 _RESULT_POINTER = ctypes.c_void_p
-_REQUEST_POINTER = ctypes.c_void_p
 _CLIENT_POINTER = ctypes.c_void_p
 
 _NamespaceDescriptor = SmithyFFINamespaceDescriptor
@@ -183,52 +181,6 @@ class _NativeApi:
                 ctypes.c_uint64,
             ),
             _RESULT_POINTER,
-        )
-        self.execute_async = self._function(
-            "openkache_client_execute_async",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _REQUEST_POINTER,
-        )
-        self.execute_with_options_async = self._function(
-            "openkache_client_execute_with_options_async",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _REQUEST_POINTER,
-        )
-        self.execute_raw_async = self._function(
-            "openkache_client_execute_raw_async",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _REQUEST_POINTER,
         )
         self.get_structured = self._optional_function(
             "openkache_client_get_structured",
@@ -370,20 +322,6 @@ class _NativeApi:
         self.connection_state = self._function(
             "openkache_client_connection_state", (_CLIENT_POINTER,), ctypes.c_uint32
         )
-        self.request_poll = self._function(
-            "openkache_client_request_poll", (_REQUEST_POINTER,), ctypes.c_uint32
-        )
-        self.request_wait = self._function(
-            "openkache_client_request_wait",
-            (_REQUEST_POINTER, ctypes.c_uint64),
-            _RESULT_POINTER,
-        )
-        self.request_cancel = self._function(
-            "openkache_client_request_cancel", (_REQUEST_POINTER,), ctypes.c_uint32
-        )
-        self.request_free = self._function(
-            "openkache_client_request_free", (_REQUEST_POINTER,), None
-        )
         self.result_kind = self._function(
             "openkache_client_result_kind", (_RESULT_POINTER,), ctypes.c_uint32
         )
@@ -465,69 +403,6 @@ class _NativeApi:
         return kind, payload, client
 
 
-class _NativeRequest:
-    """One owned request handle and its copied input buffers.
-
-    The request ABI deliberately separates request and result ownership.  A
-    request is freed exactly once after ``wait`` has consumed (or discarded)
-    its result; freeing the request also releases the owning client's active
-    call slot.
-    """
-
-    def __init__(
-        self,
-        api: _NativeApi,
-        pointer: _REQUEST_POINTER,
-        buffers: Sequence[object | None],
-        release: Callable[[], None],
-    ) -> None:
-        self._api = api
-        self._pointer = pointer
-        self._buffers = tuple(buffers)
-        self._release = release
-        self._lock = Lock()
-
-    def poll(self) -> int:
-        with self._lock:
-            pointer = self._pointer
-            if not pointer:
-                return 0
-            return int(self._api.request_poll(pointer))
-
-    def cancel(self) -> int:
-        with self._lock:
-            pointer = self._pointer
-            if not pointer:
-                return 0
-            return int(self._api.request_cancel(pointer))
-
-    def wait(self, timeout_ms: int) -> tuple[int, bytes]:
-        # ``wait`` is called only after the polling loop has stopped.  Keeping
-        # it under the lock prevents a finalizer from freeing the handle while
-        # the result pointer is still being read.
-        with self._lock:
-            pointer = self._pointer
-            if not pointer:
-                raise NativeError("native request has already been freed")
-            result = self._api.request_wait(pointer, max(0, int(timeout_ms)))
-            kind, payload, _ = self._api.read_result(result)
-            return kind, payload
-
-    def free(self) -> None:
-        with self._lock:
-            pointer, self._pointer = self._pointer, _REQUEST_POINTER()
-            self._buffers = ()
-        if pointer:
-            self._api.request_free(pointer)
-            self._release()
-
-    def __del__(self) -> None:
-        try:
-            self.free()
-        except Exception:
-            pass
-
-
 class NativeClient:
     """Thread-safe handle for one core client worker."""
 
@@ -535,11 +410,9 @@ class NativeClient:
         self,
         api: _NativeApi,
         handle: _CLIENT_POINTER,
-        request_timeout_ms: int,
     ) -> None:
         self._api = api
         self._handle = handle
-        self._request_timeout_ms = request_timeout_ms
         self._lifecycle = Condition()
         self._active_calls = 0
 
@@ -622,7 +495,7 @@ class NativeClient:
         kind, _, handle = api.read_result(result, take_client=True)
         if kind != SMITHY_FFI_RESULT_CONNECTED or not handle:
             raise NativeError("native client did not return a connected handle")
-        return cls(api, handle, request_timeout_ms)
+        return cls(api, handle)
 
     def execute(
         self,
@@ -812,36 +685,6 @@ class NativeClient:
             ttl_ms=ttl_ms,
         )
 
-    async def execute_with_options_async(
-        self,
-        operation: int,
-        *,
-        key: bytes = b"",
-        value: bytes = b"",
-        key_spec: int,
-        set_flags: int = 0,
-        ttl_ms: int = 0,
-    ) -> tuple[int, bytes]:
-        """Execute through the owned request handle and honor task cancellation.
-
-        Polling keeps cancellation and result consumption disjoint: a task is
-        never canceled while ``request_wait`` owns the mutable request handle.
-        A cancellation that reaches a started mutation is therefore returned by
-        the core as ``UnknownMutation`` instead of being replaced by the
-        language runtime's generic ``CancelledError``.
-        """
-
-        request = self._start_request(
-            self._api.execute_with_options_async,
-            operation,
-            key_spec,
-            key,
-            value,
-            set_flags,
-            ttl_ms,
-        )
-        return await self._await_request(request)
-
     def execute_raw_with_options(
         self,
         operation: int,
@@ -855,32 +698,6 @@ class NativeClient:
             self._api.execute_raw_with_options,
             operation,
             key=item_id,
-            value=value,
-            set_flags=set_flags,
-            ttl_ms=ttl_ms,
-        )
-
-    async def execute_raw_with_options_async(
-        self,
-        operation: int,
-        *,
-        item_id: bytes,
-        value: bytes = b"",
-        set_flags: int = 0,
-        ttl_ms: int = 0,
-    ) -> tuple[int, bytes]:
-        """Execute an exact-item-ID operation at a safe completion boundary.
-
-        ABI v1 exposes a request handle for the legacy raw SET condition and
-        TTL shape, but not for the complete policy flags used here.  Keep the
-        synchronous complete-options call alive until its native result is
-        consumed rather than abandoning a possible mutation on cancellation.
-        """
-
-        return await _await_native_sync_boundary(
-            self.execute_raw_with_options,
-            operation,
-            item_id=item_id,
             value=value,
             set_flags=set_flags,
             ttl_ms=ttl_ms,
@@ -1114,82 +931,6 @@ class NativeClient:
                 if self._active_calls == 0:
                     self._lifecycle.notify_all()
 
-    def _start_request(
-        self,
-        function: object,
-        operation: int,
-        *arguments: object,
-        raw: bool = False,
-    ) -> _NativeRequest:
-        if raw:
-            key, value, set_flags, ttl_ms = arguments
-            key_buffer, key_pointer = _as_native_buffer(key)
-            value_buffer, value_pointer = _as_native_buffer(value)
-            buffers = (key_buffer, value_buffer)
-            call_arguments = (
-                operation,
-                key_pointer,
-                len(key),
-                value_pointer,
-                len(value),
-                int(set_flags),
-                int(ttl_ms),
-            )
-        else:
-            key_spec, key, value, set_flags, ttl_ms = arguments
-            key_buffer, key_pointer = _as_native_buffer(key)
-            value_buffer, value_pointer = _as_native_buffer(value)
-            buffers = (key_buffer, value_buffer)
-            call_arguments = (
-                operation,
-                int(key_spec),
-                key_pointer,
-                len(key),
-                value_pointer,
-                len(value),
-                int(set_flags),
-                int(ttl_ms),
-            )
-        with self._lifecycle:
-            if not self._handle:
-                raise NativeError("client is closed")
-            handle = self._handle
-            self._active_calls += 1
-        try:
-            pointer = function(handle, *call_arguments)
-            if not pointer:
-                raise NativeError("native client returned a null request handle")
-            return _NativeRequest(self._api, pointer, buffers, self._end_call)
-        except Exception:
-            del buffers
-            self._end_call()
-            raise
-
-    async def _await_request(self, request: _NativeRequest) -> tuple[int, bytes]:
-        try:
-            while True:
-                # A cancellation can race with worker completion: request_cancel
-                # may observe a completed admission while the result is still
-                # in the completion channel.  Drain by polling until the
-                # request publishes a terminal state before consuming it.
-                if request.poll() != 0:
-                    return request.wait(0)
-                try:
-                    await asyncio.sleep(0.001)
-                except asyncio.CancelledError:
-                    request.cancel()
-                    current = asyncio.current_task()
-                    if current is not None:
-                        current.uncancel()
-        finally:
-            request.free()
-
-    def _end_call(self) -> None:
-        with self._lifecycle:
-            self._active_calls -= 1
-            if self._active_calls == 0:
-                self._lifecycle.notify_all()
-
     def close(self) -> None:
         with self._lifecycle:
             handle, self._handle = self._handle, None
@@ -1206,27 +947,5 @@ class NativeClient:
             self.close()
         except Exception:
             pass
-
-
-async def _await_native_sync_boundary(
-    function: Callable[..., object],
-    *args: object,
-    **kwargs: object,
-) -> object:
-    """Keep a legacy blocking native call alive through task cancellation."""
-
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        current = asyncio.current_task()
-        while True:
-            if current is not None:
-                current.uncancel()
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-
 
 __all__ = ["NativeClient", "NativeError"]

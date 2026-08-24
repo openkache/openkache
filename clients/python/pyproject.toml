@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openkache"
 version = "0.1.0"
-description = "Thin Python binding for the OpenKache Rust client"
+description = "Python client for the OpenKache cache server"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -13,13 +13,25 @@ authors = [{ name = "OpenKache Team" }]
 keywords = ["cache", "openkache", "ssd"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
 
+[project.urls]
+Homepage = "https://github.com/openkache/openkache"
+Documentation = "https://github.com/openkache/openkache/tree/main/clients/python"
+Repository = "https://github.com/openkache/openkache"
+Issues = "https://github.com/openkache/openkache/issues"
+
 [tool.setuptools.package-data]
-openkache = ["py.typed", "*.dll", "*.dylib", "*.so", "_generated/*.py"]
+openkache = ["LICENSE", "py.typed", "*.dll", "*.dylib", "*.so", "_generated/*.py"]
 
 [tool.setuptools]
 include-package-data = true

@@ -15,9 +15,9 @@ import tempfile
 from pathlib import Path
 
 from setuptools import Command, setup
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.sdist import sdist as _sdist
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -36,17 +36,24 @@ CLIENTS_ROOT = PUBLIC_ROOT / "clients"
 CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
 CLIENT_GENERATOR_ROOT = CLIENTS_ROOT / "generator"
 CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
-CLIENT_GENERATOR_INPUTS = ()
+GENERATED_MODULES = (
+    "smithy_api.py",
+    "smithy_operations.py",
+    "smithy_contract.py",
+    "smithy_native_abi.py",
+)
 if not CLIENT_GENERATOR.is_file():
     CLIENTS_ROOT = PACKAGE_ROOT / "clients"
     CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
     CLIENT_GENERATOR_ROOT = CLIENTS_ROOT / "generator"
     CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
-CLIENT_GENERATOR_INPUTS = tuple(
-    path.name
-    for path in sorted(CLIENTS_ROOT.glob("*.ts"))
-    if path.name != CLIENT_GENERATOR.name
-)
+
+
+def generated_module_paths() -> tuple[Path, ...]:
+    """Return every generated Python module required by the package facade."""
+
+    generated_root = PACKAGE_ROOT / "src" / "openkache" / "_generated"
+    return tuple(generated_root / module for module in GENERATED_MODULES)
 
 
 def native_library_name() -> str:
@@ -57,8 +64,18 @@ def native_library_name() -> str:
     return "libopenkache_client_python_native.so"
 
 
-def generate_smithy_contract() -> None:
-    """Generate Python contracts from the scoped wire and client Smithy models."""
+def generate_smithy_contract(*, force: bool = False) -> None:
+    """Generate Python contracts from the scoped wire and client Smithy models.
+
+    Source distributions contain the generated modules so installing from an
+    sdist does not require the repository's Bun/Smithy toolchain just to
+    regenerate an identical Python API. A maintainer can still force
+    regeneration with ``python setup.py generate_smithy`` or
+    ``OPENKACHE_REGENERATE_SMITHY=1``.
+    """
+
+    if not force and all(path.is_file() for path in generated_module_paths()):
+        return
 
     if not CLIENT_GENERATOR.is_file() or not CLIENT_GENERATOR_ROOT.is_dir():
         raise RuntimeError(
@@ -71,6 +88,12 @@ def generate_smithy_contract() -> None:
     environment["OPENKACHE_PYTHON_API_OUTPUT"] = str(generated_root / "smithy_api.py")
     environment["OPENKACHE_PYTHON_CONTRACT_OUTPUT"] = str(
         generated_root / "smithy_contract.py"
+    )
+    environment["OPENKACHE_PYTHON_OPERATIONS_OUTPUT"] = str(
+        generated_root / "smithy_operations.py"
+    )
+    environment["OPENKACHE_PYTHON_NATIVE_ABI_OUTPUT"] = str(
+        generated_root / "smithy_native_abi.py"
     )
     try:
         subprocess.run(
@@ -102,7 +125,7 @@ class generate_smithy(Command):
         pass
 
     def run(self) -> None:
-        generate_smithy_contract()
+        generate_smithy_contract(force=True)
 
 
 class build_native(Command):
@@ -159,8 +182,11 @@ class build_py(_build_py):
     """Run the native build after Python sources have been staged."""
 
     def run(self) -> None:
-        self.run_command("generate_smithy")
+        generate_smithy_contract(
+            force=os.environ.get("OPENKACHE_REGENERATE_SMITHY") == "1"
+        )
         super().run()
+        copy_license(Path(self.build_lib) / "openkache" / "LICENSE")
         self.run_command("build_native")
 
 
@@ -212,6 +238,7 @@ class sdist(_sdist):
     def make_release_tree(self, base_dir: str, files: list[str]) -> None:
         super().make_release_tree(base_dir, files)
         release_root = Path(base_dir)
+        copy_license(release_root / "LICENSE")
         source_ignore = shutil.ignore_patterns(
             "__pycache__",
             "*.pyc",
@@ -222,17 +249,13 @@ class sdist(_sdist):
         shutil.copytree(VALUE_ROOT, release_root / "value", ignore=source_ignore)
         shutil.copytree(PROTOCOL_ROOT, release_root / "protocol", ignore=source_ignore)
         (release_root / "clients").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(CLIENT_GENERATOR, release_root / "clients" / "generate.ts")
+        for generator_source in CLIENTS_ROOT.glob("*.ts"):
+            shutil.copy2(generator_source, release_root / "clients" / generator_source.name)
         shutil.copytree(
             CLIENT_GENERATOR_ROOT,
             release_root / "clients" / "generator",
             ignore=source_ignore,
         )
-        for generator_input in CLIENT_GENERATOR_INPUTS:
-            shutil.copy2(
-                CLIENTS_ROOT / generator_input,
-                release_root / "clients" / generator_input,
-            )
         shutil.copytree(
             CLIENT_MODEL_ROOT,
             release_root / "clients" / "model",
@@ -271,6 +294,21 @@ def _replace_workspace_edition(path: Path) -> None:
     if content.count(source) != 1:
         raise RuntimeError(f"expected exactly one {source!r} in {path}")
     path.write_text(content.replace(source, destination), encoding="utf-8")
+
+
+def copy_license(destination: Path) -> None:
+    """Copy the public Apache-2.0 license into a build or sdist tree."""
+
+    source = PACKAGE_ROOT / "LICENSE"
+    if not source.is_file():
+        source = PUBLIC_ROOT / "clients" / "LICENSE"
+    if not source.is_file():
+        raise RuntimeError(
+            "OpenKache package builds require the Apache-2.0 license at "
+            f"{source}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
 
 
 class bdist_wheel(_bdist_wheel):
