@@ -1,5 +1,5 @@
 {
-  "name": "@openkache/client",
+  "name": "openkache",
   "version": "0.0.1",
   "license": "Apache-2.0",
   "description": "Promise-based OpenKache client for Node.js, Bun, and Deno with a runtime-neutral structured-value codec.",

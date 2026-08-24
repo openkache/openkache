@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@openkache/client",
+      "name": "openkache",
       "devDependencies": {
         "@types/node": "latest",
         "typescript": "latest",

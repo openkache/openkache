@@ -1,6 +1,6 @@
 # OpenKache TypeScript client
 
-`@openkache/client` is the maintained Promise-based TypeScript and JavaScript
+`openkache` is the maintained Promise-based TypeScript and JavaScript
 client for Node.js, Bun, and Deno. Gate 0 keeps the application surface small:
 `connect`, `get`, `set`, `delete`, and `close`. The package delegates transport,
 key mapping, and `StructuredValue-CBOR-v1` envelope handling to the shared Rust
@@ -9,9 +9,9 @@ core.
 ## Install
 
 ```bash
-npm install @openkache/client
+npm install openkache
 # or
-bun add @openkache/client
+bun add openkache
 ```
 
 The package contains generated declarations and platform Node-API adapters. It
@@ -34,7 +34,7 @@ does not accept certificate, trust-root, identity, transport, retry, timeout,
 TTL, compression, or value-protection options.
 
 ```typescript
-import { OpenKache_Client, type Found_Result } from "@openkache/client"
+import { OpenKache_Client, type Found_Result } from "openkache"
 
 const client = await OpenKache_Client.connect("127.0.0.1:4433")
 
@@ -146,7 +146,7 @@ import {
   Integer_Value,
   Map_Value,
   UNDEFINED_VALUE,
-} from "@openkache/client"
+} from "openkache"
 
 const value = new Map_Value([
   ["ratio", new Float_Value(16, 0x3c00n)],
@@ -162,13 +162,13 @@ rejected. Map order is retained for lossless forwarding; map equality is
 order-independent.
 
 The runtime-neutral codec helpers are also available from
-`@openkache/client/value-codec` and perform no network I/O:
+`openkache/value-codec` and perform no network I/O:
 
 ```typescript
 import {
   decode_structured_value,
   encode_structured_value,
-} from "@openkache/client/value-codec"
+} from "openkache/value-codec"
 
 const bytes = encode_structured_value(1n)
 const model = decode_structured_value(bytes)
