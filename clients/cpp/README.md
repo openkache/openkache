@@ -16,6 +16,10 @@ duplicate-key, and resource-limited inputs throw `openkache::Value_Error`.
 `get` always returns a tagged `Get_Result`, so a stored `Null` or `Undefined`
 cannot be confused with a missing item.
 
+Native failures retain the shared FFI category through `Native_Error::category()`;
+an admitted SET or DELETE whose response is lost raises
+`Unknown_Mutation_Error`, and callers must not replay it automatically.
+
 Structured values are bounded by `Value_Limits`: the default traversal ceiling
 is 128 nested arrays/maps, and `MAX_ALLOWED_VALUE_DEPTH` (1024) is a hard
 implementation maximum.  A caller may choose a lower `max_depth`, but larger
@@ -80,10 +84,10 @@ client.close(); // idempotent; the destructor closes as well
 ```
 
 `Integer` keys are signed `i64`; text keys are valid UTF-8 with an explicit
-length; byte keys preserve every byte, including empty and NUL bytes.  Keys
-are canonically encoded as deterministic CBOR before the native FFI call.
-Floating-point, Boolean, null, collection, invalid-UTF-8, and out-of-range
-integer keys are not accepted by the typed-key API.
+length; byte keys preserve every byte, including empty and NUL bytes.  Every
+operation emits one deterministic StructuredValue-CBOR key item before the
+native FFI call.  Floating-point, Boolean, null, collection, invalid-UTF-8,
+and out-of-range integer keys are not accepted by the typed-key API.
 
 The Gate 0 profile fixes `NamespaceHash`, namespace ID `1`, the public
 development Item-ID root from `KEY_FORMAT.md`, `StructuredValue-CBOR-v1`,

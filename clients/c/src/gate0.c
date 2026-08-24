@@ -10,6 +10,18 @@
  */
 #include <openkache/smithy_contract.h>
 
+/*
+ * This admission-aware wait is intentionally package-private.  It is not
+ * part of the generated public ABI because Gate 0 hides native cancellation
+ * and request handles from maintained callers.
+ */
+extern openkache_client_result_t *openkache_client_request_wait_mutation(
+    openkache_client_request_t *request, uint64_t timeout_ms);
+extern openkache_client_request_t *
+openkache_client_execute_structured_fields_async(
+    const openkache_client_t *client, uint32_t operation,
+    const openkache_client_operation_field_t *fields, size_t field_count);
+
 _Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_ERROR ==
                    OPENKACHE_SMITHY_FFI_RESULT_ERROR,
                "Gate 0 result constants drifted from Smithy");
@@ -134,23 +146,38 @@ openkache_client_result_t *openkache_client_gate0_set(
           .present = 1,
       },
   };
-  return openkache_client_execute_fields(
-      client, OPENKACHE_SMITHY_OPCODE_SET, fields,
-      OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE + 1u);
+  openkache_client_request_t *request =
+      openkache_client_execute_structured_fields_async(
+          client, OPENKACHE_SMITHY_OPCODE_SET, fields,
+          OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE + 1u);
+  if (request == NULL) {
+    return NULL;
+  }
+  openkache_client_result_t *result = openkache_client_request_wait_mutation(
+      request, OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS);
+  openkache_client_request_free(request);
+  return result;
 }
 
 openkache_client_result_t *
 openkache_client_gate0_delete_value(const openkache_client_t *client,
-                                    uint32_t key_kind, const uint8_t *key,
-                                    size_t key_length) {
+                                    const uint8_t *canonical_key,
+                                    size_t canonical_key_length) {
+  const openkache_client_operation_field_t fields[1] = {
+      {
+          .data = canonical_key,
+          .length = canonical_key_length,
+          .present = 1,
+      },
+  };
   openkache_client_request_t *request =
-      openkache_client_execute_with_options_async(
-          client, OPENKACHE_SMITHY_OPCODE_DELETE, key_kind, key, key_length,
-          NULL, 0, OPENKACHE_SMITHY_SET_CONDITION_ANY_BITS, 0);
+      openkache_client_execute_structured_fields_async(
+          client, OPENKACHE_SMITHY_OPCODE_DELETE, fields,
+          OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE);
   if (request == NULL) {
     return NULL;
   }
-  openkache_client_result_t *result = openkache_client_request_wait(
+  openkache_client_result_t *result = openkache_client_request_wait_mutation(
       request, OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS);
   openkache_client_request_free(request);
   return result;

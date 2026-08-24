@@ -53,6 +53,8 @@ use crate::{
     RetryPolicy, ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+const STRUCTURED_KEY_FIELD_COUNT: usize = 1;
+const STRUCTURED_SET_FIELD_COUNT: usize = 2;
 
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
@@ -199,6 +201,14 @@ enum Command {
         input_permit: BytePermit,
         set_options: SetOptions,
         raw: bool,
+        request: Arc<FfiRequestControl>,
+        response: SyncSender<FfiResult>,
+    },
+    ExecuteStructuredAsync {
+        operation: FfiOperation,
+        canonical_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
         request: Arc<FfiRequestControl>,
         response: SyncSender<FfiResult>,
     },
@@ -618,6 +628,63 @@ impl FfiClient {
         request
     }
 
+    fn execute_structured_async(
+        &self,
+        operation: FfiOperation,
+        canonical_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+    ) -> FfiRequest {
+        let (response, receiver) = sync_channel(1);
+        let control = Arc::new(FfiRequestControl {
+            admission: FfiAdmission::new(),
+            mutating: matches!(operation, FfiOperation::Set | FfiOperation::Delete),
+        });
+        let request = FfiRequest {
+            control: Arc::clone(&control),
+            receiver: Mutex::new(Some(receiver)),
+            ready: Mutex::new(None),
+            state: AtomicU32::new(FfiRequestState::Pending.code()),
+        };
+        let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
+            *request
+                .ready
+                .lock()
+                .expect("request ready lock is not poisoned") =
+                Some(FfiResult::error_with_category(
+                    "client request timeout exceeds the platform clock range",
+                    FfiErrorCategory::Timeout,
+                ));
+            request
+                .state
+                .store(FfiRequestState::Ready.code(), Ordering::Release);
+            return request;
+        };
+        let command = Command::ExecuteStructuredAsync {
+            operation,
+            canonical_key,
+            value,
+            set_options,
+            request: control,
+            response,
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Err(error) = self.commands.send_timeout(command, remaining) {
+            *request
+                .ready
+                .lock()
+                .expect("request ready lock is not poisoned") =
+                Some(FfiResult::error_with_category(
+                    format!("client worker queue deadline exceeded: {error}"),
+                    FfiErrorCategory::ResourceExhausted,
+                ));
+            request
+                .state
+                .store(FfiRequestState::Ready.code(), Ordering::Release);
+        }
+        request
+    }
+
     fn execute_scoped(
         &self,
         operation: FfiOperation,
@@ -831,6 +898,38 @@ impl FfiRequest {
                 )
             }
         }
+    }
+
+    /// Waits for a mutating request while preserving the admission boundary.
+    ///
+    /// A timeout before worker admission cancels the queued request and
+    /// remains a definitive timeout. Once the worker has claimed the request,
+    /// the response may be lost after the mutation was admitted, so the
+    /// caller receives the distinct `UnknownMutation` category. This helper
+    /// is kept separate from the general request wait contract so managed
+    /// adapters can continue to poll or wait again after an ordinary timeout.
+    fn wait_mutation(&self, timeout: Duration) -> FfiResult {
+        let result = self.wait(timeout);
+        if result.error_category != FfiErrorCategory::Timeout {
+            return result;
+        }
+
+        let admission = self.control.admission.cancel();
+        if matches!(
+            admission,
+            AdmissionState::StartedCanceled
+                | AdmissionState::Completed
+                | AdmissionState::CompletedCanceled
+        ) {
+            return FfiResult::with_status(
+                FfiResultKind::UnknownMutation,
+                FfiStatusCategory::UnknownMutation,
+                FfiErrorCategory::UnknownMutation,
+                b"mutation outcome is unknown after request timeout".to_vec(),
+            );
+        }
+
+        result
     }
 
     fn cancel(&self) -> FfiRequestState {
@@ -1746,6 +1845,34 @@ fn run_command_loop<R, C>(
                     let _ = response.send(runtime.block_on(task));
                 }
             }
+            Command::ExecuteStructuredAsync {
+                operation,
+                canonical_key,
+                value,
+                set_options,
+                request,
+                response,
+            } => {
+                if !request.admission.try_start() {
+                    drop(response);
+                    continue;
+                }
+                let task = execute_structured_async_request(
+                    client.clone(),
+                    operation,
+                    canonical_key,
+                    value,
+                    set_options,
+                    request,
+                );
+                if async_dispatch {
+                    runtime.spawn(async move {
+                        let _ = response.send(task.await);
+                    });
+                } else {
+                    let _ = response.send(runtime.block_on(task));
+                }
+            }
             Command::NamespaceOpen {
                 name,
                 create_if_missing,
@@ -1848,6 +1975,40 @@ where
     }
 }
 
+async fn execute_structured_async_request<C>(
+    client: C,
+    operation: FfiOperation,
+    canonical_key: Vec<u8>,
+    value: Vec<u8>,
+    set_options: SetOptions,
+    request: Arc<FfiRequestControl>,
+) -> FfiResult
+where
+    C: FfiProtectedClientApi,
+{
+    let result = execute_structured(&client, operation, canonical_key, value, set_options).await;
+    let completion = request.admission.complete();
+    if completion == AdmissionState::CompletedCanceled {
+        if request.mutating {
+            FfiResult::with_status(
+                FfiResultKind::UnknownMutation,
+                FfiStatusCategory::UnknownMutation,
+                FfiErrorCategory::UnknownMutation,
+                b"mutation outcome is unknown after cancellation".to_vec(),
+            )
+        } else {
+            FfiResult::with_status(
+                FfiResultKind::Canceled,
+                FfiStatusCategory::Canceled,
+                FfiErrorCategory::Canceled,
+                b"request canceled".to_vec(),
+            )
+        }
+    } else {
+        result
+    }
+}
+
 async fn execute(
     client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
@@ -1869,9 +2030,9 @@ async fn execute(
 /// Executes the canonical StructuredValue-CBOR-v1 native seam.
 ///
 /// Unary requests carry one canonical application key and are currently used
-/// for structured GET.  Structured SET carries the key and value as two
-/// operation fields; keeping the value-model decode here ensures no Raw or
-/// JSON compatibility fallback can silently change its semantics.
+/// for structured GET.  Structured SET and DELETE carry the key and (for SET)
+/// value as operation fields; keeping the value-model decode here ensures no
+/// Raw or JSON compatibility fallback can silently change their semantics.
 async fn execute_structured(
     client: &impl FfiProtectedClientApi,
     operation: FfiOperation,
@@ -1888,9 +2049,13 @@ async fn execute_structured(
             .set_structured_canonical_key_cbor(canonical_key, value, set_options)
             .await
             .map(set_result),
+        FfiOperation::Delete => client
+            .delete_canonical_key_unchecked(canonical_key.as_slice())
+            .await
+            .map(delete_result),
         _ => Err(crate::Error::configuration(
             "operation",
-            "structured native ABI supports only GET and SET",
+            "structured native ABI supports only GET, SET, and DELETE",
         )),
     };
     result.unwrap_or_else(FfiResult::from_error)
@@ -2057,7 +2222,9 @@ async fn execute_raw(
             .experimental_stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::ExperimentalSync => client.raw().experimental_sync().await.map(|()| ok_result()),
+        FfiOperation::ExperimentalSync => {
+            client.raw().experimental_sync().await.map(|()| ok_result())
+        }
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
@@ -3239,8 +3406,8 @@ pub unsafe extern "C" fn openkache_client_execute_fields(
             unsafe { std::slice::from_raw_parts(fields, field_count) }
         };
         let required = match operation {
-            FfiOperation::Get => 1,
-            FfiOperation::Set => 2,
+            FfiOperation::Get => STRUCTURED_KEY_FIELD_COUNT,
+            FfiOperation::Set => STRUCTURED_SET_FIELD_COUNT,
             _ => {
                 return Err("structured fields ABI currently accepts only GET and SET".to_owned());
             }
@@ -3267,6 +3434,90 @@ pub unsafe extern "C" fn openkache_client_execute_fields(
         };
         Ok(client.execute_structured(operation, canonical_key, value, SetOptions::new()))
     }))
+}
+
+/// Executes the maintained native StructuredValue-CBOR-v1 field seam
+/// asynchronously.
+///
+/// This package-private seam is used by the Gate 0 C facade so mutating
+/// operations can preserve the admission boundary without exposing request
+/// handles in the generated public ABI. GET and DELETE accept one canonical
+/// key field; SET accepts a canonical key followed by one complete structured
+/// value payload.
+///
+/// # Safety
+///
+/// `client` must be live. `fields` must point to `field_count` initialized
+/// [`FfiOperationField`] values, and every present field buffer must remain
+/// readable for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_structured_fields_async(
+    client: *const FfiClient,
+    operation: u32,
+    fields: *const FfiOperationField,
+    field_count: usize,
+) -> *mut FfiRequest {
+    let request = catch_unwind(AssertUnwindSafe(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        let required = match operation {
+            FfiOperation::Get | FfiOperation::Delete => STRUCTURED_KEY_FIELD_COUNT,
+            FfiOperation::Set => STRUCTURED_SET_FIELD_COUNT,
+            _ => {
+                return Err(
+                    "structured asynchronous ABI currently accepts only GET, SET, and DELETE"
+                        .to_owned(),
+                );
+            }
+        };
+        let fields = if field_count == 0 {
+            &[][..]
+        } else if fields.is_null() {
+            return Err("structured operation fields pointer must not be null".to_owned());
+        } else {
+            unsafe { std::slice::from_raw_parts(fields, field_count) }
+        };
+        if fields.len() != required {
+            return Err(format!(
+                "structured {operation} requires exactly {required} fields, got {}",
+                fields.len()
+            ));
+        }
+        let copy_field =
+            |index: usize, name: &'static str| -> std::result::Result<Vec<u8>, String> {
+                let field = fields[index];
+                if field.present == 0 {
+                    return Err(format!("structured {name} field must be present"));
+                }
+                copy_bytes(field.data, field.length, name)
+            };
+        let canonical_key = copy_field(0, "canonical key")?;
+        let value = if operation == FfiOperation::Set {
+            copy_field(1, "structured value")?
+        } else {
+            Vec::new()
+        };
+        Ok::<FfiRequest, String>(client.execute_structured_async(
+            operation,
+            canonical_key,
+            value,
+            SetOptions::new(),
+        ))
+    }));
+    match request {
+        Ok(Ok(request)) => Box::into_raw(Box::new(request)),
+        Ok(Err(error)) => Box::into_raw(Box::new(FfiRequest::completed(
+            FfiResult::error_with_category(error, FfiErrorCategory::InvalidInput),
+        ))),
+        Err(_) => Box::into_raw(Box::new(FfiRequest::completed(
+            FfiResult::error_with_category("native client panicked", FfiErrorCategory::Internal),
+        ))),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -4160,6 +4411,33 @@ pub unsafe extern "C" fn openkache_client_request_wait(
         ));
     };
     boxed_result(request.wait(Duration::from_millis(timeout_ms)))
+}
+
+/// Waits for a mutating asynchronous operation while preserving admission
+/// semantics for the maintained native facades.
+///
+/// A timeout before worker admission remains a timeout and prevents the
+/// queued mutation from starting. Once admission has occurred, a lost
+/// response is reported as `UnknownMutation`; callers must not replay the
+/// mutation automatically.
+///
+/// # Safety
+///
+/// `request` must be a live, uniquely accessed pointer returned by an
+/// asynchronous execute function for a mutating operation. The request must
+/// not be freed concurrently with this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_request_wait_mutation(
+    request: *mut FfiRequest,
+    timeout_ms: u64,
+) -> *mut FfiResult {
+    let Some(request) = (unsafe { request.as_ref() }) else {
+        return boxed_result(FfiResult::error_with_category(
+            "request pointer must not be null",
+            FfiErrorCategory::InvalidInput,
+        ));
+    };
+    boxed_result(request.wait_mutation(Duration::from_millis(timeout_ms)))
 }
 
 /// Requests cancellation of an asynchronous operation.
