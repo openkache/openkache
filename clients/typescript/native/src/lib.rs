@@ -35,8 +35,8 @@ impl NativeClient {
     /// to its explicit `Missing_Result` value.
     #[napi]
     pub async fn get(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
-        let outcome = self
-            .active_client()?
+        let client = self.gate0_client().await?;
+        let outcome = client
             .get_structured_canonical_key_cbor(key.as_ref())
             .await
             .map_err(native_core_error)?;
@@ -49,8 +49,8 @@ impl NativeClient {
     /// Stores one canonical StructuredValue-CBOR-v1 payload unconditionally.
     #[napi]
     pub async fn set(&self, key: Uint8Array, value: Uint8Array) -> Result<String> {
-        let outcome = self
-            .active_client()?
+        let client = self.gate0_client().await?;
+        let outcome = client
             .set_structured_canonical_key_cbor(key.as_ref(), value.as_ref(), SetOptions::new())
             .await
             .map_err(native_core_error)?;
@@ -66,8 +66,8 @@ impl NativeClient {
     /// Deletes one mapped key and reports whether it existed.
     #[napi]
     pub async fn delete(&self, key: Uint8Array) -> Result<bool> {
-        let outcome = self
-            .active_client()?
+        let client = self.gate0_client().await?;
+        let outcome = client
             .delete_canonical_key(key.as_ref())
             .await
             .map_err(native_core_error)?;
@@ -111,6 +111,22 @@ impl NativeClient {
             .map(Arc::clone)
             .ok_or_else(|| state_error("client is closed"))
     }
+
+    async fn gate0_client(&self) -> Result<Arc<ProtectedClient>> {
+        let client = self.active_client()?;
+        let namespace_id = client
+            .raw()
+            .ensure_namespace_id()
+            .await
+            .map_err(native_core_error)?;
+        if namespace_id != gate0_contract::namespace_id() {
+            return Err(incompatible_outcome(format!(
+                "server selected namespace {namespace_id}, expected Gate 0 namespace {}",
+                gate0_contract::namespace_id(),
+            )));
+        }
+        Ok(client)
+    }
 }
 
 /// Connects using the fixed Gate 0 development profile.
@@ -133,7 +149,6 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let client = ProtectedClient::builder(endpoint, profile.item_id_root)
         .server_trust(profile.server_trust)
         .alpn_policy(profile.alpn)
-        .namespace_id(profile.namespace_id)
         .compression(profile.compression)
         .encryption(profile.encryption)
         .connect()
