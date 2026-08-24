@@ -229,12 +229,29 @@ export type Structured_Value =
 /** Singleton helper for constructing the model's undefined value. */
 export const UNDEFINED_VALUE = new Undefined_Value()
 
-/** Converts a JavaScript native value into the lossless model. */
-export function to_value(value: unknown): Structured_Value {
-  return convert_value(value, new Set<object>())
+/**
+ * Converts a JavaScript native value into the lossless model.
+ *
+ * @param value - Native or already-modelled structured value.
+ * @param limits - Structural resource limits used while converting native
+ *   containers.
+ * @returns The lossless structured-value model.
+ * @throws {Structured_Value_Error} When conversion exceeds a resource limit
+ *   or the native value cannot be represented losslessly.
+ */
+export function to_value(
+  value: unknown,
+  limits: Value_Limits = {},
+): Structured_Value {
+  return convert_value(value, new Set<object>(), 0, checked_limits(limits))
 }
 
-function convert_value(value: unknown, ancestors: Set<object>): Structured_Value {
+function convert_value(
+  value: unknown,
+  ancestors: Set<object>,
+  depth: number,
+  budget: Required<Value_Limits>,
+): Structured_Value {
   if (
     value instanceof Undefined_Value ||
     value instanceof Integer_Value ||
@@ -259,6 +276,7 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
   if (Array.isArray(value)) {
     assert_acyclic(value, ancestors)
     try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
       const children: Structured_Value[] = []
       for (let index = 0; index < value.length; index += 1) {
         if (!(index in value)) {
@@ -267,7 +285,7 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
             "conversion",
           )
         }
-        children.push(convert_value(value[index], ancestors))
+        children.push(convert_value(value[index], ancestors, depth + 1, budget))
       }
       return new Array_Value(children)
     } finally {
@@ -277,11 +295,12 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
   if (value instanceof Map) {
     assert_acyclic(value, ancestors)
     try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
       return new Map_Value(
         [...value.entries()].map(
           ([key, child]): readonly [Structured_Value, Structured_Value] => [
-            convert_value(key, ancestors),
-            convert_value(child, ancestors),
+            convert_value(key, ancestors, depth + 1, budget),
+            convert_value(child, ancestors, depth + 1, budget),
           ],
         ),
       )
@@ -292,6 +311,7 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
   if (is_regular_object(value)) {
     assert_acyclic(value, ancestors)
     try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
       for (const symbol of Object.getOwnPropertySymbols(value)) {
         if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
           throw new Structured_Value_Error(
@@ -303,7 +323,7 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
         Object.keys(value).map(
           (key): readonly [Structured_Value, Structured_Value] => [
             new TextString_Value(key),
-            convert_value(value[key], ancestors),
+            convert_value(value[key], ancestors, depth + 1, budget),
           ],
         ),
       )
@@ -407,7 +427,7 @@ export function encode_structured_value(
   limits: Value_Limits = {},
 ): Uint8Array {
   const budget = checked_limits(limits)
-  const model = to_value(value)
+  const model = to_value(value, budget)
   const output: number[] = []
   const tasks: [Structured_Value, number][] = [[model, 0]]
   let item_count = 0
