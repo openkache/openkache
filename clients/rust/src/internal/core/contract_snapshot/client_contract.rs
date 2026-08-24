@@ -69,6 +69,24 @@ pub const CLIENT_DEFAULT_SERVER_NAME: &str = "localhost";
 pub const CLIENT_CERTIFICATE_PEM_TYPE: &str = "CERTIFICATE";
 /// Minimum positive setting value when zero selects a default.
 pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = 1;
+/// Gate 0's fixed ALPN version.
+pub const CLIENT_GATE0_ALPN_VERSION: u32 = 1;
+/// Gate 0's fixed value-compression selector.
+pub const CLIENT_GATE0_COMPRESSION: u8 = 0x00;
+/// Gate 0's fixed value-encryption selector.
+pub const CLIENT_GATE0_ENCRYPTION: u8 = 0x00;
+/// Gate 0's fixed public Item-ID root.
+pub const CLIENT_GATE0_ITEM_ID_ROOT: [u8; 32] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f];
+/// Gate 0's fixed server-assigned namespace ID.
+pub const CLIENT_GATE0_NAMESPACE_ID: u64 = 1;
+/// Gate 0's fixed value-format selector byte.
+pub const CLIENT_GATE0_VALUE_SELECTOR: u8 = 0x10;
+/// Gate 0 namespace ID retained under the original Rust facade name.
+pub const GATE0_NAMESPACE_ID: u64 = CLIENT_GATE0_NAMESPACE_ID;
+/// Gate 0 Item-ID root retained under the original Rust facade name.
+pub const GATE0_ITEM_ID_ROOT: [u8; 32] = CLIENT_GATE0_ITEM_ID_ROOT;
+/// Gate 0 value-format selector retained under the original Rust facade name.
+pub const GATE0_VALUE_FORMAT_SELECTOR: u8 = CLIENT_GATE0_VALUE_SELECTOR;
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = 1;
@@ -1391,19 +1409,6 @@ pub const VALUE_FORMAT_ROBUST_TAG_BYTES: usize = 16;
 pub const VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES: usize = 32;
 /// BLAKE3 protected-item-ID root derivation context.
 pub const VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT: &str = "OpenKache item ID derivation root v1";
-/// Gate 0's fixed development namespace.
-pub const GATE0_NAMESPACE_ID: u64 = 1;
-/// Gate 0's public development Item-ID root fixture.
-pub const GATE0_ITEM_ID_ROOT: [u8; 32] = [
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-    0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
-    0x1e, 0x1f,
-];
-/// Gate 0's fixed selector: unprotected, uncompressed StructuredValue-CBOR-v1.
-pub const GATE0_VALUE_FORMAT_SELECTOR: u8 =
-    VALUE_FORMAT_ENCRYPTION_NONE
-        | (VALUE_FORMAT_COMPRESSION_NONE << 2)
-        | (VALUE_FORMAT_SERIALIZATION_STRUCTURED << 4);
 /// Associated-data domain separator.
 pub const VALUE_FORMAT_AAD_DOMAIN: &[u8] = b"openkache/value-format/aad/v1";
 /// BLAKE3 value-root derivation context.

@@ -482,10 +482,7 @@ impl Drop for Value {
                     Self::Integer(integer) => std::ptr::drop_in_place(integer),
                     Self::TextString(text) => std::ptr::drop_in_place(text),
                     Self::Bytes(bytes) => std::ptr::drop_in_place(bytes),
-                    Self::Undefined
-                    | Self::Null
-                    | Self::Boolean(_)
-                    | Self::Float(_) => {}
+                    Self::Undefined | Self::Null | Self::Boolean(_) | Self::Float(_) => {}
                 }
             }
         }
