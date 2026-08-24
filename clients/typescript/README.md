@@ -202,6 +202,9 @@ bun run typecheck
 bun run pack:check
 ```
 
-`build` generates ignored contract declarations and `pack:check` builds the
-host Node-API adapter before checking package contents. Private integration
-tests live in the monorepo rather than this public package.
+`build` generates ignored Smithy contract sources for the package build but
+does not publish those internal operation selectors. The npm tarball contains
+only the maintained facade, runtime-neutral codec, private native loader, and
+platform adapters. `pack:check` builds the host Node-API adapter before
+checking package contents. Private integration tests live in the monorepo
+rather than this public package.

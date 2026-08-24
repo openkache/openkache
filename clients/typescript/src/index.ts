@@ -8,12 +8,6 @@ import {
   encode_structured_value,
   type Structured_Value,
 } from "./value-codec.js"
-import {
-  SMITHY_SET_OUTCOME_CREATED,
-  SMITHY_SET_OUTCOME_NOT_STORED,
-  SMITHY_SET_OUTCOME_REPLACED,
-  type Smithy_Set_Outcome,
-} from "./generated_local/smithy-api.js"
 
 export type {
   Structured_Value,
@@ -83,10 +77,7 @@ export class Found_Result<Value> {
 export const MISSING = new Missing_Result()
 
 /** Public set outcomes for unconditional Gate 0 writes. */
-export type Set_Outcome = Exclude<
-  Smithy_Set_Outcome,
-  typeof SMITHY_SET_OUTCOME_NOT_STORED
->
+export type Set_Outcome = "created" | "replaced"
 
 /** Public delete outcomes for Gate 0 deletes. */
 export type Delete_Outcome = "deleted" | "not_found"
@@ -252,10 +243,10 @@ export class OpenKache_Client {
       throw as_openkache_error(error)
     }
     switch (outcome) {
-      case SMITHY_SET_OUTCOME_CREATED:
-      case SMITHY_SET_OUTCOME_REPLACED:
+      case "created":
+      case "replaced":
         return outcome
-      case SMITHY_SET_OUTCOME_NOT_STORED:
+      case "not_stored":
         throw new OpenKache_Error(
           "server returned unsupported conditional SET outcome not_stored",
           undefined,
@@ -295,6 +286,8 @@ export class OpenKache_Client {
     this.#lifecycle.close_promise ??= (async (): Promise<void> => {
       try {
         await this.#native_client.close()
+      } catch (error) {
+        throw as_openkache_error(error)
       } finally {
         this.#lifecycle.closed = true
         CLIENT_FINALIZER.unregister(this)
