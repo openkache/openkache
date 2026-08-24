@@ -10,7 +10,9 @@ The installed C ABI exposes `openkache_client_gate0_connect`,
 `openkache_client_gate0_get`, `openkache_client_gate0_set`,
 `openkache_client_gate0_delete_value`, and `openkache_client_gate0_close`,
 plus result ownership helpers.  The generated shared-core contract is used
-only to build the package-private forwarding library and is not installed.
+to keep the maintained declarations and forwarding library aligned with the
+Smithy source of truth; CMake installs that projection as
+`openkache/smithy_contract.h` alongside the maintained headers.
 Callers must not invoke raw, JSON, Exact Item ID, namespace, experimental,
 cancellation, TTL, retry, or certificate controls.
 
@@ -34,9 +36,10 @@ cmake --install target/build --prefix /path/to/prefix
 ```
 
 The configure/build pair is the C17 package smoke check.  It regenerates the
-private Smithy contract, compiles the forwarding library, and validates the
-imported C target; generated declarations are not copied to the install tree.
-An installed consumer can use the `find_package` snippet below.
+Smithy projection, compiles the forwarding library, and validates the imported
+C target; the generated projection is copied into the install tree so the
+installed maintained headers remain self-contained.  An installed consumer
+can use the `find_package` snippet below.
 
 If Bun or the Smithy CLI is unavailable, set
 `OPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER` to a generated

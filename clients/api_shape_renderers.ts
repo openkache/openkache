@@ -667,6 +667,18 @@ export const SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(contract.clien
 export const SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(contract.client_defaults.certificate_pem_type)}
 /** Minimum positive setting value when zero selects a default. */
 export const SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${contract.client_defaults.minimum_positive_value}
+/** Gate 0 ALPN protocol version selected by maintained facades. */
+export const SMITHY_GATE0_ALPN_VERSION = ${contract.client_defaults.gate0_alpn_version}
+/** Gate 0 compression identifier. */
+export const SMITHY_GATE0_COMPRESSION = ${contract.client_defaults.gate0_compression}
+/** Gate 0 value-protection identifier. */
+export const SMITHY_GATE0_ENCRYPTION = ${contract.client_defaults.gate0_encryption}
+/** Gate 0 public development Item-ID root key. */
+export const SMITHY_GATE0_ITEM_ID_ROOT_KEY_HEX = ${JSON.stringify(contract.client_defaults.gate0_item_id_root_key_hex)}
+/** Gate 0 namespace identity. */
+export const SMITHY_GATE0_NAMESPACE_ID = ${contract.client_defaults.gate0_namespace_id}
+/** Gate 0 value-format selector byte. */
+export const SMITHY_GATE0_VALUE_SELECTOR = ${contract.client_defaults.gate0_value_selector}
 
 ${[...enums, ...structures].join("\n\n")}
 

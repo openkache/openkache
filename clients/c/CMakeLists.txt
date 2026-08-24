@@ -208,6 +208,7 @@ function(openkache_client_c_configure target)
     "${target}"
     INTERFACE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<BUILD_INTERFACE:${_openkache_client_generated_include_dir}>
       $<INSTALL_INTERFACE:include>
   )
   target_compile_features("${target}" INTERFACE c_std_17)
@@ -294,6 +295,10 @@ install(
 install(
   DIRECTORY include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(
+  FILES "${_openkache_client_generated_contract}"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/openkache"
 )
 if(OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED)
   install(

@@ -108,6 +108,7 @@ structure clientDefaults {
     /// Inclusive upper bound accepted by Zstandard adapters.
     @required
     zstandardLevelMax: Integer
+
 }
 
 /// Native scalar and pointer kinds used by the stable C ABI.
@@ -442,6 +443,20 @@ structure valueEnvelope {
                     structureName: "FfiConnectOptionsWithKeyring",
                     mutable: false
                 }
+            ]
+        },
+        {
+            name: "openkache_client_connect_with_keyring_options_transport",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                {
+                    name: "options",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptionsWithKeyring",
+                    mutable: false
+                },
+                { name: "transport", type: "uint32", mutable: false }
             ]
         },
         {

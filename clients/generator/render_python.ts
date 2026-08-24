@@ -283,6 +283,12 @@ SMITHY_CLIENT_GATE0_ENCRYPTION = ${defaults.gate0_encryption}
 SMITHY_CLIENT_GATE0_ITEM_ID_ROOT = bytes([${gate0_item_id_root.join(", ")}])
 SMITHY_CLIENT_GATE0_NAMESPACE_ID = ${defaults.gate0_namespace_id}
 SMITHY_CLIENT_GATE0_VALUE_SELECTOR = ${defaults.gate0_value_selector}
+SMITHY_GATE0_ALPN_VERSION = ${defaults.gate0_alpn_version}
+SMITHY_GATE0_COMPRESSION = ${defaults.gate0_compression}
+SMITHY_GATE0_ENCRYPTION = ${defaults.gate0_encryption}
+SMITHY_GATE0_ITEM_ID_ROOT_KEY_HEX = ${JSON.stringify(defaults.gate0_item_id_root_key_hex)}
+SMITHY_GATE0_NAMESPACE_ID = ${defaults.gate0_namespace_id}
+SMITHY_GATE0_VALUE_SELECTOR = ${defaults.gate0_value_selector}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
 ${ffi_operations}
 ${ffi_result_kinds}

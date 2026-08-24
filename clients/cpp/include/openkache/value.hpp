@@ -30,6 +30,8 @@
 #include <variant>
 #include <vector>
 
+#include <openkache/smithy_contract.h>
+
 namespace openkache {
 
 using Byte = std::uint8_t;
@@ -92,7 +94,7 @@ private:
 
 /// Bounded work budget shared by the structured encoder and decoder.
 struct Value_Limits {
-  std::size_t max_bytes = 67'108'864;
+  std::size_t max_bytes = OPENKACHE_SMITHY_MAX_VALUE_BYTES;
   std::size_t max_depth = 128;
   std::size_t max_items = 1'000'000;
   std::size_t max_integer_bytes = 1u << 20;

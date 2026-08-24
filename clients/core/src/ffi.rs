@@ -2723,8 +2723,49 @@ pub unsafe extern "C" fn openkache_client_connect_with_keyring_options(
     }))
 }
 
+/// Connects through the v1 keyring configuration path with an explicit
+/// transport/trust selector.
+///
+/// This additive entry point keeps the Item-ID root independent from value
+/// keys while allowing a maintained facade to select the documented
+/// DevelopmentTrust transport profile.
+///
+/// # Safety
+///
+/// `options` must be either null or a valid, properly aligned pointer to an
+/// initialized [`FfiConnectOptionsWithKeyring`] for the duration of the call.
+/// The nested `base` pointer and every non-empty pointer/length pair in the
+/// options must identify readable memory for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_with_keyring_options_transport(
+    options: *const FfiConnectOptionsWithKeyring,
+    transport: u32,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let options = unsafe {
+            options
+                .as_ref()
+                .ok_or_else(|| "keyring connect options pointer must not be null".to_owned())?
+        };
+        let transport = TransportSelection::from_code(transport)?;
+        connect_options_with_keyring_transport(options, transport)
+    }))
+}
+
 fn connect_options_with_keyring(
     options: &FfiConnectOptionsWithKeyring,
+) -> std::result::Result<FfiResult, String> {
+    connect_options_with_keyring_transport(
+        options,
+        TransportSelection::Quic {
+            verify_server: true,
+        },
+    )
+}
+
+fn connect_options_with_keyring_transport(
+    options: &FfiConnectOptionsWithKeyring,
+    transport: TransportSelection,
 ) -> std::result::Result<FfiResult, String> {
     if options.abi_version != ABI_VERSION {
         return Err(format!(
@@ -2858,9 +2899,7 @@ fn connect_options_with_keyring(
         base.max_in_flight
     };
     FfiClient::connect(
-        TransportSelection::Quic {
-            verify_server: true,
-        },
+        transport,
         endpoint,
         certificate,
         Some(item_id_root),

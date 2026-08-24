@@ -17,6 +17,25 @@ export const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 export const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 export const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
 export const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
+
+/**
+ * Gate 0 defaults used only when parsing a pre-Gate-0 synthetic Smithy AST.
+ *
+ * The checked-in client model always supplies these members through the
+ * `clientDefaults` trait; retaining a compatibility fallback keeps the
+ * generator's historical fixture helpers useful without weakening validation
+ * of the maintained model.
+ */
+export const LEGACY_GATE0_DEFAULTS = {
+  alpn_version: 1,
+  compression: 0,
+  encryption: 0,
+  item_id_root_key_hex:
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  namespace_id: 1,
+  value_selector: 0x10,
+} as const
+
 export const FFI_ENUMS = {
   operations: { name: "FfiOperation", kind: "FFI operation" },
   transports: { name: "FfiTransport", kind: "FFI transport" },

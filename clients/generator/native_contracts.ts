@@ -17,6 +17,7 @@ import {
 import { compatibility_response_result_kind } from "../compatibility_response_adapters"
 import { request_transport_plan } from "../compatibility_request_adapters"
 import { compatibility_ffi_operation_contract } from "../compatibility_ffi_adapters"
+import { LEGACY_GATE0_DEFAULTS } from "./config"
 import {
   render_c_native_function_typedefs,
   render_c_native_functions,
@@ -34,6 +35,25 @@ import {
   rust_byte_string_literal,
   rust_string_literal,
 } from "./rendering"
+
+function gate0_defaults(contract: Client_Contract["client_defaults"]): {
+  readonly alpn_version: number
+  readonly compression: number
+  readonly encryption: number
+  readonly item_id_root_key_hex: string
+  readonly namespace_id: number
+  readonly value_selector: number
+} {
+  return {
+    alpn_version: contract.gate0_alpn_version ?? LEGACY_GATE0_DEFAULTS.alpn_version,
+    compression: contract.gate0_compression ?? LEGACY_GATE0_DEFAULTS.compression,
+    encryption: contract.gate0_encryption ?? LEGACY_GATE0_DEFAULTS.encryption,
+    item_id_root_key_hex:
+      contract.gate0_item_id_root_key_hex ?? LEGACY_GATE0_DEFAULTS.item_id_root_key_hex,
+    namespace_id: contract.gate0_namespace_id ?? LEGACY_GATE0_DEFAULTS.namespace_id,
+    value_selector: contract.gate0_value_selector ?? LEGACY_GATE0_DEFAULTS.value_selector,
+  }
+}
 
 function rust_ffi_enum(
   name: string,
@@ -389,15 +409,21 @@ ${constants}
 export function render_rust_client(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
+  const gate0 = gate0_defaults(defaults)
+  const gate0_item_id_root = bytes_from_hex(
+    gate0.item_id_root_key_hex,
+    "clientDefaults.gate0ItemIdRootKeyHex",
+  )
+  if (gate0_item_id_root.length !== 32) {
+    throw new Error(
+      "clientDefaults.gate0ItemIdRootKeyHex must contain exactly 32 bytes",
+    )
+  }
   const value_version_bytes = encode_vu128(value.version)
   const envelope = contract.value_envelope
   const envelope_magic = bytes_from_hex(
     envelope.magic_and_version_hex,
     "value envelope magic",
-  )
-  const gate0_item_id_root = bytes_from_hex(
-    defaults.gate0_item_id_root_key_hex,
-    "Gate 0 Item-ID root",
   )
   const ffi = contract.ffi
   const descriptor_layout = ffi.namespace_descriptor_layout
@@ -598,17 +624,29 @@ pub const CLIENT_CERTIFICATE_PEM_TYPE: &str = ${rust_string_literal(defaults.cer
 /// Minimum positive setting value when zero selects a default.
 pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.minimum_positive_value)};
 /// Gate 0's fixed ALPN version.
-pub const CLIENT_GATE0_ALPN_VERSION: u32 = ${formatted_decimal(defaults.gate0_alpn_version)};
+pub const CLIENT_GATE0_ALPN_VERSION: u32 = ${formatted_decimal(gate0.alpn_version)};
 /// Gate 0's fixed value-compression selector.
-pub const CLIENT_GATE0_COMPRESSION: u8 = ${formatted_byte(defaults.gate0_compression)};
+pub const CLIENT_GATE0_COMPRESSION: u8 = ${formatted_byte(gate0.compression)};
 /// Gate 0's fixed value-encryption selector.
-pub const CLIENT_GATE0_ENCRYPTION: u8 = ${formatted_byte(defaults.gate0_encryption)};
+pub const CLIENT_GATE0_ENCRYPTION: u8 = ${formatted_byte(gate0.encryption)};
 /// Gate 0's fixed public Item-ID root.
 pub const CLIENT_GATE0_ITEM_ID_ROOT: [u8; ${gate0_item_id_root.length}] = ${rust_byte_array_literal(gate0_item_id_root)};
 /// Gate 0's fixed server-assigned namespace ID.
-pub const CLIENT_GATE0_NAMESPACE_ID: u64 = ${formatted_decimal(defaults.gate0_namespace_id)};
+pub const CLIENT_GATE0_NAMESPACE_ID: u64 = ${formatted_decimal(gate0.namespace_id)};
 /// Gate 0's fixed value-format selector byte.
-pub const CLIENT_GATE0_VALUE_SELECTOR: u8 = ${formatted_byte(defaults.gate0_value_selector)};
+pub const CLIENT_GATE0_VALUE_SELECTOR: u8 = ${formatted_byte(gate0.value_selector)};
+/// Gate 0 ALPN protocol version selected by maintained facades.
+pub const GATE0_ALPN_VERSION: usize = ${formatted_decimal(gate0.alpn_version)};
+/// Gate 0 compression identifier.
+pub const GATE0_COMPRESSION: u8 = ${formatted_byte(gate0.compression)};
+/// Gate 0 value-protection identifier.
+pub const GATE0_ENCRYPTION: u8 = ${formatted_byte(gate0.encryption)};
+/// Gate 0 public development Item-ID root key.
+pub const GATE0_ITEM_ID_ROOT_KEY: [u8; 32] = ${rust_byte_array_literal(gate0_item_id_root)};
+/// Gate 0 namespace identity.
+pub const GATE0_NAMESPACE_ID: u64 = ${formatted_decimal(gate0.namespace_id)};
+/// Gate 0 value-format selector byte.
+pub const GATE0_VALUE_SELECTOR: u8 = ${formatted_byte(gate0.value_selector)};
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
@@ -980,6 +1018,19 @@ typedef enum openkache_client_encryption {
 export function render_c_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
+  const gate0 = gate0_defaults(defaults)
+  const gate0_item_id_root = bytes_from_hex(
+    gate0.item_id_root_key_hex,
+    "clientDefaults.gate0ItemIdRootKeyHex",
+  )
+  if (gate0_item_id_root.length !== 32) {
+    throw new Error(
+      "clientDefaults.gate0ItemIdRootKeyHex must contain exactly 32 bytes",
+    )
+  }
+  const gate0_item_id_root_bytes = gate0_item_id_root
+    .map((byte) => `${formatted_byte(byte)}u`)
+    .join(", ")
   const envelope = contract.value_envelope
   const ffi = contract.ffi
   const descriptor_fields = ffi.namespace_descriptor_fields
@@ -1182,6 +1233,13 @@ ${descriptor_offset_asserts}
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
 #define OPENKACHE_SMITHY_CLIENT_CERTIFICATE_PEM_TYPE ${c_string_literal(defaults.certificate_pem_type)}
 #define OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE ${defaults.minimum_positive_value}u
+#define OPENKACHE_SMITHY_GATE0_ALPN_VERSION ${gate0.alpn_version}u
+#define OPENKACHE_SMITHY_GATE0_COMPRESSION ${formatted_byte(gate0.compression)}u
+#define OPENKACHE_SMITHY_GATE0_ENCRYPTION ${formatted_byte(gate0.encryption)}u
+#define OPENKACHE_SMITHY_GATE0_ITEM_ID_ROOT_KEY_BYTES ${gate0_item_id_root_bytes}
+#define OPENKACHE_SMITHY_GATE0_ITEM_ID_ROOT_KEY_LENGTH ${gate0_item_id_root.length}u
+#define OPENKACHE_SMITHY_GATE0_NAMESPACE_ID ${gate0.namespace_id}u
+#define OPENKACHE_SMITHY_GATE0_VALUE_SELECTOR ${formatted_byte(gate0.value_selector)}u
 ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
