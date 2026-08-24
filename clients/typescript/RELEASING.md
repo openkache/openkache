@@ -76,9 +76,13 @@ investigate the registry state before choosing a new version.
 ## GitHub release convention
 
 The checked-in
-[`publish-npm.yml`](../../.github/workflows/publish-npm.yml) workflow publishes
-only from a committed public `main` snapshot tagged
-`typescript-v<version>`. It builds Linux and Apple Silicon artifacts
-separately, assembles one tarball, and provides `NPM_CONFIG_TOKEN` as the
-`NPM_TOKEN` repository secret. A manually selected branch must not be used for
-a production publication.
+[`publish-npm.yml`](../../.github/workflows/publish-npm.yml) workflow is
+intentionally disabled. It remains as the complete release definition, but it
+has no tag trigger and every job is guarded off, so neither a tag push nor a
+manual dispatch consumes a runner or publishes to npm.
+
+Before enabling the workflow, assign it to an approved customer runner and
+configure the `NPM_TOKEN` repository secret. Then restore the
+`typescript-v<version>` tag trigger and remove the disabled job guards. The
+enabled workflow must publish only from a committed public `main` snapshot;
+a manually selected branch must not be used for a production publication.

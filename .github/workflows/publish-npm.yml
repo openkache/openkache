@@ -1,9 +1,10 @@
 name: Publish TypeScript package
 
+# Keep the complete release definition in-tree without executing it on
+# GitHub-hosted runners. Enable this only after an approved customer runner
+# and the required npm credentials are provisioned.
 on:
-  push:
-    tags:
-      - "typescript-v*.*.*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +16,7 @@ concurrency:
 jobs:
   build-linux:
     name: Build Linux native adapters
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,6 +61,7 @@ jobs:
 
   build-darwin:
     name: Build Apple Silicon native adapter
+    if: ${{ false }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,6 +98,7 @@ jobs:
 
   publish:
     name: Publish @openkache/client
+    if: ${{ false }}
     needs: [build-linux, build-darwin]
     runs-on: ubuntu-24.04
     env:
