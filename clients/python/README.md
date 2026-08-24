@@ -167,8 +167,9 @@ result = await client.raw.get(
 - `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
 
 Call `close()` when finished; it is idempotent. The client also supports
-`async with`. `stats()` returns validated `ServerStats`, while
-`stats_json()` preserves the Smithy response text. `stats` is transitional
+`async with`. `experimental_stats()` returns validated `ServerStats`, while
+`experimental_stats_json()` preserves the Smithy response text.
+`experimental_stats` is transitional
 experimental behavior; for a draft-conforming peer, enable
 `enable_experimental_api` and coordinate the exact revision in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling it.

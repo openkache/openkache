@@ -129,13 +129,14 @@ The server listens on `127.0.0.1:4433`, stores shard files under
 TLS-over-TCP transport profiles. `SET` accepts an optional millisecond TTL and
 atomic `if_absent` or `if_present` existence condition. Expired values are
 treated as absent immediately, while their SSD space is reclaimed when the
-containing Segment Group is reused. `STATS` and `SYNC` are experimental
-administrative operations and are disabled by default. To enable them, set
+containing Segment Group is reused. `EXPERIMENTAL_STATS` and
+`EXPERIMENTAL_SYNC` are experimental administrative operations and are
+disabled by default. To enable them, set
 both `enable_experimental_api = true` and
 `experimental_api_revision = "draft-2026-08-19.4"` in the server
 configuration, then coordinate that exact revision with the client; the
-revision is not negotiated on the wire. When enabled, `SYNC` flushes each SSD
-worker for the current process. Clean shutdown checkpoint replay is supported,
+revision is not negotiated on the wire. When enabled, `EXPERIMENTAL_SYNC`
+flushes each SSD worker for the current process. Clean shutdown checkpoint replay is supported,
 but crash recovery and broader durability guarantees remain outside the current
 preview. Pass `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
@@ -198,7 +199,7 @@ admin_client_certificates = [
 The server certificate must contain every client-facing DNS name and IP
 address in its SANs. `client_ca` authenticates all clients. Only authenticated
 clients whose exact leaf certificate appears in
-`admin_client_certificates` may run `STATS` or `SYNC`.
+`admin_client_certificates` may run `EXPERIMENTAL_STATS` or `EXPERIMENTAL_SYNC`.
 
 TLS files are loaded at startup. For server identity rotation, deploy client
 trust for both issuers first, place the replacement chain and key at new paths,
@@ -239,7 +240,7 @@ SSD type, or NVMe performance. At runtime, workers reserve each Segment
 generation immediately before writing it instead of preallocating the whole
 sparse file. Memory or storage pressure temporarily rejects `SET` with an
 overloaded response while reads, deletes, and recovery remain available.
-`STATS` reports
+`EXPERIMENTAL_STATS` reports
 the memory and storage stop/resume thresholds, `memory_stop_writes`,
 `storage_stop_writes`, and `rejected_writes`.
 

@@ -449,7 +449,7 @@ impl NamespaceRegistry {
     /// Records a worker before a DELETE is dispatched to storage.
     ///
     /// The marker is intentionally conservative: a DELETE that finds no item
-    /// still leaves the worker dirty until the next successful `SYNC`.
+    /// still leaves the worker dirty until the next successful `EXPERIMENTAL_SYNC`.
     pub(crate) fn reserve_worker(
         &mut self,
         namespace_id: u64,

@@ -374,17 +374,17 @@ impl NativeBackend {
         }
     }
 
-    async fn stats(&self) -> openkache_client_core::Result<String> {
+    async fn experimental_stats(&self) -> openkache_client_core::Result<String> {
         match self {
-            Self::Quic(client) => client.stats().await,
-            Self::TlsTcp(client) => client.stats().await,
+            Self::Quic(client) => client.experimental_stats().await,
+            Self::TlsTcp(client) => client.experimental_stats().await,
         }
     }
 
-    async fn sync(&self) -> openkache_client_core::Result<()> {
+    async fn experimental_sync(&self) -> openkache_client_core::Result<()> {
         match self {
-            Self::Quic(client) => client.sync().await,
-            Self::TlsTcp(client) => client.sync().await,
+            Self::Quic(client) => client.experimental_sync().await,
+            Self::TlsTcp(client) => client.experimental_sync().await,
         }
     }
 
@@ -501,17 +501,17 @@ impl NativeRaw<'_> {
         }
     }
 
-    async fn stats_in_namespace(&self, namespace_id: u64) -> openkache_client_core::Result<String> {
+    async fn experimental_stats_in_namespace(&self, namespace_id: u64) -> openkache_client_core::Result<String> {
         match self {
-            Self::Quic(client) => client.stats_in_namespace(namespace_id).await,
-            Self::TlsTcp(client) => client.stats_in_namespace(namespace_id).await,
+            Self::Quic(client) => client.experimental_stats_in_namespace(namespace_id).await,
+            Self::TlsTcp(client) => client.experimental_stats_in_namespace(namespace_id).await,
         }
     }
 
-    async fn sync_in_namespace(&self, namespace_id: u64) -> openkache_client_core::Result<()> {
+    async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> openkache_client_core::Result<()> {
         match self {
-            Self::Quic(client) => client.sync_in_namespace(namespace_id).await,
-            Self::TlsTcp(client) => client.sync_in_namespace(namespace_id).await,
+            Self::Quic(client) => client.experimental_sync_in_namespace(namespace_id).await,
+            Self::TlsTcp(client) => client.experimental_sync_in_namespace(namespace_id).await,
         }
     }
 
@@ -1009,18 +1009,18 @@ impl NativeClient {
 
     /// Returns the server's JSON statistics payload.
     #[napi]
-    pub async fn stats(&self) -> Result<String> {
+    pub async fn experimental_stats(&self) -> Result<String> {
         self.active_client()?
-            .stats()
+            .experimental_stats()
             .await
             .map_err(native_core_error)
     }
 
     /// Requests a server durability barrier.
     #[napi]
-    pub async fn sync(&self) -> Result<()> {
+    pub async fn experimental_sync(&self) -> Result<()> {
         self.active_client()?
-            .sync()
+            .experimental_sync()
             .await
             .map_err(native_core_error)
     }
@@ -1249,23 +1249,23 @@ impl NativeClient {
     }
 
     /// Retrieves statistics for an explicitly supplied namespace.
-    #[napi(js_name = "stats_in_namespace")]
-    pub async fn stats_in_namespace(&self, namespace_id: BigInt) -> Result<String> {
+    #[napi(js_name = "experimental_stats_in_namespace")]
+    pub async fn experimental_stats_in_namespace(&self, namespace_id: BigInt) -> Result<String> {
         let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
         self.active_client()?
             .raw()
-            .stats_in_namespace(namespace_id)
+            .experimental_stats_in_namespace(namespace_id)
             .await
             .map_err(native_core_error)
     }
 
     /// Waits for a durability barrier in an explicitly supplied namespace.
-    #[napi(js_name = "sync_in_namespace")]
-    pub async fn sync_in_namespace(&self, namespace_id: BigInt) -> Result<()> {
+    #[napi(js_name = "experimental_sync_in_namespace")]
+    pub async fn experimental_sync_in_namespace(&self, namespace_id: BigInt) -> Result<()> {
         let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
         self.active_client()?
             .raw()
-            .sync_in_namespace(namespace_id)
+            .experimental_sync_in_namespace(namespace_id)
             .await
             .map_err(native_core_error)
     }

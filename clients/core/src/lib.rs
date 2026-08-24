@@ -110,10 +110,10 @@ pub enum Operation {
     Set,
     /// `DELETE` request.
     Delete,
-    /// `STATS` request.
-    Stats,
-    /// `SYNC` request.
-    Sync,
+    /// `EXPERIMENTAL_STATS` request.
+    ExperimentalStats,
+    /// `EXPERIMENTAL_SYNC` request.
+    ExperimentalSync,
     /// `NAMESPACE_OPEN` request.
     NamespaceOpen,
     /// `NAMESPACE_UPDATE_POLICY` request.
@@ -157,8 +157,8 @@ impl std::fmt::Display for Operation {
             Self::Get => "GET",
             Self::Set => "SET",
             Self::Delete => "DELETE",
-            Self::Stats => "STATS",
-            Self::Sync => "SYNC",
+            Self::ExperimentalStats => "EXPERIMENTAL_STATS",
+            Self::ExperimentalSync => "EXPERIMENTAL_SYNC",
             Self::NamespaceOpen => "NAMESPACE_OPEN",
             Self::NamespaceUpdatePolicy => "NAMESPACE_UPDATE_POLICY",
             Self::NamespaceDelete => "NAMESPACE_DELETE",
@@ -480,7 +480,7 @@ impl<C: ClientConnection> Drop for PendingRequestReservation<'_, C> {
         // future was cancelled.  Retire the connection so a later operation
         // cannot accidentally treat that abandoned lane as a known outcome.
         if entry.is_some_and(|entry| {
-            entry.transmitted && (entry.mutation || matches!(entry.operation, Operation::Sync))
+            entry.transmitted && (entry.mutation || matches!(entry.operation, Operation::ExperimentalSync))
         }) {
             let _ = self
                 .core
@@ -502,12 +502,12 @@ struct RequestFailure {
 /// Returns whether losing the response can leave the operation's outcome
 /// unknown after transmission.
 ///
-/// `SYNC` is an experimental maintenance barrier rather than a mutation, but
+/// `EXPERIMENTAL_SYNC` is an experimental maintenance barrier rather than a mutation, but
 /// its barrier may have linearized before a terminal transport failure.  Keep
 /// that transport boundary distinct from cancellation, where only actual
 /// mutating operations are surfaced as `UnknownMutation`.
 const fn operation_has_unknown_outcome(context: RequestContext) -> bool {
-    context.mutation || matches!(context.operation, Operation::Sync)
+    context.mutation || matches!(context.operation, Operation::ExperimentalSync)
 }
 
 impl RequestFailure {
@@ -742,43 +742,44 @@ impl<C: ClientConnection> Core<C> {
         .await
     }
 
-    async fn stats(&self) -> Result<String> {
+    async fn experimental_stats(&self) -> Result<String> {
         let namespace_id = self.ensure_namespace().await?;
-        self.stats_in_namespace(namespace_id).await
+        self.experimental_stats_in_namespace(namespace_id).await
     }
 
-    async fn stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
+    async fn experimental_stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
         validate_client_namespace_id(namespace_id)?;
         self.request(
-            OperationRequest::stats(namespace_id).map_err(Error::protocol)?,
+            OperationRequest::experimental_stats(namespace_id).map_err(Error::protocol)?,
             |response| {
-                expect_status(Operation::Stats, response.status, &[Status::Ok])?;
-                validate_stats_payload(&response.payload)?;
+                expect_status(Operation::ExperimentalStats, response.status, &[Status::Ok])?;
+                validate_experimental_stats_payload(&response.payload)?;
                 String::from_utf8(response.payload).map_err(|error| {
-                    Error::Protocol(format!("STATS response is not UTF-8: {error}"))
+                    Error::Protocol(format!("EXPERIMENTAL_STATS response is not UTF-8: {error}"))
                 })
             },
         )
         .await
     }
 
-    async fn sync(&self) -> Result<()> {
+    async fn experimental_sync(&self) -> Result<()> {
         let namespace_id = self.ensure_namespace().await?;
-        self.sync_in_namespace(namespace_id).await
+        self.experimental_sync_in_namespace(namespace_id).await
     }
 
-    async fn sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+    async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
         validate_client_namespace_id(namespace_id)?;
         self.request(
-            OperationRequest::sync(namespace_id).map_err(Error::protocol)?,
+            OperationRequest::experimental_sync(namespace_id).map_err(Error::protocol)?,
             |response| {
-                expect_status(Operation::Sync, response.status, &[Status::Ok])?;
+                expect_status(Operation::ExperimentalSync, response.status, &[Status::Ok])?;
                 if response.payload.is_empty() {
                     Ok(())
                 } else {
                     Err(Error::UnexpectedResponse {
-                        operation: Operation::Sync,
-                        message: "SYNC success responses must have an empty payload".into(),
+                        operation: Operation::ExperimentalSync,
+                        message: "EXPERIMENTAL_SYNC success responses must have an empty payload"
+                            .into(),
                     })
                 }
             },
@@ -1654,23 +1655,26 @@ macro_rules! raw_client_methods {
             }
 
             /// Returns server statistics as their JSON text.
-            pub async fn stats(&self) -> Result<String> {
-                self.0.stats().await
+            pub async fn experimental_stats(&self) -> Result<String> {
+                self.0.experimental_stats().await
             }
 
             /// Returns statistics for an explicitly supplied namespace.
-            pub async fn stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
-                self.0.stats_in_namespace(namespace_id).await
+            pub async fn experimental_stats_in_namespace(
+                &self,
+                namespace_id: u64,
+            ) -> Result<String> {
+                self.0.experimental_stats_in_namespace(namespace_id).await
             }
 
             /// Waits until prior mutations satisfy the server durability barrier.
-            pub async fn sync(&self) -> Result<()> {
-                self.0.sync().await
+            pub async fn experimental_sync(&self) -> Result<()> {
+                self.0.experimental_sync().await
             }
 
             /// Waits for the durability barrier for an explicitly supplied namespace.
-            pub async fn sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
-                self.0.sync_in_namespace(namespace_id).await
+            pub async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+                self.0.experimental_sync_in_namespace(namespace_id).await
             }
 
             /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
@@ -2120,15 +2124,15 @@ fn expect_status(operation: Operation, status: Status, expected: &[Status]) -> R
     }
 }
 
-fn validate_stats_payload(payload: &[u8]) -> Result<()> {
+fn validate_experimental_stats_payload(payload: &[u8]) -> Result<()> {
     let value: serde_json::Value =
         serde_json::from_slice(payload).map_err(|error| Error::UnexpectedResponse {
-            operation: Operation::Stats,
-            message: format!("STATS response is not valid JSON: {error}"),
+            operation: Operation::ExperimentalStats,
+            message: format!("EXPERIMENTAL_STATS response is not valid JSON: {error}"),
         })?;
     let object = value.as_object().ok_or_else(|| Error::UnexpectedResponse {
-        operation: Operation::Stats,
-        message: "STATS response must be a JSON object".into(),
+        operation: Operation::ExperimentalStats,
+        message: "EXPERIMENTAL_STATS response must be a JSON object".into(),
     })?;
     if object
         .get("storage")
@@ -2136,24 +2140,24 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
         .is_none()
     {
         return Err(Error::UnexpectedResponse {
-            operation: Operation::Stats,
-            message: "STATS response must contain a string storage member".into(),
+            operation: Operation::ExperimentalStats,
+            message: "EXPERIMENTAL_STATS response must contain a string storage member".into(),
         });
     }
     let workers = object
         .get("workers")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| Error::UnexpectedResponse {
-            operation: Operation::Stats,
-            message: "STATS response must contain a workers array".into(),
+            operation: Operation::ExperimentalStats,
+            message: "EXPERIMENTAL_STATS response must contain a workers array".into(),
         })?;
     if workers
         .iter()
         .any(|worker| serde_json::Value::as_str(worker).is_none())
     {
         return Err(Error::UnexpectedResponse {
-            operation: Operation::Stats,
-            message: "STATS workers entries must be strings".into(),
+            operation: Operation::ExperimentalStats,
+            message: "EXPERIMENTAL_STATS workers entries must be strings".into(),
         });
     }
     Ok(())

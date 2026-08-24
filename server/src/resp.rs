@@ -691,8 +691,8 @@ pub(crate) fn operation_for_command(command: &[&[u8]]) -> Operation {
         RespCommandKind::Get => operation_for_opcode(Opcode::Get),
         RespCommandKind::Set => operation_for_opcode(Opcode::Set),
         RespCommandKind::Delete => operation_for_opcode(Opcode::Delete),
-        RespCommandKind::Stats => operation_for_opcode(Opcode::Stats),
-        RespCommandKind::Sync => operation_for_opcode(Opcode::Sync),
+        RespCommandKind::ExperimentalStats => operation_for_opcode(Opcode::ExperimentalStats),
+        RespCommandKind::ExperimentalSync => operation_for_opcode(Opcode::ExperimentalSync),
         RespCommandKind::Select
         | RespCommandKind::Client
         | RespCommandKind::Quit
@@ -714,8 +714,8 @@ enum RespCommandKind {
     Get,
     Set,
     Delete,
-    Stats,
-    Sync,
+    ExperimentalStats,
+    ExperimentalSync,
     Select,
     Client,
     Quit,
@@ -735,10 +735,10 @@ fn classify_command(command: &[&[u8]]) -> RespCommandKind {
         RespCommandKind::Set
     } else if name.eq_ignore_ascii_case(b"DEL") {
         RespCommandKind::Delete
-    } else if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") {
-        RespCommandKind::Stats
-    } else if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") {
-        RespCommandKind::Sync
+    } else if name.eq_ignore_ascii_case(b"OPENKACHE.EXPERIMENTAL_STATS") {
+        RespCommandKind::ExperimentalStats
+    } else if name.eq_ignore_ascii_case(b"OPENKACHE.EXPERIMENTAL_SYNC") {
+        RespCommandKind::ExperimentalSync
     } else if name.eq_ignore_ascii_case(b"SELECT") {
         RespCommandKind::Select
     } else if name.eq_ignore_ascii_case(b"CLIENT") {
@@ -869,12 +869,15 @@ async fn execute_command(
                 integer(response, deleted);
             }
         }
-        RespCommandKind::Stats
-            if crate::operation_contract::spec(Opcode::Stats)
+        RespCommandKind::ExperimentalStats
+            if crate::operation_contract::spec(Opcode::ExperimentalStats)
                 .enabled(experimental_api_enabled, experimental_api_revision) =>
         {
             match command {
-                [_] => match cache.stats(operation_for_opcode(Opcode::Stats)).await {
+                [_] => match cache
+                    .experimental_stats(operation_for_opcode(Opcode::ExperimentalStats))
+                    .await
+                {
                     Ok(stats) => {
                         let stats = stats.join("\n");
                         bulk(response, Some(stats.as_bytes()));
@@ -885,15 +888,18 @@ async fn execute_command(
                     }
                     Err(cache_error) => resp_cache_error(response, cache_error),
                 },
-                _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
+                _ => error(response, "wrong number of arguments for OPENKACHE.EXPERIMENTAL_STATS"),
             }
         }
-        RespCommandKind::Sync
-            if crate::operation_contract::spec(Opcode::Sync)
+        RespCommandKind::ExperimentalSync
+            if crate::operation_contract::spec(Opcode::ExperimentalSync)
                 .enabled(experimental_api_enabled, experimental_api_revision) =>
         {
             match command {
-                [_] => match cache.sync(operation_for_opcode(Opcode::Sync)).await {
+                [_] => match cache
+                    .experimental_sync(operation_for_opcode(Opcode::ExperimentalSync))
+                    .await
+                {
                     Ok(()) => simple(response, "OK"),
                     Err(cache_error) if matches!(&cache_error, crate::KvError::Timeout(_)) => {
                         error(response, "request timed out");
@@ -901,10 +907,10 @@ async fn execute_command(
                     }
                     Err(cache_error) => resp_cache_error(response, cache_error),
                 },
-                _ => error(response, "wrong number of arguments for OPENKACHE.SYNC"),
+                _ => error(response, "wrong number of arguments for OPENKACHE.EXPERIMENTAL_SYNC"),
             }
         }
-        RespCommandKind::Stats | RespCommandKind::Sync => {
+        RespCommandKind::ExperimentalStats | RespCommandKind::ExperimentalSync => {
             // The command maps to an unassigned experimental opcode under
             // the current gate. Retire the lane without manufacturing a
             // compatibility response.

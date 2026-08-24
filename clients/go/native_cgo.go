@@ -1044,7 +1044,7 @@ func (h *nativeHandle) executeScoped(
 		return nativeResult{}, err
 	}
 	itemBytes := itemID.wireBytes()
-	if operation == SmithyOpcodeStats || operation == SmithyOpcodeSync {
+	if operation == SmithyOpcodeExperimentalStats || operation == SmithyOpcodeExperimentalSync {
 		itemBytes = nil
 	}
 	itemMemory := C.CBytes(itemBytes)

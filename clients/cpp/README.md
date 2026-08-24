@@ -67,8 +67,9 @@ and `remove_raw` expose exact `0..=32`-byte item-ID operations without value
 protection. `namespace_open`, `namespace_update_policy`, and
 `namespace_delete` expose the server-assigned namespace lifecycle as
 transitional out-of-band control-plane shapes with legacy, non-normative
-revision fields; they are not stable-v1 data-plane operations. `STATS` and
-`SYNC` are likewise transitional experimental maintenance operations and are
+revision fields; they are not stable-v1 data-plane operations.
+`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are likewise transitional
+experimental maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending

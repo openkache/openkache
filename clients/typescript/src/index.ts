@@ -93,10 +93,10 @@ import {
   type Smithy_Set_Input,
   type Smithy_Set_Outcome,
   type Smithy_Set_Output,
-  type Smithy_Stats_Input,
-  type Smithy_Stats_Output,
-  type Smithy_Sync_Input,
-  type Smithy_Sync_Output,
+  type Smithy_Experimental_Stats_Input,
+  type Smithy_Experimental_Stats_Output,
+  type Smithy_Experimental_Sync_Input,
+  type Smithy_Experimental_Sync_Output,
 } from "./generated_local/smithy-api.js"
 import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
@@ -784,18 +784,18 @@ export class OpenKache_Client {
    * @returns Validated storage and per-worker statistics.
    * @throws {OpenKache_Error} When authorization, transport, or response validation fails.
    */
-  async stats(): Promise<Server_Stats> {
+  async experimental_stats(): Promise<Server_Stats> {
     this.#assert_open()
     let text: string
     try {
-      text = await this.#native_client.stats()
+      text = await this.#native_client.experimental_stats()
     } catch (error) {
       throw as_openkache_error(error)
     }
     try {
       return parse_stats(text)
     } catch (error) {
-      throw new OpenKache_Error(`STATS decoding failed: ${error_message(error)}`, error)
+      throw new OpenKache_Error(`EXPERIMENTAL_STATS decoding failed: ${error_message(error)}`, error)
     }
   }
 
@@ -805,10 +805,10 @@ export class OpenKache_Client {
    * @returns A promise that resolves after every SSD worker flushes.
    * @throws {OpenKache_Error} When authorization, transport, or synchronization fails.
    */
-  async sync(): Promise<void> {
+  async experimental_sync(): Promise<void> {
     this.#assert_open()
     try {
-      await this.#native_client.sync()
+      await this.#native_client.experimental_sync()
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -1146,32 +1146,32 @@ class Raw_Client implements OpenKache_Raw_Client {
   }
 
   /**
-   * Invokes the Smithy STATS operation.
+   * Invokes the Smithy EXPERIMENTAL_STATS operation.
    *
    * @param _input - Empty Smithy operation input.
    * @returns The server's JSON statistics string.
    * @throws {OpenKache_Error} When authorization or transport fails.
    */
-  async stats(input: Smithy_Stats_Input): Promise<Smithy_Stats_Output> {
+  async experimental_stats(input: Smithy_Experimental_Stats_Input): Promise<Smithy_Experimental_Stats_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      return { json: await this.#native_client.stats_in_namespace(input.namespace_id) }
+      return { json: await this.#native_client.experimental_stats_in_namespace(input.namespace_id) }
     } catch (error) {
       throw as_openkache_error(error)
     }
   }
 
   /**
-   * Invokes the Smithy SYNC operation.
+   * Invokes the Smithy EXPERIMENTAL_SYNC operation.
    *
    * @param _input - Empty Smithy operation input.
    * @returns An empty Smithy operation output.
    * @throws {OpenKache_Error} When authorization or synchronization fails.
    */
-  async sync(input: Smithy_Sync_Input): Promise<Smithy_Sync_Output> {
+  async experimental_sync(input: Smithy_Experimental_Sync_Input): Promise<Smithy_Experimental_Sync_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      await this.#native_client.sync_in_namespace(input.namespace_id)
+      await this.#native_client.experimental_sync_in_namespace(input.namespace_id)
       return {}
     } catch (error) {
       throw as_openkache_error(error)

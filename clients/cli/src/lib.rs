@@ -227,9 +227,11 @@ pub enum Command {
         key: String,
     },
     /// Print validated server statistics.
-    Stats,
+    #[command(name = "experimental_stats", visible_alias = "experimental-stats")]
+    ExperimentalStats,
     /// Wait until prior mutations satisfy the durability barrier.
-    Sync,
+    #[command(name = "experimental_sync", visible_alias = "experimental-sync")]
+    ExperimentalSync,
     /// Start an interactive command shell on one connection.
     Shell,
 }
@@ -322,21 +324,21 @@ impl ConnectedClient {
         }
     }
 
-    async fn stats(&self) -> openkache_client::Result<String> {
+    async fn experimental_stats(&self) -> openkache_client::Result<String> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.stats().await,
+            Self::Compio(client) => client.experimental_stats().await,
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.stats().await,
+            Self::Quinn(client) => client.experimental_stats().await,
         }
     }
 
-    async fn sync(&self) -> openkache_client::Result<()> {
+    async fn experimental_sync(&self) -> openkache_client::Result<()> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.sync().await,
+            Self::Compio(client) => client.experimental_sync().await,
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.sync().await,
+            Self::Quinn(client) => client.experimental_sync().await,
         }
     }
 }
@@ -491,10 +493,10 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
             let outcome = client.delete(key.as_bytes()).await?;
             print_status(delete_outcome_label(outcome));
         }
-        Command::Stats => print_stats(&client.stats().await?)?,
-        Command::Sync => {
+        Command::ExperimentalStats => print_stats(&client.experimental_stats().await?)?,
+        Command::ExperimentalSync => {
             let syncing = progress_bar("waiting for durable mutations".to_owned());
-            if let Err(error) = client.sync().await {
+            if let Err(error) = client.experimental_sync().await {
                 syncing.abandon();
                 return Err(error.into());
             }
@@ -525,13 +527,17 @@ fn print_stats(payload: &str) -> Result<()> {
     }
 
     let value: Value = serde_json::from_str(payload)
-        .map_err(|error| CliError::Command(format!("STATS response is not valid JSON: {error}")))?;
+        .map_err(|error| {
+            CliError::Command(format!(
+                "EXPERIMENTAL_STATS response is not valid JSON: {error}"
+            ))
+        })?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header(["metric", "value"]);
     add_stat_rows(&mut table, "", &value);
 
-    anstream::println!("{}", "OpenKache stats".bold());
+    anstream::println!("{}", "OpenKache experimental_stats".bold());
     anstream::println!("{table}");
     Ok(())
 }
@@ -709,7 +715,7 @@ async fn run_shell(client: &ConnectedClient, address: &str) -> Result<()> {
 
 fn shell_editor() -> Reedline {
     let commands = [
-        "ping", "get", "set", "delete", "del", "stats", "sync", "help", "exit", "quit",
+        "ping", "get", "set", "delete", "del", "experimental_stats", "experimental_sync", "help", "exit", "quit",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -778,8 +784,8 @@ fn print_shell_help() {
     table.add_row(["get <key>", "retrieve a value"]);
     table.add_row(["set <key> <value>", "store a value"]);
     table.add_row(["delete <key>", "remove a value"]);
-    table.add_row(["stats", "show server statistics"]);
-    table.add_row(["sync", "wait for durable mutations"]);
+    table.add_row(["experimental_stats", "show server statistics"]);
+    table.add_row(["experimental_sync", "wait for durable mutations"]);
     table.add_row(["exit / quit", "close the shell"]);
     anstream::println!("{table}");
 }
@@ -822,13 +828,13 @@ fn parse_shell_command(line: &str) -> std::result::Result<Option<ShellCommand>, 
         "delete" | "del" => Ok(Some(ShellCommand::Command(Command::Delete {
             key: parse_single_argument(arguments, "delete <key>")?,
         }))),
-        "stats" => {
-            require_no_arguments(arguments, "stats")?;
-            Ok(Some(ShellCommand::Command(Command::Stats)))
+        "experimental_stats" => {
+            require_no_arguments(arguments, "experimental_stats")?;
+            Ok(Some(ShellCommand::Command(Command::ExperimentalStats)))
         }
-        "sync" => {
-            require_no_arguments(arguments, "sync")?;
-            Ok(Some(ShellCommand::Command(Command::Sync)))
+        "experimental_sync" => {
+            require_no_arguments(arguments, "experimental_sync")?;
+            Ok(Some(ShellCommand::Command(Command::ExperimentalSync)))
         }
         "help" | "?" => {
             require_no_arguments(arguments, "help")?;

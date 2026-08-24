@@ -61,6 +61,12 @@ try {
     { owner: "worker-1" },
     { condition: "if_absent", expiration_mode: "explicit_ttl", ttl_ms: 60_000 },
   )
+
+  const stats = await client.experimental_stats()
+  console.log(stats.storage, stats.workers)
+
+  await client.set_raw("opaque", Uint8Array.of(1, 2, 3))
+  const bytes = await client.get_raw("opaque")
 } finally {
   await client.close()
 }
@@ -69,6 +75,12 @@ try {
 Use verified QUIC by default, `transport: "tls_tcp"` where UDP is unavailable,
 and an explicit `*_insecure` selector only in tests. Production connections
 require a trusted certificate and normally a client identity.
+
+`experimental_stats` is a transitional experimental operation and is disabled
+by default. Enable `enable_experimental_api = true` explicitly and coordinate
+exact revision `draft-2026-08-19.4` out of band as described in
+[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling it;
+the revision is not negotiated on the wire.
 
 ## Primary value API: `set` / `get`
 
@@ -296,8 +308,9 @@ have reached the server reject with
 `OpenKache_Cancelled_Error`. Check the stable `kind` property rather than
 parsing messages.
 
-`stats` and `sync` are experimental maintenance operations. Enable them on the
-server only with `enable_experimental_api = true` and coordinate revision
+`experimental_stats` and `experimental_sync` are experimental maintenance
+operations. Enable them on the server only with `enable_experimental_api = true`
+and coordinate revision
 `draft-2026-08-19.4` out of band as described in
 [protocol/EXPERIMENTAL.md](../../protocol/EXPERIMENTAL.md).
 
@@ -396,9 +409,9 @@ contract.
 `client.raw(): OpenKache_Raw_Client` shares the client connection. Its inputs
 use generated Smithy shapes with `namespace_id`, `item_id`, opaque `value`,
 and optional set behavior. In addition to raw `ping/get/set/delete`,
-it provides explicit JSON, structured, v0, namespace-management, stats,
-sync, reconnect, close, and state operations. Namespace management remains
-transitional.
+it provides explicit JSON, structured, v0, namespace-management,
+experimental_stats, experimental_sync, reconnect, close, and state operations.
+Namespace management remains transitional.
 
 Set outcomes are `"created"`, `"replaced"`, or `"not_stored"`.
 

@@ -200,15 +200,15 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     /// <summary>
     /// Returns the server statistics payload as UTF-8 JSON.
     /// </summary>
-    public async ValueTask<string> StatsAsync(
+    public async ValueTask<string> ExperimentalStatsAsync(
         CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync(
-            Protocol.Opcode.Stats,
+            Protocol.Opcode.ExperimentalStats,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("STATS", result, Protocol.FfiResultValue);
+        ExpectKind("EXPERIMENTAL_STATS", result, Protocol.FfiResultValue);
         try
         {
             return new UTF8Encoding(false, true).GetString(result.Payload);
@@ -217,7 +217,7 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
-                "STATS returned invalid UTF-8.",
+                "EXPERIMENTAL_STATS returned invalid UTF-8.",
                 error);
         }
     }
@@ -225,14 +225,14 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     /// <summary>
     /// Requests a durability barrier from the server.
     /// </summary>
-    public async ValueTask SyncAsync(CancellationToken cancellationToken = default)
+    public async ValueTask ExperimentalSyncAsync(CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync(
-            Protocol.Opcode.Sync,
+            Protocol.Opcode.ExperimentalSync,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("SYNC", result, Protocol.FfiResultOk);
+        ExpectKind("EXPERIMENTAL_SYNC", result, Protocol.FfiResultOk);
     }
 
     /// <summary>

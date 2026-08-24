@@ -4,7 +4,7 @@ use super::operation_compatibility_behavior as behavior;
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
     DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
-    SetState, StatsState, SyncState,
+    SetState, ExperimentalStatsState, ExperimentalSyncState,
 };
 use super::operation_contract::OperationStatus;
 use super::operation_handlers::OperationContext;
@@ -80,5 +80,5 @@ typed_handler!(
 );
 typed_handler!(set_handler, SetState, mut decode_set, behavior::set);
 typed_handler!(delete_handler, DeleteState, decode_delete, behavior::delete);
-typed_handler!(stats_handler, StatsState, decode_stats, behavior::stats);
-typed_handler!(sync_handler, SyncState, decode_sync, behavior::sync);
+typed_handler!(experimental_stats_handler, ExperimentalStatsState, decode_experimental_stats, behavior::experimental_stats);
+typed_handler!(experimental_sync_handler, ExperimentalSyncState, decode_experimental_sync, behavior::experimental_sync);

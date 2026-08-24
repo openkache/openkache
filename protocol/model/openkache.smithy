@@ -464,10 +464,10 @@ enum Opcode {
     DELETE = "delete"
 
     @wireOpcode(value: 5)
-    STATS = "stats"
+    EXPERIMENTAL_STATS = "experimental_stats"
 
     @wireOpcode(value: 6)
-    SYNC = "sync"
+    EXPERIMENTAL_SYNC = "experimental_sync"
 
     @wireOpcode(value: 7)
     NAMESPACE_OPEN = "namespace_open"
@@ -609,9 +609,9 @@ operation Delete {
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
 )
-operation Stats {
-    input: StatsInput
-    output: StatsOutput
+operation ExperimentalStats {
+    input: ExperimentalStatsInput
+    output: ExperimentalStatsOutput
 }
 
 @operationContract(
@@ -628,9 +628,9 @@ operation Stats {
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
 )
-operation Sync {
-    input: SyncInput
-    output: SyncOutput
+operation ExperimentalSync {
+    input: ExperimentalSyncInput
+    output: ExperimentalSyncOutput
 }
 
 @operationContract(
@@ -897,27 +897,27 @@ structure DeleteOutput {
     deleted: Boolean
 }
 
-structure StatsOutput {
+structure ExperimentalStatsOutput {
     @required
     @operationField(role: "json")
     json: String
 }
 
-structure StatsInput {
+structure ExperimentalStatsInput {
     @required
     @unsignedLong
     @operationField(role: "namespace_id")
     namespaceId: Long
 }
 
-structure SyncInput {
+structure ExperimentalSyncInput {
     @required
     @unsignedLong
     @operationField(role: "namespace_id")
     namespaceId: Long
 }
 
-structure SyncOutput {}
+structure ExperimentalSyncOutput {}
 
 structure NamespaceOpenInput {
     @required
