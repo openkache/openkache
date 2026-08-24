@@ -7,9 +7,12 @@ compression, encryption, or value parsing. `OpenKacheClientOptions.transport`
 selects verified QUIC (the default), verified TLS-over-TCP, or an explicit
 TLS-preserving insecure selector.
 
-This README documents the current transitional Swift/FFI API. The target
-variable-width Item ID, structured-value, compression, and dual-transport
-contracts live in the shared draft documents linked by [`../README.md`](../README.md).
+This package is a compatibility adapter over the internal native ABI; it is not
+the maintained five-operation Gate 0 facade. Its exact-item-ID and generated
+Smithy operations remain available for existing integrations and MUST NOT be
+presented as the public Rust `openkache` API. The frozen variable-width Item ID,
+structured-value, compression, dual-transport, and security contracts live in
+the documents linked by [`../README.md`](../README.md).
 
 `OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
 keys use the `Text` type and `Data` keys use the `Bytes` type; the logical bytes
@@ -32,8 +35,8 @@ The native library exports the versioned ABI declared in
 Build or install the `openkache-client-core` Rust `cdylib` for the target platform
 and make it visible to the linker as `openkache_client_core`.
 
-The generated `EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` methods are transitional experimental
-maintenance operations and are disabled by default. Enable
+The generated `EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` methods are
+experimental maintenance operations and are disabled by default. Enable
 `enable_experimental_api = true` explicitly and coordinate exact revision
 `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling
@@ -142,10 +145,10 @@ declarations are generated into SwiftPM's build directory from
 [`../model/openkache.smithy`](../model/openkache.smithy) and the wire model in
 [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
 They are not checked into source control: the `GenerateSmithy` SwiftPM build
-plugin regenerates the current transitional contract for every build. The
-draft protocol and client-format documents remain the target sources of truth
-until migration is complete. The shared C ABI header consumes the same
-generated current contract.
+plugin regenerates the compatibility contract for every build. The frozen
+protocol and client-format documents remain the sources of truth for
+interoperability. The shared C ABI header consumes the same generated
+contract.
 To regenerate the declarations explicitly:
 
 ```bash

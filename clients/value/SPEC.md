@@ -19,10 +19,10 @@ Gate 0 payload profile for that model. A future profile may use another
 self-describing codec, or a schema-bound codec such as protobuf, while
 retaining a separate compatibility contract.
 
-This document is the frozen target specification. The shared implementation and
-language adapters may temporarily lag while migration is completed. An
-implementation MUST NOT claim Gate 0 conformance until it satisfies the model,
-profile, validation, and native-conversion rules in this document.
+This document is the frozen specification. An implementation that does not yet
+satisfy the model, profile, validation, and native-conversion rules MUST
+identify itself as a compatibility adapter or scaffold and MUST NOT claim Gate
+0 conformance.
 
 The normative terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**,
 **SHOULD NOT**, and **MAY** are to be interpreted as described by
@@ -463,11 +463,11 @@ unknown-field semantics.
 
 ## 7. Implementation boundary
 
-The Rust implementation is currently published under `clients/value/` as the
-`openkache-value` package. It provides the owned `Value` algebra and the
-bounded `StructuredValue-CBOR-v1` payload codec described by this document.
-Cross-language adapters and final profile-conformance claims remain migration
-work; the logical model and its conformance rules remain one specification.
+The Rust implementation is kept under `clients/value/` as the internal,
+non-published `openkache-value` package. It provides the owned `Value` algebra
+and the bounded `StructuredValue-CBOR-v1` payload codec described by this
+document. Compatibility adapters must preserve the model and its conformance
+rules; the published `openkache` crate exposes the maintained end-user facade.
 
 The OpenKache client core uses this package to produce structured payload
 bytes. The client value envelope then applies compression, cryptographic

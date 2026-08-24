@@ -3,7 +3,8 @@
 `openkache` is the maintained Rust binding for the OpenKache Gate 0
 (`v1-gate0`) client contract. It is one publishable crate; the transport,
 protocol, key, and value implementation crates are private workspace
-implementation details.
+implementation details. The server is released separately as the
+[`openkache-server`](../../server/) package.
 
 ## Install
 

@@ -1,7 +1,7 @@
 # OpenKache Python client
 
-`openkache` is the maintained synchronous Python client for the OpenKache v1
-preview. Gate 0 deliberately exposes only five operations:
+`openkache` is the maintained synchronous Python client for the frozen
+OpenKache v1 Gate 0 contract. It exposes only the five contract operations:
 
 | Operation | Result |
 | --- | --- |

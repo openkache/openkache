@@ -19,10 +19,11 @@ cross-referenced specifications. Later profiles may expose additional
 transport, identity, value, and policy choices, but they require an explicit
 contract revision.
 
-The shared core and package implementations may temporarily lag this contract.
-A package that has not implemented all five operations and the lossless
-structured-value path MUST identify itself as a scaffold or transitional
-limitation rather than claim maintained v1 support.
+The shared core and package implementations may expose additional internal or
+compatibility APIs around this contract. A package that has not implemented all
+five operations and the lossless structured-value path MUST identify itself as
+a scaffold or compatibility limitation rather than claim maintained v1
+support.
 
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.
@@ -242,7 +243,7 @@ bindings:
   and
 - common configuration validation and stable error categories.
 
-The target core uses one connection/request engine. Mapped versus Exact
+The shared core uses one connection/request engine. Mapped versus Exact
 addressing and formatted versus Raw versus caller-owned-v0 values are
 operation choices, not separate transport clients. Bindings may add convenience
 facades without coupling the two axes.
@@ -540,9 +541,9 @@ fail rather than silently change the Gate 0 profile.
 
 ### 6.1 Configuration boundaries
 
-After migration, the generated client contract will be the derived common
-source for configuration fields, identifiers, limits, and maintained defaults.
-The draft format documents remain the source of truth until then. Adapters
+The generated client contract is the derived common source for configuration
+fields, identifiers, limits, and maintained defaults. The frozen format
+documents remain the source of truth for their byte contracts. Adapters
 translate native configuration into the generated model and let the shared
 core validate combinations; they do not duplicate profile algorithms or derive
 new defaults from native type behavior.

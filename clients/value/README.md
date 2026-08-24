@@ -1,9 +1,11 @@
 # OpenKache value model
 
-`openkache-value` is the production Rust implementation of the
-cross-language value model in [`SPEC.md`](SPEC.md). It deliberately has no
-dependency on the client transport, cache server, value envelope, compression,
-or protection profiles.
+`openkache-value` is an internal, non-published Rust implementation of the
+cross-language value model in [`SPEC.md`](SPEC.md). End users do not add this
+crate directly; the published [`openkache`](../rust/) crate exposes the
+maintained client facade and its `Value` type. This crate deliberately has no
+dependency on client transport, cache server, value envelope, compression, or
+protection profiles.
 
 ## Commands
 

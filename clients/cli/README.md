@@ -1,9 +1,10 @@
 # OpenKache CLI
 
 `openkache-cli` is a standalone command-line client for Bash scripts,
-administration, and interactive cache inspection. It uses the shared Rust
-client for QUIC, TLS, retries, application-key derivation, and value
-protection.
+administration, and interactive cache inspection. It uses the internal Rust
+client engine for QUIC, TLS, retries, application-key derivation, and value
+protection; it is a separate CLI surface, not an expansion of the published
+five-operation `openkache` Rust facade.
 
 ## Purpose
 
@@ -55,7 +56,7 @@ openkache-cli experimental_sync
 openkache-cli shell
 ```
 
-`experimental_stats` and `experimental_sync` are transitional experimental maintenance commands and are
+`experimental_stats` and `experimental_sync` are experimental maintenance commands and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before using them;
@@ -121,7 +122,8 @@ openkache-cli \
 - `src/main.rs` starts the selected async runtime and reports process-level errors.
 - `src/lib.rs` owns argument parsing, connection configuration, one-shot
   operations, value output, and the interactive command loop.
-- `openkache-client` supplies the shared QUIC and value-protection behavior.
+- `openkache-client-core` supplies the shared QUIC and value-protection
+  behavior as an internal implementation crate.
 
 The CLI speaks OpenKache protocol v1 over QUIC. It is not a Redis RESP client
 and cannot be used with `redis-cli`.

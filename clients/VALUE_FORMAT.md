@@ -14,12 +14,12 @@ interpret payload formats, compression, or cryptographic protection.
 Cryptographic behavior is defined only in the
 [Security Model](../SECURITY_MODEL.md).
 
-This is the complete v1 envelope contract. Client implementations may
-temporarily lag while the migration is completed, but an implementation MUST
-NOT claim conformance until it implements the complete grammar, key schedule,
-and validation rules. Gate 0 fixes one safe development selection for the
-maintained five-operation facade; it does not delete the other normative
-profiles or their rejection rules.
+This is the complete v1 envelope contract. An implementation that does not
+implement the complete grammar, key schedule, and validation rules MUST
+identify itself as a compatibility adapter or scaffold and MUST NOT claim
+conformance. Gate 0 fixes one safe development selection for the maintained
+five-operation facade; it does not delete the other normative profiles or
+their rejection rules.
 
 The legacy TypeScript metadata envelope and generated `serializationJson`
 constants are compatibility metadata, not the structured payload profile
