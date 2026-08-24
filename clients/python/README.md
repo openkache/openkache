@@ -1,184 +1,209 @@
 # OpenKache Python client
 
-The `openkache` package is an asyncio-friendly Python binding over the shared
-Rust client core. TLS 1.3 over QUIC or TCP, retries, application-key
-derivation, compression, encryption, and the v1 value format stay in
-[`../core`](../core); Python only converts Python values and owns the async
-scheduling and resource lifecycle. Pass `Transport.TLS_TCP` for verified
-TLS-over-TCP or an explicit insecure enum member to disable certificate and
-server-identity verification; the default remains verified QUIC.
+`openkache` is an asyncio-friendly Python client for the OpenKache cache
+server. It uses the shared Rust client core for QUIC, TLS 1.3 over TCP,
+retries, compression, authenticated value protection, and the wire protocol.
+The Python layer provides validation, Python value conversion, and async
+resource management.
 
-The Smithy client model in [`../model/openkache.smithy`](../model/openkache.smithy), together with
-the wire model in [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy),
-currently generates the transitional operation types, client constants, and native ABI identifiers
-in `src/openkache/_generated/`. The `RawClient` adapter
-implements those exact item-ID operations. `Client` adds protected
-application-key operations and JSON values.
+This is an experimental preview. The protocol and generated Smithy API are
+still transitional, so pin the package version and coordinate upgrades with
+the server version you operate.
 
-The package also exposes the lossless ``StructuredValue-CBOR-v1`` model from
-``openkache._value`` (and the package root). Python ``bool`` is tested before
-``int``; Python integers retain arbitrary precision, bytes-like values map to
-byte strings, and both ``list`` and ``tuple`` map to model arrays.
-``decode_value`` returns the complete lossless model, while ``decode_native``
-performs a strict conversion and rejects ``Undefined`` or map-key collisions
-instead of dropping information. Cache methods use canonical UTF-8 JSON as
-`OpaqueBytes`; structured payload operations use the generated
-StructuredValue-CBOR-v1 ABI without JSON or Raw fallback. The native boundary preserves unknown mutation
-and cancellation outcomes as ``OpenKacheUnknownMutationError`` and
-``OpenKacheCancelledError``.
+## Install
 
-Mapped GET/SET/DELETE calls use the ABI v6 request handle
-(``poll``/``wait``/``cancel``/``free``), so task cancellation cannot abandon a
-native mutation. Cancellation before admission raises
-``OpenKacheCancelledError``; cancellation after a mutation starts raises
-``OpenKacheUnknownMutationError``. Structured, scoped, namespace, and complete
-raw-policy calls have no dedicated request entry point in ABI v6 and therefore
-drain a documented safe completion boundary before honoring cancellation.
-
-> **Current implementation:** This package exposes canonical-JSON mapped-key
-> operations and exact `0..=32`-byte Item ID operations. Native values are
-> converted to logical bytes plus a generated key discriminator at the adapter
-> boundary; the shared core performs canonical encoding and applies the default
-> `NamespaceHash` profile. `PublicKeyOrHash` remains an explicit core-only
-> profile until the binding options are finalized.
-
-## Commands
-
-Run from `clients/python`:
+The normal installation is:
 
 ```bash
-python -m compileall src
-python -m build
+python -m pip install openkache
 ```
 
-The package build first regenerates the Smithy modules in
-`src/openkache/_generated/`, then runs Cargo for `native/` and places the
-resulting target-native ctypes library in the wheel. Source distributions bundle
-the shared core and protocol source so a wheel is compiled for the target
-platform; they never carry a host native binary. A C compiler or Python
-extension ABI is not required. Package builds require Bun and the Smithy CLI;
-the reproducible development shell supplies all of these tools.
+The package requires Python 3.11 or newer. Published wheels contain the
+platform-native Rust adapter and do not require a C compiler or a Python
+extension toolchain. If pip falls back to the source distribution, the build
+also needs Rust/Cargo, a C/C++ compiler with CMake (for the AWS-LC TLS
+dependency), Bun, and the Smithy CLI used by the shared client core.
+Maintainers should publish one wheel per supported target platform so normal
+installation does not need those build tools.
 
-## Usage
+## Quick start
+
+The verified transports require a CA certificate that trusts the server
+certificate. `OPENKACHE_CA_CERT` may be a PEM/DER file path or the equivalent
+bytes passed directly to `Client.connect`.
 
 ```python
+import asyncio
+import os
 from pathlib import Path
 
-from openkache import Client, KeySpec, SetOptions
+from openkache import Client, SetOptions
 
-client = await Client.connect(
-    "cache.example.com:4433",
-    certificate="client-bundle/ca.crt",
-    data_protection_key=Path("client-bundle/data-protection.key").read_bytes(),
-)
-try:
-    await client.set(
-        "profile",
-        {"name": "Kim", "visits": 42, "active": True},
-        SetOptions(condition="if_absent", ttl_ms=300_000),
-    )
-    profile = await client.get("profile")
-    raw = await client.get_raw("opaque")
-finally:
-    await client.close()
+
+async def main() -> None:
+    address = os.environ.get("OPENKACHE_ADDRESS", "127.0.0.1:4433")
+    ca_certificate = Path(os.environ["OPENKACHE_CA_CERT"])
+
+    async with await Client.connect(
+        address,
+        certificate=ca_certificate,
+    ) as client:
+        await client.ping()
+        outcome = await client.set(
+            "profile",
+            {"name": "Kim", "visits": 42, "active": True},
+            SetOptions(condition="if_absent", ttl_ms=300_000),
+        )
+        profile = await client.get("profile")
+        print(outcome.value, profile)
+
+
+asyncio.run(main())
 ```
 
-`set` and `get` use the core canonical JSON value format. Use `set_raw` and
-`get_raw` for exact bytes; empty raw values are supported. Each operation
-infers `Text`, `Bytes`, or signed-i64 `Integer` from the native key and passes
-the logical bytes plus the generated key discriminator through the native ABI;
-the shared core performs canonical deterministic CBOR encoding. The
-deprecated `key_spec` option is accepted for source compatibility but is not a
-namespace policy and does not override per-operation inference. Empty and
-NUL-containing keys are valid. JSON numbers
-are finite, and integers
-must be exactly representable as IEEE-754 binary64 values. Python converts a
-native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
-core reparses that input and owns canonical serialization, compression,
-encryption, and value framing.
+The same lifecycle can be written with explicit `await client.close()`; close
+is idempotent. See [`examples/basic.py`](examples/basic.py) for a runnable
+version with environment-variable handling.
 
-JSON helpers are an explicitly documented convenience surface: they carry
-canonical UTF-8 JSON as `OpaqueBytes`, while the structured operation uses
-`StructuredValue-CBOR-v1` and never substitutes JSON or Raw payloads.
-`set_v0` / `get_v0` accept a complete caller-owned version-0 envelope,
-validate only its canonical leading version field, and preserve the remaining
-bytes unchanged. The `client.raw` view exposes the same value modes for exact
-Item IDs.
+## Values and keys
 
-`client.raw` exposes the current transitional Smithy-shaped exact item-ID API.
-The namespace-open call below is an out-of-band WIP control-plane example, not
-a stable v1 wire operation; stable data operations still use a
-server-assigned namespace ID.
+The high-level `Client` alias is the same class as `OpenKacheClient`.
+
+- `set` and `get` use the core's canonical UTF-8 JSON value profile.
+- `set_raw` and `get_raw` store and retrieve exact decrypted bytes, including
+  empty values.
+- `set_structured` and `get_structured` use
+  `StructuredValue-CBOR-v1`. The default `"lossless"` representation preserves
+  `Undefined`, arbitrary-precision integers, float width/bits, byte strings,
+  text strings, arrays, and ordered maps. `"native"` projects to ordinary
+  Python values and rejects information-losing values.
+- `set_v0` and `get_v0` accept a complete caller-owned version-0 value envelope
+  and preserve its body unchanged.
+
+Mapped operations infer a typed key from each call: `str` is text, bytes-like
+values are bytes, and signed 64-bit `int` values are integers. Boolean keys
+are rejected. Empty and NUL-containing keys are valid. `key_spec`/`KeySpec`
+remain accepted for source compatibility with older clients, but do not select
+a namespace policy.
+
+JSON values must contain finite numbers. Integers must be exactly representable
+by the shared IEEE-754 binary64 JSON model. Use the structured or raw APIs when
+that restriction is not appropriate.
+
+## API surface
+
+The high-level client exposes:
+
+| Method | Result |
+| --- | --- |
+| `ping()` | Verifies that the server is reachable. |
+| `get()` / `set()` | Reads or writes canonical JSON values. |
+| `get_raw()` / `set_raw()` | Reads or writes exact bytes. |
+| `get_structured()` / `set_structured()` | Reads or writes lossless StructuredValue-CBOR-v1 values. |
+| `get_v0()` / `set_v0()` | Reads or writes complete caller-owned v0 envelopes. |
+| `delete()` | Deletes a mapped key and reports whether it existed. |
+| `stats()` / `stats_json()` | Returns validated statistics or the original Smithy response text. |
+| `sync()` / `reconnect()` | Flushes the core or requests a reconnect. |
+| `connection_state()` | Returns the best-effort native connection state. |
+| `close()` | Releases the native client; safe to call more than once. |
+
+## Connection configuration
+
+`Client.connect(address, ...)` accepts these important options:
+
+| Option | Meaning |
+| --- | --- |
+| `certificate` | Trusted CA certificate or PEM/DER path. Required for verified peers. |
+| `server_name` | TLS server name; defaults to the hostname in `address`. |
+| `transport` | `Transport.QUIC` (default), `Transport.TLS_TCP`, or an explicit insecure enum member for local/test deployments. |
+| `identity` | Optional `ClientIdentity` containing a client certificate chain and private key for mutual TLS. |
+| `data_protection_key` | Optional 32-byte application-managed secret shared by clients addressing the same protected entries. |
+| `compression` | `CompressionOptions`; automatic level-1 Zstandard is the default. |
+| `encryption` | `Encryption.ROBUST` (default) or `Encryption.COMPACT`. All clients sharing protected entries must use the same profile. |
+| `timeouts` | `ClientTimeouts(connect_ms, request_ms)`. |
+| `max_in_flight` | Maximum number of concurrent requests admitted by the native core. |
+| `retry_max_attempts` | Maximum attempts for retryable failures. |
+| `native_path` | Explicit path to a compatible native adapter. |
+
+`OPENKACHE_CLIENT_NATIVE` is an equivalent environment-variable override for
+`native_path`. Keep native artifacts produced by the same package release; the
+Python wrapper checks the generated ABI version before using one.
+
+Cancellation has explicit safety semantics. A cancellation before native
+admission raises `OpenKacheCancelledError`; once a mutation may have reached
+the server, it raises `OpenKacheUnknownMutationError` instead of pretending
+that the mutation did not happen.
+
+## Raw Smithy API
+
+`client.raw` exposes the generated exact Item ID API for transitional control
+and interoperability work. Item IDs are `bytes` values of at most 32 bytes:
 
 ```python
-from openkache import (
-    SmithyGetInput,
-    SmithyNamespaceOpenInput,
-    SmithyNamespacePolicy,
-    SmithyExpirationDefault,
-    SmithyEvictionDefault,
-    SmithyOverridePolicy,
-    SmithySetInput,
-)
+from openkache import SmithyGetInput, SmithySetInput
 
-item_id = b"short-id"
-namespace = await client.raw.namespace_open(
-    SmithyNamespaceOpenInput(
-        name="example",
-        create_if_missing=True,
-        policy=SmithyNamespacePolicy(
-            default_expiration=SmithyExpirationDefault.NO_EXPIRY,
-            expiration_override=SmithyOverridePolicy.ALLOWED,
-            default_eviction=SmithyEvictionDefault.EVICTABLE,
-            eviction_override=SmithyOverridePolicy.ALLOWED,
-        ),
-    )
-)
-namespace_id = namespace.descriptor.namespace_id
+namespace_id = 1  # Replace with the server-assigned namespace ID.
 await client.raw.set(
-    SmithySetInput(namespace_id=namespace_id, item_id=item_id, value=b"opaque")
+    SmithySetInput(namespace_id=namespace_id, item_id=b"item", value=b"opaque")
 )
 result = await client.raw.get(
-    SmithyGetInput(namespace_id=namespace_id, item_id=item_id)
+    SmithyGetInput(namespace_id=namespace_id, item_id=b"item")
 )
 ```
 
-## Configuration
+The namespace-open/update/delete operations are currently out-of-band WIP
+control-plane operations, not a stable v1 wire contract. Use the server's
+assigned namespace ID for stable data operations.
 
-- `certificate` accepts a DER/PEM path or bytes containing one trusted
-  certificate or PEM chain.
-- `data_protection_key` is optional. When supplied it is an
-  application-managed 32-byte secret shared by clients that must address the
-  same protected entries. When omitted, values are unprotected.
-- The deprecated `key_spec`/`KeySpec` names remain accepted for source
-  compatibility. They do not select a namespace policy or Item ID mapping
-  profile; mapped operations infer the `TypedKey` variant per call.
-- `server_name` defaults to the hostname from `address` and is used for TLS
-  verification after DNS resolution.
-- `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private
-  key for mutual TLS.
-- `compression`, `encryption`, `timeouts`, `max_in_flight`, and
-  `retry_max_attempts` map directly to shared-core settings. Compression
-  defaults to automatic level-1 Zstandard with no input-size or
-  minimum-savings threshold; pass `CompressionOptions(enabled=False)` for an
-  explicit opt-out. `Encryption.ROBUST` is the default; select
-  `Encryption.COMPACT` only when every client sharing the protected entries
-  uses that profile.
-- `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
+## Build and verify
 
-Call `close()` when finished; it is idempotent. The client also supports
-`async with`. `stats()` returns validated `ServerStats`, while
-`stats_json()` preserves the Smithy response text. `stats` is transitional
-experimental behavior; for a draft-conforming peer, enable
-`enable_experimental_api` and coordinate the exact revision in
-[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling it.
+Run these commands from `clients/python` in a checkout that has the repository
+development tools available:
 
-## Components
+```bash
+python -m compileall src examples
+python -m build --sdist --wheel --outdir dist
+python -m twine check dist/*
+# After CI has verified every platform wheel:
+python -m twine upload dist/*
+```
 
-- `src/openkache/_client.py` contains the small Python API and validation.
-- `src/openkache/_native.py` contains only ctypes ownership and ABI conversion.
-- `native/` re-exports the core C ABI without protocol logic.
-- `src/openkache/_generated/smithy_*.py` is regenerated from Smithy during
-  every package build and is intentionally not checked into source control.
-  The small `__init__.py` package facade is handwritten and tracked so the
-  generated modules remain importable after a clean checkout.
+The wheel build copies one target-native library into the package. In the
+monorepo, release automation supplies it through `OPENKACHE_CLIENT_NATIVE`
+(normally from the Bazel `openkache_client_python_native` target). A source
+distribution intentionally contains no host-native library; it bundles the
+shared core, protocol, Smithy models, and all generator modules needed to
+rebuild one for the target platform.
+
+Upload a version only once: update `project.version`, build into a clean
+directory, run the package-content verification, and use PyPI Trusted
+Publishing or a short-lived token for the final upload. Never commit `dist/`,
+`build/`, native libraries, or generated Smithy modules.
+
+Generated Python modules are kept out of version control and are regenerated
+from the Smithy models for a checkout build. They are included in every sdist,
+so rebuilding a wheel from an sdist does not need to regenerate the Python
+facade. To deliberately regenerate an existing tree, run:
+
+```bash
+python setup.py generate_smithy
+```
+
+## Package layout
+
+- `src/openkache/_client.py` — public async API, validation, and result mapping.
+- `src/openkache/_native.py` — ctypes ownership and native ABI conversion.
+- `src/openkache/_value.py` — lossless StructuredValue-CBOR-v1 conversion.
+- `src/openkache/_generated/` — generated Smithy API, operations, constants, and
+  native ABI declarations.
+- `native/` — thin Rust `cdylib` adapter over `clients/core`.
+- `examples/basic.py` — minimal end-to-end usage example.
+
+The shared protocol, security, key-format, and value-format documents live in
+the OpenKache repository. The generated API is an implementation surface, not
+a replacement for those protocol specifications.
+
+## License
+
+The Python client and its native adapter are distributed under the Apache
+License 2.0. The package artifacts include the license text.
