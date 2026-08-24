@@ -41,6 +41,8 @@ export {
 
 const TEXT_ENCODER = new TextEncoder()
 const MAX_CANONICAL_KEY_BYTES = 1_048_576
+const INCOMPATIBLE_OUTCOME_PREFIX =
+  "openkache:error:incompatible_server_outcome:"
 
 /**
  * A Gate 0 mapped key: UTF-8 text, exact bytes, a safe integer number, or a
@@ -322,25 +324,34 @@ function parse_endpoint(endpoint: string | Client_Options): string {
     }
     return endpoint
   }
-  if (
-    endpoint === null ||
-    typeof endpoint !== "object" ||
-    Array.isArray(endpoint) ||
-    Object.getPrototypeOf(endpoint) !== Object.prototype &&
-      Object.getPrototypeOf(endpoint) !== null
-  ) {
-    throw new OpenKache_Error("connect expects an endpoint string or { address }")
-  }
-  const keys = Object.keys(endpoint)
-  if (keys.some((key): boolean => key !== "address")) {
+  try {
+    if (
+      endpoint === null ||
+      typeof endpoint !== "object" ||
+      Array.isArray(endpoint) ||
+      (Object.getPrototypeOf(endpoint) !== Object.prototype &&
+        Object.getPrototypeOf(endpoint) !== null)
+    ) {
+      throw new OpenKache_Error("connect expects an endpoint string or { address }")
+    }
+    const keys = Reflect.ownKeys(endpoint)
+    if (keys.length !== 1 || keys[0] !== "address") {
+      throw new OpenKache_Error(
+        "Gate 0 connect accepts only the address field; trust and certificate options are unsupported",
+      )
+    }
+    const address = endpoint.address
+    if (typeof address !== "string" || address.length === 0) {
+      throw new OpenKache_Error("address must be a non-empty string")
+    }
+    return address
+  } catch (error) {
+    if (error instanceof OpenKache_Error) throw error
     throw new OpenKache_Error(
-      "Gate 0 connect accepts only the address field; trust and certificate options are unsupported",
+      "connect expects an endpoint string or { address }",
+      error,
     )
   }
-  if (typeof endpoint.address !== "string" || endpoint.address.length === 0) {
-    throw new OpenKache_Error("address must be a non-empty string")
-  }
-  return endpoint.address
 }
 
 function owned_key_bytes(key: Client_Key): Uint8Array {
@@ -477,6 +488,13 @@ function assert_valid_unicode_string(value: string): void {
 function as_openkache_error(error: unknown): OpenKache_Error {
   if (error instanceof OpenKache_Error) return error
   const message = error_message(error)
+  if (message.startsWith(INCOMPATIBLE_OUTCOME_PREFIX)) {
+    return new OpenKache_Error(
+      message.slice(INCOMPATIBLE_OUTCOME_PREFIX.length),
+      error,
+      "incompatible_server_outcome",
+    )
+  }
   if (message.startsWith("openkache:error:unknown_mutation:")) {
     return new OpenKache_Unknown_Mutation_Error(
       message.slice("openkache:error:unknown_mutation:".length),

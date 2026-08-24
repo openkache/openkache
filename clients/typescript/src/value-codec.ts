@@ -138,7 +138,17 @@ export class Array_Value {
     if (!Array.isArray(values)) {
       throw new Structured_Value_Error("Array_Value requires an array")
     }
-    this.values = values.map((value): Structured_Value => to_value(value))
+    const converted: Structured_Value[] = []
+    for (let index = 0; index < values.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(values, index)) {
+        throw new Structured_Value_Error(
+          `array entry ${index} is sparse`,
+          "conversion",
+        )
+      }
+      converted.push(to_value(values[index]))
+    }
+    this.values = converted
   }
 
   get length(): number {
@@ -164,17 +174,34 @@ export class Map_Value {
       throw new Structured_Value_Error("Map_Value requires entry pairs")
     }
     const converted: [Structured_Value, Structured_Value][] = []
-    entries.forEach((entry, index): void => {
+    const key_identities = new Set<string>()
+    for (let index = 0; index < entries.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(entries, index)) {
+        throw new Structured_Value_Error(
+          `map entry ${index} is sparse`,
+          "conversion",
+        )
+      }
+      const entry = entries[index]
       if (!Array.isArray(entry) || entry.length !== 2) {
         throw new Structured_Value_Error(
           `map entry ${index} must be a two-item pair`,
         )
       }
+      if (
+        !Object.prototype.hasOwnProperty.call(entry, 0) ||
+        !Object.prototype.hasOwnProperty.call(entry, 1)
+      ) {
+        throw new Structured_Value_Error(
+          `map entry ${index} is sparse`,
+          "conversion",
+        )
+      }
       const key = to_value(entry[0])
       const value = to_value(entry[1])
-      validate_map_key(key, index, converted)
+      validate_map_key(key, index, key_identities)
       converted.push([key, value])
-    })
+    }
     this.entries = converted
   }
 
@@ -279,7 +306,7 @@ function convert_value(
       if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
       const children: Structured_Value[] = []
       for (let index = 0; index < value.length; index += 1) {
-        if (!(index in value)) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) {
           throw new Structured_Value_Error(
             `array entry ${index} is sparse`,
             "conversion",
@@ -350,7 +377,7 @@ function is_scalar_key(value: Structured_Value): boolean {
 function validate_map_key(
   key: Structured_Value,
   index: number,
-  entries: readonly (readonly [Structured_Value, Structured_Value])[],
+  key_identities: Set<string>,
 ): void {
   if (!is_scalar_key(key)) {
     throw new Structured_Value_Error(
@@ -358,12 +385,37 @@ function validate_map_key(
       "non_scalar_key",
     )
   }
-  if (entries.some(([candidate]): boolean => model_equal(candidate, key))) {
+  const identity = scalar_key_identity(key)
+  if (key_identities.has(identity)) {
     throw new Structured_Value_Error(
       `duplicate map key at entry ${index}`,
       "duplicate_key",
     )
   }
+  key_identities.add(identity)
+}
+
+function scalar_key_identity(value: Structured_Value): string {
+  if (value === null) return "null"
+  if (typeof value === "boolean") return value ? "boolean:true" : "boolean:false"
+  if (value instanceof Undefined_Value) return "undefined"
+  if (value instanceof Integer_Value) return `integer:${value.value}`
+  if (value instanceof Float_Value) {
+    return `float:${value.width}:${value.raw_bits}`
+  }
+  if (value instanceof ByteString_Value) {
+    return `bytes:${bytes_to_hex(value.value)}`
+  }
+  if (value instanceof TextString_Value) {
+    return `text:${bytes_to_hex(TEXT_ENCODER.encode(value.value))}`
+  }
+  throw new Structured_Value_Error("map key is not scalar", "non_scalar_key")
+}
+
+function bytes_to_hex(value: Uint8Array): string {
+  const chunks: string[] = []
+  for (const byte of value) chunks.push(byte.toString(16).padStart(2, "0"))
+  return chunks.join("")
 }
 
 /** Model structural equality, including float width/raw bits and key kinds. */
@@ -562,7 +614,13 @@ export function decode_structured_value(
   let item_count = 0
   type Frame =
     | { kind: "array"; remaining: number; values: Structured_Value[] }
-    | { kind: "map"; remaining: number; entries: [Structured_Value, Structured_Value][]; pending?: Structured_Value }
+    | {
+        kind: "map"
+        remaining: number
+        entries: [Structured_Value, Structured_Value][]
+        key_identities: Set<string>
+        pending?: Structured_Value
+      }
   const frames: Frame[] = []
 
   const accept = (value: Structured_Value): void => {
@@ -575,7 +633,7 @@ export function decode_structured_value(
       }
       if (frame.kind === "array") frame.values.push(current)
       else if (frame.pending === undefined) {
-        validate_map_key(current, frame.entries.length, frame.entries)
+        validate_map_key(current, frame.entries.length, frame.key_identities)
         frame.pending = current
       } else {
         frame.entries.push([frame.pending, current])
@@ -624,18 +682,23 @@ export function decode_structured_value(
     } else if (head.major === 4) {
       const length = safe_length(head.value, budget)
       if (length > budget.max_items) resource("items", budget.max_items, length)
+      if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
       if (length === 0) accept(new Array_Value([]))
       else {
-        if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
         frames.push({ kind: "array", remaining: length, values: [] })
       }
     } else if (head.major === 5) {
       const length = safe_length(head.value, budget)
       if (length * 2 > budget.max_items) resource("items", budget.max_items, length * 2)
+      if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
       if (length === 0) accept(new Map_Value([]))
       else {
-        if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
-        frames.push({ kind: "map", remaining: length * 2, entries: [] })
+        frames.push({
+          kind: "map",
+          remaining: length * 2,
+          entries: [],
+          key_identities: new Set<string>(),
+        })
       }
     } else if (head.major === 6) {
       if (head.value !== 2n && head.value !== 3n) {

@@ -176,7 +176,13 @@ fn invalid_argument(message: impl Into<String>) -> Error {
 }
 
 fn incompatible_outcome(message: impl Into<String>) -> Error {
-    Error::new(Status::GenericFailure, message.into())
+    Error::new(
+        Status::GenericFailure,
+        format!(
+            "openkache:error:incompatible_server_outcome:{}",
+            message.into()
+        ),
+    )
 }
 
 fn state_error(message: impl Into<String>) -> Error {
