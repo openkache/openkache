@@ -16,9 +16,10 @@ grammar, key schedule, and validation rules.
 
 The legacy TypeScript metadata envelope and generated `serializationJson`
 constants are compatibility metadata, not the target selector-1 assignment.
-Target selector `1` means `StructuredValue-CBOR-v1`; canonical JSON helpers
-use the `OpaqueBytes` payload profile unless a binding documents a separate
-structured operation.
+The maintained TypeScript `set` / `get` facade uses target selector `1`,
+`StructuredValue-CBOR-v1`. Target selector `1` is never a generic alias for
+the legacy envelope; canonical JSON helpers use the `OpaqueBytes` payload
+profile unless a binding documents a separate structured operation.
 
 The current shared FFI's `set_json` / `get_json` helpers parse or serialize a
 JSON-compatible view while carrying canonical UTF-8 JSON as selector-0

@@ -2,8 +2,9 @@
 
 `@openkache/client` is the Promise-based TypeScript and JavaScript SDK for
 Node.js, Bun, and Deno. A packaged Node-API adapter delegates networking,
-retries, compression, value protection, and canonical JSON behavior to the
-shared Rust core; applications need no helper process or runtime dependencies.
+retries, compression, value protection, and the common
+`StructuredValue-CBOR-v1` value format to the shared Rust core; applications
+need no helper process or runtime dependencies.
 
 ## Install
 
@@ -41,22 +42,21 @@ const client = await OpenKache_Client.connect({
 try {
   await client.ping()
 
-  // Cross-language canonical JSON.
-  const outcome = await client.set_json("profile", {
+  // The primary API uses the common StructuredValue-CBOR-v1 format.
+  const outcome = await client.set("profile", {
     name: "Kim",
     visits: 42,
     labels: ["subscriber", "beta"],
     active: true,
   })
   console.log(outcome) // "created" or "replaced"
-  console.log(await client.get_json("profile"))
-
-  // Exact binary bytes.
-  await client.set_raw("blob", Uint8Array.of(1, 2, 3))
-  console.log(await client.get_raw("blob"))
+  const profile = await client.get("profile")
+  if (profile instanceof Map) {
+    console.log(profile.get("name"))
+  }
 
   // Create only when absent, then expire after 60 seconds.
-  await client.set_json(
+  await client.set(
     "lock",
     { owner: "worker-1" },
     { condition: "if_absent", expiration_mode: "explicit_ttl", ttl_ms: 60_000 },
@@ -70,26 +70,45 @@ Use verified QUIC by default, `transport: "tls_tcp"` where UDP is unavailable,
 and an explicit `*_insecure` selector only in tests. Production connections
 require a trusted certificate and normally a client identity.
 
-## Choose a value API
+## Primary value API: `set` / `get`
 
-| API | Value contract | Use when |
+Mapped `set` and `get` are the normal application API. Both use payload format
+selector `1`, `StructuredValue-CBOR-v1`, from the shared
+[`VALUE_FORMAT.md`](../VALUE_FORMAT.md) and
+[`value/SPEC.md`](../value/SPEC.md). They do not use the former TypeScript-only
+`{ encoding, type_name, payload }` metadata envelope.
+
+The native JavaScript mapping is intentionally explicit:
+
+| JavaScript value | Common value model | `get` result |
 |---|---|---|
-| `set_json` / `get_json` | Canonical RFC 8785-compatible JSON in the shared Rust core | Values must interoperate across OpenKache clients |
-| `set_structured` / `get_structured` | Exact `StructuredValue-CBOR-v1` | Integers, floats, bytes, `undefined`, and ordered maps need distinct types |
-| `set_raw` / `get_raw` | Exact bytes after compression and protection | The application already owns serialization |
-| `set_v0` / `get_v0` | Complete caller-owned version-0 envelope | Migrating or embedding another envelope format |
-| `set` / `get` | Package-local metadata envelope or registered custom codec | Existing package users and codec integrations |
+| `null` | `Null` | `null` |
+| `undefined` | `Undefined` | `undefined` |
+| `boolean` | `Boolean` | `boolean` |
+| `number` | `Float64` | `number` |
+| `bigint` | `Integer` | `bigint` |
+| `string` | `TextString` | `string` |
+| `Uint8Array` | `ByteString` | copied `Uint8Array` |
+| `Array` | `Array` | `Array` |
+| `Map` or plain object | ordered `Map` | `Map` |
 
-Canonical JSON accepts only null, booleans, finite numbers, strings, dense
-arrays, and regular objects with string keys. Cycles, sparse arrays, binary
-objects, `undefined`, `bigint`, and non-finite numbers are rejected.
+Plain objects are encoded as text-keyed maps and are returned as `Map` values.
+This avoids stringifying scalar map keys, overwriting entries, or silently
+changing cross-language map semantics. Use the lossless helpers below when
+float width, raw bits, or exact model wrappers are part of the contract.
+
+Values that cannot be represented by the common model—such as functions,
+classes, cyclic objects, and sparse arrays—are rejected. `NaN` and infinities
+are valid `Float64` values in the structured format; the advanced JSON helper
+rejects them because JSON has no representation for them.
 
 The runtime-neutral structured-value model is available without loading native
 networking from `@openkache/client/value-codec`. JavaScript `number` always
 encodes as a binary64 float even when integral, while `bigint` encodes exactly
-as an integer. The default decode preserves those distinctions with model
-wrappers; `get_structured(key, "native")` projects integers to `bigint`,
-floats to `number`, bytes to `Uint8Array`, and maps to `Map`.
+as an integer. `decode_structured_value` and
+`get_structured(key)` preserve those distinctions with model wrappers;
+`get_structured(key, "native")` projects integers to `bigint`, floats to
+`number`, bytes to `Uint8Array`, and maps to `Map`.
 
 ### Structured values and exact types
 
@@ -97,28 +116,29 @@ Use structured values when binary64, arbitrary-precision integers,
 byte strings, `undefined`, and scalar-keyed ordered maps must remain distinct:
 
 ```typescript
-import {
-  ByteString_Value,
-  Float_Value,
-  Integer_Value,
-  Map_Value,
-  UNDEFINED_VALUE,
-} from "@openkache/client/value-codec"
-
-await client.set_structured("session", {
+await client.set("session", {
   id: 9007199254740993n, // Exact integer; number would round.
   ratio: 1.25,
-  token: new ByteString_Value(Uint8Array.of(1, 2, 3)),
+  token: Uint8Array.of(1, 2, 3),
   metadata: undefined, // Preserved as Undefined.
-  attributes: new Map_Value([
+  attributes: new Map([
     ["region", "ap-northeast-2"],
     [42n, "integer-key"],
   ]),
 })
 
-const lossless = await client.get_structured("session")
-const native = await client.get_structured("session", "native")
+const native = await client.get("session")
 ```
+
+Use `Map` when a value needs non-text keys. The ordinary `get` result for this
+example is also a `Map`, with the nested `id` value returned as `bigint`.
+Because both a missing key and a root `Undefined` project to JavaScript
+`undefined`, use `get_structured` when those two states must be distinguished.
+
+`get_structured(key)` is an advanced lossless view of the same selector-1
+value. It returns model wrappers such as `Map_Value`, `Integer_Value`, and
+`Float_Value`; `get_structured(key, "native")` applies the same strict native
+projection as `get`.
 
 For local encoding or browser use, the codec subpath performs no I/O:
 
@@ -126,6 +146,7 @@ For local encoding or browser use, the codec subpath performs no I/O:
 import {
   decode_structured_value,
   encode_structured_value,
+  Float_Value,
   to_native,
 } from "@openkache/client/value-codec"
 
@@ -210,43 +231,10 @@ test("native projection rejects lossy Map key collisions", (): void => {
 the lossless wrapper classes. It rejects cycles, sparse arrays, unsupported
 native objects, non-scalar map keys, and duplicate map keys.
 
-### Compatibility envelope and codecs
-
-The compatibility `set` / `get` path is package-local. It stores a
-TypeScript-specific `{ encoding, type_name, payload }` metadata envelope, not
-the shared-core canonical JSON or structured-value format used by
-`set_json`, `set_structured`, or other OpenKache clients. Use it when an
-application must remain compatible with data already written by this package
-or must plug in its own object codec:
-
-- Built-in fallback: plain JSON values encode as the package-local `"json"`
-  envelope.
-- Custom codecs: objects matching `can_encode` store under the codec's stable
-  encoding name.
-- Cross-language reads: prefer `set_json` / `set_structured`; this path does
-  not interoperate with them.
-
-```typescript
-import type { Value_Codec } from "@openkache/client"
-
-const protobuf_codec: Value_Codec = {
-  encoding: "acme.protobuf",
-  can_encode: (value): boolean =>
-    typeof value === "object" &&
-    value !== null &&
-    "protobuf_type" in value,
-  encode: (value): { type_name: string; payload: Uint8Array } => {
-    // Call your schema-specific encoder here.
-    return { type_name: "acme.Profile", payload: Uint8Array.of(1) }
-  },
-  decode: (type_name, payload): object => {
-    if (type_name !== "acme.Profile") throw new Error("unsupported profile")
-    return { protobuf_type: "Profile", payload }
-  },
-}
-
-// Supply value_codecs: [protobuf_codec] when connecting.
-```
+The old package-local metadata-envelope path is not used by `set` or `get` and
+is not a cross-language compatibility contract. Applications that need a
+schema-bound format should encode it explicitly and use `set_raw`/`get_raw`
+until a dedicated shared payload profile is defined.
 
 ## Keys and exact item IDs
 
@@ -334,7 +322,7 @@ Structured-value errors expose these stable categories:
 
 ```typescript
 try {
-  await client.set_json("metrics", value)
+  await client.set("metrics", value)
 } catch (error) {
   if (error instanceof OpenKache_Unknown_Mutation_Error) {
     // Do not blindly retry a non-idempotent mutation.
@@ -358,23 +346,38 @@ try {
 | `reconnect` | `reconnect(): Promise<void>` | Replaces a failed connection without replaying operations |
 | `close` | `close(): Promise<void>` | Releases the connection; repeated awaits are safe; later operations reject |
 
+### Public types
+
+| Type | Purpose |
+|---|---|
+| `Client_Options` | TLS, transport, protection, compression, timeout, retry, and resource-budget settings |
+| `Client_Key` | Mapped key union: UTF-8 `string`, `Uint8Array`, safe integer `number`, or signed-i64 `bigint` |
+| `Native_Value` | Recursive native projection returned by `get`, including `bigint`, `Uint8Array`, arrays, and `Map` |
+| `Set_Options` | Conditional-write, TTL, expiration, and eviction settings |
+| `Set_Outcome` | `"created"`, `"replaced"`, or `"not_stored"` |
+| `Connection_State` | `"connected"`, `"reconnecting"`, `"disconnected"`, `"closed"`, or `"unknown"` |
+
 ### Mapped key operations
 
 All mapped methods accept `Client_Key`: UTF-8 `string`, `Uint8Array`, safe
 integer-valued `number`, or signed-i64 `bigint`.
 
+The first two rows are the primary API. The remaining rows are explicit
+advanced selectors and escape hatches; they do not change the `set` / `get`
+contract.
+
 | Method | Signature | Value contract |
 |---|---|---|
-| `get` | `get<Value = Json_Value>(key: Client_Key): Promise<Value \| undefined>` | Reads the package-local metadata envelope or registered custom codec |
-| `set` | `set<Value>(key: Client_Key, value: Value, options?: Set_Options): Promise<Set_Outcome>` | Encodes with the built-in envelope or first matching custom codec |
-| `get_json` | `get_json(key: Client_Key): Promise<Json_Value \| undefined>` | Reads shared-core canonical JSON |
-| `set_json` | `set_json(key: Client_Key, value: Json_Value, options?: Set_Options): Promise<Set_Outcome>` | Writes shared-core canonical JSON |
-| `get_structured` | `get_structured(key: Client_Key, representation?: "lossless" \| "native"): Promise<unknown \| undefined>` | Lossless decode returns model wrappers; native projection applies strict JavaScript mapping |
-| `set_structured` | `set_structured(key: Client_Key, value: unknown, options?: Set_Options): Promise<Set_Outcome>` | Encodes `StructuredValue-CBOR-v1` directly |
-| `get_raw` | `get_raw(key: Client_Key): Promise<Uint8Array \| undefined>` | Reads protected transport bytes exactly after core decompression/decryption |
-| `set_raw` | `set_raw(key: Client_Key, value: Uint8Array, options?: Set_Options): Promise<Set_Outcome>` | Stores exact application bytes |
-| `get_v0` | `get_v0(key: Client_Key): Promise<Uint8Array \| undefined>` | Reads a complete caller-owned version-0 envelope |
-| `set_v0` | `set_v0(key: Client_Key, value: Uint8Array, options?: Set_Options): Promise<Set_Outcome>` | Stores a version-0 envelope after leading-version and size checks |
+| `get` | `get<Value = Native_Value>(key: Client_Key): Promise<Value \| undefined>` | Reads selector-1 `StructuredValue-CBOR-v1` and returns the strict native JavaScript projection |
+| `set` | `set(key: Client_Key, value: unknown, options?: Set_Options): Promise<Set_Outcome>` | Writes selector-1 `StructuredValue-CBOR-v1` from the documented native value mapping |
+| `get_structured` | `get_structured(key: Client_Key, representation?: "lossless" \| "native"): Promise<unknown \| undefined>` | Advanced selector-1 read; lossless mode returns model wrappers |
+| `set_structured` | `set_structured(key: Client_Key, value: unknown, options?: Set_Options): Promise<Set_Outcome>` | Advanced selector-1 write from native/model values |
+| `get_json` | `get_json(key: Client_Key): Promise<Json_Value \| undefined>` | Advanced selector-0 canonical JSON compatibility read |
+| `set_json` | `set_json(key: Client_Key, value: Json_Value, options?: Set_Options): Promise<Set_Outcome>` | Advanced selector-0 canonical JSON compatibility write |
+| `get_raw` | `get_raw(key: Client_Key): Promise<Uint8Array \| undefined>` | Reads exact application bytes after core decompression/decryption |
+| `set_raw` | `set_raw(key: Client_Key, value: Uint8Array, options?: Set_Options): Promise<Set_Outcome>` | Stores application bytes as an opaque payload |
+| `get_v0` | `get_v0(key: Client_Key): Promise<Uint8Array \| undefined>` | Advanced caller-owned version-0 envelope read |
+| `set_v0` | `set_v0(key: Client_Key, value: Uint8Array, options?: Set_Options): Promise<Set_Outcome>` | Stores a caller-owned version-0 envelope after leading-version and size checks |
 | `delete` | `delete(key: Client_Key): Promise<boolean>` | Returns whether an item existed and was deleted |
 
 ### Raw exact-item operations
@@ -397,8 +400,6 @@ available from the main entry point:
 |---|---|---|
 | `Json_Value`, `Json_Object` | Type | Canonical JSON value model accepted by JSON helpers |
 | `assert_json_value` | Function | Narrows unknown data and rejects unsupported JSON constructs |
-| `Value_Codec`, `Encoded_Value`, `Value_Envelope` | Type | Compatibility-codec boundary and stored envelope components |
-| `Value_Codec_Registry` | Class | Selects codecs on writes and routes envelopes on reads |
 | `Structured_Value_Error` | Class | Local codec error with a stable `kind` |
 | `Value_Limits` | Type | Bounds for encode and decode budgets |
 | `Undefined_Value` through `Map_Value` | Class | Lossless model wrappers preserving exact type identity and order |
@@ -412,10 +413,9 @@ available from the main entry point:
 | `decode_native_value` | Function | Decodes payload bytes directly to native projection |
 | `to_plain_object` | Function | Converts a text-keyed map to a null-prototype object safely |
 
-`Encoded_Value`, `Json_Value`, `Structured_Value_Error_Kind`, and
-`Structured_Value` are also re-exported by the main entry point. Generated
-Smithy operation and limit names remain available from `@openkache/client`
-for protocol-level code.
+`Json_Value`, `Structured_Value_Error_Kind`, and `Structured_Value` are also
+re-exported by the main entry point. Generated Smithy operation and limit names
+remain available from `@openkache/client` for protocol-level code.
 
 ## Configuration
 
@@ -440,7 +440,6 @@ for protocol-level code.
   value-protection work.
 - `encryption` selects the shared core's `compact` or recommended `robust`
   authenticated-encryption profile.
-- `value_codecs` registers current package codecs.
 - `native_path` overrides Node-API adapter discovery for custom packaging.
 
 Defaults come from the generated Smithy contract: 256 request lanes, 5-second
@@ -454,7 +453,11 @@ unreachable.
 
 ## Runtime and compatibility
 
-Protocol limits and operation outcomes follow the
+`set` / `get` are the common selector-1 structured-value API. They are not
+backward-compatible with values written by the former TypeScript-only metadata
+envelope. Use the explicit `set_json` / `get_json`, `set_raw` / `get_raw`, or
+`set_v0` / `get_v0` helpers only when the stored value was written with that
+same profile. Protocol limits and operation outcomes follow the
 [wire protocol specification](../../protocol/SPEC.md); retry policy remains
 client-local.
 
