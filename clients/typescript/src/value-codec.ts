@@ -1,144 +1,7 @@
-/**
- * Runtime-neutral structured-value codec and JSON validation helpers.
- */
+/** Runtime-neutral StructuredValue-CBOR-v1 codec and lossless model. */
 
-const MAX_JSON_DEPTH = 128
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
-
-/**
- * JSON value accepted by the core-owned canonical JSON API.
- */
-export type Json_Value =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly Json_Value[]
-  | Json_Object
-
-/**
- * JSON object with string keys. The JSON helpers reject `undefined` properties.
- */
-export interface Json_Object {
-  readonly [key: string]: Json_Value
-}
-
-/**
- * Validates a value against the shared JSON value model.
- *
- * @param value - Candidate native value.
- * @throws {Error} When the value contains unsupported, cyclic, sparse, or
- * non-finite data.
- */
-export function assert_json_value(value: unknown): asserts value is Json_Value {
-  validate_json_value(value, "$", new WeakSet())
-}
-
-function validate_json_value(
-  value: unknown,
-  path: string,
-  ancestors: WeakSet<object>,
-  depth = 0,
-): void {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new Error(`${path} must contain a finite JSON number`)
-    }
-    return
-  }
-  if (Array.isArray(value)) {
-    if (depth >= MAX_JSON_DEPTH) {
-      throw new Error(`${path} exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}`)
-    }
-    validate_json_container(value, path, ancestors, (): void => {
-      for (let index = 0; index < value.length; index += 1) {
-        if (!(index in value)) {
-          throw new Error(`${path}[${index}] must not be a sparse array entry`)
-        }
-        validate_json_value(value[index], `${path}[${index}]`, ancestors, depth + 1)
-      }
-      for (const key of Object.keys(value)) {
-        if (
-          !/^(?:0|[1-9][0-9]*)$/.test(key) ||
-          Number(key) >= value.length
-        ) {
-          throw new Error(`${path} must not contain enumerable property ${JSON.stringify(key)}`)
-        }
-      }
-      for (const symbol of Object.getOwnPropertySymbols(value)) {
-        if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
-          throw new Error(`${path} must not contain enumerable symbol properties`)
-        }
-      }
-    })
-    return
-  }
-  if (is_regular_object(value)) {
-    if (depth >= MAX_JSON_DEPTH) {
-      throw new Error(`${path} exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}`)
-    }
-    validate_json_container(value, path, ancestors, (): void => {
-      for (const [key, property_value] of Object.entries(value)) {
-        if (property_value === undefined) {
-          throw new Error(`${property_path(path, key)} contains unsupported JSON value undefined`)
-        }
-        validate_json_value(
-          property_value,
-          property_path(path, key),
-          ancestors,
-          depth + 1,
-        )
-      }
-      for (const symbol of Object.getOwnPropertySymbols(value)) {
-        if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
-          throw new Error(`${path} must not contain enumerable symbol properties`)
-        }
-      }
-    })
-    return
-  }
-  if (typeof value === "undefined") {
-    throw new Error(`${path} contains unsupported JSON value undefined`)
-  }
-  throw new Error(`${path} contains unsupported JSON value ${describe_value(value)}`)
-}
-
-function validate_json_container(
-  value: object,
-  path: string,
-  ancestors: WeakSet<object>,
-  validate_children: () => void,
-): void {
-  if (ancestors.has(value)) {
-    throw new Error(`${path} contains a cyclic reference`)
-  }
-  ancestors.add(value)
-  try {
-    validate_children()
-  } finally {
-    ancestors.delete(value)
-  }
-}
-
-function is_regular_object(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function property_path(path: string, key: string): string {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)
-    ? `${path}.${key}`
-    : `${path}[${JSON.stringify(key)}]`
-}
 
 function describe_value(value: unknown): string {
   if (typeof value === "bigint") return "bigint"
@@ -146,6 +9,12 @@ function describe_value(value: unknown): string {
   if (typeof value === "function") return "function"
   if (typeof value === "symbol") return "symbol"
   return Object.prototype.toString.call(value)
+}
+
+function is_regular_object(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 // ---------------------------------------------------------------------------
@@ -632,14 +501,16 @@ function append_head(
 function encode_integer(value: bigint, output: number[], budget: Required<Value_Limits>): void {
   const negative = value < 0n
   const transformed = negative ? -value - 1n : value
+  const magnitude_length =
+    transformed === 0n ? 0 : Math.ceil(transformed.toString(2).length / 8)
+  if (magnitude_length > budget.max_integer_bytes) {
+    resource("integer bytes", budget.max_integer_bytes, magnitude_length)
+  }
   if (transformed <= 0xffff_ffff_ffff_ffffn) {
     append_head(negative ? 1 : 0, transformed, output, budget)
     return
   }
-  const magnitude = bigint_bytes(transformed, Math.ceil(transformed.toString(2).length / 8))
-  if (magnitude.length > budget.max_integer_bytes) {
-    resource("integer bytes", budget.max_integer_bytes, magnitude.length)
-  }
+  const magnitude = bigint_bytes(transformed, magnitude_length)
   append_head(6, negative ? 3n : 2n, output, budget)
   append_head(2, BigInt(magnitude.length), output, budget)
   append(output, magnitude, budget)
@@ -909,7 +780,11 @@ function assert_valid_unicode_string(value: string): void {
     const code_unit = value.charCodeAt(index)
     if (code_unit >= 0xd800 && code_unit <= 0xdbff) {
       const next_code_unit = value.charCodeAt(index + 1)
-      if (next_code_unit < 0xdc00 || next_code_unit > 0xdfff) {
+      if (
+        Number.isNaN(next_code_unit) ||
+        next_code_unit < 0xdc00 ||
+        next_code_unit > 0xdfff
+      ) {
         throw new Structured_Value_Error("text contains unpaired surrogates", "invalid_utf8")
       }
       index += 1
