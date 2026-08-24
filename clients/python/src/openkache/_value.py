@@ -598,6 +598,16 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
             if magnitude[0] == 0:
                 raise StructuredValueError("bignum magnitude is not minimal", ValueErrorKind.INVALID_INTEGER)
             number = int.from_bytes(magnitude, "big")
+            model_magnitude = number + 1 if tag == 3 else number
+            model_magnitude_bytes = max(
+                1, (model_magnitude.bit_length() + 7) // 8
+            )
+            if model_magnitude_bytes > budget.max_integer_bytes:
+                _resource(
+                    "integer bytes",
+                    budget.max_integer_bytes,
+                    model_magnitude_bytes,
+                )
             value = IntegerValue(number if tag == 2 else -number - 1)
             accept(value)
         elif major == 7:
