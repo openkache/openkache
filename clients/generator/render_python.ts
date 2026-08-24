@@ -120,6 +120,10 @@ export function render_python_contract(contract: Client_Contract): string {
   const descriptor_fields = contract.ffi.namespace_descriptor_fields
   const version_bytes = encode_vu128(value.version)
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  const gate0_item_id_root = bytes_from_hex(
+    defaults.gate0_item_id_root_key_hex,
+    "Gate 0 Item-ID root",
+  )
   const ffi_operations = contract.ffi.operations
     .map(
       (entry) =>
@@ -273,6 +277,12 @@ SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX = ${defaults.zstandard_level_max}
 SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(defaults.server_name)}
 SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(defaults.certificate_pem_type)}
 SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value}
+SMITHY_CLIENT_GATE0_ALPN_VERSION = ${defaults.gate0_alpn_version}
+SMITHY_CLIENT_GATE0_COMPRESSION = ${defaults.gate0_compression}
+SMITHY_CLIENT_GATE0_ENCRYPTION = ${defaults.gate0_encryption}
+SMITHY_CLIENT_GATE0_ITEM_ID_ROOT = bytes([${gate0_item_id_root.join(", ")}])
+SMITHY_CLIENT_GATE0_NAMESPACE_ID = ${defaults.gate0_namespace_id}
+SMITHY_CLIENT_GATE0_VALUE_SELECTOR = ${defaults.gate0_value_selector}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
 ${ffi_operations}
 ${ffi_result_kinds}

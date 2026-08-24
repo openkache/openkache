@@ -72,6 +72,12 @@ export interface Value_Envelope_Contract {
 /** Defaults shared by the Rust client core and its native language adapters. */
 export interface Client_Defaults_Contract {
   readonly connect_timeout_milliseconds: number
+  readonly gate0_alpn_version: number
+  readonly gate0_compression: number
+  readonly gate0_encryption: number
+  readonly gate0_item_id_root_key_hex: string
+  readonly gate0_namespace_id: number
+  readonly gate0_value_selector: number
   readonly max_in_flight: number
   readonly request_timeout_milliseconds: number
   readonly retry_max_attempts: number
@@ -1578,6 +1584,44 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
     ),
+    gate0_alpn_version: integer_member(
+      contract,
+      "gate0AlpnVersion",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    gate0_compression: integer_member(
+      contract,
+      "gate0Compression",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    gate0_encryption: integer_member(
+      contract,
+      "gate0Encryption",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    gate0_item_id_root_key_hex: string_member(
+      contract,
+      "gate0ItemIdRootKeyHex",
+      CLIENT_DEFAULTS_TRAIT_ID,
+    ),
+    gate0_namespace_id: integer_member(
+      contract,
+      "gate0NamespaceId",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    gate0_value_selector: integer_member(
+      contract,
+      "gate0ValueSelector",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+      0xff,
+    ),
     request_timeout_milliseconds: integer_member(
       contract,
       "requestTimeoutMilliseconds",
@@ -1633,6 +1677,11 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
       1,
     ),
   } satisfies Client_Defaults_Contract
+  if (!/^[0-9a-f]{64}$/i.test(defaults.gate0_item_id_root_key_hex)) {
+    throw new Error(
+      `${CLIENT_DEFAULTS_TRAIT_ID}.gate0ItemIdRootKeyHex must contain exactly 32 hexadecimal bytes`,
+    )
+  }
   if (defaults.zstandard_level_min > defaults.zstandard_level_max) {
     throw new Error(
       `${CLIENT_DEFAULTS_TRAIT_ID}.zstandardLevelMin must not exceed zstandardLevelMax`,

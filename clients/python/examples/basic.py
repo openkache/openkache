@@ -1,40 +1,37 @@
-"""Minimal OpenKache client example.
+"""Development-only OpenKache example.
 
-Set ``OPENKACHE_ADDRESS`` to the server's ``host:port`` endpoint and
-``OPENKACHE_CA_CERT`` to the trusted CA certificate before running:
+This example deliberately uses TLS 1.3 with server verification disabled,
+because it targets a local development server.  Do not copy this trust policy
+to production deployments.
 
-    python examples/basic.py
+Run from this package directory:
+
+    OPENKACHE_ADDRESS=127.0.0.1:4433 python examples/basic.py
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
-from openkache import Client, SetOptions
+from openkache import Client, Found, Missing
 
 
 def main() -> None:
     address = os.environ.get("OPENKACHE_ADDRESS", "127.0.0.1:4433")
-    certificate = os.environ.get("OPENKACHE_CA_CERT")
-    if certificate is None:
-        raise SystemExit(
-            "Set OPENKACHE_CA_CERT to the PEM/DER CA certificate trusted by "
-            "the OpenKache server."
-        )
-
-    with Client.connect(
-        address,
-        certificate=Path(certificate),
-    ) as client:
+    client = Client.connect(address)
+    try:
         outcome = client.set(
             "example:profile",
-            {"name": "OpenKache", "visits": 1},
-            SetOptions(condition="if_absent", ttl_ms=300_000),
+            {"name": "OpenKache", "visits": 1, "development_only": True},
         )
-        profile = client.get("example:profile")
+        result = client.get("example:profile")
         print(f"SET outcome: {outcome.value}")
-        print(f"GET value: {profile!r}")
+        if isinstance(result, Found):
+            print(f"GET value: {result.value!r}")
+        elif isinstance(result, Missing):
+            print("GET value: missing")
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

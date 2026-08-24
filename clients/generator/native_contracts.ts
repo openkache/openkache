@@ -395,6 +395,10 @@ export function render_rust_client(contract: Client_Contract): string {
     envelope.magic_and_version_hex,
     "value envelope magic",
   )
+  const gate0_item_id_root = bytes_from_hex(
+    defaults.gate0_item_id_root_key_hex,
+    "Gate 0 Item-ID root",
+  )
   const ffi = contract.ffi
   const descriptor_layout = ffi.namespace_descriptor_layout
   const api_enum_constants = rust_api_enum_constants(contract)
@@ -593,6 +597,18 @@ pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.serv
 pub const CLIENT_CERTIFICATE_PEM_TYPE: &str = ${rust_string_literal(defaults.certificate_pem_type)};
 /// Minimum positive setting value when zero selects a default.
 pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.minimum_positive_value)};
+/// Gate 0's fixed ALPN version.
+pub const CLIENT_GATE0_ALPN_VERSION: u32 = ${formatted_decimal(defaults.gate0_alpn_version)};
+/// Gate 0's fixed value-compression selector.
+pub const CLIENT_GATE0_COMPRESSION: u8 = ${formatted_byte(defaults.gate0_compression)};
+/// Gate 0's fixed value-encryption selector.
+pub const CLIENT_GATE0_ENCRYPTION: u8 = ${formatted_byte(defaults.gate0_encryption)};
+/// Gate 0's fixed public Item-ID root.
+pub const CLIENT_GATE0_ITEM_ID_ROOT: [u8; ${gate0_item_id_root.length}] = ${rust_byte_array_literal(gate0_item_id_root)};
+/// Gate 0's fixed server-assigned namespace ID.
+pub const CLIENT_GATE0_NAMESPACE_ID: u64 = ${formatted_decimal(defaults.gate0_namespace_id)};
+/// Gate 0's fixed value-format selector byte.
+pub const CLIENT_GATE0_VALUE_SELECTOR: u8 = ${formatted_byte(defaults.gate0_value_selector)};
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};

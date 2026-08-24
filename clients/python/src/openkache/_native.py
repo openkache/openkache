@@ -32,6 +32,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_ERROR,
     SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_SET_CONDITION_ANY,
+    SMITHY_OPCODE_DELETE,
 )
 from ._generated.smithy_native_abi import (
     SmithyNativeConnectOptions,
@@ -166,6 +167,66 @@ class _NativeApi:
             "openkache_client_connect_transport",
             (ctypes.POINTER(SmithyNativeConnectOptions), ctypes.c_uint32),
             _RESULT_POINTER,
+        )
+        # The maintained facade uses a private adapter entry point that owns
+        # the fixed Gate 0 profile. Keep the generated shared-FFI bindings
+        # below for package compatibility, but never route the facade through
+        # their caller-configurable defaults.
+        self.gate0_connect = self._optional_function(
+            "openkache_python_connect",
+            (_U8_POINTER, ctypes.c_size_t),
+            _RESULT_POINTER,
+        )
+        self.gate0_get = self._optional_function(
+            "openkache_python_get",
+            (_CLIENT_POINTER, _U8_POINTER, ctypes.c_size_t),
+            _RESULT_POINTER,
+        )
+        self.gate0_set = self._optional_function(
+            "openkache_python_set",
+            (
+                _CLIENT_POINTER,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
+            ),
+            _RESULT_POINTER,
+        )
+        self.gate0_delete = self._optional_function(
+            "openkache_python_delete",
+            (_CLIENT_POINTER, _U8_POINTER, ctypes.c_size_t),
+            _RESULT_POINTER,
+        )
+        self.gate0_result_kind = self._optional_function(
+            "openkache_python_result_kind",
+            (_RESULT_POINTER,),
+            ctypes.c_uint32,
+        )
+        self.gate0_result_data = self._optional_function(
+            "openkache_python_result_data",
+            (_RESULT_POINTER,),
+            _U8_POINTER,
+        )
+        self.gate0_result_length = self._optional_function(
+            "openkache_python_result_data_length",
+            (_RESULT_POINTER,),
+            ctypes.c_size_t,
+        )
+        self.gate0_result_take_client = self._optional_function(
+            "openkache_python_result_take_client",
+            (_RESULT_POINTER,),
+            _CLIENT_POINTER,
+        )
+        self.gate0_result_free = self._optional_function(
+            "openkache_python_result_free",
+            (_RESULT_POINTER,),
+            None,
+        )
+        self.gate0_client_free = self._optional_function(
+            "openkache_python_client_free",
+            (_CLIENT_POINTER,),
+            None,
         )
         self.execute = self._function(
             "openkache_client_execute",
@@ -402,6 +463,39 @@ class _NativeApi:
             )
         return kind, payload, client
 
+    def read_gate0_result(
+        self, result: _RESULT_POINTER, *, take_client: bool = False
+    ) -> tuple[int, bytes, _CLIENT_POINTER | None]:
+        if (
+            not result
+            or self.gate0_result_kind is None
+            or self.gate0_result_data is None
+            or self.gate0_result_length is None
+            or self.gate0_result_free is None
+        ):
+            raise NativeError("native client is missing the Gate 0 result ABI")
+        try:
+            kind = int(self.gate0_result_kind(result))
+            length = int(self.gate0_result_length(result))
+            pointer = self.gate0_result_data(result)
+            if length and not pointer:
+                raise NativeError("native client returned a null payload pointer")
+            payload = b"" if length == 0 else ctypes.string_at(pointer, length)
+            client = (
+                self.gate0_result_take_client(result)
+                if take_client and self.gate0_result_take_client is not None
+                else None
+            )
+        finally:
+            self.gate0_result_free(result)
+        if kind in (SMITHY_FFI_RESULT_ERROR, SMITHY_FFI_RESULT_UNKNOWN_MUTATION):
+            message = payload.decode("utf-8", errors="replace")
+            raise NativeError(
+                message or "native client operation failed",
+                result_kind=kind,
+            )
+        return kind, payload, client
+
 
 class NativeClient:
     """Thread-safe handle for one core client worker."""
@@ -410,9 +504,12 @@ class NativeClient:
         self,
         api: _NativeApi,
         handle: _CLIENT_POINTER,
+        *,
+        gate0: bool = False,
     ) -> None:
         self._api = api
         self._handle = handle
+        self._gate0 = gate0
         self._lifecycle = Condition()
         self._active_calls = 0
 
@@ -496,6 +593,44 @@ class NativeClient:
         if kind != SMITHY_FFI_RESULT_CONNECTED or not handle:
             raise NativeError("native client did not return a connected handle")
         return cls(api, handle)
+
+    @classmethod
+    def connect_gate0(
+        cls,
+        *,
+        address: bytes,
+        native_path: str | os.PathLike[str] | None = None,
+    ) -> NativeClient:
+        """Connect through the fixed private Gate 0 profile adapter."""
+
+        api = _NativeApi(native_path)
+        if any(
+            function is None
+            for function in (
+                api.gate0_connect,
+                api.gate0_get,
+                api.gate0_set,
+                api.gate0_delete,
+                api.gate0_result_kind,
+                api.gate0_result_data,
+                api.gate0_result_length,
+                api.gate0_result_take_client,
+                api.gate0_result_free,
+                api.gate0_client_free,
+            )
+        ):
+            raise NativeError(
+                "native client does not provide the complete fixed Gate 0 profile adapter"
+            )
+        address_buffer, address_pointer = _as_native_buffer(address)
+        try:
+            result = api.gate0_connect(address_pointer, len(address))
+            kind, _, handle = api.read_gate0_result(result, take_client=True)
+        finally:
+            del address_buffer
+        if kind != SMITHY_FFI_RESULT_CONNECTED or not handle:
+            raise NativeError("native client did not return a connected Gate 0 handle")
+        return cls(api, handle, gate0=True)
 
     def execute(
         self,
@@ -582,8 +717,16 @@ class NativeClient:
             handle = self._handle
             self._active_calls += 1
         try:
-            if self._api.get_structured is not None:
+            if self._gate0:
+                if self._api.gate0_get is None:
+                    raise NativeError(
+                        "native client is missing the Gate 0 StructuredValue GET ABI"
+                    )
+                result = self._api.gate0_get(handle, key_pointer, len(key))
+                kind, payload, _ = self._api.read_gate0_result(result)
+            elif self._api.get_structured is not None:
                 result = self._api.get_structured(handle, key_pointer, len(key))
+                kind, payload, _ = self._api.read_result(result)
             else:
                 function = self._api.execute_unary
                 if function is None:
@@ -591,7 +734,7 @@ class NativeClient:
                         "native client does not support the StructuredValue-CBOR-v1 ABI"
                     )
                 result = function(handle, 1, key_pointer, len(key))
-            kind, payload, _ = self._api.read_result(result)
+                kind, payload, _ = self._api.read_result(result)
             return kind, payload
         finally:
             del key_buffer
@@ -616,7 +759,20 @@ class NativeClient:
             handle = self._handle
             self._active_calls += 1
         try:
-            if self._api.set_structured is not None:
+            if self._gate0:
+                if self._api.gate0_set is None:
+                    raise NativeError(
+                        "native client is missing the Gate 0 StructuredValue SET ABI"
+                    )
+                result = self._api.gate0_set(
+                    handle,
+                    key_pointer,
+                    len(key),
+                    value_pointer,
+                    len(value),
+                )
+                kind, payload, _ = self._api.read_gate0_result(result)
+            elif self._api.set_structured is not None:
                 result = self._api.set_structured(
                     handle,
                     key_pointer,
@@ -626,6 +782,7 @@ class NativeClient:
                     set_flags,
                     ttl_ms,
                 )
+                kind, payload, _ = self._api.read_result(result)
             else:
                 function = self._api.execute_fields
                 if function is None:
@@ -640,7 +797,7 @@ class NativeClient:
                 fields[1].length = len(value)
                 fields[1].present = 1
                 result = function(handle, 2, fields, 2)
-            kind, payload, _ = self._api.read_result(result)
+                kind, payload, _ = self._api.read_result(result)
             return kind, payload
         finally:
             del key_buffer, value_buffer
@@ -913,17 +1070,25 @@ class NativeClient:
             handle = self._handle
             self._active_calls += 1
         try:
-            result = function(
-                handle,
-                operation,
-                key_pointer,
-                len(key),
-                value_pointer,
-                len(value),
-                set_flags,
-                ttl_ms,
-            )
-            kind, payload, _ = self._api.read_result(result)
+            if self._gate0:
+                if operation != SMITHY_OPCODE_DELETE or self._api.gate0_delete is None:
+                    raise NativeError(
+                        "native client is missing the Gate 0 DELETE ABI"
+                    )
+                result = self._api.gate0_delete(handle, key_pointer, len(key))
+                kind, payload, _ = self._api.read_gate0_result(result)
+            else:
+                result = function(
+                    handle,
+                    operation,
+                    key_pointer,
+                    len(key),
+                    value_pointer,
+                    len(value),
+                    set_flags,
+                    ttl_ms,
+                )
+                kind, payload, _ = self._api.read_result(result)
             return kind, payload
         finally:
             with self._lifecycle:
@@ -937,7 +1102,10 @@ class NativeClient:
             while self._active_calls:
                 self._lifecycle.wait()
         if handle:
-            self._api.client_free(handle)
+            if self._gate0:
+                self._api.gate0_client_free(handle)
+            else:
+                self._api.client_free(handle)
 
     def __del__(self) -> None:
         # Explicit ``close`` remains the deterministic lifecycle API, but a
