@@ -1185,19 +1185,19 @@ public actor OpenKacheClient {
     }
 
     /// Returns the server's JSON statistics payload.
-    public func stats() async throws -> String {
+    public func experimentalStats() async throws -> String {
         try await performAsync { handle in
             let result = try await NativeBridge.executeTypedAsync(
                 handle,
-                operation: UInt32(Smithy_Opcode.stats.rawValue),
+                operation: UInt32(Smithy_Opcode.experimentalStats.rawValue),
                 keySpec: Smithy_Native_Contract.keySpecBytes
             )
             return try consumeResult(result) { kind, payload in
                 guard kind == Smithy_Native_Contract.resultValue else {
-                    throw OpenKacheError("unexpected STATS result")
+                    throw OpenKacheError("unexpected EXPERIMENTAL_STATS result")
                 }
                 guard let text = String(data: payload, encoding: .utf8) else {
-                    throw OpenKacheError("STATS response is not valid UTF-8")
+                    throw OpenKacheError("EXPERIMENTAL_STATS response is not valid UTF-8")
                 }
                 return text
             }
@@ -1205,16 +1205,16 @@ public actor OpenKacheClient {
     }
 
     /// Waits for the server durability barrier.
-    public func sync() async throws {
+    public func experimentalSync() async throws {
         try await performAsync { handle in
             let result = try await NativeBridge.executeTypedAsync(
                 handle,
-                operation: UInt32(Smithy_Opcode.sync.rawValue),
+                operation: UInt32(Smithy_Opcode.experimentalSync.rawValue),
                 keySpec: Smithy_Native_Contract.keySpecBytes
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
-                    throw OpenKacheError("unexpected SYNC result")
+                    throw OpenKacheError("unexpected EXPERIMENTAL_SYNC result")
                 }
             }
         }
@@ -1393,19 +1393,19 @@ public actor OpenKacheRawClient {
     }
 
     /// Returns the server's JSON statistics payload.
-    public func stats() async throws -> String {
+    public func experimentalStats() async throws -> String {
         try await performAsync { handle in
             let result = try await NativeBridge.executeTypedAsync(
                 handle,
-                operation: UInt32(Smithy_Opcode.stats.rawValue),
+                operation: UInt32(Smithy_Opcode.experimentalStats.rawValue),
                 keySpec: Smithy_Native_Contract.keySpecBytes
             )
             return try consumeResult(result) { kind, payload in
                 guard kind == Smithy_Native_Contract.resultValue else {
-                    throw OpenKacheError("unexpected raw STATS result")
+                    throw OpenKacheError("unexpected raw EXPERIMENTAL_STATS result")
                 }
                 guard let text = String(data: payload, encoding: .utf8) else {
-                    throw OpenKacheError("raw STATS response is not valid UTF-8")
+                    throw OpenKacheError("raw EXPERIMENTAL_STATS response is not valid UTF-8")
                 }
                 return text
             }
@@ -1413,16 +1413,16 @@ public actor OpenKacheRawClient {
     }
 
     /// Waits for the server durability barrier.
-    public func sync() async throws {
+    public func experimentalSync() async throws {
         try await performAsync { handle in
             let result = try await NativeBridge.executeTypedAsync(
                 handle,
-                operation: UInt32(Smithy_Opcode.sync.rawValue),
+                operation: UInt32(Smithy_Opcode.experimentalSync.rawValue),
                 keySpec: Smithy_Native_Contract.keySpecBytes
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
-                    throw OpenKacheError("unexpected raw SYNC result")
+                    throw OpenKacheError("unexpected raw EXPERIMENTAL_SYNC result")
                 }
             }
         }
@@ -1548,40 +1548,40 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
         return Smithy_Delete_Output(deleted: deleted)
     }
 
-    public func stats(_ input: Smithy_Stats_Input) async throws -> Smithy_Stats_Output {
+    public func experimentalStats(_ input: Smithy_Experimental_Stats_Input) async throws -> Smithy_Experimental_Stats_Output {
         let json = try await perform { handle in
             let result = try NativeBridge.executeScoped(
                 handle,
-                operation: UInt32(Smithy_Opcode.stats.rawValue),
+                operation: UInt32(Smithy_Opcode.experimentalStats.rawValue),
                 namespaceID: input.namespaceId
             )
             return try consumeResult(result) { kind, payload in
                 guard kind == Smithy_Native_Contract.resultValue else {
-                    throw OpenKacheError("unexpected STATS result")
+                    throw OpenKacheError("unexpected EXPERIMENTAL_STATS result")
                 }
                 guard let text = String(data: payload, encoding: .utf8) else {
-                    throw OpenKacheError("STATS response is not valid UTF-8")
+                    throw OpenKacheError("EXPERIMENTAL_STATS response is not valid UTF-8")
                 }
                 return text
             }
         }
-        return Smithy_Stats_Output(json: json)
+        return Smithy_Experimental_Stats_Output(json: json)
     }
 
-    public func sync(_ input: Smithy_Sync_Input) async throws -> Smithy_Sync_Output {
+    public func experimentalSync(_ input: Smithy_Experimental_Sync_Input) async throws -> Smithy_Experimental_Sync_Output {
         try await perform { handle in
             let result = try NativeBridge.executeScoped(
                 handle,
-                operation: UInt32(Smithy_Opcode.sync.rawValue),
+                operation: UInt32(Smithy_Opcode.experimentalSync.rawValue),
                 namespaceID: input.namespaceId
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
-                    throw OpenKacheError("unexpected SYNC result")
+                    throw OpenKacheError("unexpected EXPERIMENTAL_SYNC result")
                 }
             }
         }
-        return Smithy_Sync_Output()
+        return Smithy_Experimental_Sync_Output()
     }
 
     public func namespaceOpen(

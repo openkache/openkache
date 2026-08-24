@@ -71,7 +71,7 @@ The documents above are target drafts. Package READMEs describe current
 behavior; no package claims conformance until the generated contract and core
 complete the migration.
 
-`STATS` and `SYNC` remain transitional experimental maintenance operations and
+`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` remain transitional experimental maintenance operations and
 are disabled by default. A server exposes them only when configured with
 `enable_experimental_api = true` and
 `experimental_api_revision = "draft-2026-08-19.4"`. Clients and servers must

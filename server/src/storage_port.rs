@@ -213,7 +213,7 @@ impl StorageAdministrationPort for StoragePort {
     fn stats(&self, operation: Operation) -> impl Future<Output = StorageResult<Vec<String>>> + '_ {
         async move {
             self.backend
-                .stats(operation)
+                .experimental_stats(operation)
                 .await
                 .map_err(StorageError::from)
         }

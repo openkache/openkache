@@ -101,8 +101,10 @@ pub enum CliCommand {
     Get { key: String },
     Set { key: String, value: String },
     Delete { key: String },
-    Sync,
-    Stats,
+    #[command(name = "experimental_sync", visible_alias = "experimental-sync")]
+    ExperimentalSync,
+    #[command(name = "experimental_stats", visible_alias = "experimental-stats")]
+    ExperimentalStats,
 }
 
 pub(crate) fn parse_cpu_ids(value: &str) -> Result<Vec<usize>> {
@@ -124,8 +126,8 @@ pub enum Command {
     Get(Vec<u8>),
     Set(Vec<u8>, Vec<u8>),
     Delete(Vec<u8>),
-    Sync,
-    Stats,
+    ExperimentalSync,
+    ExperimentalStats,
 }
 
 impl AppConfig {
@@ -227,10 +229,10 @@ impl AppConfig {
                 Command::Set(key.into_bytes(), value.into_bytes())
             }
             Some(CliCommand::Delete { key }) => Command::Delete(key.into_bytes()),
-            Some(CliCommand::Sync) => Command::Sync,
-            Some(CliCommand::Stats) => Command::Stats,
+            Some(CliCommand::ExperimentalSync) => Command::ExperimentalSync,
+            Some(CliCommand::ExperimentalStats) => Command::ExperimentalStats,
             None => return Err(KvError::Usage(
-                "usage: kvkache [options] <get KEY | set KEY VALUE | delete KEY | sync | stats>"
+                "usage: kvkache [options] <get KEY | set KEY VALUE | delete KEY | experimental_sync | experimental_stats>"
                     .into(),
             )),
         };

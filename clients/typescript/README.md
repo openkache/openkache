@@ -88,7 +88,7 @@ const profile = await client.get<{
   active: boolean
 }>("profile")
 
-const stats = await client.stats()
+const stats = await client.experimental_stats()
 console.log(stats.storage, stats.workers)
 
 await client.set_raw("opaque", Uint8Array.of(1, 2, 3))
@@ -96,7 +96,7 @@ const bytes = await client.get_raw("opaque")
 await client.close()
 ```
 
-`stats` is a transitional experimental operation and is disabled by default.
+`experimental_stats` is a transitional experimental operation and is disabled by default.
 Enable `enable_experimental_api = true` explicitly and coordinate exact
 revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling it;

@@ -490,15 +490,15 @@ public:
     }
 
     /// Returns the server's JSON statistics document.
-    std::string stats() const {
+    std::string experimental_stats() const {
         const auto result = execute(
-            OPENKACHE_SMITHY_OPCODE_STATS,
+            OPENKACHE_SMITHY_OPCODE_EXPERIMENTAL_STATS,
             OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
             {},
             {},
             Set_Options{});
         if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_VALUE) {
-            throw Error("OpenKache returned an invalid STATS outcome");
+            throw Error("OpenKache returned an invalid EXPERIMENTAL_STATS outcome");
         }
         if (result.payload.empty()) {
             return {};
@@ -509,15 +509,15 @@ public:
     }
 
     /// Waits for the server durability barrier.
-    void sync() const {
+    void experimental_sync() const {
         const auto result = execute(
-            OPENKACHE_SMITHY_OPCODE_SYNC,
+            OPENKACHE_SMITHY_OPCODE_EXPERIMENTAL_SYNC,
             OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
             {},
             {},
             Set_Options{});
         if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
-            throw Error("OpenKache returned an invalid SYNC outcome");
+            throw Error("OpenKache returned an invalid EXPERIMENTAL_SYNC outcome");
         }
     }
 

@@ -1,6 +1,6 @@
 //! Main entry point for the kvkache-v1 cache server.
 //! Parses CLI arguments, starts the multi-threaded cache, and dispatches
-//! commands (get, set, delete, sync, stats) to the worker threads.
+//! commands (get, set, delete, experimental_sync, experimental_stats) to the worker threads.
 
 use std::error::Error;
 
@@ -56,11 +56,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
                 );
             }
-            Command::Sync => {
+            Command::ExperimentalSync => {
                 cache.sync().await?;
                 println!("Synced");
             }
-            Command::Stats => {
+            Command::ExperimentalStats => {
                 for stats in cache.stats().await? {
                     println!("{stats}");
                 }

@@ -214,12 +214,12 @@ fn decode_namespace(
     })
 }
 
-pub(super) fn decode_stats(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
-    decode_namespace(input, request_fields::op_stats::NAMESPACE_ID)
+pub(super) fn decode_experimental_stats(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
+    decode_namespace(input, request_fields::op_experimental_stats::NAMESPACE_ID)
 }
 
-pub(super) fn decode_sync(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
-    decode_namespace(input, request_fields::op_sync::NAMESPACE_ID)
+pub(super) fn decode_experimental_sync(input: &OperationInputView) -> Result<NamespaceInput, &'static [u8]> {
+    decode_namespace(input, request_fields::op_experimental_sync::NAMESPACE_ID)
 }
 
 pub(super) fn decode_namespace_open(

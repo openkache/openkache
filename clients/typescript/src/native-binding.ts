@@ -141,8 +141,8 @@ export interface Native_Client {
     ttl_ms?: bigint,
   ): Promise<Smithy_Set_Outcome>
   delete(key: Uint8Array): Promise<boolean>
-  stats(): Promise<string>
-  sync(): Promise<void>
+  experimental_stats(): Promise<string>
+  experimental_sync(): Promise<void>
   close(): Promise<void>
   close_now(): void
   connection_state(): string
@@ -185,8 +185,8 @@ export interface Native_Client {
     policy: Native_Namespace_Policy,
   ): Promise<Native_Namespace_Descriptor>
   namespace_delete(namespace_id: bigint, expected_revision: bigint): Promise<void>
-  stats_in_namespace(namespace_id: bigint): Promise<string>
-  sync_in_namespace(namespace_id: bigint): Promise<void>
+  experimental_stats_in_namespace(namespace_id: bigint): Promise<string>
+  experimental_sync_in_namespace(namespace_id: bigint): Promise<void>
 }
 
 interface Native_Module {

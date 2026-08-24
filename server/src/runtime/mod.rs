@@ -46,8 +46,8 @@ pub(crate) use crate::storage_backend::{
 
 #[derive(Debug)]
 pub(in crate::runtime) enum WorkerControlResponse {
-    Stats(String),
-    Synced,
+    ExperimentalStats(String),
+    ExperimentalSynced,
 }
 
 pub(in crate::runtime) type WorkerResponse =
@@ -656,11 +656,11 @@ impl ThreadedKvkache {
         for thread_id in 0..self.workers.len() {
             match self
                 .request(thread_id, operation, requester, |response| {
-                    WorkerRequest::Control(WorkerControlRequest::Stats { response })
+                    WorkerRequest::Control(WorkerControlRequest::ExperimentalStats { response })
                 })
                 .await?
             {
-                WorkerResponse::Control(WorkerControlResponse::Stats(worker_stats)) => {
+                WorkerResponse::Control(WorkerControlResponse::ExperimentalStats(worker_stats)) => {
                     stats.push(format!("thread={thread_id} {worker_stats}"));
                 }
                 response => {
@@ -686,11 +686,11 @@ impl ThreadedKvkache {
         for thread_id in 0..self.workers.len() {
             match self
                 .request(thread_id, operation, requester, |response| {
-                    WorkerRequest::Control(WorkerControlRequest::Sync { response })
+                    WorkerRequest::Control(WorkerControlRequest::ExperimentalSync { response })
                 })
                 .await?
             {
-                WorkerResponse::Control(WorkerControlResponse::Synced) => {}
+                WorkerResponse::Control(WorkerControlResponse::ExperimentalSynced) => {}
                 response => {
                     return Err(KvError::Worker(format!(
                         "unexpected sync response: {response:?}"
@@ -720,11 +720,11 @@ impl ThreadedKvkache {
             }
             match self
                 .request(worker, operation, requester, |response| {
-                    WorkerRequest::Control(WorkerControlRequest::Sync { response })
+                    WorkerRequest::Control(WorkerControlRequest::ExperimentalSync { response })
                 })
                 .await?
             {
-                WorkerResponse::Control(WorkerControlResponse::Synced) => {}
+                WorkerResponse::Control(WorkerControlResponse::ExperimentalSynced) => {}
                 response => {
                     return Err(KvError::Worker(format!(
                         "unexpected sync response: {response:?}"

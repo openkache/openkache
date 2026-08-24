@@ -54,7 +54,8 @@ pub(super) struct SecurityArguments {
     #[arg(long, value_name = "PATH")]
     tls_client_ca: Option<PathBuf>,
 
-    /// Authenticated client leaf certificate allowed to run STATS and SYNC; repeatable.
+    /// Authenticated client leaf certificate allowed to run EXPERIMENTAL_STATS and
+    /// EXPERIMENTAL_SYNC; repeatable.
     #[arg(long = "tls-admin-client-certificate", value_name = "PATH")]
     tls_admin_client_certificates: Vec<PathBuf>,
 }

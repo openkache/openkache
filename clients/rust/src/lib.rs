@@ -265,20 +265,21 @@ macro_rules! impl_smithy_api {
                 Ok(smithy::DeleteOutput { deleted })
             }
 
-            async fn stats(
+            async fn experimental_stats(
                 &self,
-                input: smithy::StatsInput,
-            ) -> std::result::Result<smithy::StatsOutput, Self::Error> {
-                let json = $client::stats_in_namespace(self, input.namespace_id).await?;
-                Ok(smithy::StatsOutput { json })
+                input: smithy::ExperimentalStatsInput,
+            ) -> std::result::Result<smithy::ExperimentalStatsOutput, Self::Error> {
+                let json =
+                    $client::experimental_stats_in_namespace(self, input.namespace_id).await?;
+                Ok(smithy::ExperimentalStatsOutput { json })
             }
 
-            async fn sync(
+            async fn experimental_sync(
                 &self,
-                input: smithy::SyncInput,
-            ) -> std::result::Result<smithy::SyncOutput, Self::Error> {
-                $client::sync_in_namespace(self, input.namespace_id).await?;
-                Ok(smithy::SyncOutput)
+                input: smithy::ExperimentalSyncInput,
+            ) -> std::result::Result<smithy::ExperimentalSyncOutput, Self::Error> {
+                $client::experimental_sync_in_namespace(self, input.namespace_id).await?;
+                Ok(smithy::ExperimentalSyncOutput)
             }
 
             async fn namespace_open(
@@ -667,13 +668,13 @@ macro_rules! client_methods {
             }
 
             /// Returns server statistics as their JSON text.
-            pub async fn stats(&self) -> Result<String> {
-                self.inner.stats().await
+            pub async fn experimental_stats(&self) -> Result<String> {
+                self.inner.experimental_stats().await
             }
 
             /// Waits until prior mutations satisfy the server durability barrier.
-            pub async fn sync(&self) -> Result<()> {
-                self.inner.sync().await
+            pub async fn experimental_sync(&self) -> Result<()> {
+                self.inner.experimental_sync().await
             }
 
             /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.

@@ -12,7 +12,7 @@ compression, encryption, and the worker lifecycle. Select
 explicit opt-outs: they keep TLS encryption but disable certificate and server
 identity verification.
 
-`STATS` and `SYNC` are transitional experimental maintenance operations and are
+`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are transitional experimental maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending

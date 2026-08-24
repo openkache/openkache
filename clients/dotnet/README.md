@@ -67,8 +67,8 @@ var outcome = await client.SetAsync(
         TimeToLive = TimeSpan.FromMinutes(5),
     });
 var value = await client.GetAsync(itemId);
-var statisticsJson = await client.StatsAsync();
-await client.SyncAsync();
+var statisticsJson = await client.ExperimentalStatsAsync();
+await client.ExperimentalSyncAsync();
 var deleted = await client.DeleteAsync(itemId);
 ```
 
@@ -99,8 +99,9 @@ Zstandard compression by default; set `ClientOptions.CompressionEnabled` to
 legacy compatibility alias for callers that need one deadline for both phases.
 
 The generated Smithy operation, input, output, and enum types under
-`OpenKache.Smithy` are the current transitional .NET API types. `StatsAsync`
-and `SyncAsync` are transitional experimental maintenance operations and are
+`OpenKache.Smithy` are the current transitional .NET API types.
+`ExperimentalStatsAsync` and `ExperimentalSyncAsync` are transitional
+experimental maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling

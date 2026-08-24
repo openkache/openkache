@@ -3,7 +3,7 @@
 use super::operation_compatibility_decode as decode;
 use super::operation_compatibility_services::{
     DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
-    SetState, StatsState, SyncState,
+    SetState, ExperimentalStatsState, ExperimentalSyncState,
 };
 use super::operation_contract::{OperationStatus, request_fields};
 use super::operation_handlers::OperationInputView;
@@ -118,27 +118,27 @@ pub(super) fn prepare_delete_namespace(
     )
 }
 
-pub(super) fn prepare_stats_namespace(
+pub(super) fn prepare_experimental_stats_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> Result<PreparePlan, PrepareError> {
-    let state = operation_state::<StatsState>(context)?;
+    let state = operation_state::<ExperimentalStatsState>(context)?;
     prepare_namespace_at(
         input,
         state.coordination.as_ref(),
-        request_fields::op_stats::NAMESPACE_ID,
+        request_fields::op_experimental_stats::NAMESPACE_ID,
     )
 }
 
-pub(super) fn prepare_sync_namespace(
+pub(super) fn prepare_experimental_sync_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> Result<PreparePlan, PrepareError> {
-    let state = operation_state::<SyncState>(context)?;
+    let state = operation_state::<ExperimentalSyncState>(context)?;
     prepare_namespace_at(
         input,
         state.coordination.as_ref(),
-        request_fields::op_sync::NAMESPACE_ID,
+        request_fields::op_experimental_sync::NAMESPACE_ID,
     )
 }
 
