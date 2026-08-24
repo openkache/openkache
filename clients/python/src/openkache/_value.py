@@ -1,9 +1,9 @@
 """Lossless Python bindings for ``StructuredValue-CBOR-v1``.
 
-The Rust value crate owns the wire profile.  This module only maps Python's
-native values to the language-independent model and provides the small
-lossless escape hatch needed by dynamic callers.  It deliberately does not
-inspect JSON, infer integers from floats, or stringify unsupported values.
+The Rust value crate owns the wire profile.  This module maps Python values to
+the language-independent model without lossy conversions.  It
+deliberately does not inspect JSON, infer integers from floats, or stringify
+unsupported values.
 """
 
 from __future__ import annotations
@@ -657,61 +657,6 @@ def _read_head(source: bytes, cursor: int) -> tuple[int, tuple[int, int, int]]:
     return major, (ai, cursor + width, value)
 
 
-def to_native(value: Value) -> object:
-    """Projects a lossless model value into ordinary Python native values."""
-
-    if isinstance(value, UndefinedValue):
-        raise StructuredValueError("Undefined has no Python native projection")
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, IntegerValue):
-        return value.value
-    if isinstance(value, FloatValue):
-        if value.width == 16:
-            return struct.unpack(">e", value.raw_bits.to_bytes(2, "big"))[0]
-        if value.width == 32:
-            return struct.unpack(">f", value.raw_bits.to_bytes(4, "big"))[0]
-        return struct.unpack(">d", value.raw_bits.to_bytes(8, "big"))[0]
-    if isinstance(value, ByteStringValue):
-        return bytes(value.value)
-    if isinstance(value, TextStringValue):
-        return value.value
-    if isinstance(value, ArrayValue):
-        return [to_native(child) for child in value.values]
-    if isinstance(value, MapValue):
-        output: dict[object, object] = {}
-        projected: list[object] = []
-        for key, child in value.entries:
-            native_key = to_native(key)
-            if any(_native_keys_collapse(native_key, previous) for previous in projected):
-                raise StructuredValueError(
-                    "map keys cannot be represented by a Python dict without loss",
-                    ValueErrorKind.CONVERSION,
-                )
-            projected.append(native_key)
-            output[native_key] = to_native(child)
-        return output
-    raise StructuredValueError("unsupported model value")
-
-
-def _native_keys_collapse(left: object, right: object) -> bool:
-    # Python's bool/int and int/float equality are intentionally stricter than
-    # the model.  Distinct NaN payloads are not collapsed by Python equality.
-    if type(left) is not type(right):
-        return left == right
-    return left == right
-
-
-def decode_native(
-    data: bytes | bytearray | memoryview,
-    *,
-    limits: ValueLimits | None = None,
-) -> object:
-    """Decodes a payload and applies the strict native projection."""
-
-    return to_native(decode_value(data, limits=limits))
-
-
 __all__ = [
     "Array",
     "ArrayValue",
@@ -732,10 +677,8 @@ __all__ = [
     "Value",
     "ValueErrorKind",
     "ValueLimits",
-    "decode_native",
     "decode_value",
     "encode_value",
     "model_equal",
-    "to_native",
     "to_value",
 ]

@@ -94,7 +94,7 @@ crate.spec(
     package = "rustix",
     version = "1.1.4",
 )
-crate.spec(package = "signal-hook", version = "0.4.4")
+crate.spec(package = "signal-hook", version = "0.3.18")
 crate.spec(
     default_features = False,
     package = "tokio-rustls",

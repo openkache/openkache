@@ -37,6 +37,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!("cargo:rerun-if-changed={}", model.display());
+    let packaged_snapshot = protocol_directory.join("src/contract_snapshot");
+    println!("cargo:rerun-if-changed={}", packaged_snapshot.display());
+
+    // The published protocol crate cannot contain the repository-level
+    // TypeScript generator and Smithy model siblings. Use the checked-in
+    // generated snapshot in that layout; a full checkout continues to
+    // regenerate from the canonical inputs.
+    if !generator.is_file()
+        || !wire_generator.is_file()
+        || !wire_spec_renderer.is_file()
+        || !model.is_dir()
+    {
+        for (name, destination) in [
+            ("wire_values.rs", &output),
+            ("operation_contract.rs", &operation_output),
+            ("operation_compatibility.rs", &compatibility_output),
+        ] {
+            let source = packaged_snapshot.join(name);
+            if !source.is_file() {
+                return Err(format!(
+                    "generated protocol fallback is missing: {}",
+                    source.display()
+                )
+                .into());
+            }
+            std::fs::copy(&source, destination).map_err(|error| {
+                format!(
+                    "could not copy packaged protocol fallback {} to {}: {error}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+        }
+        return Ok(());
+    }
 
     let bun = std::env::var_os("OPENKACHE_BUN_EXECUTABLE")
         .map(PathBuf::from)

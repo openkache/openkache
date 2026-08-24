@@ -1,6 +1,5 @@
 """Bazel targets for the ergonomic public Rust client."""
 
-load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load(
     "//bazel:openkache_defs.bzl",
@@ -17,8 +16,9 @@ filegroup(
     srcs = [
         "Cargo.toml",
         "README.md",
-        "build.rs",
+        "LICENSE",
     ] + glob([
+        "examples/**",
         "src/**",
     ]),
 )
@@ -28,58 +28,16 @@ filegroup(
     srcs = [":source_tree"],
 )
 
-cargo_build_script(
-    name = "openkache_client_build_script",
-    srcs = ["build.rs"],
-    build_script_env = {
-        "OPENKACHE_BUN_EXECUTABLE": "$(execpath //bazel:bun)",
-        "OPENKACHE_SMITHY_EXECUTABLE": "$(execpath //bazel:smithy)",
-        "OPENKACHE_SMITHY_USE_SHELL": "1",
-    },
-    crate_name = "openkache_client_build_script",
-    crate_root = "build.rs",
-    data = ["//clients:client_generator_inputs"],
-    edition = RUST_EDITION,
-    tools = [
-        "//bazel:bun",
-        "//bazel:smithy",
-        "//bazel:smithy_tree",
-    ],
-)
-
 rust_library(
     name = "openkache_client",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"], exclude = ["src/contract_snapshot/**"]),
     aliases = crate_aliases("clients/rust"),
     crate_features = [
-        "quic-compio",
         "quic-quinn",
-        "tls-tcp",
     ],
-    crate_name = "openkache_client",
+    crate_name = "openkache",
     crate_root = "src/lib.rs",
     edition = RUST_EDITION,
-    rustc_env = rust_metadata("openkache-client"),
-    deps = [
-        ":openkache_client_build_script",
-        "//clients/core:openkache_client_core",
-    ] + cargo_deps("clients/rust"),
-)
-
-rust_library(
-    name = "openkache_client_ffi",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = crate_aliases("clients/rust"),
-    crate_features = [
-        "ffi",
-        "quic-compio",
-    ],
-    crate_name = "openkache_client",
-    crate_root = "src/lib.rs",
-    edition = RUST_EDITION,
-    rustc_env = rust_metadata("openkache-client"),
-    deps = [
-        ":openkache_client_build_script",
-        "//clients/core:openkache_client_core_ffi_library",
-    ] + cargo_deps("clients/rust"),
+    rustc_env = rust_metadata("openkache"),
+    deps = cargo_deps("clients/rust"),
 )

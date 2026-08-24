@@ -1,5 +1,5 @@
 {
-  "checksum": "fd93cf0dfa194cda1d191db5ee4a87e8071431faac6f817a0a3f3d2061d84fe4",
+  "checksum": "661cec0e82b8aa9b5e1fc727612a18b255bf7e6d4dc90baf4ef92f8d98834bb2",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -8070,7 +8070,7 @@
               "target": "rustix"
             },
             {
-              "id": "signal-hook 0.4.4",
+              "id": "signal-hook 0.3.18",
               "target": "signal_hook"
             },
             {
@@ -16976,7 +16976,7 @@
     "openkache 0.1.0": {
       "name": "openkache",
       "version": "0.1.0",
-      "package_url": null,
+      "package_url": "https://github.com/openkache/openkache",
       "repository": null,
       "targets": [
         {
@@ -17011,116 +17011,109 @@
         ],
         "crate_features": {
           "common": [
-            "allocator-jemalloc",
-            "channel-kanal",
             "default",
-            "network-runtime-compio",
-            "quic-noq",
-            "storage-runtime-compio"
+            "quic-quinn",
+            "runtime-tokio"
           ],
           "selects": {}
         },
         "deps": {
           "common": [
             {
-              "id": "anstream 1.0.0",
-              "target": "anstream"
+              "id": "aes 0.9.1",
+              "target": "aes"
+            },
+            {
+              "id": "aes-gcm-siv 0.12.0-rc.3",
+              "target": "aes_gcm_siv"
+            },
+            {
+              "id": "aes-siv 0.8.0-rc.3",
+              "target": "aes_siv"
+            },
+            {
+              "id": "base64 0.22.1",
+              "target": "base64"
             },
             {
               "id": "blake3 1.8.5",
               "target": "blake3"
             },
             {
-              "id": "clap 4.6.4",
-              "target": "clap"
+              "id": "cmac 0.8.0",
+              "target": "cmac"
             },
             {
-              "id": "comnoq 0.3.8",
-              "target": "comnoq"
+              "id": "crossbeam-queue 0.3.13",
+              "target": "crossbeam_queue"
             },
             {
-              "id": "compio 0.19.1",
-              "target": "compio"
-            },
-            {
-              "id": "crc32fast 1.5.0",
-              "target": "crc32fast"
-            },
-            {
-              "id": "event-listener 5.4.2",
-              "target": "event_listener"
+              "id": "crossfire 3.1.19",
+              "target": "crossfire"
             },
             {
               "id": "futures-util 0.3.33",
               "target": "futures_util"
             },
             {
-              "id": "kanal 0.1.1",
-              "target": "kanal"
+              "id": "getrandom 0.3.4",
+              "target": "getrandom"
             },
             {
-              "id": "libc 0.2.189",
-              "target": "libc"
+              "id": "http 1.5.0",
+              "target": "http"
             },
             {
-              "id": "miette 7.6.0",
-              "target": "miette"
+              "id": "polyval 0.7.3",
+              "target": "polyval"
             },
             {
-              "id": "owo-colors 4.3.0",
-              "target": "owo_colors"
-            },
-            {
-              "id": "rand 0.9.5",
-              "target": "rand"
-            },
-            {
-              "id": "rcgen 0.14.8",
-              "target": "rcgen"
+              "id": "quinn 0.11.11",
+              "target": "quinn"
             },
             {
               "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
+              "id": "rustls-native-certs 0.8.4",
+              "target": "rustls_native_certs"
+            },
+            {
               "id": "serde 1.0.229",
               "target": "serde"
             },
             {
-              "id": "sha2 0.11.0",
-              "target": "sha2"
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            },
+            {
+              "id": "serde_json_canonicalizer 0.3.2",
+              "target": "serde_json_canonicalizer"
             },
             {
               "id": "smallvec 1.15.2",
               "target": "smallvec"
             },
             {
-              "id": "socket2 0.4.10",
-              "target": "socket2"
-            },
-            {
               "id": "thiserror 2.0.19",
               "target": "thiserror"
             },
             {
-              "id": "tikv-jemallocator 0.7.0",
-              "target": "tikv_jemallocator"
+              "id": "tokio 1.53.1",
+              "target": "tokio"
             },
             {
-              "id": "time 0.3.54",
-              "target": "time"
+              "id": "vu128 1.1.0",
+              "target": "vu128"
             },
             {
-              "id": "toml 1.1.4+spec-1.1.0",
-              "target": "toml"
+              "id": "zeroize 1.9.0",
+              "target": "zeroize"
             },
             {
-              "id": "tracing 0.1.44",
-              "target": "tracing"
-            },
-            {
-              "id": "tracing-subscriber 0.3.23",
-              "target": "tracing_subscriber"
+              "id": "zstd-pure-rs 0.1.2",
+              "target": "zstd_pure_rs"
             }
           ],
           "selects": {}
@@ -17145,9 +17138,9 @@
           "**"
         ]
       },
-      "license": "AGPL-3.0-or-later",
+      "license": "Apache-2.0",
       "license_ids": [
-        "AGPL-3.0"
+        "Apache-2.0"
       ],
       "license_file": null
     },
@@ -17240,89 +17233,10 @@
       ],
       "license_file": null
     },
-    "openkache-client 0.1.0": {
-      "name": "openkache-client",
-      "version": "0.1.0",
-      "package_url": null,
-      "repository": null,
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "openkache_client",
-            "crate_root": "src/lib.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
-        },
-        {
-          "BuildScript": {
-            "crate_name": "build_script_build",
-            "crate_root": "build.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
-        }
-      ],
-      "library_target_name": "openkache_client",
-      "common_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "crate_features": {
-          "common": [
-            "default",
-            "quic-compio",
-            "quic-quinn"
-          ],
-          "selects": {}
-        },
-        "deps": {
-          "common": [
-            {
-              "id": "futures-util 0.3.33",
-              "target": "futures_util"
-            }
-          ],
-          "selects": {}
-        },
-        "extra_deps": {
-          "common": [
-            ":build_script_build"
-          ],
-          "selects": {}
-        },
-        "edition": "2024",
-        "version": "0.1.0"
-      },
-      "build_script_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "compile_data_glob_excludes": [
-          "**/*.rs"
-        ],
-        "data_glob": [
-          "**"
-        ]
-      },
-      "license": "Apache-2.0",
-      "license_ids": [
-        "Apache-2.0"
-      ],
-      "license_file": null
-    },
     "openkache-client-core 0.1.0": {
       "name": "openkache-client-core",
       "version": "0.1.0",
-      "package_url": null,
+      "package_url": "https://github.com/openkache/openkache",
       "repository": null,
       "targets": [
         {
@@ -17583,7 +17497,7 @@
     "openkache-protocol 0.1.0": {
       "name": "openkache-protocol",
       "version": "0.1.0",
-      "package_url": null,
+      "package_url": "https://github.com/openkache/openkache",
       "repository": null,
       "targets": [
         {
@@ -17663,10 +17577,188 @@
       ],
       "license_file": null
     },
+    "openkache-server 0.1.0": {
+      "name": "openkache-server",
+      "version": "0.1.0",
+      "package_url": null,
+      "repository": null,
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "openkache_server",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "openkache_server",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "allocator-jemalloc",
+            "channel-kanal",
+            "default",
+            "network-runtime-compio",
+            "quic-noq",
+            "storage-runtime-compio"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "anstream 1.0.0",
+              "target": "anstream"
+            },
+            {
+              "id": "blake3 1.8.5",
+              "target": "blake3"
+            },
+            {
+              "id": "clap 4.6.4",
+              "target": "clap"
+            },
+            {
+              "id": "comnoq 0.3.8",
+              "target": "comnoq"
+            },
+            {
+              "id": "compio 0.19.1",
+              "target": "compio"
+            },
+            {
+              "id": "crc32fast 1.5.0",
+              "target": "crc32fast"
+            },
+            {
+              "id": "event-listener 5.4.2",
+              "target": "event_listener"
+            },
+            {
+              "id": "futures-util 0.3.33",
+              "target": "futures_util"
+            },
+            {
+              "id": "kanal 0.1.1",
+              "target": "kanal"
+            },
+            {
+              "id": "libc 0.2.189",
+              "target": "libc"
+            },
+            {
+              "id": "miette 7.6.0",
+              "target": "miette"
+            },
+            {
+              "id": "owo-colors 4.3.0",
+              "target": "owo_colors"
+            },
+            {
+              "id": "rand 0.9.5",
+              "target": "rand"
+            },
+            {
+              "id": "rcgen 0.14.8",
+              "target": "rcgen"
+            },
+            {
+              "id": "rustls 0.23.43",
+              "target": "rustls"
+            },
+            {
+              "id": "serde 1.0.229",
+              "target": "serde"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
+            },
+            {
+              "id": "smallvec 1.15.2",
+              "target": "smallvec"
+            },
+            {
+              "id": "socket2 0.4.10",
+              "target": "socket2"
+            },
+            {
+              "id": "thiserror 2.0.19",
+              "target": "thiserror"
+            },
+            {
+              "id": "tikv-jemallocator 0.7.0",
+              "target": "tikv_jemallocator"
+            },
+            {
+              "id": "time 0.3.54",
+              "target": "time"
+            },
+            {
+              "id": "toml 1.1.4+spec-1.1.0",
+              "target": "toml"
+            },
+            {
+              "id": "tracing 0.1.44",
+              "target": "tracing"
+            },
+            {
+              "id": "tracing-subscriber 0.3.23",
+              "target": "tracing_subscriber"
+            }
+          ],
+          "selects": {}
+        },
+        "extra_deps": {
+          "common": [
+            ":build_script_build"
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.1.0"
+      },
+      "build_script_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "compile_data_glob_excludes": [
+          "**/*.rs"
+        ],
+        "data_glob": [
+          "**"
+        ]
+      },
+      "license": "AGPL-3.0-or-later",
+      "license_ids": [
+        "AGPL-3.0"
+      ],
+      "license_file": null
+    },
     "openkache-value 0.1.0": {
       "name": "openkache-value",
       "version": "0.1.0",
-      "package_url": null,
+      "package_url": "https://github.com/openkache/openkache",
       "repository": null,
       "targets": [
         {
@@ -23297,95 +23389,6 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "signal-hook 0.4.4": {
-      "name": "signal-hook",
-      "version": "0.4.4",
-      "package_url": "https://github.com/vorner/signal-hook",
-      "repository": {
-        "Http": {
-          "url": "https://static.crates.io/crates/signal-hook/0.4.4/download",
-          "sha256": "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "signal_hook",
-            "crate_root": "src/lib.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
-        },
-        {
-          "BuildScript": {
-            "crate_name": "build_script_build",
-            "crate_root": "build.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
-        }
-      ],
-      "library_target_name": "signal_hook",
-      "common_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "crate_features": {
-          "common": [
-            "channel",
-            "default",
-            "iterator"
-          ],
-          "selects": {}
-        },
-        "deps": {
-          "common": [
-            {
-              "id": "libc 0.2.189",
-              "target": "libc"
-            },
-            {
-              "id": "signal-hook-registry 1.4.8",
-              "target": "signal_hook_registry"
-            }
-          ],
-          "selects": {}
-        },
-        "extra_deps": {
-          "common": [
-            ":build_script_build"
-          ],
-          "selects": {}
-        },
-        "edition": "2018",
-        "version": "0.4.4"
-      },
-      "build_script_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "compile_data_glob_excludes": [
-          "**/*.rs"
-        ],
-        "data_glob": [
-          "**"
-        ]
-      },
-      "license": "MIT OR Apache-2.0",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "license_file": "LICENSE-APACHE"
-    },
     "signal-hook-mio 0.2.5": {
       "name": "signal-hook-mio",
       "version": "0.2.5",
@@ -25841,29 +25844,19 @@
             "default",
             "io-util",
             "libc",
+            "macros",
             "mio",
             "net",
             "rt",
+            "rt-multi-thread",
             "socket2",
             "sync",
-            "time"
+            "time",
+            "tokio-macros"
           ],
           "selects": {
-            "aarch64-apple-darwin": [
-              "rt-multi-thread"
-            ],
-            "aarch64-unknown-linux-gnu": [
-              "rt-multi-thread"
-            ],
             "x86_64-pc-windows-msvc": [
-              "rt-multi-thread",
               "windows-sys"
-            ],
-            "x86_64-unknown-linux-gnu": [
-              "rt-multi-thread"
-            ],
-            "x86_64-unknown-nixos-gnu": [
-              "rt-multi-thread"
             ]
           }
         },
@@ -25942,7 +25935,71 @@
           }
         },
         "edition": "2021",
+        "proc_macro_deps": {
+          "common": [
+            {
+              "id": "tokio-macros 2.7.2",
+              "target": "tokio_macros"
+            }
+          ],
+          "selects": {}
+        },
         "version": "1.53.1"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
+    "tokio-macros 2.7.2": {
+      "name": "tokio-macros",
+      "version": "2.7.2",
+      "package_url": "https://github.com/tokio-rs/tokio",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/tokio-macros/2.7.2/download",
+          "sha256": "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+        }
+      },
+      "targets": [
+        {
+          "ProcMacro": {
+            "crate_name": "tokio_macros",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "tokio_macros",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "proc-macro2 1.0.107",
+              "target": "proc_macro2"
+            },
+            {
+              "id": "quote 1.0.47",
+              "target": "quote"
+            },
+            {
+              "id": "syn 3.0.3",
+              "target": "syn"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "2.7.2"
       },
       "license": "MIT",
       "license_ids": [
@@ -31872,12 +31929,12 @@
   "binary_crates": [],
   "workspace_members": {
     "direct-cargo-bazel-deps 0.0.1": "",
-    "openkache 0.1.0": "server",
+    "openkache 0.1.0": "clients/rust",
     "openkache-cli 0.1.0": "clients/cli",
-    "openkache-client 0.1.0": "clients/rust",
     "openkache-client-core 0.1.0": "clients/core",
     "openkache-client-napi 0.1.0": "clients/typescript/native",
     "openkache-protocol 0.1.0": "protocol",
+    "openkache-server 0.1.0": "server",
     "openkache-value 0.1.0": "clients/value"
   },
   "conditions": {
@@ -32160,7 +32217,7 @@
     "serde_json 1.0.151",
     "serde_json_canonicalizer 0.3.2",
     "sha2 0.11.0",
-    "signal-hook 0.4.4",
+    "signal-hook 0.3.18",
     "smallvec 1.15.2",
     "snmalloc-rs 0.7.4",
     "socket2 0.4.10",
