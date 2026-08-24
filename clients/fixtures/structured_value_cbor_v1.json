@@ -1,0 +1,268 @@
+{
+  "$schema": "./schema.json",
+  "spec": "openkache/structured-value-cbor",
+  "spec_revision": "v1-gate0",
+  "vectors": [
+    {
+      "kind": "positive",
+      "name": "undefined",
+      "input": {
+        "logical": "Undefined"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "f7"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "null",
+      "input": {
+        "logical": "Null"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "f6"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "boolean_false",
+      "input": {
+        "logical": "Boolean(false)"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "f4"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "boolean_true",
+      "input": {
+        "logical": "Boolean(true)"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "f5"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "integer_one",
+      "input": {
+        "logical": "Integer(1)"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "01"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "integer_arbitrary_precision",
+      "input": {
+        "logical": "Integer(18446744073709551616)"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "c249010000000000000000"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "float16_positive_one",
+      "input": {
+        "logical": "Float16(+1.0)"
+      },
+      "intermediate": {
+        "raw_bits_hex": "3c00"
+      },
+      "output": {
+        "cbor_hex": "f93c00"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "float32_positive_one",
+      "input": {
+        "logical": "Float32(+1.0)"
+      },
+      "intermediate": {
+        "raw_bits_hex": "3f800000"
+      },
+      "output": {
+        "cbor_hex": "fa3f800000"
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "float64_negative_zero",
+      "input": {
+        "logical": "Float64(-0.0)"
+      },
+      "intermediate": {
+        "raw_bits_hex": "8000000000000000"
+      },
+      "output": {
+        "cbor_hex": "fb8000000000000000"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "bytes_x",
+      "input": {
+        "logical": "ByteString(78)"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "4178"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "text_x",
+      "input": {
+        "logical": "TextString(x)"
+      },
+      "intermediate": {},
+      "output": {
+        "cbor_hex": "6178"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "empty_array",
+      "input": {
+        "logical": "Array([])"
+      },
+      "intermediate": {
+        "item_count": 0
+      },
+      "output": {
+        "cbor_hex": "80"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "nested_array",
+      "input": {
+        "logical": "Array([Integer(1), Null, Array([])])"
+      },
+      "intermediate": {
+        "item_count": 3
+      },
+      "output": {
+        "cbor_hex": "8301f680"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "map_integer_one_to_null",
+      "input": {
+        "logical": "Map([(Integer(1), Null)])"
+      },
+      "intermediate": {
+        "entry_count": 1
+      },
+      "output": {
+        "cbor_hex": "a101f6"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "map_key_kinds_are_distinct",
+      "input": {
+        "logical": "Map([(Integer(1), TextString(integer)), (Boolean(true), TextString(boolean)), (Float64(1.0), TextString(float))])"
+      },
+      "intermediate": {
+        "entry_count": 3,
+        "distinct_keys": [
+          "Integer(1)",
+          "Boolean(true)",
+          "Float64(1.0)"
+        ]
+      },
+      "output": {
+        "cbor_hex": "a30168696e7465676572f568626f6f6c65616efb3ff000000000000068666c6f6174"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "duplicate_logical_key",
+      "input": {
+        "cbor_hex": "a201f601f7"
+      },
+      "intermediate": {
+        "duplicate_key": "Integer(1)"
+      },
+      "output": null,
+      "error": {
+        "category": "duplicate_map_key"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "non_scalar_map_key_rejected",
+      "input": {
+        "cbor_hex": "a18000"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "non_scalar_map_key"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "indefinite_array_rejected",
+      "input": {
+        "cbor_hex": "9f01ff"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "unsupported_indefinite_length"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "invalid_utf8_rejected",
+      "input": {
+        "cbor_hex": "61ff"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "invalid_utf8"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "trailing_bytes_rejected",
+      "input": {
+        "cbor_hex": "0100"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "trailing_bytes"
+      }
+    }
+  ]
+}

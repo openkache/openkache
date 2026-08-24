@@ -1,28 +1,22 @@
-# OpenKache Cross-Language Value Model v1 (Draft)
+# OpenKache Cross-Language Value Model — Version 1 Gate 0
 
-> **Status:** Draft — pre-freeze
+> **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
 
-This document defines the language-independent value model used by
-OpenKache-maintained clients when they exchange structured values. It is
-intentionally separate from the cache value envelope: the envelope carries
-payload bytes, while this specification defines what those bytes mean to
-clients.
+This document defines the language-independent value model used by every
+maintained client's `get` and `set`. It is intentionally separate from the
+cache value envelope: the envelope carries payload bytes, while this
+specification defines what those bytes mean to clients.
 
-Package documentation exposes the logical model and native mappings, not the
-concrete profile identifier or selector assignment. The profile section below
-is retained as a protocol reference for interoperability implementations.
+Gate 0 exposes lossless model values by default. Package documentation may
+choose different wrapper names, but it must preserve the same tags and
+distinctions. The concrete profile identifier and selector assignment are
+normative in [`../VALUE_FORMAT.md`](../VALUE_FORMAT.md).
 
-The first structured-value profile uses CBOR as its internal codec. CBOR is an
-implementation profile, not the public value API. The Value Model v1 defined
-here owns logical semantics; `StructuredValue-CBOR-v1` is the first payload
-codec profile for that model. A future profile may use another self-describing
-codec, or a schema-bound codec such as protobuf, while retaining a separate
-compatibility contract.
-
-This document is a target specification. The shared implementation and
-language adapters may temporarily lag while the draft is completed. An
-implementation MUST NOT claim conformance until it satisfies the model,
-profile, validation, and native-conversion rules in this document.
+`StructuredValue-CBOR-v1` is the only Gate 0 payload profile. The model owns
+logical semantics; the profile owns its CBOR bytes. A future profile may use
+another codec only after a new selector and contract revision are published.
+An implementation MUST NOT claim Gate 0 conformance until it satisfies the
+model, profile, validation, and native-conversion rules in this document.
 
 The normative terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**,
 **SHOULD NOT**, and **MAY** are to be interpreted as described by
@@ -49,7 +43,8 @@ The design priorities are:
 The model intentionally does not preserve language-specific object identity,
 class names, tuple-versus-list identity, set implementations, cycles,
 functions, or custom collection classes. Applications that require those
-properties MUST use an explicit application codec or `OpaqueBytes`.
+properties MUST use an explicit application codec or a future opaque-value
+profile; Gate 0 does not expose an opaque-byte operation.
 
 ## 2. Value model
 
@@ -57,20 +52,27 @@ The public model is codec-independent:
 
 ```text
 Value =
-    Null
-  | Undefined
+    Undefined
+  | Null
   | Boolean(value)
-  | Integer(value)
-  | Float(width, raw_bits)
+  | Integer(arbitrary_precision_signed_value)
+  | Float16(raw_bits)
+  | Float32(raw_bits)
+  | Float64(raw_bits)
   | ByteString(bytes)
-  | TextString(utf8)
-  | Array(values)
-  | Map(entries)
+  | TextString(valid_utf8)
+  | Array<Value>
+  | Map<(Value, Value)>[]
 ```
 
 `Undefined` is distinct from `Null`. A binding that has no native undefined
 value MUST expose it through its lossless value representation or report a
 conversion error in strict native mode.
+
+`Float16`, `Float32`, and `Float64` are separate model kinds, not one native
+language float with an inferred width. Each stores the raw IEEE-754 bits for
+that width. `Integer` is arbitrary precision even though the key contract
+uses signed `i64`.
 
 `Map` is an ordered sequence of key/value entries in the generic model:
 
@@ -100,21 +102,20 @@ otherwise change the integer.
 
 ### 2.2 Floating-point values
 
-`Float` contains both its IEEE-754 width and the raw bits available from the
-source representation:
+The three floating-point kinds contain their IEEE-754 width and raw bits:
 
 ```text
-Float16(width=16, raw_bits)
-Float32(width=32, raw_bits)
-Float64(width=64, raw_bits)
+Float16(raw_bits)
+Float32(raw_bits)
+Float64(raw_bits)
 ```
 
 The model distinguishes `Integer(1)` from `Float64(1.0)`, and distinguishes
 positive and negative zero. Float width and raw bits MUST be preserved by the
 generic value representation and by an encoder that receives those bits.
 
-The generic `Float(width, raw_bits)` representation and an encoder receiving
-that representation MUST preserve the selected width and raw bits exactly.
+An encoder receiving one of these model variants MUST preserve its width and
+raw bits exactly.
 Native runtime mappings have weaker guarantees when the runtime cannot expose
 all of those bits. Python `float` mappings preserve the runtime-observable
 binary64 bits. A JavaScript adapter MUST encode the binary64 bits observable
@@ -154,7 +155,8 @@ The model defines structural equality for duplicate-key detection:
 Only scalar values MAY be map keys:
 
 ```text
-MapKey = Null | Undefined | Boolean | Integer | Float
+MapKey = Null | Undefined | Boolean | Integer
+       | Float16 | Float32 | Float64
        | ByteString | TextString
 ```
 
@@ -362,7 +364,7 @@ The maintained default native projections are:
 | `Undefined` | conversion error | `undefined` |
 | `Boolean` | `bool` | `boolean` |
 | `Integer` | `int` | `bigint` |
-| `Float` | `float` | `number` |
+| `Float16`/`Float32`/`Float64` | documented float wrapper/`float` | documented float wrapper/`number` |
 | `ByteString` | `bytes` | `Uint8Array` |
 | `TextString` | `str` | `string` |
 | `Array` | `list` | `Array` |
@@ -374,10 +376,10 @@ changing a map's order. A binding MAY provide a separate checked convenience
 conversion, such as JavaScript safe `Integer` values to `number`, only when it
 rejects values outside the exact target range.
 
-Opaque byte operations bypass this model and return the exact application
-bytes directly. They are not a representation option on structured-value
-`get`; callers that need byte-exact forwarding MUST use the raw or Exact Item
-ID API rather than decoding and re-encoding a structured value.
+Gate 0 has no opaque-byte representation or raw/Exact Item ID operation.
+Byte-exact forwarding is a future feature, not a representation option on
+structured-value `get`; callers MUST NOT decode and re-encode a structured
+value when exact envelope bytes are required.
 
 The structured-value API guarantees semantic round trips, not byte identity.
 Reading with `lossless` and writing again MAY produce different codec bytes
@@ -401,7 +403,7 @@ The profile accepts exactly the following CBOR values:
 | `undefined` | `Undefined` | MUST be accepted. |
 | Major type 0 or 1 | `Integer` | MUST represent the mathematical value exactly. Preferred and valid non-preferred integer encodings MAY both be accepted; encoders MUST emit preferred serialization. |
 | Tag 2 or 3 over a definite byte string | `Integer` | MUST use a minimal, non-empty big-endian magnitude. The sign is selected by the tag. Values representable as ordinary CBOR integers MUST still be decoded as the same `Integer`; encoders MUST prefer ordinary integers. |
-| Half-, single-, or double-precision float | `Float` | Width and raw bits MUST be retained by the generic representation. |
+| Half-, single-, or double-precision float | `Float16`/`Float32`/`Float64` | Width and raw bits MUST be retained by the generic representation. |
 | Definite byte string | `ByteString` | Bytes are uninterpreted. |
 | Definite, valid UTF-8 text string | `TextString` | Invalid UTF-8 MUST be rejected. |
 | Definite array | `Array` | Elements are decoded recursively. |
@@ -431,7 +433,9 @@ apply lower local structural budgets and MUST report a local resource
 rejection without returning a partially decoded value.
 
 The profile's parser MUST apply the common payload limits supplied by the
-enclosing client value format.
+enclosing client value format. Gate 0 does not provide a raw/opaque or
+caller-owned-v0 structured operation; those are unsupported client features,
+even though the model can be used by a future profile.
 
 ## 6. Standards delegation and future profiles
 
@@ -457,17 +461,11 @@ unknown-field semantics.
 
 ## 7. Implementation boundary
 
-The Rust implementation is currently published under `clients/value/` as the
-`openkache-value` package. It provides the owned `Value` algebra and the
-bounded `StructuredValue-CBOR-v1` payload codec described by this document.
-Cross-language adapters and final profile-conformance claims remain migration
-work; the logical model and its conformance rules remain one specification.
-
-The OpenKache client core uses this package to produce structured payload
-bytes. The client value envelope then applies compression, cryptographic
-protection, key selection, and storage binding as specified by
-[`../VALUE_FORMAT.md`](../VALUE_FORMAT.md). The server continues to treat the
-complete envelope as opaque bytes.
+Maintained bindings may share a value implementation, but the public Gate 0
+facade owns the lossless model and `StructuredValue-CBOR-v1` profile described
+here. The client value envelope prefixes the payload with version `1` and
+selector `0x10` and performs no value-level compression or protection in Gate
+0. The server continues to treat the complete envelope as opaque bytes.
 
 This specification is deliberately independent of Item ID derivation and
 formatted-key behavior, which remain defined by
