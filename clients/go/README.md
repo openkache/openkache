@@ -8,9 +8,11 @@ contains no duplicate wire or cryptographic implementation. Set
 explicit insecure selector when certificate and server-identity verification
 is intentionally disabled; the zero value remains verified QUIC.
 
-The generated Smithy API and current native ABI are transitional references.
-Stable-v1 operation assignments and target client/value behavior come from the
-draft protocol and client-format documents.
+This package is a compatibility adapter over the internal native ABI; it is not
+the maintained five-operation Gate 0 facade. Its generated Smithy, JSON, and
+exact-item-ID/raw methods are retained for integrations that already use this
+adapter and MUST NOT be presented as the public Rust `openkache` API. The
+frozen protocol, key, value, and security specifications remain normative.
 
 ## Commands
 

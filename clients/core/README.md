@@ -1,8 +1,11 @@
 # OpenKache client core
 
-`openkache-client-core` is the reusable Rust engine behind OpenKache language
-bindings. This README documents the current transitional crate. The
-[target design](TARGET.md) describes the pre-freeze destination.
+`openkache-client-core` is an internal, non-published Rust engine behind the
+OpenKache client packages. End users depend on the published
+[the `openkache` crate](../rust/) instead; this crate's raw/protected clients, request engine, and native
+ABI are implementation boundaries for maintained adapters.
+The [internal design notes](TARGET.md) record implementation details and are
+not a second end-user API.
 
 ## Purpose
 
@@ -10,9 +13,9 @@ The core centralizes connection lifecycle, protocol operations, key mapping,
 value processing, and the native ABI used by maintained bindings. Language
 adapters convert native types and delegate shared behavior to this crate.
 
-The main API layers are:
+The internal API layers are:
 
-- raw and protected convenience clients for the current implementation;
+- raw and protected convenience clients used by compatibility adapters;
 - the shared address/value operations described by `CLIENT.md`;
 - `ValueCodec`, which owns value serialization, optional Zstandard compression,
   and formatted-value encryption;
@@ -44,15 +47,15 @@ adapter depends on this core directly.
 - The [wire protocol specification](https://github.com/openkache/openkache/blob/main/protocol/SPEC.md)
   defines framing, operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
-- The [target design](TARGET.md) summarizes the post-migration core contract.
+- The [internal design notes](TARGET.md) summarize non-public core boundaries.
 
 This README intentionally does not specify protected-value bytes. Consult the
-client index for implemented-format status and the value-format specification
-for the v1 contract.
+client index and the value-format and security specifications for the v1
+contract; those specifications remain normative for this implementation.
 
 ## What exists today
 
-The current core implements the draft key boundary: `TypedKey` produces one
+The current core implements the frozen key boundary: `TypedKey` produces one
 canonical deterministic-CBOR item, `NamespaceHash` is the default
 root/namespace-bound profile, and `PublicKeyOrHash` is explicit. `ItemId`
 accepts exact `0..=32` bytes; raw clients preserve those bytes without
@@ -85,7 +88,8 @@ contract header is supplied by each package build.
 
 ## Usage
 
-Use the raw layer when the caller supplies the exact protocol item ID and value:
+The following raw-layer example is for internal adapter integration only. It
+is not part of the published `openkache` facade:
 
 ```rust
 use openkache_client_core::{ItemId, ItemValue, RawClient, SetOptions};
@@ -108,8 +112,8 @@ value model owns structured-value semantics, the value format owns envelope
 and compression bytes, and the security model owns protection. Neither
 the wire protocol nor the server parses these client-owned formats.
 
-Use `ProtectedClient` when the core should derive the item ID and transform
-plaintext values:
+Use `ProtectedClient` internally when an adapter must derive the item ID and
+transform plaintext values:
 
 ```rust
 use openkache_client_core::{ClientRootKey, ProtectedClient};
@@ -153,9 +157,8 @@ retry attempts, compression policy, and `max_in_flight`.
 `max_in_flight_bytes` additionally bounds aggregate bytes retained across
 transport and value-protection work.
 
-Target transport and security settings are documented in
-[`TARGET.md`](TARGET.md); they are not claims about the transitional builder
-surface.
+Transport and security settings are documented in [`TARGET.md`](TARGET.md);
+they describe internal builders rather than the published facade.
 
 `Endpoint` requires a positive port. A pre-resolved socket address also
 requires an explicit certificate server name because the network destination
@@ -167,7 +170,7 @@ The native ABI v1 base connection functions retain their historical
 options while accepting an explicit Item-ID root and an immutable value-key
 array.
 
-## Request-engine migration
+## Request engine
 
 The core exposes a transport-neutral `RequestEngine` for multiplexed lanes.
 Callers reserve an ID and one aggregate request/response byte permit with
@@ -182,10 +185,10 @@ ALPN `openkache/1`, and the singleton `X25519MLKEM768` hybrid key exchange;
 neither adapter exposes plaintext or classical fallback. The engine does not
 decode server values or impose a value representation.
 
-Existing convenience clients remain source-compatible during this migration.
-New adapters should use the engine boundary rather than assuming one request
-per lane or response order, and should call `shutdown`/`drain` exactly once
-when owning a connection lifecycle.
+Existing convenience clients remain available for compatibility adapters. New
+adapters should use the engine boundary rather than assuming one request per
+lane or response order, and should call `shutdown`/`drain` exactly once when
+owning a connection lifecycle.
 
 ## Core components
 

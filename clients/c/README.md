@@ -1,7 +1,7 @@
 # OpenKache native C ABI
 
-This directory packages the maintained Gate 0 C17 ABI used by the native
-adapters.  It is intentionally a thin FFI boundary: transport, request
+This directory packages the maintained Gate 0 C17 ABI used by native
+adapters. It is intentionally a thin FFI boundary: transport, request
 admission, key mapping, value envelopes, and result ownership remain in the
 shared Rust core, while the C++ facade supplies typed-key and
 StructuredValue-CBOR-v1 conversion.
@@ -61,7 +61,7 @@ or static native library is supplied.
 
 ## Development profile
 
-The maintained C++ facade fixes TLS 1.3, ALPN `openkache/1`,
+The maintained C facade fixes TLS 1.3, ALPN `openkache/1`,
 `X25519MLKEM768`, and the `DevelopmentTrust` profile.  DevelopmentTrust
 disables certificate and hostname verification but retains TLS encryption and
 does not permit plaintext fallback.  It is **development only — do not use

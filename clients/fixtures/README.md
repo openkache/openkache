@@ -1,5 +1,7 @@
 # Client interoperability fixtures
 
+> **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
+
 These public JSON files are the canonical machine-readable representation of
 the OpenKache maintained client and protocol contracts frozen at `v1-gate0`.
 They are contract data, not tests or private development infrastructure; the

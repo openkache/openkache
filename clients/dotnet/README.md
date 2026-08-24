@@ -3,6 +3,12 @@
 The OpenKache package is a managed .NET adapter over the shared Rust client
 core's C ABI.
 
+This package is a compatibility adapter over the internal native ABI; it is not
+the maintained five-operation Gate 0 facade. Its exact-item-ID and generated
+Smithy operations remain available for existing integrations and MUST NOT be
+presented as the public Rust `openkache` API. The frozen protocol, key, value,
+and security specifications remain normative.
+
 ## Purpose
 
 The package provides binary-safe cache operations over the authenticated
@@ -14,7 +20,7 @@ TLS-preserving opt-outs that disable certificate and server-identity
 verification.
 
 The [client status table](../README.md#sdk-status) describes this package's
-implementation and migration status.
+compatibility status.
 
 ## Build and package
 
@@ -99,9 +105,9 @@ Zstandard compression by default; set `ClientOptions.CompressionEnabled` to
 legacy compatibility alias for callers that need one deadline for both phases.
 
 The generated Smithy operation, input, output, and enum types under
-`OpenKache.Smithy` are the current transitional .NET API types.
-`ExperimentalStatsAsync` and `ExperimentalSyncAsync` are transitional
-experimental maintenance operations and are
+`OpenKache.Smithy` are compatibility adapter types.
+`ExperimentalStatsAsync` and `ExperimentalSyncAsync` are experimental
+maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before calling
@@ -116,5 +122,6 @@ directly.
 The package reads and writes plaintext values. It does not implement the
 [shared formatted value contract](../VALUE_FORMAT.md).
 
-The client exposes the raw Smithy API. Protected value handling remains in the
-shared Rust core and is not part of this package.
+The compatibility adapter exposes the raw Smithy API. Protected value handling
+remains in the shared Rust core and is not part of this package; neither is
+this raw surface an addition to the public Rust facade.
