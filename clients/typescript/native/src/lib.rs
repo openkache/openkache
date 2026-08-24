@@ -4,21 +4,16 @@
 //! profiles.  The adapter keeps those settings below the TypeScript boundary;
 //! callers can provide only an endpoint and the five maintained operations.
 
+mod gate0_contract;
+
 use std::sync::{Arc, RwLock};
 
 use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use openkache_client_core::value::{Compression, Encryption};
 use openkache_client_core::{
-    ClientRootKey, DeleteOutcome, Endpoint, GetOutcome, ProtectedClient, ServerTrust, SetOptions,
-    SetOutcome,
+    DeleteOutcome, Endpoint, GetOutcome, ProtectedClient, SetOptions, SetOutcome,
 };
-
-const ITEM_ID_ROOT: [u8; 32] = [
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-];
 
 /// Endpoint-only connection settings consumed by the private native loader.
 #[napi(object)]
@@ -126,17 +121,21 @@ impl NativeClient {
 /// production.
 #[napi]
 pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
+    let profile = gate0_contract::profile();
     let address = options.address.parse().map_err(|error| {
         invalid_argument(format!(
             "invalid server address {:?}: {error}",
             options.address
         ))
     })?;
-    let endpoint = Endpoint::from_socket_addr(address, "localhost").map_err(native_core_error)?;
-    let client = ProtectedClient::builder(endpoint, ClientRootKey::from_bytes(ITEM_ID_ROOT))
-        .server_trust(ServerTrust::Insecure)
-        .compression(Compression::Disabled)
-        .encryption(Encryption::Unprotected)
+    let endpoint =
+        Endpoint::from_socket_addr(address, profile.server_name).map_err(native_core_error)?;
+    let client = ProtectedClient::builder(endpoint, profile.item_id_root)
+        .server_trust(profile.server_trust)
+        .alpn_policy(profile.alpn)
+        .namespace_id(profile.namespace_id)
+        .compression(profile.compression)
+        .encryption(profile.encryption)
         .connect()
         .await
         .map_err(native_core_error)?;
