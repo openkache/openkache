@@ -39,8 +39,9 @@ impl KacheServer {
     ///
     /// # Errors
     ///
-    /// Returns an error when production TLS is missing or invalid, configuration validation or
-    /// socket binding fails, or cache startup fails.
+    /// Returns an error when the production TLS identity is missing or
+    /// invalid, configuration validation or socket binding fails, or cache
+    /// startup fails.
     pub async fn bind_with_config(address: SocketAddr, config: AppConfig) -> Result<Self> {
         config.validate()?;
         if !config.tls.is_configured() {

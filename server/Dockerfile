@@ -35,7 +35,7 @@ COPY clients/rust/Cargo.toml clients/rust/Cargo.toml
 COPY clients/typescript/native/Cargo.toml clients/typescript/native/Cargo.toml
 
 # Cargo validates that every workspace member has a target before it can fetch
-# dependencies, even when `-p openkache` selects only the server package.
+# dependencies, even when `-p openkache-server` selects only the server package.
 # These metadata-only placeholders avoid copying or compiling client sources;
 # the protocol and server placeholders are replaced by real sources below, and
 # none of these files reaches the runtime image.

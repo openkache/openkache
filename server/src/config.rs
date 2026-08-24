@@ -467,7 +467,7 @@ impl Default for ObservabilityConfig {
     }
 }
 
-/// Server identity, client authentication, and administrative authorization paths.
+/// Server identity, optional client authentication, and administrative authorization paths.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TlsConfig {
@@ -475,9 +475,14 @@ pub struct TlsConfig {
     pub certificate_chain: Option<PathBuf>,
     /// Unencrypted PEM or DER server private key.
     pub private_key: Option<PathBuf>,
-    /// PEM or DER CA certificates trusted to authenticate clients.
+    /// Optional PEM or DER CA certificates trusted to authenticate clients.
+    ///
+    /// When omitted, TLS 1.3 still protects every connection but the server
+    /// does not request a client certificate. Supplying this path enables
+    /// client authentication for deployments that need mTLS.
     pub client_ca: Option<PathBuf>,
-    /// Leaf certificates whose authenticated clients may execute administrative commands.
+    /// Optional leaf certificates whose authenticated clients may execute
+    /// administrative commands.
     pub admin_client_certificates: Vec<PathBuf>,
 }
 
@@ -497,17 +502,16 @@ impl TlsConfig {
         for (name, path) in [
             ("tls.certificate_chain", &self.certificate_chain),
             ("tls.private_key", &self.private_key),
-            ("tls.client_ca", &self.client_ca),
         ] {
             if path.is_none() {
                 return Err(KvError::InvalidConfig(format!(
-                    "{name} is required when production TLS is configured"
+                    "{name} is required when a production TLS identity is configured"
                 )));
             }
         }
-        if self.admin_client_certificates.is_empty() {
+        if !self.admin_client_certificates.is_empty() && self.client_ca.is_none() {
             return Err(KvError::InvalidConfig(
-                "tls.admin_client_certificates must contain at least one administrator certificate"
+                "tls.client_ca is required when tls.admin_client_certificates is configured"
                     .into(),
             ));
         }

@@ -8,7 +8,8 @@ use openkache::AppConfig;
 use openkache::server::{KacheServer, Result};
 use owo_colors::OwoColorize;
 
-/// TLS identity, client authentication, and explicit development override arguments.
+/// TLS identity, optional client authentication, and explicit development
+/// override arguments.
 #[derive(Args)]
 pub(super) struct SecurityArguments {
     /// File receiving the generated certificate in local development modes.
@@ -50,12 +51,13 @@ pub(super) struct SecurityArguments {
     #[arg(long, value_name = "PATH")]
     tls_private_key: Option<PathBuf>,
 
-    /// PEM or DER CA certificates trusted to authenticate clients.
+    /// Optional PEM or DER CA certificates trusted to authenticate clients.
+    /// Omit this flag when ordinary TLS clients do not need mTLS.
     #[arg(long, value_name = "PATH")]
     tls_client_ca: Option<PathBuf>,
 
-    /// Authenticated client leaf certificate allowed to run EXPERIMENTAL_STATS and
-    /// EXPERIMENTAL_SYNC; repeatable.
+    /// Authenticated client leaf certificate allowed to run EXPERIMENTAL_STATS
+    /// and EXPERIMENTAL_SYNC; repeatable. Requires --tls-client-ca.
     #[arg(long = "tls-admin-client-certificate", value_name = "PATH")]
     tls_admin_client_certificates: Vec<PathBuf>,
 }
@@ -94,9 +96,17 @@ impl SecurityArguments {
                 .await
                 .map(|server| (server, SecurityMode::LocalDevelopment))
         } else {
+            let client_authentication = config.tls.client_ca.is_some();
             KacheServer::bind_with_config(listen, config)
                 .await
-                .map(|server| (server, SecurityMode::MutualTls))
+                .map(|server| {
+                    (
+                        server,
+                        SecurityMode::ProductionTls {
+                            client_authentication,
+                        },
+                    )
+                })
         }
     }
 
@@ -116,14 +126,22 @@ impl SecurityArguments {
 
     pub(super) fn report(&self, mode: SecurityMode) {
         match mode {
-            SecurityMode::MutualTls => println!("{} {}", "Security:".green().bold(), "mutual TLS"),
+            SecurityMode::ProductionTls {
+                client_authentication: true,
+            } => println!("{} {}", "Security:".green().bold(), "mutual TLS"),
+            SecurityMode::ProductionTls {
+                client_authentication: false,
+            } => println!(
+                "{} TLS 1.3 (server identity configured; client certificates optional)",
+                "Security:".green().bold()
+            ),
             SecurityMode::LocalDevelopment => println!(
-                "{} local development on loopback only (certificate: {})",
+                "{} TLS 1.3 local development on loopback only; client certificates omitted (server certificate: {})",
                 "Security:".green().bold(),
                 self.certificate_out.display()
             ),
             SecurityMode::ExplicitInsecureDevelopment => println!(
-                "{} INSECURE DEVELOPMENT (certificate: {})",
+                "{} INSECURE DEVELOPMENT (TLS 1.3; client certificates omitted; server certificate: {})",
                 "Security:".red().bold(),
                 self.certificate_out.display()
             ),
@@ -133,7 +151,9 @@ impl SecurityArguments {
 
 #[derive(Clone, Copy)]
 pub(super) enum SecurityMode {
-    MutualTls,
+    ProductionTls {
+        client_authentication: bool,
+    },
     LocalDevelopment,
     ExplicitInsecureDevelopment,
 }

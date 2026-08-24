@@ -11,7 +11,7 @@ pub enum ServerError {
     #[error("cache failed: {0}")]
     Cache(#[from] KvError),
     #[error(
-        "production TLS and client authentication are required to bind {0}; configure [tls] or explicitly select insecure development mode"
+        "a production TLS server identity is required to bind {0}; configure [tls] or explicitly select insecure development mode"
     )]
     ProductionTlsRequired(SocketAddr),
     #[error("production TLS cannot be combined with insecure development mode")]

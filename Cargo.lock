@@ -2632,53 +2632,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "openkache"
-version = "0.1.0"
-dependencies = [
- "anstream",
- "blake3",
- "boring",
- "clap",
- "comnoq",
- "compio",
- "compio-quic",
- "crc32fast",
- "crossfire",
- "event-listener",
- "flume 0.10.14",
- "futures-util",
- "glommio",
- "kanal",
- "kimojio",
- "libc",
- "miette",
- "mimalloc",
- "monoio",
- "openkache-protocol",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "owo-colors",
- "quiche",
- "rand 0.9.5",
- "rcgen",
- "rustix",
- "rustls",
- "serde",
- "sha2",
- "signal-hook 0.4.4",
- "smallvec",
- "snmalloc-rs",
- "socket2 0.4.10",
- "thiserror",
- "tikv-jemallocator",
- "time",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "openkache-cli"
 version = "0.1.0"
 dependencies = [
@@ -2758,6 +2711,53 @@ dependencies = [
  "smallvec",
  "thiserror",
  "vu128",
+]
+
+[[package]]
+name = "openkache-server"
+version = "0.1.0"
+dependencies = [
+ "anstream",
+ "blake3",
+ "boring",
+ "clap",
+ "comnoq",
+ "compio",
+ "compio-quic",
+ "crc32fast",
+ "crossfire",
+ "event-listener",
+ "flume 0.10.14",
+ "futures-util",
+ "glommio",
+ "kanal",
+ "kimojio",
+ "libc",
+ "miette",
+ "mimalloc",
+ "monoio",
+ "openkache-protocol",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "owo-colors",
+ "quiche",
+ "rand 0.9.5",
+ "rcgen",
+ "rustix",
+ "rustls",
+ "serde",
+ "sha2",
+ "signal-hook 0.4.4",
+ "smallvec",
+ "snmalloc-rs",
+ "socket2 0.4.10",
+ "thiserror",
+ "tikv-jemallocator",
+ "time",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
