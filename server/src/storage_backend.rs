@@ -150,7 +150,7 @@ pub(crate) fn load_or_create_server_secret(
     backend::load_or_create_server_secret(directory, existing_storage)
 }
 
-/// Selects DomainV2 or fails closed before worker storage is opened.
+/// Selects DomainV1 or fails closed before worker storage is opened.
 #[allow(dead_code)]
 pub(crate) fn load_or_create_storage_format(
     directory: &Path,
@@ -386,7 +386,7 @@ mod backend {
     const SERVER_KEY_VERSION: u32 = 1;
     const SERVER_KEY_FILE_BYTES: usize = 64;
     const STORAGE_FORMAT_MAGIC: &[u8; 8] = b"OKFORMAT";
-    const STORAGE_FORMAT_VERSION: u32 = 2;
+    const STORAGE_FORMAT_VERSION: u32 = 1;
     const STORAGE_FORMAT_FILE_BYTES: usize = 16;
     const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
     pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
@@ -505,7 +505,7 @@ mod backend {
         }
         if existing_storage {
             return Err(KvError::Worker(format!(
-                "storage format marker {} is missing for existing storage; DomainV2 cannot open an unmarked legacy store",
+                "storage format marker {} is missing for existing storage; DomainV1 cannot open an unmarked legacy store",
                 path.display()
             )));
         }

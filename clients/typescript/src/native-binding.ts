@@ -33,6 +33,7 @@ export interface Native_Client_Options {
   readonly request_timeout_ms?: number
   readonly retry_max_attempts?: number
   readonly max_in_flight?: number
+  readonly max_in_flight_bytes?: number
   readonly encryption?: "compact" | "robust"
   readonly key_spec?: "integer" | "text" | "bytes"
   readonly transport?: "quic" | "tls_tcp" | "quic_insecure" | "tls_tcp_insecure"
@@ -44,18 +45,11 @@ export type Native_Namespace_Descriptor = Smithy_Namespace_Descriptor
 
 export type Native_Namespace_Open_Output = Smithy_Namespace_Open_Output
 
-interface Native_Value_Envelope {
-  readonly encoding: string
-  readonly type_name: string
-  readonly payload: Uint8Array
-}
-
 export interface Native_Client {
   ping(): Promise<void>
   get(key: Uint8Array): Promise<Uint8Array | null>
-  /** Returns one canonical StructuredValue-CBOR-v1 payload, or null when absent. */
+  /** Returns one canonical structured-value payload, or null when absent. */
   get_structured(key: Uint8Array): Promise<Uint8Array | null>
-  get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
   get_json(key: Uint8Array): Promise<string | null>
   get_v0(key: Uint8Array): Promise<Uint8Array | null>
   set(
@@ -66,20 +60,10 @@ export interface Native_Client {
     eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
   ): Promise<Smithy_Set_Outcome>
-  /** Stores one StructuredValue-CBOR-v1 payload without JSON reinterpretation. */
+  /** Stores one structured-value payload without JSON reinterpretation. */
   set_structured(
     key: Uint8Array,
     value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: number,
-  ): Promise<Smithy_Set_Outcome>
-  set_value(
-    key: Uint8Array,
-    encoding: string,
-    type_name: string,
-    payload: Uint8Array,
     condition?: Smithy_Set_Condition,
     expiration_mode?: Smithy_Expiration_Mode,
     eviction_mode?: Smithy_Eviction_Mode,

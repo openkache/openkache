@@ -2,9 +2,24 @@
   "name": "@openkache/client",
   "version": "0.2.0",
   "license": "Apache-2.0",
+  "description": "Promise-based OpenKache client for Node.js, Bun, and Deno with a runtime-neutral structured-value codec.",
+  "keywords": [
+    "bun",
+    "cache",
+    "deno",
+    "node",
+    "openkache"
+  ],
   "engines": {
     "node": ">=20"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openkache/openkache.git",
+    "directory": "clients/typescript"
+  },
+  "bugs": "https://github.com/openkache/openkache/issues",
+  "homepage": "https://github.com/openkache/openkache/tree/main/clients/typescript#readme",
   "type": "module",
   "sideEffects": false,
   "types": "./dist/index.d.ts",

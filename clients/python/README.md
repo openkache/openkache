@@ -27,12 +27,12 @@ StructuredValue-CBOR-v1 ABI without JSON or Raw fallback. The native boundary pr
 and cancellation outcomes as ``OpenKacheUnknownMutationError`` and
 ``OpenKacheCancelledError``.
 
-Mapped GET/SET/DELETE calls use the ABI v6 request handle
+Mapped GET/SET/DELETE calls use the ABI v1 request handle
 (``poll``/``wait``/``cancel``/``free``), so task cancellation cannot abandon a
 native mutation. Cancellation before admission raises
 ``OpenKacheCancelledError``; cancellation after a mutation starts raises
 ``OpenKacheUnknownMutationError``. Structured, scoped, namespace, and complete
-raw-policy calls have no dedicated request entry point in ABI v6 and therefore
+raw-policy calls have no dedicated request entry point in ABI v1 and therefore
 drain a documented safe completion boundary before honoring cancellation.
 
 > **Current implementation:** This package exposes canonical-JSON mapped-key

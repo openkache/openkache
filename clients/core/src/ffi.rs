@@ -54,10 +54,6 @@ use crate::{
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
-/// Additive native connection contract for independent Item-ID and value
-/// protection roots.
-pub const FFI_ABI_VERSION_V7: u32 = 7;
-
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
     kind: FfiResultKind,
@@ -146,10 +142,10 @@ pub struct FfiValueKey {
     pub key_length: usize,
 }
 
-/// ABI v7 options with independent Item-ID root and value keyring.
+/// ABI v1 options with independent Item-ID root and value keyring.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FfiConnectOptionsV7 {
+pub struct FfiConnectOptionsWithKeyring {
     pub abi_version: u32,
     pub base: *const FfiConnectOptions,
     pub item_id_root_key: *const u8,
@@ -2677,7 +2673,7 @@ pub unsafe extern "C" fn openkache_client_connect_with_options(
 
 /// Connects using the stable options structure and an explicit transport selector.
 ///
-/// This additive symbol leaves the ABI v6 options structure unchanged. Older
+/// This additive symbol leaves the base options structure unchanged. Older
 /// native libraries may omit it; callers must probe the symbol before use.
 ///
 /// # Safety
@@ -2700,44 +2696,51 @@ pub unsafe extern "C" fn openkache_client_connect_transport(
     }))
 }
 
-/// Returns the additive ABI version that supports independent Item-ID and
-/// value-key configuration.
+/// Connects through the v1 keyring configuration path.
+///
+/// The keyring options keep Item-ID derivation independent from value
+/// encryption keys. The base options must leave `data_protection_key` empty;
+/// the caller supplies the Item-ID root and, for protected values, value keys.
+/// Failures are encoded in the returned result pointer.
+///
+/// # Safety
+///
+/// `options` must be either null or a valid, properly aligned pointer to an
+/// initialized [`FfiConnectOptionsWithKeyring`] for the duration of this call.
+/// The nested `base` pointer and every non-empty pointer/length pair in the
+/// options must identify readable memory for the duration of this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn openkache_client_abi_version_v7() -> u32 {
-    FFI_ABI_VERSION_V7
-}
-
-/// Connects through the additive ABI v7 configuration path.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_connect_with_options_v7(
-    options: *const FfiConnectOptionsV7,
+pub unsafe extern "C" fn openkache_client_connect_with_keyring_options(
+    options: *const FfiConnectOptionsWithKeyring,
 ) -> *mut FfiResult {
     boxed_result(catch_result(|| {
         let options = unsafe {
             options
                 .as_ref()
-                .ok_or_else(|| "v7 connect options pointer must not be null".to_owned())?
+                .ok_or_else(|| "keyring connect options pointer must not be null".to_owned())?
         };
-        connect_options_v7(options)
+        connect_options_with_keyring(options)
     }))
 }
 
-fn connect_options_v7(options: &FfiConnectOptionsV7) -> std::result::Result<FfiResult, String> {
-    if options.abi_version != FFI_ABI_VERSION_V7 {
+fn connect_options_with_keyring(
+    options: &FfiConnectOptionsWithKeyring,
+) -> std::result::Result<FfiResult, String> {
+    if options.abi_version != ABI_VERSION {
         return Err(format!(
-            "unsupported native ABI v7 options version {}, expected {}",
-            options.abi_version, FFI_ABI_VERSION_V7
+            "unsupported native ABI options version {}, expected {}",
+            options.abi_version, ABI_VERSION
         ));
     }
     let base = unsafe {
         options
             .base
             .as_ref()
-            .ok_or_else(|| "v7 base options pointer must not be null".to_owned())?
+            .ok_or_else(|| "keyring base options pointer must not be null".to_owned())?
     };
     if base.data_protection_key_length != 0 {
         return Err(
-            "v7 base data_protection_key must be empty; configure item_id_root_key and value_keys"
+            "keyring base data_protection_key must be empty; configure item_id_root_key and value_keys"
                 .to_owned(),
         );
     }
@@ -2751,13 +2754,13 @@ fn connect_options_v7(options: &FfiConnectOptionsV7) -> std::result::Result<FfiR
         value if value == VALUE_FORMAT_ENCRYPTION_NONE as u32 => Encryption::Unprotected,
         value if value == VALUE_FORMAT_ENCRYPTION_COMPACT as u32 => Encryption::Compact,
         value if value == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 => Encryption::Robust,
-        value => return Err(format!("unsupported v7 encryption profile {value}")),
+        value => return Err(format!("unsupported keyring encryption profile {value}")),
     };
     if options.value_key_count == 0 && encryption != Encryption::Unprotected {
-        return Err("protected v7 values require at least one value key".to_owned());
+        return Err("protected keyring values require at least one value key".to_owned());
     }
     if options.value_key_count > 0 && encryption == Encryption::Unprotected {
-        return Err("unprotected v7 values must not supply value keys".to_owned());
+        return Err("unprotected keyring values must not supply value keys".to_owned());
     }
     if options.value_key_count > 0 && options.value_keys.is_null() {
         return Err(format!(

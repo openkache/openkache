@@ -1216,7 +1216,7 @@ func (h *nativeHandle) executeNative(
 				ttlMilliseconds,
 			)
 		}
-		// ABI v6 has no raw request entry point carrying complete policy
+		// ABI v1 has no raw request entry point carrying complete policy
 		// flags.  Keep this synchronous call alive through cancellation so a
 		// mutation cannot be abandoned with an unknown owner.
 		return h.executeSyncBoundary(

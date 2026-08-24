@@ -19,7 +19,7 @@ performs canonical encoding. Use
 opaque value bytes; it implements the generated `Smithy_OpenKache_Api`
 contract.
 
-ABI v6 operations use the native request-handle lifecycle (`poll`, `wait`,
+ABI v1 operations use the native request-handle lifecycle (`poll`, `wait`,
 `cancel`, and `free`). A canceled read is surfaced as Swift's
 `CancellationError`; a mutation that crossed native admission throws
 `OpenKacheUnknownMutationError` and must not be replayed. Raw SETs that request
