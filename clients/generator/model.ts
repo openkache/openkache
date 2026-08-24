@@ -43,6 +43,12 @@ export interface Value_Envelope_Contract {
 /** Defaults shared by the Rust client core and its native language adapters. */
 export interface Client_Defaults_Contract {
   readonly connect_timeout_milliseconds: number
+  readonly gate0_alpn_version: number
+  readonly gate0_compression: number
+  readonly gate0_encryption: number
+  readonly gate0_item_id_root_key_hex: string
+  readonly gate0_namespace_id: number
+  readonly gate0_value_selector: number
   readonly max_in_flight: number
   readonly request_timeout_milliseconds: number
   readonly retry_max_attempts: number
