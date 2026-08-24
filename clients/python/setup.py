@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from setuptools import Command, setup
@@ -28,21 +29,24 @@ if not PROTOCOL_ROOT.is_dir():
 CORE_ROOT = PUBLIC_ROOT / "clients" / "core"
 if not CORE_ROOT.is_dir():
     CORE_ROOT = PACKAGE_ROOT / "core"
+VALUE_ROOT = PUBLIC_ROOT / "clients" / "value"
+if not VALUE_ROOT.is_dir():
+    VALUE_ROOT = PACKAGE_ROOT / "value"
 CLIENTS_ROOT = PUBLIC_ROOT / "clients"
 CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
 CLIENT_GENERATOR_ROOT = CLIENTS_ROOT / "generator"
 CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
-CLIENT_GENERATOR_INPUTS = (
-    "operation_client_projection.ts",
-    "operation_models.ts",
-    "operation_plans.ts",
-    "operation_results.ts",
-)
+CLIENT_GENERATOR_INPUTS = ()
 if not CLIENT_GENERATOR.is_file():
     CLIENTS_ROOT = PACKAGE_ROOT / "clients"
     CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
     CLIENT_GENERATOR_ROOT = CLIENTS_ROOT / "generator"
     CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
+CLIENT_GENERATOR_INPUTS = tuple(
+    path.name
+    for path in sorted(CLIENTS_ROOT.glob("*.ts"))
+    if path.name != CLIENT_GENERATOR.name
+)
 
 
 def native_library_name() -> str:
@@ -167,6 +171,44 @@ class sdist(_sdist):
         self.run_command("generate_smithy")
         super().run()
 
+    def make_distribution(self) -> None:
+        """Build the release tree outside the checkout.
+
+        ``setuptools`` normally creates ``<name>-<version>`` beside
+        ``setup.py`` while assembling an sdist.  The public checkout is also
+        a Bazel source tree, so that transient directory can race Bazel's
+        package scanner during parallel CI.  Keep the archive assembly in a
+        temporary directory and publish only the finished archive.
+        """
+
+        staging_root = Path(
+            tempfile.mkdtemp(prefix=f"{self.distribution.get_fullname()}-")
+        )
+        try:
+            with self._remove_os_link():
+                base_dir = self.distribution.get_fullname()
+                release_root = staging_root / base_dir
+                base_name = os.path.join(self.dist_dir, base_dir)
+                self.make_release_tree(str(release_root), self.filelist.files)
+                archive_files = []
+                if "tar" in self.formats:
+                    self.formats.append(self.formats.pop(self.formats.index("tar")))
+                for fmt in self.formats:
+                    archive_file = self.make_archive(
+                        base_name,
+                        fmt,
+                        root_dir=str(staging_root),
+                        base_dir=base_dir,
+                        owner=self.owner,
+                        group=self.group,
+                    )
+                    archive_files.append(archive_file)
+                    self.distribution.dist_files.append(("sdist", "", archive_file))
+                self.archive_files = archive_files
+        finally:
+            if not self.keep_temp:
+                shutil.rmtree(staging_root, ignore_errors=True)
+
     def make_release_tree(self, base_dir: str, files: list[str]) -> None:
         super().make_release_tree(base_dir, files)
         release_root = Path(base_dir)
@@ -177,6 +219,7 @@ class sdist(_sdist):
             "target",
         )
         shutil.copytree(CORE_ROOT, release_root / "core", ignore=source_ignore)
+        shutil.copytree(VALUE_ROOT, release_root / "value", ignore=source_ignore)
         shutil.copytree(PROTOCOL_ROOT, release_root / "protocol", ignore=source_ignore)
         (release_root / "clients").mkdir(parents=True, exist_ok=True)
         shutil.copy2(CLIENT_GENERATOR, release_root / "clients" / "generate.ts")
@@ -206,6 +249,7 @@ class sdist(_sdist):
             'path = "../protocol"',
         )
         _replace_workspace_edition(release_root / "core" / "Cargo.toml")
+        _replace_workspace_edition(release_root / "value" / "Cargo.toml")
         _replace_workspace_edition(release_root / "protocol" / "Cargo.toml")
 
 

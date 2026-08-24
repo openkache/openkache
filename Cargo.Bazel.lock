@@ -1,5 +1,5 @@
 {
-  "checksum": "520107721df1bb53dd25687f2c7430c106dae29db800a378c0ff32476b669669",
+  "checksum": "fd93cf0dfa194cda1d191db5ee4a87e8071431faac6f817a0a3f3d2061d84fe4",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2577,6 +2577,12 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "pq-experimental"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -2657,6 +2663,12 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "pq-experimental"
+          ],
+          "selects": {}
+        },
         "extra_deps": {
           "common": [
             ":build_script_main"
@@ -17347,7 +17359,8 @@
           "common": [
             "default",
             "quic-compio",
-            "quic-quinn"
+            "quic-quinn",
+            "tls-tcp"
           ],
           "selects": {}
         },
@@ -17430,12 +17443,20 @@
               "target": "serde_json_canonicalizer"
             },
             {
+              "id": "smallvec 1.15.2",
+              "target": "smallvec"
+            },
+            {
               "id": "thiserror 2.0.19",
               "target": "thiserror"
             },
             {
               "id": "tokio 1.53.1",
               "target": "tokio"
+            },
+            {
+              "id": "tokio-rustls 0.26.4",
+              "target": "tokio_rustls"
             },
             {
               "id": "vu128 1.1.0",
@@ -23679,28 +23700,10 @@
         "crate_features": {
           "common": [
             "const_generics",
+            "const_new",
             "union"
           ],
-          "selects": {
-            "aarch64-apple-darwin": [
-              "const_new"
-            ],
-            "aarch64-unknown-linux-gnu": [
-              "const_new"
-            ],
-            "wasm32-wasip1": [
-              "const_new"
-            ],
-            "x86_64-pc-windows-msvc": [
-              "const_new"
-            ],
-            "x86_64-unknown-linux-gnu": [
-              "const_new"
-            ],
-            "x86_64-unknown-nixos-gnu": [
-              "const_new"
-            ]
-          }
+          "selects": {}
         },
         "edition": "2018",
         "version": "1.15.2"

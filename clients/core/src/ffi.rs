@@ -3232,6 +3232,7 @@ pub unsafe extern "C" fn openkache_client_execute_fields(
     }))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_execute(
     client: *const FfiClient,
     operation: u32,

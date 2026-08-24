@@ -36,7 +36,7 @@ network-runtime-glommio = ["dep:glommio", "dep:signal-hook"]
 network-runtime-kimojio = ["dep:kimojio", "dep:rustix", "dep:signal-hook"]
 quic-quinn = ["dep:compio-quic"]
 quic-noq = ["dep:comnoq"]
-quic-quiche = ["dep:boring", "dep:quiche"]
+quic-quiche = ["dep:boring", "dep:quiche", "boring/pq-experimental"]
 
 [[bin]]
 name = "openkache-server"
