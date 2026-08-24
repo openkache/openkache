@@ -14,6 +14,15 @@ import type {
 } from "./model"
 import { encode_vu128 } from "./utils"
 
+function gate0_integer_member(
+  object: Readonly<Record<string, unknown>>,
+  member: string,
+  minimum: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  return integer_member(object, member, CLIENT_DEFAULTS_TRAIT_ID, minimum, maximum)
+}
+
 export function value_format_contract(value: unknown): Value_Format_Contract {
   const contract = object_value(value, VALUE_FORMAT_TRAIT_ID)
   const values = {
@@ -261,6 +270,19 @@ export function value_envelope_contract(value: unknown): Value_Envelope_Contract
 
 export function client_defaults_contract(value: unknown): Client_Defaults_Contract {
   const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
+  const gate0_item_id_root_key_hex = string_member(
+    contract,
+    "gate0ItemIdRootKeyHex",
+    CLIENT_DEFAULTS_TRAIT_ID,
+  )
+  if (
+    gate0_item_id_root_key_hex.length !== 64 ||
+    !/^[0-9a-f]{64}$/i.test(gate0_item_id_root_key_hex)
+  ) {
+    throw new Error(
+      `${CLIENT_DEFAULTS_TRAIT_ID}.gate0ItemIdRootKeyHex must contain exactly 32 bytes of hexadecimal digits`,
+    )
+  }
   const defaults = {
     max_in_flight: integer_member(
       contract,
@@ -273,44 +295,6 @@ export function client_defaults_contract(value: unknown): Client_Defaults_Contra
       "connectTimeoutMilliseconds",
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
-    ),
-    gate0_alpn_version: integer_member(
-      contract,
-      "gate0AlpnVersion",
-      CLIENT_DEFAULTS_TRAIT_ID,
-      1,
-    ),
-    gate0_compression: integer_member(
-      contract,
-      "gate0Compression",
-      CLIENT_DEFAULTS_TRAIT_ID,
-      0,
-      0xff,
-    ),
-    gate0_encryption: integer_member(
-      contract,
-      "gate0Encryption",
-      CLIENT_DEFAULTS_TRAIT_ID,
-      0,
-      0xff,
-    ),
-    gate0_item_id_root_key_hex: string_member(
-      contract,
-      "gate0ItemIdRootKeyHex",
-      CLIENT_DEFAULTS_TRAIT_ID,
-    ),
-    gate0_namespace_id: integer_member(
-      contract,
-      "gate0NamespaceId",
-      CLIENT_DEFAULTS_TRAIT_ID,
-      1,
-    ),
-    gate0_value_selector: integer_member(
-      contract,
-      "gate0ValueSelector",
-      CLIENT_DEFAULTS_TRAIT_ID,
-      0,
-      0xff,
     ),
     request_timeout_milliseconds: integer_member(
       contract,
@@ -365,6 +349,36 @@ export function client_defaults_contract(value: unknown): Client_Defaults_Contra
       "minimumPositiveValue",
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
+    ),
+    gate0_alpn_version: gate0_integer_member(
+      contract,
+      "gate0AlpnVersion",
+      1,
+      0xff,
+    ),
+    gate0_compression: gate0_integer_member(
+      contract,
+      "gate0Compression",
+      0,
+      0xff,
+    ),
+    gate0_encryption: gate0_integer_member(
+      contract,
+      "gate0Encryption",
+      0,
+      0xff,
+    ),
+    gate0_item_id_root_key_hex,
+    gate0_namespace_id: gate0_integer_member(
+      contract,
+      "gate0NamespaceId",
+      1,
+    ),
+    gate0_value_selector: gate0_integer_member(
+      contract,
+      "gate0ValueSelector",
+      0,
+      0xff,
     ),
   } satisfies Client_Defaults_Contract
   if (!/^[0-9a-f]{64}$/i.test(defaults.gate0_item_id_root_key_hex)) {

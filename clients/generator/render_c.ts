@@ -3,6 +3,7 @@
 import type { Wire_Entry } from "../../protocol/wire"
 import type { Client_Contract } from "./model"
 import {
+  bytes_from_hex,
   c_string_literal,
   c_unsigned_literal,
   formatted_byte,
@@ -50,6 +51,18 @@ function c_contract_api_enum(
 export function render_c_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
+  const gate0_item_id_root = bytes_from_hex(
+    defaults.gate0_item_id_root_key_hex,
+    "clientDefaults.gate0ItemIdRootKeyHex",
+  )
+  if (gate0_item_id_root.length !== 32) {
+    throw new Error(
+      "clientDefaults.gate0ItemIdRootKeyHex must contain exactly 32 bytes",
+    )
+  }
+  const gate0_item_id_root_bytes = gate0_item_id_root
+    .map((byte) => `${formatted_byte(byte)}u`)
+    .join(", ")
   const envelope = contract.value_envelope
   const ffi = contract.ffi
   const descriptor_fields = ffi.namespace_descriptor_fields
@@ -199,6 +212,13 @@ ${descriptor_offset_asserts}
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
 #define OPENKACHE_SMITHY_CLIENT_CERTIFICATE_PEM_TYPE ${c_string_literal(defaults.certificate_pem_type)}
 #define OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE ${defaults.minimum_positive_value}u
+#define OPENKACHE_SMITHY_GATE0_ALPN_VERSION ${defaults.gate0_alpn_version}u
+#define OPENKACHE_SMITHY_GATE0_COMPRESSION ${formatted_byte(defaults.gate0_compression)}u
+#define OPENKACHE_SMITHY_GATE0_ENCRYPTION ${formatted_byte(defaults.gate0_encryption)}u
+#define OPENKACHE_SMITHY_GATE0_ITEM_ID_ROOT_KEY_BYTES ${gate0_item_id_root_bytes}
+#define OPENKACHE_SMITHY_GATE0_ITEM_ID_ROOT_KEY_LENGTH ${gate0_item_id_root.length}u
+#define OPENKACHE_SMITHY_GATE0_NAMESPACE_ID ${defaults.gate0_namespace_id}u
+#define OPENKACHE_SMITHY_GATE0_VALUE_SELECTOR ${formatted_byte(defaults.gate0_value_selector)}u
 ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u

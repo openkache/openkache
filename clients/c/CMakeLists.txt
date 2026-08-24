@@ -208,18 +208,39 @@ function(openkache_client_c_configure target)
     "${target}"
     INTERFACE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../core/include>
       $<BUILD_INTERFACE:${_openkache_client_generated_include_dir}>
       $<INSTALL_INTERFACE:include>
   )
   target_compile_features("${target}" INTERFACE c_std_17)
 endfunction()
 
+add_library(openkache_client_gate0 STATIC src/gate0.c)
+set_target_properties(
+  openkache_client_gate0
+  PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    OUTPUT_NAME openkache-client-gate0
+    EXPORT_NAME ClientGate0
+)
+target_include_directories(
+  openkache_client_gate0
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../core/include"
+    "${_openkache_client_generated_include_dir}"
+)
+target_compile_features(openkache_client_gate0 PRIVATE c_std_17)
+target_link_libraries(openkache_client_gate0 PRIVATE OpenKache::ClientCore)
+
 add_library(openkache_client_c INTERFACE)
 add_library(OpenKache::ClientC ALIAS openkache_client_c)
 set_target_properties(openkache_client_c PROPERTIES EXPORT_NAME ClientC)
 openkache_client_c_configure(openkache_client_c)
-target_link_libraries(openkache_client_c INTERFACE OpenKache::ClientCore)
+target_link_libraries(
+  openkache_client_c
+  INTERFACE
+    openkache_client_gate0
+    OpenKache::ClientCore
+)
 
 if(TARGET OpenKache::ClientCoreShared)
   add_library(openkache_client_c_shared INTERFACE)
@@ -233,6 +254,7 @@ if(TARGET OpenKache::ClientCoreShared)
   target_link_libraries(
     openkache_client_c_shared
     INTERFACE
+      openkache_client_gate0
       OpenKache::ClientCoreShared
   )
 endif()
@@ -249,11 +271,13 @@ if(TARGET OpenKache::ClientCoreStatic)
   target_link_libraries(
     openkache_client_c_static
     INTERFACE
+      openkache_client_gate0
       OpenKache::ClientCoreStatic
   )
 endif()
 
-set(_openkache_client_c_export_targets openkache_client_c)
+set(_openkache_client_c_export_targets
+    openkache_client_gate0 openkache_client_c)
 if(TARGET openkache_client_c_shared)
   list(APPEND _openkache_client_c_export_targets openkache_client_c_shared)
 endif()
@@ -264,20 +288,17 @@ endif()
 install(
   TARGETS ${_openkache_client_c_export_targets}
   EXPORT openkache_client_targets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(
   DIRECTORY include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 install(
-  FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/../core/include/openkache/client_abi.h"
-    "${_openkache_client_generated_contract}"
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/openkache
-)
-install(
-  FILES "${CMAKE_CURRENT_SOURCE_DIR}/../core/include/openkache_client.h"
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES "${_openkache_client_generated_contract}"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/openkache"
 )
 if(OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED)
   install(
@@ -339,7 +360,19 @@ if(CMAKE_THREAD_LIBS_INIT)
        ${CMAKE_THREAD_LIBS_INIT})
 endif()
 if(CMAKE_DL_LIBS)
-  list(APPEND _openkache_client_pkgconfig_private_libs_list ${CMAKE_DL_LIBS})
+  if(CMAKE_DL_LIBS MATCHES "^-l")
+    list(
+      APPEND
+      _openkache_client_pkgconfig_private_libs_list
+      ${CMAKE_DL_LIBS}
+    )
+  else()
+    list(
+      APPEND
+      _openkache_client_pkgconfig_private_libs_list
+      "-l${CMAKE_DL_LIBS}"
+    )
+  endif()
 endif()
 string(
   JOIN
@@ -355,7 +388,7 @@ if(OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED)
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_LINK_LIBRARIES
-    "-L\${libdir} -l${OPENKACHE_CLIENT_PKGCONFIG_LIBRARY_NAME}"
+    "-L\${libdir} -lopenkache-client-gate0 -l${OPENKACHE_CLIENT_PKGCONFIG_LIBRARY_NAME}"
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_PRIVATE_LIBS
@@ -378,7 +411,7 @@ if(OPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC)
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_LINK_LIBRARIES
-    "\${libdir}/${OPENKACHE_CLIENT_INSTALLED_STATIC_NAME}"
+    "-L\${libdir} -lopenkache-client-gate0 \${libdir}/${OPENKACHE_CLIENT_INSTALLED_STATIC_NAME}"
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_PRIVATE_LIBS

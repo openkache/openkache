@@ -301,6 +301,18 @@ pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.serv
 pub const CLIENT_CERTIFICATE_PEM_TYPE: &str = ${rust_string_literal(defaults.certificate_pem_type)};
 /// Minimum positive setting value when zero selects a default.
 pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.minimum_positive_value)};
+/// Gate 0 ALPN protocol version selected by maintained facades.
+pub const GATE0_ALPN_VERSION: usize = ${formatted_decimal(defaults.gate0_alpn_version)};
+/// Gate 0 compression identifier.
+pub const GATE0_COMPRESSION: u8 = ${formatted_byte(defaults.gate0_compression)};
+/// Gate 0 value-protection identifier.
+pub const GATE0_ENCRYPTION: u8 = ${formatted_byte(defaults.gate0_encryption)};
+/// Gate 0 public development Item-ID root key.
+pub const GATE0_ITEM_ID_ROOT_KEY: [u8; 32] = ${rust_byte_array_literal(bytes_from_hex(defaults.gate0_item_id_root_key_hex, "clientDefaults.gate0ItemIdRootKeyHex"))};
+/// Gate 0 namespace identity.
+pub const GATE0_NAMESPACE_ID: u64 = ${formatted_decimal(defaults.gate0_namespace_id)};
+/// Gate 0 value-format selector byte.
+pub const GATE0_VALUE_SELECTOR: u8 = ${formatted_byte(defaults.gate0_value_selector)};
 
 ${operation_client_projections}
 

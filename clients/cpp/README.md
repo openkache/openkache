@@ -1,25 +1,32 @@
 # OpenKache C++ client
 
-The C++ package targets C++20 and is a header-only RAII layer over the shared C
-ABI. `openkache::Client` is movable, releases its native worker automatically,
-and exposes byte-span and `std::string_view` overloads for protected cache
-operations. CMake propagates the C++20 requirement only through the imported
-target; it does not change the consuming project's global standard.
-Projects using C++23 or newer can consume the same target; C++17 is not a
-supported minimum because the public API uses `std::span`.
-`Connect_Options::transport` selects verified QUIC (the source-compatible
-default), verified TLS-over-TCP, or one of the explicit TLS-preserving
-insecure variants. Both profiles use TLS 1.3, `openkache/1`, and
-`X25519MLKEM768`, with identical v1 frame bytes. Non-default selectors require
-the additive `openkache_client_connect_transport` symbol; older native
-libraries report a clear unsupported-selector error through the runtime symbol
-probe.
+This package is the maintained C++20 Gate 0 client.  It is a header-only RAII
+adapter over the generated C ABI and exposes exactly five operations:
+`connect`, `get`, `set`, `remove` (the C++ spelling of `delete`), and `close`.
+The adapter owns no protocol, key-derivation, or value-envelope implementation
+outside the generated native boundary.
+
+`openkache::Value` is a lossless tagged model.  It retains `Undefined` versus
+`Null`, arbitrary-precision signed integers, Float16/32/64 raw bits,
+byte/text distinction, ordered arrays, and ordered maps with scalar,
+structurally unique keys.  `encode_structured_value` and
+`decode_structured_value` implement one complete
+`StructuredValue-CBOR-v1` item; malformed, truncated, trailing, non-UTF-8,
+duplicate-key, and resource-limited inputs throw `openkache::Value_Error`.
+`get` always returns a tagged `Get_Result`, so a stored `Null` or `Undefined`
+cannot be confused with a missing item.
+
+Structured values are bounded by `Value_Limits`: the default traversal ceiling
+is 128 nested arrays/maps, and `MAX_ALLOWED_VALUE_DEPTH` (1024) is a hard
+implementation maximum.  A caller may choose a lower `max_depth`, but larger
+limits are rejected before parsing or encoding so recursive native stack usage
+stays bounded.
 
 ## Build
 
-Build the native ABI first, then configure this package. CMake generates the
-Smithy C contract into the build tree; generated contract files are not
-checked into the source repository:
+Build the shared native ABI, then configure this package.  CMake generates the
+Smithy contract into the build tree and does not check generated headers into
+the source repository:
 
 ```bash
 cargo build --manifest-path ../../Cargo.toml \
@@ -29,14 +36,12 @@ cmake -S . -B target/build \
 cmake --build target/build
 ```
 
-For a shared build, use
-`-DOPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED=/path/to/libopenkache_client_core.so`.
-The legacy `OPENKACHE_CLIENT_NATIVE_LIBRARY` option remains accepted for
-single-library builds. If Bun or the Smithy CLI is not available, pass a
-previously generated header with
-`-DOPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER=/path/to/smithy_contract.h`.
+The configure/build pair is the package smoke check: it regenerates the C
+contract, compiles the C++20 headers, and validates the imported CMake target.
+For an installed-package check, configure a small consumer with
+`find_package(OpenKacheClient CONFIG REQUIRED)` as shown below.
 
-Install and consume the package with CMake:
+Install and consume the C++ target with:
 
 ```bash
 cmake --install target/build --prefix /path/to/prefix
@@ -44,50 +49,49 @@ cmake --install target/build --prefix /path/to/prefix
 
 ```cmake
 find_package(OpenKacheClient CONFIG REQUIRED)
-target_link_libraries(app PRIVATE OpenKache::ClientCpp)
+target_link_libraries(app PRIVATE OpenKache::Client)
 ```
 
-Use `OpenKache::ClientCppShared` or `OpenKache::ClientCppStatic` when the
-linkage mode must be explicit. The C++ targets remain header-only; the shared
-Rust/C core is the native binary.
+The C++ target requires C++20 through its target usage requirements and does
+not change the consuming project's global compiler mode.  The
+`OpenKache::ClientCpp` language-specific target remains available; use
+`OpenKache::ClientCppShared` or `OpenKache::ClientCppStatic` when linkage must
+be explicit.  The C++ adapter remains header-only, with the package-private C
+forwarding library and selected native core providing the runtime binary.
 
-## API
+## Usage
 
-Construct `openkache::Connect_Options` with the server address and, when
-protection is wanted, a persistent 32-byte data-protection key, then call
-`openkache::Client::connect`. Omitting the key selects unprotected formatted
-values while retaining Item ID derivation. A DER/PEM trust
-certificate is optional; an empty buffer uses system roots. `get` returns
-`std::optional<Bytes>`, `set` returns `Set_Outcome`, and `remove` reports
-whether a value existed. `Set_Options` supports conditional writes,
-namespace-inherited or explicit expiration, and evictable or
-eviction-protected items; a non-empty `ttl_ms` without an explicit mode is
-accepted as the convenience `Explicit_Ttl` shorthand. `get_raw`, `set_raw`,
-and `remove_raw` expose exact `0..=32`-byte item-ID operations without value
-protection. `namespace_open`, `namespace_update_policy`, and
-`namespace_delete` expose the server-assigned namespace lifecycle as
-transitional out-of-band control-plane shapes with legacy, non-normative
-revision fields; they are not stable-v1 data-plane operations.
-`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are likewise transitional
-experimental maintenance operations and are
-disabled by default. Enable `enable_experimental_api = true` explicitly and
-coordinate exact revision `draft-2026-08-19.4` out of band as described in
-[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending
-them; the revision is not negotiated on the wire. Transport and validation
-failures throw `openkache::Error`. Logical `std::span` and `std::string_view`
-keys cross the ABI with their generated `Bytes` or `Text` discriminator; the
-shared core performs canonical key encoding. ABI v1 requests use the
-`poll`/`wait`/`free` request lifecycle and preserve
-`Unknown_Mutation_Error` or `Canceled_Error` categories. Complete raw SET
-policy flags and namespace/scoped operations have no request-handle entry
-point, so the adapter drains their synchronous native result at a documented
-safe completion boundary.
+```cpp
+#include <openkache/client.hpp>
 
-Formatted writes use automatic level-1 Zstandard compression by default and
-retain a completed frame only when it is smaller. Set
-`Connect_Options::compression_enabled` to `false` for an explicit
-uncompressed opt-out.
+using namespace openkache;
 
-The C++ layer does not duplicate protocol or protection logic. Its operation
-and outcome values come from the C ABI, whose Smithy-derived constants live in
-the shared core include directory.
+Client client = Client::connect("127.0.0.1:4433");
+const auto outcome = client.set(
+    Typed_Key::text("greeting"),
+    Value::text("hello"));
+const Get_Result result = client.get(Typed_Key::text("greeting"));
+if (result.is_found()) {
+    const Value& value = result.value();
+    // value remains lossless; Null and Undefined are separate kinds.
+}
+client.remove(Typed_Key::text("greeting"));
+client.close(); // idempotent; the destructor closes as well
+```
+
+`Integer` keys are signed `i64`; text keys are valid UTF-8 with an explicit
+length; byte keys preserve every byte, including empty and NUL bytes.  Keys
+are canonically encoded as deterministic CBOR before the native FFI call.
+Floating-point, Boolean, null, collection, invalid-UTF-8, and out-of-range
+integer keys are not accepted by the typed-key API.
+
+The Gate 0 profile fixes `NamespaceHash`, namespace ID `1`, the public
+development Item-ID root from `KEY_FORMAT.md`, `StructuredValue-CBOR-v1`,
+uncompressed/unprotected values, and TLS 1.3 with ALPN `openkache/1` and
+`X25519MLKEM768`.  `DevelopmentTrust` deliberately disables certificate and
+hostname verification while retaining TLS encryption and has no plaintext
+fallback.  This profile is **development only — do not use this trust profile
+in production**.  Trust roots, certificates, mTLS, retries, timeouts,
+cancellation, TTL, conditional writes, raw/JSON selectors, Exact Item IDs,
+compression, and value-protection controls are intentionally not part of the
+maintained facade.

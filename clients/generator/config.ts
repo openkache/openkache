@@ -17,6 +17,7 @@ export const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 export const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 export const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
 export const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
+
 export const FFI_ENUMS = {
   operations: { name: "FfiOperation", kind: "FFI operation" },
   transports: { name: "FfiTransport", kind: "FFI transport" },
