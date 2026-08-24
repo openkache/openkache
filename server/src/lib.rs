@@ -151,6 +151,21 @@ compile_error!(
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+// Keep the wire primitives package-contained so the published server does
+// not depend on a separately released protocol crate. Checkout builds still
+// regenerate the adapter contract from the canonical Smithy model, while this
+// internal protocol copy consumes immutable generated wire snapshots.
+#[path = "internal_protocol/lib.rs"]
+mod internal_protocol;
+
+// Preserve the historical `crate::openkache_protocol::…` path inside the server
+// adapter while keeping the wire primitives package-contained.  This is a
+// module alias rather than a crate alias: the server's own `Result` type must
+// remain distinct from the protocol result alias.
+#[doc(hidden)]
+pub mod openkache_protocol {
+    pub use super::internal_protocol::*;
+}
 // The generated contract contains compatibility constants used by adapters
 // and client build targets that are not all referenced by the server crate.
 // Keep those generated details out of server lint noise without weakening

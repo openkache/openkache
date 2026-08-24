@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use openkache_protocol::Status;
+use crate::openkache_protocol::Status;
 
 use super::http::{MetricsEndpoint, MetricsEndpointHandle};
 use super::lifecycle::{Lifecycle, LifecycleCell};

@@ -5,7 +5,7 @@
 //! `Response`. Keeping this adapter separate prevents API behavior from
 //! acquiring wire status or framing branches.
 
-use openkache_protocol::{Opcode, ProtocolError, Response, ResponseParts, ResponseSegment, Status};
+use crate::openkache_protocol::{Opcode, ProtocolError, Response, ResponseParts, ResponseSegment, Status};
 use smallvec::SmallVec;
 
 use super::operation_contract::OperationStatus;
@@ -248,7 +248,7 @@ pub(super) fn validate_response_fields<T: AsRef<[u8]>>(
 /// status and response framing contract. An abandoned outcome deliberately
 /// produces no response when a mutation's commit state is unknowable.
 pub(super) fn encode_operation_outcome(
-    opcode: openkache_protocol::Opcode,
+    opcode: crate::openkache_protocol::Opcode,
     outcome: OperationOutcome,
 ) -> Option<OperationResponse> {
     match outcome {
@@ -319,7 +319,7 @@ pub(super) fn encode_operation_outcome_for_operation(
     encode_operation_outcome(contract::opcode_for_operation_id(operation_id), outcome)
 }
 
-fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &[u8]) -> bool {
+fn valid_opaque_response(opcode: crate::openkache_protocol::Opcode, value: &[u8]) -> bool {
     let wire = contract::spec(opcode);
     if wire.response.framing != contract::OperationLayoutFraming::Opaque {
         return false;
@@ -337,7 +337,7 @@ fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &[u8]) -> bo
 }
 
 fn operation_success_status(
-    opcode: openkache_protocol::Opcode,
+    opcode: crate::openkache_protocol::Opcode,
     status: OperationSuccessStatus,
 ) -> Option<Status> {
     let status = status.wire_status();
@@ -352,7 +352,7 @@ fn operation_success_status(
 /// contract. A behavior cannot accidentally return a status that its Smithy
 /// operation did not declare.
 fn operation_error_response(
-    opcode: openkache_protocol::Opcode,
+    opcode: crate::openkache_protocol::Opcode,
     error: OperationError,
 ) -> Option<OperationResponse> {
     let contract = contract::spec(opcode);
@@ -373,7 +373,7 @@ fn operation_error_response(
 }
 
 fn operation_status_response(
-    opcode: openkache_protocol::Opcode,
+    opcode: crate::openkache_protocol::Opcode,
     contract: contract::OperationWireSpec,
     requested: OperationStatus,
     message: impl Into<OperationValue>,
@@ -396,7 +396,7 @@ fn operation_status_response(
 /// Encodes one operation response without allowing an API-owned payload to
 /// panic the server when it exceeds the protocol frame limit.
 fn operation_response(
-    opcode: openkache_protocol::Opcode,
+    opcode: crate::openkache_protocol::Opcode,
     status: Status,
     payload: impl Into<OperationValue>,
 ) -> OperationResponse {

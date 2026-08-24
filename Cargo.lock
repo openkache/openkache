@@ -2747,6 +2747,7 @@ dependencies = [
  "compio",
  "compio-quic",
  "crc32fast",
+ "crossbeam-queue",
  "crossfire",
  "event-listener",
  "flume 0.10.14",
@@ -2758,7 +2759,6 @@ dependencies = [
  "miette",
  "mimalloc",
  "monoio",
- "openkache-protocol",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -2780,6 +2780,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "vu128",
 ]
 
 [[package]]

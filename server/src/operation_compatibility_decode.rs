@@ -5,7 +5,7 @@
 //! the storage behavior. Generic field-envelope examples live in
 //! [`super::operation_generic_bindings`] and do not depend on these adapters.
 
-use openkache_protocol::{ItemId, OwnedRange};
+use crate::openkache_protocol::{ItemId, OwnedRange};
 
 use super::operation_contract::request_fields;
 use super::operation_handlers::OperationInputView;
@@ -28,7 +28,7 @@ impl OperationInputView {
     fn unsigned_long_at_index(&self, index: usize) -> Option<u64> {
         self.encoded_field_at_index(index)
             .and_then(|field| {
-                openkache_protocol::codec::decode_u64_be(field.bytes()).ok()
+                crate::openkache_protocol::codec::decode_u64_be(field.bytes()).ok()
             })
     }
 
@@ -38,14 +38,14 @@ impl OperationInputView {
     ) -> Result<Option<u64>, &'static [u8]> {
         index
             .and_then(|index| self.encoded_field_at_index(index))
-            .map(|field| openkache_protocol::codec::decode_u64_be(field.bytes()))
+            .map(|field| crate::openkache_protocol::codec::decode_u64_be(field.bytes()))
             .transpose()
     }
 
     fn boolean_at_index(&self, index: Option<usize>) -> Result<Option<bool>, &'static [u8]> {
         index
             .and_then(|index| self.encoded_field_at_index(index))
-            .map(|field| openkache_protocol::codec::decode_bool(field.bytes()))
+            .map(|field| crate::openkache_protocol::codec::decode_bool(field.bytes()))
             .transpose()
     }
 }

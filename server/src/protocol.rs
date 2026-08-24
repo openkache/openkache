@@ -1,12 +1,12 @@
 //! Server protocol framing and cache policy values.
 
 pub use crate::contract::{WireRequestLayout, WireRequestStep, wire_request_layout};
-pub use openkache_protocol::{ItemId, Opcode, Response, Status};
-use openkache_protocol::{
+pub use crate::openkache_protocol::{ItemId, Opcode, Response, Status};
+use crate::openkache_protocol::{
     MAX_VARUINT_BYTES, NAMESPACE_ID_BYTES, REQUEST_FIXED_BYTES, RequestFrameHeader,
 };
 
-type WireResult<T> = openkache_protocol::Result<T>;
+type WireResult<T> = crate::openkache_protocol::Result<T>;
 
 #[path = "protocol_policy.rs"]
 mod policy;
@@ -29,7 +29,7 @@ pub(crate) const fn max_request_frame_bytes() -> usize {
 /// fields or operation semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestFrame<'a> {
-    inner: openkache_protocol::OpaqueRequestFrame<'a>,
+    inner: crate::openkache_protocol::OpaqueRequestFrame<'a>,
 }
 
 impl<'a> RequestFrame<'a> {
@@ -46,7 +46,7 @@ impl<'a> RequestFrame<'a> {
         let Some(layout) = Self::layout(prefix)? else {
             return Ok(None);
         };
-        openkache_protocol::OpaqueRequestFrame::decode_header(prefix, layout)
+        crate::openkache_protocol::OpaqueRequestFrame::decode_header(prefix, layout)
     }
 
     /// Returns the exact additional bytes needed to complete the next
@@ -55,7 +55,7 @@ impl<'a> RequestFrame<'a> {
         let Some(layout) = Self::layout(prefix)? else {
             return Ok(REQUEST_FIXED_BYTES - prefix.len());
         };
-        openkache_protocol::OpaqueRequestFrame::header_bytes_needed(prefix, layout)
+        crate::openkache_protocol::OpaqueRequestFrame::header_bytes_needed(prefix, layout)
     }
 
     /// Reports the complete frame length once enough metadata is available.
@@ -73,12 +73,12 @@ impl<'a> RequestFrame<'a> {
     /// complete frame length is invalid.
     pub fn decode(frame: &'a [u8]) -> WireResult<Self> {
         let layout =
-            Self::layout(frame)?.ok_or(openkache_protocol::ProtocolError::FrameTooShort {
+            Self::layout(frame)?.ok_or(crate::openkache_protocol::ProtocolError::FrameTooShort {
                 expected: REQUEST_FIXED_BYTES,
                 actual: frame.len(),
             })?;
         Ok(Self {
-            inner: openkache_protocol::OpaqueRequestFrame::decode(frame, layout)?,
+            inner: crate::openkache_protocol::OpaqueRequestFrame::decode(frame, layout)?,
         })
     }
 
@@ -111,11 +111,11 @@ fn read_u64_be(input: &[u8]) -> Result<u64> {
 }
 
 fn encode_varuint(value: u64) -> ([u8; MAX_VARUINT_BYTES], usize) {
-    openkache_protocol::encode_varuint(value)
+    crate::openkache_protocol::encode_varuint(value)
 }
 
 fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64, usize)>> {
-    openkache_protocol::decode_varuint(input, context).map_err(Into::into)
+    crate::openkache_protocol::decode_varuint(input, context).map_err(Into::into)
 }
 
 /// Policy framing and validation errors.
@@ -169,40 +169,40 @@ pub enum ProtocolError {
     InvalidRevision,
 }
 
-impl From<openkache_protocol::ProtocolError> for ProtocolError {
-    fn from(error: openkache_protocol::ProtocolError) -> Self {
+impl From<crate::openkache_protocol::ProtocolError> for ProtocolError {
+    fn from(error: crate::openkache_protocol::ProtocolError) -> Self {
         match error {
-            openkache_protocol::ProtocolError::UnknownOpcode(value) => Self::UnknownOpcode(value),
-            openkache_protocol::ProtocolError::UnknownStatus(value) => Self::UnknownStatus(value),
-            openkache_protocol::ProtocolError::FrameTooShort { expected, actual } => {
+            crate::openkache_protocol::ProtocolError::UnknownOpcode(value) => Self::UnknownOpcode(value),
+            crate::openkache_protocol::ProtocolError::UnknownStatus(value) => Self::UnknownStatus(value),
+            crate::openkache_protocol::ProtocolError::FrameTooShort { expected, actual } => {
                 Self::FrameTooShort { expected, actual }
             }
-            openkache_protocol::ProtocolError::FrameLength { expected, actual } => {
+            crate::openkache_protocol::ProtocolError::FrameLength { expected, actual } => {
                 Self::FrameLength { expected, actual }
             }
-            openkache_protocol::ProtocolError::FrameLengthOverflow => Self::FrameLengthOverflow,
-            openkache_protocol::ProtocolError::NonCanonicalVaruint { context } => {
+            crate::openkache_protocol::ProtocolError::FrameLengthOverflow => Self::FrameLengthOverflow,
+            crate::openkache_protocol::ProtocolError::NonCanonicalVaruint { context } => {
                 Self::NonCanonicalVaruint { context }
             }
-            openkache_protocol::ProtocolError::VaruintOverflow { context } => {
+            crate::openkache_protocol::ProtocolError::VaruintOverflow { context } => {
                 Self::VaruintOverflow { context }
             }
-            openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
+            crate::openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
             }
-            openkache_protocol::ProtocolError::InvalidItemIdLength { maximum, actual } => {
+            crate::openkache_protocol::ProtocolError::InvalidItemIdLength { maximum, actual } => {
                 Self::InvalidItemIdLength { maximum, actual }
             }
-            openkache_protocol::ProtocolError::InvalidRequestPackedBits { offset } => {
+            crate::openkache_protocol::ProtocolError::InvalidRequestPackedBits { offset } => {
                 Self::InvalidRequestPackedBits { offset }
             }
-            openkache_protocol::ProtocolError::RequestConstantMismatch { offset } => {
+            crate::openkache_protocol::ProtocolError::RequestConstantMismatch { offset } => {
                 Self::RequestConstantMismatch { offset }
             }
-            openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
+            crate::openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
                 Self::InvalidOptionalValues(message)
             }
-            openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
+            crate::openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
                 Self::InvalidFieldSequence(message)
             }
         }

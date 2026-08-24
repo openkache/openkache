@@ -9,7 +9,7 @@
 //! becoming a second operation registry. Adding an API changes its generated
 //! contract and API-owned registration/binding, not the network loop.
 
-use openkache_protocol::{Opcode, RequestFrameHeader};
+use crate::openkache_protocol::{Opcode, RequestFrameHeader};
 use smallvec::SmallVec;
 
 use super::operation_authorization::AuthorizationContext;
@@ -38,7 +38,7 @@ impl HeaderAdmissionRejection {
         self.request_id
     }
 
-    pub(super) const fn status(&self) -> openkache_protocol::Status {
+    pub(super) const fn status(&self) -> crate::openkache_protocol::Status {
         self.response.status()
     }
 
@@ -88,7 +88,7 @@ pub(super) fn admit_request_header(
             request_id: header.request_id(),
             response: operation_transport::contract_error_response_for_operation(
                 operation_contract::operation_id_for_opcode(header.opcode()),
-                openkache_protocol::Status::InternalError,
+                crate::openkache_protocol::Status::InternalError,
                 b"unassigned data-plane opcode",
             ),
             silent: true,

@@ -12,6 +12,9 @@ use super::{Result, ServerError};
 
 pub(super) enum AccessPolicy {
     InsecureDevelopment,
+    /// Production TLS with optional client authentication. An empty
+    /// administrator list deliberately keeps privileged operations disabled
+    /// until an authenticated leaf is explicitly allowlisted.
     MutualTls {
         admin_client_certificates: Vec<CertificateDer<'static>>,
     },
@@ -50,12 +53,12 @@ pub(super) fn load_production_tls(
             .as_deref()
             .expect("validated production TLS private key path"),
     )?;
-    let client_ca = load_certificates(
-        config
-            .client_ca
-            .as_deref()
-            .expect("validated production TLS client CA path"),
-    )?;
+    let client_ca = config
+        .client_ca
+        .as_deref()
+        .map(load_certificates)
+        .transpose()?
+        .unwrap_or_default();
     let mut admin_client_certificates = Vec::with_capacity(config.admin_client_certificates.len());
     for path in &config.admin_client_certificates {
         let certificate = load_certificates(path)?

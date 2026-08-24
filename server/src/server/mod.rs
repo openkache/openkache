@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::Status;
+use crate::openkache_protocol::Status;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -224,7 +224,7 @@ impl NamespaceGate {
             .map_err(|_| NamespaceGateError::Internal)?;
         let (outcome, descriptor) = registry
             .open(
-                openkache_protocol::OwnedRange::whole(name.to_vec()),
+                crate::openkache_protocol::OwnedRange::whole(name.to_vec()),
                 create_if_missing,
                 policy,
             )

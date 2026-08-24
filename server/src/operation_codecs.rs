@@ -1,7 +1,7 @@
 //! Server adapter for generated codec descriptors.
 //!
 //! Wire-value validation and container traversal live in
-//! [`openkache_protocol::codec`]. This module only resolves generated codec
+//! [`crate::openkache_protocol::codec`]. This module only resolves generated codec
 //! identifiers and checks that the modeled registry is complete.
 
 #![allow(dead_code)]

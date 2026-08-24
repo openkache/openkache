@@ -4,7 +4,7 @@ use boring::x509::X509;
 use boring::x509::store::X509StoreBuilder;
 
 use super::{NAME, ServerTlsConfig, TransportError};
-use openkache_protocol::ALPN;
+use crate::openkache_protocol::ALPN;
 
 const MAX_DATAGRAM_BYTES: usize = 65_535;
 const MAX_BUFFERED_REQUEST_BYTES: usize = crate::protocol::max_request_frame_bytes() + 1;

@@ -3,7 +3,7 @@
 //! Generated wire metadata maps one owned frame into numeric modeled fields.
 //! This boundary does not classify API families or interpret field semantics.
 
-use openkache_protocol::{
+use crate::openkache_protocol::{
     OPCODE_BYTES, Opcode, OwnedRange, ProtocolError, RequestFieldProjection, project_request_frame,
 };
 

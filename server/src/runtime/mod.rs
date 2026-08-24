@@ -460,8 +460,8 @@ impl ThreadedKvkache {
     /// existing data remains addressable. Variable-length IDs use the scoped
     /// length-delimited derivation and are never padded or reinterpreted as a
     /// fixed-width identity.
-    pub fn storage_key_for_item_id(&self, item_id: openkache_protocol::ItemId) -> StorageKey {
-        if item_id.len() == openkache_protocol::ITEM_ID_BYTES {
+    pub fn storage_key_for_item_id(&self, item_id: crate::openkache_protocol::ItemId) -> StorageKey {
+        if item_id.len() == crate::openkache_protocol::ITEM_ID_BYTES {
             let identity = item_id
                 .as_bytes()
                 .try_into()

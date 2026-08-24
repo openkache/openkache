@@ -265,12 +265,12 @@ impl Config {
         }
         if self.max_item_bytes == 0
             || self.max_item_bytes > self.large_value_capacity
-            || self.max_item_bytes > openkache_protocol::MAX_VALUE_BYTES
+            || self.max_item_bytes > crate::openkache_protocol::MAX_VALUE_BYTES
         {
             return Err(KvError::InvalidConfig(format!(
                 "maximum item size must be between 1 byte and {} bytes",
                 self.large_value_capacity
-                    .min(openkache_protocol::MAX_VALUE_BYTES)
+                    .min(crate::openkache_protocol::MAX_VALUE_BYTES)
             )));
         }
         if self
@@ -467,7 +467,7 @@ impl Default for ObservabilityConfig {
     }
 }
 
-/// Server identity, client authentication, and administrative authorization paths.
+/// Server identity, optional client authentication, and administrative authorization paths.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TlsConfig {
@@ -475,9 +475,14 @@ pub struct TlsConfig {
     pub certificate_chain: Option<PathBuf>,
     /// Unencrypted PEM or DER server private key.
     pub private_key: Option<PathBuf>,
-    /// PEM or DER CA certificates trusted to authenticate clients.
+    /// Optional PEM or DER CA certificates trusted to authenticate clients.
+    ///
+    /// When omitted, TLS 1.3 still protects every connection but the server
+    /// does not request a client certificate. Supplying this path enables
+    /// client authentication for deployments that need mTLS.
     pub client_ca: Option<PathBuf>,
-    /// Leaf certificates whose authenticated clients may execute administrative commands.
+    /// Optional leaf certificates whose authenticated clients may execute
+    /// administrative commands.
     pub admin_client_certificates: Vec<PathBuf>,
 }
 
@@ -497,17 +502,16 @@ impl TlsConfig {
         for (name, path) in [
             ("tls.certificate_chain", &self.certificate_chain),
             ("tls.private_key", &self.private_key),
-            ("tls.client_ca", &self.client_ca),
         ] {
             if path.is_none() {
                 return Err(KvError::InvalidConfig(format!(
-                    "{name} is required when production TLS is configured"
+                    "{name} is required when a production TLS identity is configured"
                 )));
             }
         }
-        if self.admin_client_certificates.is_empty() {
+        if !self.admin_client_certificates.is_empty() && self.client_ca.is_none() {
             return Err(KvError::InvalidConfig(
-                "tls.admin_client_certificates must contain at least one administrator certificate"
+                "tls.client_ca is required when tls.admin_client_certificates is configured"
                     .into(),
             ));
         }
@@ -1019,13 +1023,13 @@ impl AppConfig {
                 .storage
                 .max_item_size_mib
                 .checked_mul(1024 * 1024)
-                .is_none_or(|bytes| bytes > openkache_protocol::MAX_VALUE_BYTES)
+                .is_none_or(|bytes| bytes > crate::openkache_protocol::MAX_VALUE_BYTES)
         {
             return Err(KvError::InvalidConfig(format!(
                 "storage.max_item_size_mib must be between 1 and {}",
                 self.storage
                     .large_value_capacity_mib_per_thread
-                    .min(openkache_protocol::MAX_VALUE_BYTES / (1024 * 1024))
+                    .min(crate::openkache_protocol::MAX_VALUE_BYTES / (1024 * 1024))
             )));
         }
         if self.network.max_inflight_value_mib < self.storage.max_item_size_mib {

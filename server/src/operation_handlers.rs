@@ -8,7 +8,7 @@
 
 use std::any::Any;
 
-use openkache_protocol::OwnedRange;
+use crate::openkache_protocol::OwnedRange;
 use smallvec::SmallVec;
 
 use super::operation_execution_state::OperationStateRef;

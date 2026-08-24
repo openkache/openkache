@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::Opcode;
+use crate::openkache_protocol::Opcode;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -562,7 +562,7 @@ async fn serve_resp_connection(
                     network_shard.record_request(
                         operation,
                         if command_timed_out {
-                            openkache_protocol::Status::Timeout
+                            crate::openkache_protocol::Status::Timeout
                         } else {
                             status_for_resp_response(&responses[response_start..], operation)
                         },
@@ -753,39 +753,39 @@ fn classify_command(command: &[&[u8]]) -> RespCommandKind {
 pub(crate) fn status_for_resp_response(
     response: &[u8],
     operation: Operation,
-) -> openkache_protocol::Status {
+) -> crate::openkache_protocol::Status {
     if response.starts_with(b"+") {
-        return openkache_protocol::Status::Ok;
+        return crate::openkache_protocol::Status::Ok;
     }
     if response.starts_with(b"$-1\r\n") {
         return if operation == operation_for_opcode(Opcode::Set) {
-            openkache_protocol::Status::NotStored
+            crate::openkache_protocol::Status::NotStored
         } else {
-            openkache_protocol::Status::NotFound
+            crate::openkache_protocol::Status::NotFound
         };
     }
     if response.starts_with(b"$") {
-        return openkache_protocol::Status::Ok;
+        return crate::openkache_protocol::Status::Ok;
     }
     if response.starts_with(b":") {
         return if operation == operation_for_opcode(Opcode::Delete) {
             if response.starts_with(b":0\r\n") {
-                openkache_protocol::Status::NotFound
+                crate::openkache_protocol::Status::NotFound
             } else {
-                openkache_protocol::Status::Deleted
+                crate::openkache_protocol::Status::Deleted
             }
         } else {
-            openkache_protocol::Status::Ok
+            crate::openkache_protocol::Status::Ok
         };
     }
     if response.starts_with(b"-ERR") {
         return if operation == Operation::unknown() {
-            openkache_protocol::Status::UnsupportedOpcode
+            crate::openkache_protocol::Status::UnsupportedOpcode
         } else {
-            openkache_protocol::Status::InternalError
+            crate::openkache_protocol::Status::InternalError
         };
     }
-    openkache_protocol::Status::InternalError
+    crate::openkache_protocol::Status::InternalError
 }
 
 async fn execute_command(

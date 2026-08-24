@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use futures_util::lock::Mutex as AsyncMutex;
-use openkache_protocol::OwnedRange;
+use crate::openkache_protocol::OwnedRange;
 
 use super::operation_capabilities::CapabilityKey;
 use super::storage_port::StorageRoute;

@@ -3,7 +3,7 @@
 //! The network/runtime implementation owns routing and worker lifecycle;
 //! API modules depend only on opaque address and storage operation contracts.
 
-use openkache_protocol::{OwnedRange, StableBytes, StableOwnerPool};
+use crate::openkache_protocol::{OwnedRange, StableBytes, StableOwnerPool};
 
 use crate::StorageKey;
 pub(crate) use crate::types::StorageWriteOptions;
@@ -138,7 +138,7 @@ impl AsRef<[u8]> for StorageValue {
 /// Implementations may retain memory segments, pooled read leases, or another
 /// backend owner. The visible byte length must remain unchanged while the
 /// owner is held by a [`StorageReadValue`].
-pub(crate) use openkache_protocol::StableByteOwner as StorageReadOwner;
+pub(crate) use crate::openkache_protocol::StableByteOwner as StorageReadOwner;
 
 /// Preallocated type-erasure storage for backend read owners.
 #[derive(Clone)]

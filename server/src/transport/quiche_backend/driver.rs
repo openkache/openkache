@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::ResponseSegment;
+use crate::openkache_protocol::ResponseSegment;
 use rustls::pki_types::CertificateDer;
 use smallvec::SmallVec;
 

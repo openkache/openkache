@@ -5,7 +5,7 @@
 //! these accessors here gives the composition boundary one place to evolve
 //! when the generated descriptor changes.
 
-use openkache_protocol::Opcode;
+use crate::openkache_protocol::Opcode;
 
 use crate::observability::Operation;
 

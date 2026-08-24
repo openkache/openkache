@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
-use openkache_protocol::{OwnedRange, StableByteOwner};
+use crate::openkache_protocol::{OwnedRange, StableByteOwner};
 
 use crate::store::{DirectIoBuffer, DirectIoBufferLease};
 
