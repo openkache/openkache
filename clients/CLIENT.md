@@ -163,7 +163,7 @@ runtime alive until those completions no longer reference them.
 
 ### 3.4 Native request handles and safe boundaries
 
-ABI v6 exposes asynchronous execute entry points that return an owned request
+ABI v1 exposes asynchronous execute entry points that return an owned request
 handle. A managed adapter MUST keep the copied input buffers and client active
 slot owned until the request lifecycle is complete, then consume at most one
 result and call `request_free` exactly once. The required sequence is:
@@ -179,7 +179,7 @@ generic runtime cancellation or retrying the mutation. Read-only cancellation
 may map to the language's normal cancellation exception after the native result
 has been consumed.
 
-ABI v6 does not expose a request-handle entry point for every operation shape
+ABI v1 does not expose a request-handle entry point for every operation shape
 (for example, complete raw SET policy flags and namespace/scoped calls).
 Adapters MAY use a documented **safe completion boundary** for those calls:
 shield the synchronous native task from language cancellation, drain its

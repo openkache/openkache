@@ -92,12 +92,12 @@ item-ID/raw-value layer when an application already owns protocol IDs.
 Use `client.Smithy()` when an application needs the generated
 `SmithyOpenKacheAPI` operation structures shared with other bindings.
 
-Protected and legacy raw operations use the ABI v6 request handle lifecycle
+Protected and legacy raw operations use the ABI v1 request handle lifecycle
 when an async entry point carries their options. A context cancellation before
 native admission returns the context error; cancellation after a mutation has
 started preserves `ErrUnknownMutation` and never replays the mutation. Complete
 raw SET policy flags, structured calls, scoped calls, and namespace control
-operations do not have request-handle entry points in ABI v6, so the adapter
+operations do not have request-handle entry points in ABI v1, so the adapter
 drains a safe synchronous completion boundary before returning.
 
 ## Configuration
@@ -114,7 +114,7 @@ drains a safe synchronous completion boundary before returning.
 - An empty `DataProtectionKey` selects unprotected values while retaining
   client-side Item ID derivation.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 6 and the extended
+  artifact. The native artifact must have ABI version 1 and the extended
   connect symbol when `Identity` is used.
 
 Protocol operations, Smithy models, and value-format identifiers are generated

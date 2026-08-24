@@ -1146,7 +1146,7 @@ async def _await_sync_boundary(
     """Wait for a legacy synchronous ABI call before honoring cancellation.
 
     Structured, scoped, and namespace operations do not yet have dedicated
-    request-handle entry points in ABI v6.  Keeping their native call alive
+    request-handle entry points in ABI v1.  Keeping their native call alive
     until its core deadline is the safe ownership boundary: a canceled task
     never abandons a mutation whose result could still become unknown.
     """

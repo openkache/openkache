@@ -8,8 +8,8 @@
 use crate::{BUCKET_BYTES, Config, DirectIoBuffer, KvError, Result};
 
 pub(crate) const SEGMENT_FILE_HEADER_BYTES: u64 = BUCKET_BYTES as u64;
-const FILE_MAGIC: &[u8; 8] = b"OKSGV2\0\0";
-const FORMAT_VERSION: u32 = 2;
+const FILE_MAGIC: &[u8; 8] = b"OKSGV1\0\0";
+const FORMAT_VERSION: u32 = 1;
 
 pub(crate) fn encode_segment_file_header(
     config: &Config,

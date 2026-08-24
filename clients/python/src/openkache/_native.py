@@ -871,7 +871,7 @@ class NativeClient:
     ) -> tuple[int, bytes]:
         """Execute an exact-item-ID operation at a safe completion boundary.
 
-        ABI v6 exposes a request handle for the legacy raw SET condition and
+        ABI v1 exposes a request handle for the legacy raw SET condition and
         TTL shape, but not for the complete policy flags used here.  Keep the
         synchronous complete-options call alive until its native result is
         consumed rather than abandoning a possible mutation on cancellation.

@@ -33,7 +33,7 @@ without extending the item and MUST document its clock source,
 rollback/forward behavior, VM suspend behavior, and restore behavior.
 
 OpenKache stores expiration deadlines as Unix-epoch milliseconds and captures
-the wall-clock reference in the `OKCPV3` checkpoint. During one process,
+the wall-clock reference in the `OKCPV1` checkpoint. During one process,
 deadline comparisons use a monotonic `Instant` anchored to that reference.
 On restart, a wall clock earlier than the checkpoint reference is treated as
 untrusted and startup fails closed; this prevents a restart rollback from
@@ -41,8 +41,9 @@ extending every persisted TTL. A forward jump at restart is accepted and may
 expire entries early. The monotonic clock's suspend behavior is
 platform-defined; operators must restart/revalidate after a suspend or restore
 when elapsed time cannot be trusted, and the restart check follows the same
-fail-closed policy rather than extending a deadline. `OKCPV1` and
-`OKCPV2` checkpoints lack this reference and are rejected instead of replayed.
+fail-closed policy rather than extending a deadline. The v1 checkpoint carries
+this reference; a checkpoint with a different version is rejected instead of
+replayed.
 
 Snapshot or replica restore MUST choose one explicit policy:
 
