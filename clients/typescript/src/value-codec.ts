@@ -683,12 +683,31 @@ function safe_length(value: bigint, budget: Required<Value_Limits>): number {
   return length
 }
 
-/** Strict native projection: Integer -> bigint and Map -> Map. */
+/**
+ * Strict native projection for values that JavaScript can represent without
+ * semantic loss.
+ *
+ * `Undefined_Value` cannot become JavaScript `undefined`, because that would
+ * erase the distinction between a stored undefined value and a missing value.
+ * `Float_Value` cannot become JavaScript `number`, because that would erase
+ * its original width and raw bits. Callers that need either value must keep
+ * the lossless model returned by `decode_structured_value`.
+ *
+ * @param value - Lossless structured value to project.
+ * @param options - Optional checked integer convenience conversion.
+ * @returns A native value with the model distinctions supported by JavaScript.
+ * @throws {Structured_Value_Error} If the value cannot be represented without
+ * semantic loss.
+ */
 export function to_native(
   value: Structured_Value,
   options: { readonly safe_integer?: boolean } = {},
 ): unknown {
-  if (value instanceof Undefined_Value) return undefined
+  if (value instanceof Undefined_Value) {
+    throw new Structured_Value_Error(
+      "Undefined cannot be represented by strict native projection; use the lossless model",
+    )
+  }
   if (value === null || typeof value === "boolean") return value
   if (value instanceof Integer_Value) {
     if (options.safe_integer && (value.value < BigInt(Number.MIN_SAFE_INTEGER) || value.value > BigInt(Number.MAX_SAFE_INTEGER))) {
@@ -696,7 +715,11 @@ export function to_native(
     }
     return options.safe_integer ? Number(value.value) : value.value
   }
-  if (value instanceof Float_Value) return decode_float(value)
+  if (value instanceof Float_Value) {
+    throw new Structured_Value_Error(
+      "Float width and raw bits cannot be represented by JavaScript number; use the lossless model",
+    )
+  }
   if (value instanceof ByteString_Value) return value.value.slice()
   if (value instanceof TextString_Value) return value.value
   if (value instanceof Array_Value) return value.values.map((child): unknown => to_native(child, options))
@@ -730,7 +753,15 @@ function native_map_key_equal(left: unknown, right: unknown): boolean {
   return left === right
 }
 
-/** Decodes one payload and applies the strict native projection. */
+/**
+ * Decodes one payload and applies the strict native projection.
+ *
+ * @param input - One complete StructuredValue-CBOR-v1 payload.
+ * @param options - Optional checked integer convenience conversion.
+ * @returns A native value when every model value is representable without loss.
+ * @throws {Structured_Value_Error} If decoding fails or native projection
+ * would lose model semantics.
+ */
 export function decode_native_value(
   input: Uint8Array,
   options: { readonly safe_integer?: boolean } = {},
@@ -738,13 +769,27 @@ export function decode_native_value(
   return to_native(decode_structured_value(input), options)
 }
 
-/** Safely projects a text-keyed lossless map to a null-prototype object. */
+/**
+ * Safely projects a text-keyed lossless map to a null-prototype object.
+ *
+ * Values use the same strict rules as `to_native`; undefined values and
+ * floating-point values are rejected instead of being coerced. The projection
+ * also rejects text-keyed maps whose JavaScript object property order would
+ * differ from the model entry order.
+ *
+ * @param value - Lossless map with text keys.
+ * @returns A null-prototype object containing the map entries.
+ * @throws {Structured_Value_Error} If a key or value cannot be represented
+ * without semantic loss.
+ */
 export function to_plain_object(value: Map_Value): Record<string, unknown> {
   const result = Object.create(null) as Record<string, unknown>
+  const expected_keys: string[] = []
   for (const [key, child] of value.entries) {
     if (!(key instanceof TextString_Value)) {
       throw new Structured_Value_Error("map contains a non-text key")
     }
+    expected_keys.push(key.value)
     Object.defineProperty(result, key.value, {
       configurable: true,
       enumerable: true,
@@ -752,27 +797,12 @@ export function to_plain_object(value: Map_Value): Record<string, unknown> {
       value: to_native(child),
     })
   }
+  if (!Object.keys(result).every((key, index): boolean => key === expected_keys[index])) {
+    throw new Structured_Value_Error(
+      "map keys cannot be represented by a JavaScript object without changing entry order",
+    )
+  }
   return result
-}
-
-function decode_float(value: Float_Value): number {
-  if (value.width === 64) {
-    const buffer = new ArrayBuffer(8)
-    new DataView(buffer).setBigUint64(0, value.raw_bits, false)
-    return new DataView(buffer).getFloat64(0, false)
-  }
-  if (value.width === 32) {
-    const buffer = new ArrayBuffer(4)
-    new DataView(buffer).setUint32(0, Number(value.raw_bits), false)
-    return new DataView(buffer).getFloat32(0, false)
-  }
-  const bits = Number(value.raw_bits)
-  const sign = (bits & 0x8000) === 0 ? 1 : -1
-  const exponent = (bits >>> 10) & 0x1f
-  const fraction = bits & 0x3ff
-  if (exponent === 0) return sign * 2 ** -14 * (fraction / 2 ** 10)
-  if (exponent === 0x1f) return fraction === 0 ? sign * Infinity : NaN
-  return sign * 2 ** (exponent - 15) * (1 + fraction / 2 ** 10)
 }
 
 function assert_valid_unicode_string(value: string): void {

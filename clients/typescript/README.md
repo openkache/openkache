@@ -174,9 +174,20 @@ const bytes = encode_structured_value(1n)
 const model = decode_structured_value(bytes)
 ```
 
-`to_native` is an explicit convenience projection. It maps integers to
-`bigint`, floats to JavaScript `number`, bytes to copied `Uint8Array`, and
-maps to `Map`; use the lossless result from `get` when width or raw bits matter.
+`to_native` and `decode_native_value` are strict convenience projections. They
+map integers to `bigint`, bytes to copied `Uint8Array`, and maps to `Map`.
+They reject `Undefined_Value` and every `Float_Value` with
+`Structured_Value_Error`: JavaScript `undefined` would collapse the stored
+undefined/missing distinction, while `number` would discard float width and
+raw-bit distinctions. Keep the lossless result from `get` or use
+`decode_structured_value` when those values are present. The optional
+`{ safe_integer: true }` setting is a checked integer-only convenience that
+returns a JavaScript `number` only for values in the exact safe-integer range;
+it does not enable lossy undefined or float conversion.
+
+`to_plain_object` applies the same strict value rules and additionally rejects
+text-keyed maps when JavaScript object property ordering would differ from the
+lossless map entry order.
 
 ## Errors
 
