@@ -208,18 +208,38 @@ function(openkache_client_c_configure target)
     "${target}"
     INTERFACE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../core/include>
-      $<BUILD_INTERFACE:${_openkache_client_generated_include_dir}>
       $<INSTALL_INTERFACE:include>
   )
   target_compile_features("${target}" INTERFACE c_std_17)
 endfunction()
 
+add_library(openkache_client_gate0 STATIC src/gate0.c)
+set_target_properties(
+  openkache_client_gate0
+  PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    OUTPUT_NAME openkache-client-gate0
+    EXPORT_NAME ClientGate0
+)
+target_include_directories(
+  openkache_client_gate0
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../core/include"
+    "${_openkache_client_generated_include_dir}"
+)
+target_compile_features(openkache_client_gate0 PRIVATE c_std_17)
+target_link_libraries(openkache_client_gate0 PRIVATE OpenKache::ClientCore)
+
 add_library(openkache_client_c INTERFACE)
 add_library(OpenKache::ClientC ALIAS openkache_client_c)
 set_target_properties(openkache_client_c PROPERTIES EXPORT_NAME ClientC)
 openkache_client_c_configure(openkache_client_c)
-target_link_libraries(openkache_client_c INTERFACE OpenKache::ClientCore)
+target_link_libraries(
+  openkache_client_c
+  INTERFACE
+    openkache_client_gate0
+    OpenKache::ClientCore
+)
 
 if(TARGET OpenKache::ClientCoreShared)
   add_library(openkache_client_c_shared INTERFACE)
@@ -253,7 +273,8 @@ if(TARGET OpenKache::ClientCoreStatic)
   )
 endif()
 
-set(_openkache_client_c_export_targets openkache_client_c)
+set(_openkache_client_c_export_targets
+    openkache_client_gate0 openkache_client_c)
 if(TARGET openkache_client_c_shared)
   list(APPEND _openkache_client_c_export_targets openkache_client_c_shared)
 endif()
@@ -264,19 +285,12 @@ endif()
 install(
   TARGETS ${_openkache_client_c_export_targets}
   EXPORT openkache_client_targets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(
   DIRECTORY include/
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-install(
-  FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/../core/include/openkache/client_abi.h"
-    "${_openkache_client_generated_contract}"
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/openkache
-)
-install(
-  FILES "${CMAKE_CURRENT_SOURCE_DIR}/../core/include/openkache_client.h"
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 if(OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED)

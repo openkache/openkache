@@ -26,7 +26,6 @@ function(openkache_client_cpp_configure target)
     INTERFACE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../c/include>
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../core/include>
       $<INSTALL_INTERFACE:include>
   )
   openkache_client_cpp_require_cxx20("${target}")
@@ -37,6 +36,11 @@ add_library(OpenKache::ClientCpp ALIAS openkache_client_cpp)
 set_target_properties(openkache_client_cpp PROPERTIES EXPORT_NAME ClientCpp)
 openkache_client_cpp_configure(openkache_client_cpp)
 target_link_libraries(openkache_client_cpp INTERFACE OpenKache::ClientC)
+
+add_library(openkache_client INTERFACE)
+add_library(OpenKache::Client ALIAS openkache_client)
+set_target_properties(openkache_client PROPERTIES EXPORT_NAME Client)
+target_link_libraries(openkache_client INTERFACE openkache_client_cpp)
 
 if(TARGET OpenKache::ClientCShared)
   add_library(openkache_client_cpp_shared INTERFACE)
@@ -70,7 +74,7 @@ if(TARGET OpenKache::ClientCStatic)
   )
 endif()
 
-set(_openkache_client_cpp_export_targets openkache_client_cpp)
+set(_openkache_client_cpp_export_targets openkache_client_cpp openkache_client)
 if(TARGET openkache_client_cpp_shared)
   list(APPEND _openkache_client_cpp_export_targets openkache_client_cpp_shared)
 endif()

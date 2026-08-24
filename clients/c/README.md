@@ -1,30 +1,28 @@
-# OpenKache C client
+# OpenKache native C ABI
 
-The C package is a small C17 ABI over the shared Rust client core. It provides
-protected `PING`, `GET`, `SET`, `DELETE`, and transitional administrative
-operations while the core owns TLS 1.3 over QUIC or TCP, retries, framing,
-compression, encryption, and the worker lifecycle. Select
-`OPENKACHE_CLIENT_TRANSPORT_QUIC` (the legacy default),
-`OPENKACHE_CLIENT_TRANSPORT_TLS_TCP`,
-`OPENKACHE_CLIENT_TRANSPORT_QUIC_INSECURE`, or
-`OPENKACHE_CLIENT_TRANSPORT_TLS_TCP_INSECURE` through the generated
-`openkache_client_connect_transport` entry point. The insecure selectors are
-explicit opt-outs: they keep TLS encryption but disable certificate and server
-identity verification.
+This directory packages the maintained Gate 0 C17 ABI used by the native
+adapters.  It is intentionally a thin FFI boundary: transport, request
+admission, key mapping, value envelopes, and result ownership remain in the
+shared Rust core, while the C++ facade supplies typed-key and
+StructuredValue-CBOR-v1 conversion.
 
-`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are transitional experimental maintenance operations and are
-disabled by default. Enable `enable_experimental_api = true` explicitly and
-coordinate exact revision `draft-2026-08-19.4` out of band as described in
-[`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending
-them; the revision is not negotiated on the wire. The generated
-namespace-management functions are out-of-band WIP control-plane shapes; they
-do not reserve stable v1 opcodes or public data-plane routes.
+The installed C ABI exposes `openkache_client_gate0_connect`,
+`openkache_client_gate0_get`, `openkache_client_gate0_set`,
+`openkache_client_gate0_delete_value`, and `openkache_client_gate0_close`,
+plus result ownership helpers.  The generated shared-core contract is used
+only to build the package-private forwarding library and is not installed.
+Callers must not invoke raw, JSON, Exact Item ID, namespace, experimental,
+cancellation, TTL, retry, or certificate controls.
 
-## Build
+Pointers and lengths are explicit; result payloads are borrowed until
+`openkache_client_gate0_result_free`, and a connected handle is transferred
+with `openkache_client_gate0_result_take_client` before
+`openkache_client_gate0_close`.
 
-Build the native ABI from the workspace with the `ffi` feature, then point
-CMake at the resulting library. CMake generates the Smithy C contract into
-the build tree; it is intentionally not checked into the source repository:
+## Build and install
+
+Build the native core with the `ffi` feature and pass either an explicit static
+or shared library to CMake:
 
 ```bash
 cargo build --manifest-path ../../Cargo.toml \
@@ -32,71 +30,31 @@ cargo build --manifest-path ../../Cargo.toml \
 cmake -S . -B target/build \
   -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC=/path/to/libopenkache_client_core.a
 cmake --build target/build
-```
-
-For a shared build, use
-`-DOPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED=/path/to/libopenkache_client_core.so`.
-The legacy `OPENKACHE_CLIENT_NATIVE_LIBRARY` option remains accepted for
-single-library builds. If Bun or the Smithy CLI is not available, pass a
-previously generated header with
-`-DOPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER=/path/to/smithy_contract.h`.
-
-Installable CMake and `pkg-config` metadata are produced when a native library
-is supplied:
-
-```bash
 cmake --install target/build --prefix /path/to/prefix
-pkg-config --cflags --libs openkache-client
-pkg-config --static --cflags --libs openkache-client-static
 ```
 
-Downstream CMake projects can use the installed package with
-`find_package(OpenKacheClient CONFIG REQUIRED)` and
-`target_link_libraries(app PRIVATE OpenKache::ClientC)`. Select
-`OpenKache::ClientCShared` or `OpenKache::ClientCStatic` when the linkage mode
-must be explicit.
+The configure/build pair is the C17 package smoke check.  It regenerates the
+private Smithy contract, compiles the forwarding library, and validates the
+imported C target; generated declarations are not copied to the install tree.
+An installed consumer can use the `find_package` snippet below.
 
-## API
+If Bun or the Smithy CLI is unavailable, set
+`OPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER` to a generated
+`smithy_contract.h`.  Downstream CMake projects use:
 
-`include/openkache/client.h` includes the canonical
-`clients/core/include/openkache/client_abi.h`, which defines an opaque client
-handle, result ownership rules, operation and outcome discriminators, and
-buffer-based protected and exact-item-ID calls. Result payloads are borrowed until
-`openkache_client_result_free`; copy them before freeing the result. A
-connected handle is transferred with `openkache_client_result_take_client` and
-released with `openkache_client_free`.
+```cmake
+find_package(OpenKacheClient CONFIG REQUIRED)
+target_link_libraries(app PRIVATE OpenKache::ClientC)
+```
 
-`openkache_client_connect_ex` is the flat generated-binding entry point;
-`openkache_client_connect_with_options` is a named-field convenience wrapper.
-An empty trust buffer selects system roots. `openkache_client_execute` accepts
-one complete canonical v1 key item and derives its protected Item ID, while
-`openkache_client_execute_raw` accepts `0..=32`-byte exact item IDs. Raw
-`GET`/`SET`/`DELETE` preserve their opaque value bytes; the generated JSON,
-StructuredValue-CBOR-v1, and caller-owned-v0 operations retain the exact
-address while applying their documented value handling. C callers that construct
-protected keys directly should use the
-the `Integer`, `Text`, and `Bytes` rules in
-[`../KEY_FORMAT.md`](../KEY_FORMAT.md).
+The CMake package also installs `openkache-client.pc` metadata when a shared
+or static native library is supplied.
 
-The ABI v1 base connect functions keep their historical coupled
-`data_protection_key` semantics. Bindings that need publicly derivable Item IDs
-with protected values can call
-`openkache_client_connect_with_keyring_options`. The keyring options reference
-the base transport settings but require an explicit Item-ID root and an
-immutable array of value-key records; the base data-protection field must be
-empty and is never reinterpreted. A zero-length Item-ID root selects the public
-all-zero root, while value-key IDs and key material remain independent.
+## Development profile
 
-`openkache_client_namespace_open`, `openkache_client_namespace_update_policy`,
-and `openkache_client_namespace_delete` expose those transitional
-control-plane shapes when a private adapter enables them. Namespace results
-carry the canonical descriptor payload; use
-`openkache_client_namespace_descriptor_decode` to obtain a typed descriptor
-without reimplementing the wire parser in the application.
-
-Operation and value-format constants in the generated
-`openkache/smithy_contract.h` are sourced at build/package time from the client
-model [`../model/openkache.smithy`](../model/openkache.smithy) and wire model
-[`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
-C and C++ adapters therefore share the same operation numbers, limits, and
-value-format identifiers without checking generated files into the repository.
+The maintained C++ facade fixes TLS 1.3, ALPN `openkache/1`,
+`X25519MLKEM768`, and the `DevelopmentTrust` profile.  DevelopmentTrust
+disables certificate and hostname verification but retains TLS encryption and
+does not permit plaintext fallback.  It is **development only — do not use
+this trust profile in production**.  Production trust roots and certificate
+configuration require a future facade revision.
