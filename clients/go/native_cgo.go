@@ -1044,7 +1044,7 @@ func (h *nativeHandle) executeScoped(
 		return nativeResult{}, err
 	}
 	itemBytes := itemID.wireBytes()
-	if operation == SmithyOpcodeStats || operation == SmithyOpcodeSync {
+	if operation == SmithyOpcodeExperimentalStats || operation == SmithyOpcodeExperimentalSync {
 		itemBytes = nil
 	}
 	itemMemory := C.CBytes(itemBytes)
@@ -1216,7 +1216,7 @@ func (h *nativeHandle) executeNative(
 				ttlMilliseconds,
 			)
 		}
-		// ABI v6 has no raw request entry point carrying complete policy
+		// ABI v1 has no raw request entry point carrying complete policy
 		// flags.  Keep this synchronous call alive through cancellation so a
 		// mutation cannot be abandoned with an unknown owner.
 		return h.executeSyncBoundary(

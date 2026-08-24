@@ -101,8 +101,8 @@ The high-level client exposes:
 | `get_structured()` / `set_structured()` | Reads or writes lossless StructuredValue-CBOR-v1 values. |
 | `get_v0()` / `set_v0()` | Reads or writes complete caller-owned v0 envelopes. |
 | `delete()` | Deletes a mapped key and reports whether it existed. |
-| `stats()` / `stats_json()` | Returns validated statistics or the original Smithy response text. |
-| `sync()` / `reconnect()` | Flushes the core or requests a reconnect. |
+| `experimental_stats()` / `experimental_stats_json()` | Returns transitional server statistics or the original response text. |
+| `experimental_sync()` / `reconnect()` | Flushes the core or requests a reconnect. |
 | `connection_state()` | Returns the best-effort native connection state. |
 | `close()` | Releases the native client; safe to call more than once. |
 
@@ -157,6 +157,11 @@ assigned namespace ID for stable data operations.
 
 Run these commands from `clients/python` in a checkout that has the repository
 development tools available:
+
+The maintenance operations are explicitly experimental in the current
+protocol. The Python package currently exposes a blocking API only; use
+`experimental_stats()` and `experimental_sync()` directly and coordinate the
+server's draft revision before relying on them.
 
 ```bash
 python -m compileall src examples

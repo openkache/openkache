@@ -1,6 +1,6 @@
 //! Durable, append-only membership metadata for the namespace registry.
 //!
-//! Namespace lifecycle metadata remains in the existing v2 snapshot.  Item and
+//! Namespace lifecycle metadata remains in the existing v1 snapshot.  Item and
 //! worker membership changes use this journal so a SET/DELETE does not rewrite
 //! and synchronise the complete namespace snapshot.  A dedicated writer thread
 //! batches records and acknowledges them only after the journal has been

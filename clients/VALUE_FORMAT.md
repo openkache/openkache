@@ -2,6 +2,11 @@
 
 > **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
 
+> **Audience:** This is a protocol and interoperability reference, not a
+> package-level application API. Maintained package documentation describes the
+> logical structured-value contract and deliberately hides concrete profile
+> identifiers and selector assignments from ordinary callers.
+
 This document defines the client-side v1 value encoding before it is handed to
 the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
@@ -15,10 +20,11 @@ MUST NOT claim conformance to this profile until it implements the complete
 grammar, key schedule, and validation rules.
 
 The legacy TypeScript metadata envelope and generated `serializationJson`
-constants are compatibility metadata, not the target selector-1 assignment.
-Target selector `1` means `StructuredValue-CBOR-v1`; canonical JSON helpers
-use the `OpaqueBytes` payload profile unless a binding documents a separate
-structured operation.
+constants are compatibility metadata, not the structured payload profile
+described here. The structured profile is selected by the shared core; its
+selector is never a generic alias for the legacy envelope. Canonical JSON
+helpers use the `OpaqueBytes` payload profile unless a binding documents a
+separate structured operation.
 
 The current shared FFI's `set_json` / `get_json` helpers parse or serialize a
 JSON-compatible view while carrying canonical UTF-8 JSON as selector-0

@@ -9,10 +9,10 @@ use super::{Kvkache, WorkerControlResponse, WorkerResponse};
 use crate::Result;
 
 pub(super) enum ControlRequest<R> {
-    Stats {
+    ExperimentalStats {
         response: ResponseSender<R>,
     },
-    Sync {
+    ExperimentalSync {
         response: ResponseSender<R>,
     },
     Shutdown,
@@ -26,22 +26,22 @@ impl ControlPort<ControlRequest<WorkerResponse>> for Kvkache {
     ) -> impl std::future::Future<Output = Result<ControlFlow>> + '_ {
         async move {
             match command {
-                ControlRequest::Stats { response } => {
+                ControlRequest::ExperimentalStats { response } => {
                     let stats = format!(
                         "{} {}",
                         crate::platform::cpu_diagnostic(affinity_id),
                         self.stats()
                     );
                     let _ = response.send(Ok(WorkerResponse::Control(
-                        WorkerControlResponse::Stats(stats),
+                        WorkerControlResponse::ExperimentalStats(stats),
                     )));
                     Ok(ControlFlow::Continue)
                 }
-                ControlRequest::Sync { response } => {
+                ControlRequest::ExperimentalSync { response } => {
                     let result = self
                         .sync()
                         .await
-                        .map(|()| WorkerResponse::Control(WorkerControlResponse::Synced));
+                        .map(|()| WorkerResponse::Control(WorkerControlResponse::ExperimentalSynced));
                     let _ = response.send(result);
                     Ok(ControlFlow::Continue)
                 }

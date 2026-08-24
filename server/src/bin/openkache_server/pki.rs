@@ -245,7 +245,7 @@ fn issue_client_identity(
     println!("Issued {} identity {name}:", role.label());
     println!("  bundle: {}", bundle.display());
     if role.is_administrator() {
-        println!("  registered for STATS and SYNC");
+        println!("  registered for EXPERIMENTAL_STATS and EXPERIMENTAL_SYNC");
     }
     Ok(())
 }

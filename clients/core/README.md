@@ -158,11 +158,11 @@ surface.
 requires an explicit certificate server name because the network destination
 does not provide one.
 
-The native ABI v6 connection functions retain their historical
-`data_protection_key` coupling. ABI v7 adds
-`openkache_client_connect_with_options_v7`, which references v6 transport
+The native ABI v1 base connection functions retain their historical
+`data_protection_key` coupling. The ABI v1 keyring entry point,
+`openkache_client_connect_with_keyring_options`, references the base transport
 options while accepting an explicit Item-ID root and an immutable value-key
-array; callers must check `openkache_client_abi_version_v7()` before use.
+array.
 
 ## Request-engine migration
 

@@ -36,7 +36,7 @@ Version 1 specifies:
 - malformed-frame handling and admission rejection;
 - mutation error outcomes.
 
-`STATS` and `EXPERIMENTAL_SYNC` are experimental operations. They are not part
+`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are experimental operations. They are not part
 of the stable v1 operation conformance surface. A server MAY enable them with
 an `enable_experimental_api` server setting, but only when the client and
 server have coordinated the exact experimental revision documented in
@@ -495,10 +495,8 @@ or shorter encoding.
 Opcodes `05` and `06` are not stable v1 operations. A server with
 `enable_experimental_api` may recognize their current experimental layouts only
 when the client and server have coordinated the exact experimental revision.
-Otherwise they are unassigned and malformed. The public
-`EXPERIMENTAL_SYNC` name corresponds to the transitional Smithy operation
-`Sync` and enum text `sync`; this is a naming distinction only. See
-[`EXPERIMENTAL.md`](EXPERIMENTAL.md).
+Otherwise they are unassigned and malformed. See
+[`EXPERIMENTAL.md`](EXPERIMENTAL.md) for the experimental operation contract.
 
 Every opcode not assigned above or enabled by both that experimental setting
 and the coordinated revision is unassigned. A server receiving one MUST
@@ -834,7 +832,7 @@ stated condition applies:
 | `NamespaceNotFound` | `GET`, `SET`, or `DELETE` addressing a missing namespace |
 
 The experimental operations in [`EXPERIMENTAL.md`](EXPERIMENTAL.md) have their
-own status applicability. In particular, an authorized `STATS` or
+own status applicability. In particular, an authorized `EXPERIMENTAL_STATS` or
 `EXPERIMENTAL_SYNC` request for a missing namespace MUST return
 `NamespaceNotFound`; that experimental exception does not add a stable-v1
 operation or status assignment.

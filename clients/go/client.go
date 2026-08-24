@@ -1048,26 +1048,26 @@ func (c *Client) DeleteItem(ctx context.Context, itemID ItemID) (bool, error) {
 	return deleteResult("delete item", result)
 }
 
-// Stats returns the server's JSON statistics document unchanged.
-func (c *Client) Stats(ctx context.Context) (string, error) {
-	result, err := c.invoke(ctx, SmithyOpcodeStats, nil, nil, SetOptions{})
+// ExperimentalStats returns the server's JSON statistics document unchanged.
+func (c *Client) ExperimentalStats(ctx context.Context) (string, error) {
+	result, err := c.invoke(ctx, SmithyOpcodeExperimentalStats, nil, nil, SetOptions{})
 	if err != nil {
-		return "", operationError("stats", err)
+		return "", operationError("experimental_stats", err)
 	}
 	if result.kind != SmithyFFIResultValue {
-		return "", unexpectedResult("stats", result.kind)
+		return "", unexpectedResult("experimental_stats", result.kind)
 	}
 	return string(result.data), nil
 }
 
-// Sync waits for the server durability barrier.
-func (c *Client) Sync(ctx context.Context) error {
-	result, err := c.invoke(ctx, SmithyOpcodeSync, nil, nil, SetOptions{})
+// ExperimentalSync waits for the server durability barrier.
+func (c *Client) ExperimentalSync(ctx context.Context) error {
+	result, err := c.invoke(ctx, SmithyOpcodeExperimentalSync, nil, nil, SetOptions{})
 	if err != nil {
-		return operationError("sync", err)
+		return operationError("experimental_sync", err)
 	}
 	if result.kind != SmithyFFIResultOK {
-		return unexpectedResult("sync", result.kind)
+		return unexpectedResult("experimental_sync", result.kind)
 	}
 	return nil
 }

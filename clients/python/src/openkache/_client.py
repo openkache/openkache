@@ -38,10 +38,10 @@ from ._generated import (
     SmithySetInput,
     SmithySetOutcome,
     SmithySetOutput,
-    SmithyStatsInput,
-    SmithyStatsOutput,
-    SmithySyncInput,
-    SmithySyncOutput,
+    SmithyExperimentalStatsInput,
+    SmithyExperimentalStatsOutput,
+    SmithyExperimentalSyncInput,
+    SmithyExperimentalSyncOutput,
 )
 from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_CLOSED,
@@ -100,8 +100,8 @@ from ._generated.smithy_contract import (
     SMITHY_OPCODE_NAMESPACE_UPDATE_POLICY,
     SMITHY_OPCODE_PING,
     SMITHY_OPCODE_SET,
-    SMITHY_OPCODE_STATS,
-    SMITHY_OPCODE_SYNC,
+    SMITHY_OPCODE_EXPERIMENTAL_STATS,
+    SMITHY_OPCODE_EXPERIMENTAL_SYNC,
     SMITHY_POLICY_DEFAULT_EXPIRATION_MASK,
     SMITHY_POLICY_EVICTION_OVERRIDE,
     SMITHY_POLICY_EVICTION_PROTECTED,
@@ -420,18 +420,18 @@ class ServerStats:
         try:
             value = json.loads(text)
         except json.JSONDecodeError as error:
-            raise OpenKacheError(f"STATS decoding failed: {error}") from error
+            raise OpenKacheError(f"EXPERIMENTAL_STATS decoding failed: {error}") from error
         if not isinstance(value, dict):
-            raise OpenKacheError("STATS response must be an object")
+            raise OpenKacheError("EXPERIMENTAL_STATS response must be an object")
         storage = value.get("storage")
         workers = value.get("workers")
         if not isinstance(storage, str):
-            raise OpenKacheError("STATS response.storage must be a string")
+            raise OpenKacheError("EXPERIMENTAL_STATS response.storage must be a string")
         if (
             not isinstance(workers, list)
             or not all(isinstance(worker, str) for worker in workers)
         ):
-            raise OpenKacheError("STATS response.workers must be a string array")
+            raise OpenKacheError("EXPERIMENTAL_STATS response.workers must be a string array")
         return cls(storage=storage, workers=tuple(workers))
 
 
@@ -667,22 +667,32 @@ class OpenKacheClient:
         )
         return _delete_outcome(kind)
 
-    def stats(self) -> ServerStats:
-        return ServerStats.from_json(self.stats_json())
+    def experimental_stats(self) -> ServerStats:
+        """Return the server's transitional experimental statistics."""
 
-    def stats_json(self) -> str:
+        return ServerStats.from_json(self.experimental_stats_json())
+
+    def experimental_stats_json(self) -> str:
         self._assert_open()
-        kind, payload = self._execute(SMITHY_OPCODE_STATS)
+        kind, payload = self._execute(SMITHY_OPCODE_EXPERIMENTAL_STATS)
         if kind != SMITHY_FFI_RESULT_VALUE:
-            raise OpenKacheError(f"STATS returned unexpected native result {kind}")
+            raise OpenKacheError(f"EXPERIMENTAL_STATS returned unexpected native result {kind}")
         try:
             return payload.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise OpenKacheError(f"STATS response is not UTF-8: {error}") from error
+            raise OpenKacheError(f"EXPERIMENTAL_STATS response is not UTF-8: {error}") from error
 
-    def sync(self) -> None:
+    def experimental_sync(self) -> None:
+        """Wait for durable completion of pending mutations."""
+
         self._assert_open()
-        self._execute(SMITHY_OPCODE_SYNC)
+        self._execute(SMITHY_OPCODE_EXPERIMENTAL_SYNC)
+
+    # Compatibility aliases for the pre-experimental operation names.  The
+    # wire contract remains the explicitly experimental opcode above.
+    stats = experimental_stats
+    stats_json = experimental_stats_json
+    sync = experimental_sync
 
     def reconnect(self) -> None:
         self._assert_open()
@@ -998,24 +1008,34 @@ class RawClient(SmithyOpenKacheApi):
         )
         return SmithyDeleteOutput(deleted=_delete_outcome(kind))
 
-    def stats(self, input: SmithyStatsInput) -> SmithyStatsOutput:
+    def experimental_stats(
+        self, input: SmithyExperimentalStatsInput
+    ) -> SmithyExperimentalStatsOutput:
         kind, payload = self._owner._execute_scoped(
-            SMITHY_OPCODE_STATS,
+            SMITHY_OPCODE_EXPERIMENTAL_STATS,
             namespace_id=input.namespace_id,
         )
         if kind != SMITHY_FFI_RESULT_VALUE:
-            raise OpenKacheError(f"STATS returned unexpected native result {kind}")
+            raise OpenKacheError(f"EXPERIMENTAL_STATS returned unexpected native result {kind}")
         try:
-            return SmithyStatsOutput(json=payload.decode("utf-8"))
+            return SmithyExperimentalStatsOutput(json=payload.decode("utf-8"))
         except UnicodeDecodeError as error:
-            raise OpenKacheError(f"STATS response is not UTF-8: {error}") from error
+            raise OpenKacheError(f"EXPERIMENTAL_STATS response is not UTF-8: {error}") from error
 
-    def sync(self, input: SmithySyncInput) -> SmithySyncOutput:
+    def experimental_sync(
+        self, input: SmithyExperimentalSyncInput
+    ) -> SmithyExperimentalSyncOutput:
         self._owner._execute_scoped(
-            SMITHY_OPCODE_SYNC,
+            SMITHY_OPCODE_EXPERIMENTAL_SYNC,
             namespace_id=input.namespace_id,
         )
-        return SmithySyncOutput()
+        return SmithyExperimentalSyncOutput()
+
+    # Keep the old generated-operation spellings as local aliases for callers
+    # that used the preview API before these maintenance operations were named
+    # explicitly experimental in the protocol.
+    stats = experimental_stats
+    sync = experimental_sync
 
     def namespace_open(
         self, input: SmithyNamespaceOpenInput

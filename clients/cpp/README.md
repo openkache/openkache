@@ -67,15 +67,16 @@ and `remove_raw` expose exact `0..=32`-byte item-ID operations without value
 protection. `namespace_open`, `namespace_update_policy`, and
 `namespace_delete` expose the server-assigned namespace lifecycle as
 transitional out-of-band control-plane shapes with legacy, non-normative
-revision fields; they are not stable-v1 data-plane operations. `STATS` and
-`SYNC` are likewise transitional experimental maintenance operations and are
+revision fields; they are not stable-v1 data-plane operations.
+`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are likewise transitional
+experimental maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending
 them; the revision is not negotiated on the wire. Transport and validation
 failures throw `openkache::Error`. Logical `std::span` and `std::string_view`
 keys cross the ABI with their generated `Bytes` or `Text` discriminator; the
-shared core performs canonical key encoding. ABI v6 requests use the
+shared core performs canonical key encoding. ABI v1 requests use the
 `poll`/`wait`/`free` request lifecycle and preserve
 `Unknown_Mutation_Error` or `Canceled_Error` categories. Complete raw SET
 policy flags and namespace/scoped operations have no request-handle entry

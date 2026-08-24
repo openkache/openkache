@@ -8,22 +8,18 @@ import {
   decode_structured_value,
   encode_structured_value,
   to_native,
-  Value_Codec_Registry,
   type Json_Value,
   type Structured_Value,
-  type Value_Codec,
-  type Value_Envelope,
 } from "./value-codec.js"
 
 export type {
-  Encoded_Value,
-  Json_Object,
   Json_Value,
   Structured_Value,
   Structured_Value_Error_Kind,
   Value_Limits,
-  Value_Codec,
-  Value_Envelope,
+} from "./value-codec.js"
+export type {
+  Json_Object,
 } from "./value-codec.js"
 export {
   Array_Value,
@@ -97,10 +93,10 @@ import {
   type Smithy_Set_Input,
   type Smithy_Set_Outcome,
   type Smithy_Set_Output,
-  type Smithy_Stats_Input,
-  type Smithy_Stats_Output,
-  type Smithy_Sync_Input,
-  type Smithy_Sync_Output,
+  type Smithy_Experimental_Stats_Input,
+  type Smithy_Experimental_Stats_Output,
+  type Smithy_Experimental_Sync_Input,
+  type Smithy_Experimental_Sync_Output,
 } from "./generated_local/smithy-api.js"
 import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
@@ -109,6 +105,23 @@ export const MAX_CANONICAL_KEY_BYTES = 1_048_576
 
 export type Key_Spec = "integer" | "text" | "bytes"
 export type Client_Key = string | Uint8Array | number | bigint
+
+/**
+ * Native JavaScript projection returned by the primary `get` method.
+ *
+ * Plain objects supplied to `set` are represented as `Map` values so text keys,
+ * scalar keys, and entry order remain unambiguous across language bindings.
+ */
+export type Native_Value =
+  | undefined
+  | null
+  | boolean
+  | bigint
+  | number
+  | string
+  | Uint8Array
+  | readonly Native_Value[]
+  | ReadonlyMap<Native_Value, Native_Value>
 
 interface Client_Lifecycle {
   closed: boolean
@@ -191,10 +204,10 @@ export interface Client_Options {
   readonly retry?: Retry_Options
   /** Maximum concurrent request lanes on one connection (TCP uses one lane). */
   readonly max_in_flight?: number
+  /** Aggregate bytes retained across transport and value-protection work. */
+  readonly max_in_flight_bytes?: number
   /** Authenticated value-encryption profile; requires `data_protection_key`. */
   readonly encryption?: "compact" | "robust"
-  /** Optional Protobuf, FlatBuffers, or application value codecs. */
-  readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
   readonly native_path?: string
   /** Verified QUIC (default), TLS-over-TCP, or explicit TLS-preserving insecure variants. */
@@ -249,7 +262,8 @@ export type OpenKache_Error_Kind =
   | "cancelled"
 
 /**
- * Error returned by client validation, value codecs, native transport, or server failures.
+ * Error returned by client validation, structured-value conversion, native
+ * transport, or server failures.
  */
 export class OpenKache_Error extends Error {
   readonly kind: OpenKache_Error_Kind
@@ -292,19 +306,16 @@ export class OpenKache_Cancelled_Error extends OpenKache_Error {
  */
 export class OpenKache_Client {
   readonly #native_client: Native_Client
-  readonly #value_codecs: Value_Codec_Registry
   readonly #raw_client: OpenKache_Raw_Client
   readonly #lifecycle: Client_Lifecycle
   readonly #key_spec: Key_Spec | undefined
 
   private constructor(
     native_client: Native_Client,
-    value_codecs: Value_Codec_Registry,
     key_spec: Key_Spec | undefined,
     lifecycle: Client_Lifecycle,
   ) {
     this.#native_client = native_client
-    this.#value_codecs = value_codecs
     this.#key_spec = key_spec
     this.#lifecycle = lifecycle
     this.#raw_client = new Raw_Client(native_client, lifecycle)
@@ -320,15 +331,6 @@ export class OpenKache_Client {
    */
   static async connect(options: Client_Options): Promise<OpenKache_Client> {
     validate_options(options)
-    let value_codecs: Value_Codec_Registry
-    try {
-      value_codecs = new Value_Codec_Registry(options.value_codecs ?? [])
-    } catch (error) {
-      throw new OpenKache_Error(
-        `value codec configuration failed: ${error_message(error)}`,
-        error,
-      )
-    }
     const compression = options.compression ?? {}
     const timeouts = options.timeouts ?? {}
     const retry = options.retry ?? {}
@@ -351,6 +353,7 @@ export class OpenKache_Client {
       retry_max_attempts:
         retry.max_attempts ?? SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
+      max_in_flight_bytes: options.max_in_flight_bytes,
       encryption: options.encryption,
       key_spec: options.key_spec,
       transport: options.transport ?? "quic",
@@ -360,7 +363,6 @@ export class OpenKache_Client {
       const native_client = await native_module.connect(native_options)
       const client = new OpenKache_Client(
         native_client,
-        value_codecs,
         options.key_spec,
         { closed: false },
       )
@@ -427,63 +429,70 @@ export class OpenKache_Client {
   }
 
   /**
-   * Retrieves and codec-decodes a JSON value or custom codec object.
+   * Retrieves and decodes one value from the common structured value model.
    *
-   * @typeParam Value - Expected object shape selected by the caller.
+   * This is the primary mapped-value API. The shared core owns the wire
+   * representation; the result uses the documented native JavaScript
+   * projection (`bigint`, `number`, `Uint8Array`, arrays, and maps).
+   *
+   * @typeParam Value - Optional caller-provided result shape.
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @returns The decoded value, or `undefined` when the key does not exist.
-   * @throws {OpenKache_Error} When transport, decryption, or decoding fails.
+   * @throws {OpenKache_Error} When the client is closed, the key is invalid,
+   * or transport, decryption, or decoding fails.
    */
-  async get<Value = Json_Value>(
+  async get<Value = Native_Value>(
     key: Client_Key,
   ): Promise<Value | undefined> {
     this.#assert_open()
-    let envelope: Value_Envelope | null
+    let payload: Uint8Array | null
     try {
-      envelope = await this.#native_client.get_value(
+      payload = await this.#native_client.get_structured(
         owned_key_bytes(key, this.#key_spec),
       )
     } catch (error) {
       throw as_openkache_error(error)
     }
-    if (envelope === null) return undefined
+    if (payload === null) return undefined
     try {
-      return this.#value_codecs.decode(envelope) as Value
+      const model = decode_structured_value(payload)
+      return to_native(model) as Value
     } catch (error) {
-      throw new OpenKache_Error(`value decoding failed: ${error_message(error)}`, error)
+      throw new OpenKache_Error(`structured value decoding failed: ${error_message(error)}`, error)
     }
   }
 
   /**
-   * Codec-encodes and stores a JSON value.
+   * Encodes and stores one value from the common structured value model.
    *
-   * @typeParam Value - JSON value shape to store.
+   * This is the primary mapped-value API. It accepts the native values defined
+   * by the common value model; it does not use JSON, Raw, or the former
+   * package-local metadata envelope.
+   *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
-   * @param value - JSON value accepted by the built-in envelope or a registered
-   * custom object codec.
+   * @param value - Runtime value accepted by `encode_structured_value`.
    * @param options - Optional TTL and `if_absent` or `if_present` condition.
    * @returns Whether the operation created, replaced, or did not store the key.
-   * @throws {OpenKache_Error} When validation, encoding, transport, or storage fails.
+   * @throws {OpenKache_Error} When the client is closed or validation, encoding,
+   * transport, or storage fails.
    */
-  async set<Value>(
+  async set(
     key: Client_Key,
-    value: Value,
+    value: unknown,
     options: Set_Options = {},
   ): Promise<Set_Outcome> {
     this.#assert_open()
     validate_set_options(options)
-    let envelope: Value_Envelope
+    let payload: Uint8Array
     try {
-      envelope = this.#value_codecs.encode(value)
+      payload = encode_structured_value(value)
     } catch (error) {
-      throw new OpenKache_Error(`value encoding failed: ${error_message(error)}`, error)
+      throw new OpenKache_Error(`structured value encoding failed: ${error_message(error)}`, error)
     }
     try {
-      const outcome = await this.#native_client.set_value(
+      const outcome = await this.#native_client.set_structured(
         owned_key_bytes(key, this.#key_spec),
-        envelope.encoding,
-        envelope.type_name,
-        envelope.payload,
+        payload,
         options.condition,
         options.expiration_mode,
         options.eviction_mode,
@@ -496,12 +505,18 @@ export class OpenKache_Client {
   }
 
   /**
-   * Retrieves one StructuredValue-CBOR-v1 payload.
+   * Retrieves one value from the common structured value model.
    *
    * The default lossless representation retains integer/float distinctions,
    * undefined, scalar map-key identity, and map order.  Native projection
    * returns bigint/number/Uint8Array/Map and rejects values that cannot be
    * represented without loss.
+   *
+   * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
+   * @param representation - Lossless model wrappers by default, or a strict native projection.
+   * @returns The decoded value, or `undefined` when the key does not exist.
+   * @throws {OpenKache_Error} When the client is closed, the key or representation is invalid,
+   * or transport or decoding fails.
    */
   async get_structured(
     key: Client_Key,
@@ -542,10 +557,17 @@ export class OpenKache_Client {
   }
 
   /**
-   * Encodes and stores one StructuredValue-CBOR-v1 payload.
+   * Encodes and stores one value from the common structured value model.
    *
    * This method never routes through legacy JSON or Raw operations; the
-   * generated native adapter owns the structured selector directly.
+   * generated native adapter owns the structured representation directly.
+   *
+   * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
+   * @param value - A runtime value accepted by `encode_structured_value`.
+   * @param options - Optional TTL and atomic existence condition.
+   * @returns Whether the operation created, replaced, or did not store the key.
+   * @throws {OpenKache_Error} When the client is closed or encoding, validation,
+   * transport, or storage fails.
    */
   async set_structured(
     key: Client_Key,
@@ -674,8 +696,8 @@ export class OpenKache_Client {
   /**
    * Retrieves a value encoded by the shared core's canonical JSON format.
    *
-   * This method is the cross-language value API. Use `get` when reading the
-   * backwards-compatible TypeScript metadata envelope or a custom codec.
+   * This is an advanced JSON compatibility helper. The primary `get` method
+   * reads the common structured value instead.
    *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @returns The canonical JSON value, or `undefined` when absent.
@@ -701,6 +723,9 @@ export class OpenKache_Client {
 
   /**
    * Stores a value through the shared core's canonical JSON format.
+   *
+   * This is an advanced JSON compatibility helper. The primary `set` method
+   * writes the common structured value instead.
    *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @param value - Dense, finite JSON value.
@@ -759,18 +784,18 @@ export class OpenKache_Client {
    * @returns Validated storage and per-worker statistics.
    * @throws {OpenKache_Error} When authorization, transport, or response validation fails.
    */
-  async stats(): Promise<Server_Stats> {
+  async experimental_stats(): Promise<Server_Stats> {
     this.#assert_open()
     let text: string
     try {
-      text = await this.#native_client.stats()
+      text = await this.#native_client.experimental_stats()
     } catch (error) {
       throw as_openkache_error(error)
     }
     try {
       return parse_stats(text)
     } catch (error) {
-      throw new OpenKache_Error(`STATS decoding failed: ${error_message(error)}`, error)
+      throw new OpenKache_Error(`EXPERIMENTAL_STATS decoding failed: ${error_message(error)}`, error)
     }
   }
 
@@ -780,10 +805,10 @@ export class OpenKache_Client {
    * @returns A promise that resolves after every SSD worker flushes.
    * @throws {OpenKache_Error} When authorization, transport, or synchronization fails.
    */
-  async sync(): Promise<void> {
+  async experimental_sync(): Promise<void> {
     this.#assert_open()
     try {
-      await this.#native_client.sync()
+      await this.#native_client.experimental_sync()
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -897,9 +922,9 @@ export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
   get_json(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
   /** Stores canonical JSON UTF-8 bytes at an exact Item ID. */
   set_json(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
-  /** Reads StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  /** Reads structured-value bytes at an exact Item ID. */
   get_structured(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
-  /** Stores StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  /** Stores structured-value bytes at an exact Item ID. */
   set_structured(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
   /** Reads a caller-owned version-0 envelope at an exact Item ID. */
   get_v0(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
@@ -1121,32 +1146,32 @@ class Raw_Client implements OpenKache_Raw_Client {
   }
 
   /**
-   * Invokes the Smithy STATS operation.
+   * Invokes the Smithy EXPERIMENTAL_STATS operation.
    *
    * @param _input - Empty Smithy operation input.
    * @returns The server's JSON statistics string.
    * @throws {OpenKache_Error} When authorization or transport fails.
    */
-  async stats(input: Smithy_Stats_Input): Promise<Smithy_Stats_Output> {
+  async experimental_stats(input: Smithy_Experimental_Stats_Input): Promise<Smithy_Experimental_Stats_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      return { json: await this.#native_client.stats_in_namespace(input.namespace_id) }
+      return { json: await this.#native_client.experimental_stats_in_namespace(input.namespace_id) }
     } catch (error) {
       throw as_openkache_error(error)
     }
   }
 
   /**
-   * Invokes the Smithy SYNC operation.
+   * Invokes the Smithy EXPERIMENTAL_SYNC operation.
    *
    * @param _input - Empty Smithy operation input.
    * @returns An empty Smithy operation output.
    * @throws {OpenKache_Error} When authorization or synchronization fails.
    */
-  async sync(input: Smithy_Sync_Input): Promise<Smithy_Sync_Output> {
+  async experimental_sync(input: Smithy_Experimental_Sync_Input): Promise<Smithy_Experimental_Sync_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      await this.#native_client.sync_in_namespace(input.namespace_id)
+      await this.#native_client.experimental_sync_in_namespace(input.namespace_id)
       return {}
     } catch (error) {
       throw as_openkache_error(error)
@@ -1501,14 +1526,12 @@ function validate_options(options: Client_Options): void {
   if (options.retry !== undefined && !is_regular_object(options.retry)) {
     throw new OpenKache_Error("retry must be a regular object")
   }
-  if (options.value_codecs !== undefined && !Array.isArray(options.value_codecs)) {
-    throw new OpenKache_Error("value_codecs must be an array")
-  }
   validate_compression(options.compression)
   validate_timeout(options.timeouts?.connect_ms, "timeouts.connect_ms")
   validate_timeout(options.timeouts?.request_ms, "timeouts.request_ms")
   validate_positive_integer(options.retry?.max_attempts, "retry.max_attempts")
   validate_positive_integer(options.max_in_flight, "max_in_flight")
+  validate_positive_integer(options.max_in_flight_bytes, "max_in_flight_bytes")
   if (
     options.encryption !== undefined &&
     options.encryption !== "compact" &&

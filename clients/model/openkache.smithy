@@ -320,7 +320,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 6,
+    abiVersion: 1,
     nativeFunctions: [
         {
             name: "openkache_client_abi_version",
@@ -402,20 +402,14 @@ structure valueEnvelope {
             ]
         },
         {
-            name: "openkache_client_abi_version_v7",
-            optional: true,
-            returnType: "uint32",
-            parameters: []
-        },
-        {
-            name: "openkache_client_connect_with_options_v7",
+            name: "openkache_client_connect_with_keyring_options",
             optional: true,
             returnType: "result_pointer",
             parameters: [
                 {
                     name: "options",
                     type: "struct_pointer",
-                    structureName: "FfiConnectOptionsV7",
+                    structureName: "FfiConnectOptionsWithKeyring",
                     mutable: false
                 }
             ]
@@ -808,7 +802,7 @@ structure valueEnvelope {
             ]
         },
         {
-            name: "FfiConnectOptionsV7",
+            name: "FfiConnectOptionsWithKeyring",
             fields: [
                 { name: "abiVersion", type: "uint32", mutable: false },
                 {

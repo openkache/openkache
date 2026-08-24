@@ -33,8 +33,8 @@ use futures_util::stream::FuturesUnordered;
 use self::policy::{item_state_is_live_at, unix_time_ms, validate_persisted_clock};
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
-const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV3\0\0";
-const CHECKPOINT_VERSION: u32 = 3;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"OKCPV1\0\0";
+const CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_MAX_RECORDS: usize = 1_000_000;
 const CHECKPOINT_HEADER_BYTES: usize = 56;
 // sequence (8), generation location (36), large-value flag (1), and three

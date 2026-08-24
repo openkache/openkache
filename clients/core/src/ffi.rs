@@ -54,10 +54,6 @@ use crate::{
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
-/// Additive native connection contract for independent Item-ID and value
-/// protection roots.
-pub const FFI_ABI_VERSION_V7: u32 = 7;
-
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
     kind: FfiResultKind,
@@ -146,10 +142,10 @@ pub struct FfiValueKey {
     pub key_length: usize,
 }
 
-/// ABI v7 options with independent Item-ID root and value keyring.
+/// ABI v1 options with independent Item-ID root and value keyring.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FfiConnectOptionsV7 {
+pub struct FfiConnectOptionsWithKeyring {
     pub abi_version: u32,
     pub base: *const FfiConnectOptions,
     pub item_id_root_key: *const u8,
@@ -1208,8 +1204,8 @@ trait FfiRawClientApi {
         options: SetOptions,
     ) -> crate::Result<SetOutcome>;
     async fn delete(&self, item_id: ItemId) -> crate::Result<DeleteOutcome>;
-    async fn stats(&self) -> crate::Result<String>;
-    async fn sync(&self) -> crate::Result<()>;
+    async fn experimental_stats(&self) -> crate::Result<String>;
+    async fn experimental_sync(&self) -> crate::Result<()>;
     async fn reconnect(&self) -> crate::Result<()>;
     async fn get_in_namespace(
         &self,
@@ -1228,8 +1224,8 @@ trait FfiRawClientApi {
         namespace_id: u64,
         item_id: ItemId,
     ) -> crate::Result<DeleteOutcome>;
-    async fn stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String>;
-    async fn sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()>;
+    async fn experimental_stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String>;
+    async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()>;
     async fn namespace_open_with_outcome(
         &self,
         name: Vec<u8>,
@@ -1269,11 +1265,11 @@ macro_rules! impl_ffi_raw_client {
             async fn delete(&self, item_id: ItemId) -> crate::Result<DeleteOutcome> {
                 self.delete(item_id).await
             }
-            async fn stats(&self) -> crate::Result<String> {
-                self.stats().await
+            async fn experimental_stats(&self) -> crate::Result<String> {
+                self.experimental_stats().await
             }
-            async fn sync(&self) -> crate::Result<()> {
-                self.sync().await
+            async fn experimental_sync(&self) -> crate::Result<()> {
+                self.experimental_sync().await
             }
             async fn reconnect(&self) -> crate::Result<()> {
                 self.reconnect().await
@@ -1302,11 +1298,11 @@ macro_rules! impl_ffi_raw_client {
             ) -> crate::Result<DeleteOutcome> {
                 self.delete_in_namespace(namespace_id, item_id).await
             }
-            async fn stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String> {
-                self.stats_in_namespace(namespace_id).await
+            async fn experimental_stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String> {
+                self.experimental_stats_in_namespace(namespace_id).await
             }
-            async fn sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()> {
-                self.sync_in_namespace(namespace_id).await
+            async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()> {
+                self.experimental_sync_in_namespace(namespace_id).await
             }
             async fn namespace_open_with_outcome(
                 &self,
@@ -1440,8 +1436,8 @@ trait FfiProtectedClientApi: Clone + 'static {
         &self,
         canonical_key: &[u8],
     ) -> crate::Result<DeleteOutcome>;
-    async fn stats(&self) -> crate::Result<String>;
-    async fn sync(&self) -> crate::Result<()>;
+    async fn experimental_stats(&self) -> crate::Result<String>;
+    async fn experimental_sync(&self) -> crate::Result<()>;
     async fn reconnect(&self) -> crate::Result<()>;
 }
 
@@ -1603,11 +1599,11 @@ macro_rules! impl_ffi_protected_client {
             ) -> crate::Result<DeleteOutcome> {
                 self.delete_canonical_key_unchecked(canonical_key).await
             }
-            async fn stats(&self) -> crate::Result<String> {
-                self.stats().await
+            async fn experimental_stats(&self) -> crate::Result<String> {
+                self.experimental_stats().await
             }
-            async fn sync(&self) -> crate::Result<()> {
-                self.sync().await
+            async fn experimental_sync(&self) -> crate::Result<()> {
+                self.experimental_sync().await
             }
             async fn reconnect(&self) -> crate::Result<()> {
                 self.reconnect().await
@@ -1968,11 +1964,11 @@ async fn execute_protected(
             .delete_canonical_key_unchecked(canonical_key.as_slice())
             .await
             .map(delete_result),
-        FfiOperation::Stats => client
-            .stats()
+        FfiOperation::ExperimentalStats => client
+            .experimental_stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.sync().await.map(|()| ok_result()),
+        FfiOperation::ExperimentalSync => client.experimental_sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
@@ -2058,12 +2054,12 @@ async fn execute_raw(
             let item_id = ItemId::from_slice(&item_id)?;
             client.raw().delete(item_id).await.map(delete_result)
         }
-        FfiOperation::Stats => client
+        FfiOperation::ExperimentalStats => client
             .raw()
-            .stats()
+            .experimental_stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
+        FfiOperation::ExperimentalSync => client.raw().experimental_sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
@@ -2155,14 +2151,14 @@ async fn execute_scoped(
                 .await
                 .map(delete_result)
         }
-        FfiOperation::Stats => client
+        FfiOperation::ExperimentalStats => client
             .raw()
-            .stats_in_namespace(namespace_id)
+            .experimental_stats_in_namespace(namespace_id)
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client
+        FfiOperation::ExperimentalSync => client
             .raw()
-            .sync_in_namespace(namespace_id)
+            .experimental_sync_in_namespace(namespace_id)
             .await
             .map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
@@ -2677,7 +2673,7 @@ pub unsafe extern "C" fn openkache_client_connect_with_options(
 
 /// Connects using the stable options structure and an explicit transport selector.
 ///
-/// This additive symbol leaves the ABI v6 options structure unchanged. Older
+/// This additive symbol leaves the base options structure unchanged. Older
 /// native libraries may omit it; callers must probe the symbol before use.
 ///
 /// # Safety
@@ -2700,44 +2696,51 @@ pub unsafe extern "C" fn openkache_client_connect_transport(
     }))
 }
 
-/// Returns the additive ABI version that supports independent Item-ID and
-/// value-key configuration.
+/// Connects through the v1 keyring configuration path.
+///
+/// The keyring options keep Item-ID derivation independent from value
+/// encryption keys. The base options must leave `data_protection_key` empty;
+/// the caller supplies the Item-ID root and, for protected values, value keys.
+/// Failures are encoded in the returned result pointer.
+///
+/// # Safety
+///
+/// `options` must be either null or a valid, properly aligned pointer to an
+/// initialized [`FfiConnectOptionsWithKeyring`] for the duration of this call.
+/// The nested `base` pointer and every non-empty pointer/length pair in the
+/// options must identify readable memory for the duration of this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn openkache_client_abi_version_v7() -> u32 {
-    FFI_ABI_VERSION_V7
-}
-
-/// Connects through the additive ABI v7 configuration path.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_connect_with_options_v7(
-    options: *const FfiConnectOptionsV7,
+pub unsafe extern "C" fn openkache_client_connect_with_keyring_options(
+    options: *const FfiConnectOptionsWithKeyring,
 ) -> *mut FfiResult {
     boxed_result(catch_result(|| {
         let options = unsafe {
             options
                 .as_ref()
-                .ok_or_else(|| "v7 connect options pointer must not be null".to_owned())?
+                .ok_or_else(|| "keyring connect options pointer must not be null".to_owned())?
         };
-        connect_options_v7(options)
+        connect_options_with_keyring(options)
     }))
 }
 
-fn connect_options_v7(options: &FfiConnectOptionsV7) -> std::result::Result<FfiResult, String> {
-    if options.abi_version != FFI_ABI_VERSION_V7 {
+fn connect_options_with_keyring(
+    options: &FfiConnectOptionsWithKeyring,
+) -> std::result::Result<FfiResult, String> {
+    if options.abi_version != ABI_VERSION {
         return Err(format!(
-            "unsupported native ABI v7 options version {}, expected {}",
-            options.abi_version, FFI_ABI_VERSION_V7
+            "unsupported native ABI options version {}, expected {}",
+            options.abi_version, ABI_VERSION
         ));
     }
     let base = unsafe {
         options
             .base
             .as_ref()
-            .ok_or_else(|| "v7 base options pointer must not be null".to_owned())?
+            .ok_or_else(|| "keyring base options pointer must not be null".to_owned())?
     };
     if base.data_protection_key_length != 0 {
         return Err(
-            "v7 base data_protection_key must be empty; configure item_id_root_key and value_keys"
+            "keyring base data_protection_key must be empty; configure item_id_root_key and value_keys"
                 .to_owned(),
         );
     }
@@ -2751,13 +2754,13 @@ fn connect_options_v7(options: &FfiConnectOptionsV7) -> std::result::Result<FfiR
         value if value == VALUE_FORMAT_ENCRYPTION_NONE as u32 => Encryption::Unprotected,
         value if value == VALUE_FORMAT_ENCRYPTION_COMPACT as u32 => Encryption::Compact,
         value if value == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 => Encryption::Robust,
-        value => return Err(format!("unsupported v7 encryption profile {value}")),
+        value => return Err(format!("unsupported keyring encryption profile {value}")),
     };
     if options.value_key_count == 0 && encryption != Encryption::Unprotected {
-        return Err("protected v7 values require at least one value key".to_owned());
+        return Err("protected keyring values require at least one value key".to_owned());
     }
     if options.value_key_count > 0 && encryption == Encryption::Unprotected {
-        return Err("unprotected v7 values must not supply value keys".to_owned());
+        return Err("unprotected keyring values must not supply value keys".to_owned());
     }
     if options.value_key_count > 0 && options.value_keys.is_null() {
         return Err(format!(
@@ -2989,7 +2992,7 @@ fn connect_options(
 /// v1 key item from `KEY_FORMAT.md`. The CBOR item is the ABI's type
 /// discriminator (`Integer`, `Text`, or `Bytes`); it is not raw application
 /// bytes and is not a wire Item ID. `SET` accepts an empty value and
-/// optional existence/TTL options. `PING`, `STATS`, and `SYNC` require empty
+/// optional existence/TTL options. `PING`, `EXPERIMENTAL_STATS`, and `EXPERIMENTAL_SYNC` require empty
 /// key and value buffers.
 ///
 /// # Safety
@@ -3441,10 +3444,10 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             {
                 Err("operation does not accept a value".to_owned())
             }
-            FfiOperation::Stats | FfiOperation::Sync if !item_id.is_empty() => {
+            FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync if !item_id.is_empty() => {
                 Err("operation does not accept an item_id".to_owned())
             }
-            FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
+            FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync if !value.is_empty() => {
                 Err("operation does not accept a value".to_owned())
             }
             FfiOperation::GetJson
@@ -3738,7 +3741,7 @@ fn validated_execute(
         SetOptions::new()
     };
     match operation {
-        FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync | FfiOperation::Reconnect
+        FfiOperation::Ping | FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync | FfiOperation::Reconnect
             if !key.is_empty() =>
         {
             Err("operation does not accept an application key".to_owned())
@@ -3749,8 +3752,8 @@ fn validated_execute(
         | FfiOperation::GetStructured
         | FfiOperation::GetV0
         | FfiOperation::Delete
-        | FfiOperation::Stats
-        | FfiOperation::Sync
+        | FfiOperation::ExperimentalStats
+        | FfiOperation::ExperimentalSync
         | FfiOperation::Reconnect
             if !value.is_empty() =>
         {
@@ -3802,7 +3805,7 @@ fn typed_execute_entry(
         )?;
         let key = if matches!(
             operation,
-            FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync | FfiOperation::Reconnect
+            FfiOperation::Ping | FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync | FfiOperation::Reconnect
         ) {
             // Keyless operations use an empty application-key buffer.  Do
             // not turn that buffer into a canonical empty Bytes key before
@@ -3856,8 +3859,8 @@ fn typed_async_entry(
             && matches!(
                 operation,
                 FfiOperation::Ping
-                    | FfiOperation::Stats
-                    | FfiOperation::Sync
+                    | FfiOperation::ExperimentalStats
+                    | FfiOperation::ExperimentalSync
                     | FfiOperation::Reconnect
             ) {
             // Keyless operations use an empty application-key buffer.  Do
@@ -4010,8 +4013,8 @@ fn execute_entry_inner(
         };
         match operation {
             FfiOperation::Ping
-            | FfiOperation::Stats
-            | FfiOperation::Sync
+            | FfiOperation::ExperimentalStats
+            | FfiOperation::ExperimentalSync
             | FfiOperation::Reconnect
                 if !application_key.is_empty() =>
             {
@@ -4023,8 +4026,8 @@ fn execute_entry_inner(
             | FfiOperation::GetStructured
             | FfiOperation::GetV0
             | FfiOperation::Delete
-            | FfiOperation::Stats
-            | FfiOperation::Sync
+            | FfiOperation::ExperimentalStats
+            | FfiOperation::ExperimentalSync
             | FfiOperation::Reconnect
                 if !value.is_empty() =>
             {
@@ -4346,8 +4349,8 @@ fn validate_input_lengths(
             | FfiOperation::GetStructured
             | FfiOperation::GetV0
             | FfiOperation::Delete
-            | FfiOperation::Stats
-            | FfiOperation::Sync
+            | FfiOperation::ExperimentalStats
+            | FfiOperation::ExperimentalSync
             | FfiOperation::Reconnect
     ) && value_length != 0
     {
@@ -4355,7 +4358,7 @@ fn validate_input_lengths(
     }
     if matches!(
         operation,
-        FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync | FfiOperation::Reconnect
+        FfiOperation::Ping | FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync | FfiOperation::Reconnect
     ) && application_key_length != 0
     {
         return Err("operation does not accept an application key".to_owned());
@@ -4390,7 +4393,7 @@ fn validate_scoped_input_lengths(
     if matches!(operation, FfiOperation::Get | FfiOperation::Delete) && value_length != 0 {
         return Err("operation does not accept a value".to_owned());
     }
-    if matches!(operation, FfiOperation::Stats | FfiOperation::Sync)
+    if matches!(operation, FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync)
         && (item_id_length != 0 || value_length != 0)
     {
         return Err("operation does not accept item_id or value".to_owned());

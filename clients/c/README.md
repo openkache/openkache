@@ -12,7 +12,7 @@ compression, encryption, and the worker lifecycle. Select
 explicit opt-outs: they keep TLS encryption but disable certificate and server
 identity verification.
 
-`STATS` and `SYNC` are transitional experimental maintenance operations and are
+`EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are transitional experimental maintenance operations and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before sending
@@ -78,14 +78,14 @@ protected keys directly should use the
 the `Integer`, `Text`, and `Bytes` rules in
 [`../KEY_FORMAT.md`](../KEY_FORMAT.md).
 
-The ABI v6 connect functions keep their historical coupled
+The ABI v1 base connect functions keep their historical coupled
 `data_protection_key` semantics. Bindings that need publicly derivable Item IDs
-with protected values can probe `openkache_client_abi_version_v7()` and, when
-it returns `7`, call `openkache_client_connect_with_options_v7`. The v7 options
-reference the v6 transport settings but require an explicit Item-ID root and
-an immutable array of value-key records; the legacy data-protection field must
-be empty and is never reinterpreted. A zero-length Item-ID root selects the
-public all-zero root, while value-key IDs and key material remain independent.
+with protected values can call
+`openkache_client_connect_with_keyring_options`. The keyring options reference
+the base transport settings but require an explicit Item-ID root and an
+immutable array of value-key records; the base data-protection field must be
+empty and is never reinterpreted. A zero-length Item-ID root selects the public
+all-zero root, while value-key IDs and key material remain independent.
 
 `openkache_client_namespace_open`, `openkache_client_namespace_update_policy`,
 and `openkache_client_namespace_delete` expose those transitional
