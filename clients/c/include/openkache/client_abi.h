@@ -117,8 +117,8 @@ openkache_client_result_t *openkache_client_gate0_set(
 
 openkache_client_result_t *
 openkache_client_gate0_delete_value(const openkache_client_t *client,
-                                    uint32_t key_kind, const uint8_t *key,
-                                    size_t key_length);
+                                    const uint8_t *canonical_key,
+                                    size_t canonical_key_length);
 
 void openkache_client_gate0_close(openkache_client_t *client);
 

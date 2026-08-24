@@ -22,11 +22,39 @@ public:
       : std::runtime_error(std::move(message)) {}
 };
 
+/// Stable native error categories projected by the shared C ABI.
+enum class Error_Category : std::uint32_t {
+  None = OPENKACHE_CLIENT_GATE0_ERROR_NONE,
+  Invalid_Input = OPENKACHE_CLIENT_GATE0_ERROR_INVALID_INPUT,
+  Configuration = OPENKACHE_CLIENT_GATE0_ERROR_CONFIGURATION,
+  Timeout = OPENKACHE_CLIENT_GATE0_ERROR_TIMEOUT,
+  Transport = OPENKACHE_CLIENT_GATE0_ERROR_TRANSPORT,
+  Server = OPENKACHE_CLIENT_GATE0_ERROR_SERVER,
+  Protocol = OPENKACHE_CLIENT_GATE0_ERROR_PROTOCOL,
+  Value = OPENKACHE_CLIENT_GATE0_ERROR_VALUE,
+  Key = OPENKACHE_CLIENT_GATE0_ERROR_KEY,
+  Unknown_Mutation = OPENKACHE_CLIENT_GATE0_ERROR_UNKNOWN_MUTATION,
+  Closed = OPENKACHE_CLIENT_GATE0_ERROR_CLOSED,
+  Internal = OPENKACHE_CLIENT_GATE0_ERROR_INTERNAL,
+};
+
+/// Native failure with a stable shared-core error category.
+class Native_Error : public Error {
+public:
+  Native_Error(std::string message, Error_Category category)
+      : Error(std::move(message)), category_(category) {}
+
+  Error_Category category() const noexcept { return category_; }
+
+private:
+  Error_Category category_;
+};
+
 /// A mutation whose response may have been lost after admission.
-class Unknown_Mutation_Error : public Error {
+class Unknown_Mutation_Error : public Native_Error {
 public:
   explicit Unknown_Mutation_Error(std::string message)
-      : Error(std::move(message)) {}
+      : Native_Error(std::move(message), Error_Category::Unknown_Mutation) {}
 };
 
 enum class Key_Kind {
@@ -322,9 +350,9 @@ public:
   }
 
   Delete_Outcome remove(const Typed_Key &key) const {
-    const auto logical = key.logical_bytes();
+    const auto canonical = canonical_key_bytes(key);
     const auto result = take_result(openkache_client_gate0_delete_value(
-        checked_client(), key.key_spec(), logical.data(), logical.size()));
+        checked_client(), canonical.data(), canonical.size()));
     if (result.kind == OPENKACHE_CLIENT_GATE0_RESULT_DELETED) {
       return Delete_Outcome::Deleted;
     }
@@ -397,8 +425,17 @@ private:
     const auto kind = openkache_client_gate0_result_kind(result);
     if (kind != OPENKACHE_CLIENT_GATE0_RESULT_CONNECTED) {
       const auto message = result_message(result);
+      const auto category =
+          openkache_client_gate0_result_error_category(result);
       openkache_client_gate0_result_free(result);
-      throw Error(message.empty() ? "OpenKache connection failed" : message);
+      const auto error_message =
+          message.empty() ? "OpenKache connection failed" : message;
+      if (kind == OPENKACHE_CLIENT_GATE0_RESULT_UNKNOWN_MUTATION ||
+          category == OPENKACHE_CLIENT_GATE0_ERROR_UNKNOWN_MUTATION) {
+        throw Unknown_Mutation_Error(error_message);
+      }
+      throw Native_Error(error_message,
+                         static_cast<Error_Category>(category));
     }
     auto *client = openkache_client_gate0_result_take_client(result);
     openkache_client_gate0_result_free(result);
@@ -459,7 +496,8 @@ private:
             OPENKACHE_CLIENT_GATE0_ERROR_UNKNOWN_MUTATION) {
       throw Unknown_Mutation_Error(message);
     }
-    throw Error(message);
+    throw Native_Error(message,
+                       static_cast<Error_Category>(result.error_category));
   }
 
   openkache_client_t *client_ = nullptr;

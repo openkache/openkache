@@ -21,6 +21,12 @@ Pointers and lengths are explicit; result payloads are borrowed until
 with `openkache_client_gate0_result_take_client` before
 `openkache_client_gate0_close`.
 
+`gate0_get`, `gate0_set`, and `gate0_delete_value` accept one canonical
+StructuredValue-CBOR key item, so integer, text, and byte keys use the same
+wire representation across native adapters.  A mutating timeout after worker
+admission is returned with the generated `UNKNOWN_MUTATION` result and
+error-category discriminators; callers must not replay that operation.
+
 ## Build and install
 
 Build the native core with the `ffi` feature and pass either an explicit static
