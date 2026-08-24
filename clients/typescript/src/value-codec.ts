@@ -572,12 +572,18 @@ function append_head(
 
 function encode_integer(value: bigint, output: number[], budget: Required<Value_Limits>): void {
   const negative = value < 0n
+  const model_magnitude = negative ? -value : value
+  const model_magnitude_length =
+    model_magnitude === 0n ? 0 : Math.ceil(model_magnitude.toString(2).length / 8)
+  // The budget covers the mathematical magnitude, not the transformed
+  // `-1-n` argument used by CBOR major type 1. A negative power of two can
+  // therefore have one more model byte than its native CBOR argument.
+  if (model_magnitude_length > budget.max_integer_bytes) {
+    resource("integer bytes", budget.max_integer_bytes, model_magnitude_length)
+  }
   const transformed = negative ? -value - 1n : value
   const magnitude_length =
     transformed === 0n ? 0 : Math.ceil(transformed.toString(2).length / 8)
-  if (magnitude_length > budget.max_integer_bytes) {
-    resource("integer bytes", budget.max_integer_bytes, magnitude_length)
-  }
   if (transformed <= 0xffff_ffff_ffff_ffffn) {
     append_head(negative ? 1 : 0, transformed, output, budget)
     return
