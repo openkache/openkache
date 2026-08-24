@@ -264,6 +264,7 @@ public:
   /// disables certificate and hostname verification.  It is development
   /// only — do not use this trust profile in production.
   static Client connect(const Connect_Options &options) {
+    validate_native_abi();
     if (options.address.empty()) {
       throw Error("OpenKache endpoint must not be empty");
     }
@@ -378,6 +379,16 @@ private:
     std::uint32_t error_category = OPENKACHE_CLIENT_GATE0_ERROR_INTERNAL;
     Bytes payload;
   };
+
+  static void validate_native_abi() {
+    const auto actual = openkache_client_abi_version();
+    if (actual != OPENKACHE_CLIENT_ABI_VERSION) {
+      throw Error(
+          "OpenKache native ABI version " + std::to_string(actual) +
+          " does not match generated contract version " +
+          std::to_string(OPENKACHE_CLIENT_ABI_VERSION));
+    }
+  }
 
   static Client connect_result(openkache_client_result_t *result) {
     if (result == nullptr) {

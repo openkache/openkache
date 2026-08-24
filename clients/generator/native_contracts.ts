@@ -17,10 +17,10 @@ import {
 import { compatibility_response_result_kind } from "../compatibility_response_adapters"
 import { request_transport_plan } from "../compatibility_request_adapters"
 import { compatibility_ffi_operation_contract } from "../compatibility_ffi_adapters"
-import { LEGACY_GATE0_DEFAULTS } from "./config"
 import {
   render_c_native_function_typedefs,
   render_c_native_functions,
+  render_c_native_structure_assertions,
   render_c_native_structures,
 } from "../native_abi_renderers"
 import { pascal_case, snake_case } from "../generator_names"
@@ -45,13 +45,12 @@ function gate0_defaults(contract: Client_Contract["client_defaults"]): {
   readonly value_selector: number
 } {
   return {
-    alpn_version: contract.gate0_alpn_version ?? LEGACY_GATE0_DEFAULTS.alpn_version,
-    compression: contract.gate0_compression ?? LEGACY_GATE0_DEFAULTS.compression,
-    encryption: contract.gate0_encryption ?? LEGACY_GATE0_DEFAULTS.encryption,
-    item_id_root_key_hex:
-      contract.gate0_item_id_root_key_hex ?? LEGACY_GATE0_DEFAULTS.item_id_root_key_hex,
-    namespace_id: contract.gate0_namespace_id ?? LEGACY_GATE0_DEFAULTS.namespace_id,
-    value_selector: contract.gate0_value_selector ?? LEGACY_GATE0_DEFAULTS.value_selector,
+    alpn_version: contract.gate0_alpn_version,
+    compression: contract.gate0_compression,
+    encryption: contract.gate0_encryption,
+    item_id_root_key_hex: contract.gate0_item_id_root_key_hex,
+    namespace_id: contract.gate0_namespace_id,
+    value_selector: contract.gate0_value_selector,
   }
 }
 
@@ -1112,6 +1111,8 @@ export function render_c_contract(contract: Client_Contract): string {
     (field) => `    ${field.c_type} ${field.name};`,
   ).join("\n")
   const native_structures = render_c_native_structures(contract)
+  const native_structure_assertions =
+    render_c_native_structure_assertions(contract)
   const native_functions = render_c_native_functions(contract)
   const native_function_typedefs = render_c_native_function_typedefs(contract)
   const client_compatibility = c_contract_client_compatibility(contract)
@@ -1150,6 +1151,18 @@ typedef struct openkache_client_request openkache_client_request_t;
 
 ${native_structures}
 
+#ifdef __cplusplus
+#define OPENKACHE_SMITHY_STATIC_ASSERT static_assert
+#define OPENKACHE_SMITHY_ALIGNOF(type) alignof(type)
+#else
+#define OPENKACHE_SMITHY_STATIC_ASSERT _Static_assert
+#define OPENKACHE_SMITHY_ALIGNOF(type) _Alignof(type)
+#endif
+#define OPENKACHE_SMITHY_ALIGN_UP(value, alignment) \
+    (((value) + (alignment) - 1u) / (alignment) * (alignment))
+
+${native_structure_assertions}
+
 /* Stable native function declarations shared by every language adapter. */
 #ifdef __cplusplus
 extern "C" {
@@ -1162,17 +1175,13 @@ ${native_functions}
 /* Function-pointer types used by dynamic language loaders. */
 ${native_function_typedefs}
 
-#ifdef __cplusplus
-#define OPENKACHE_SMITHY_STATIC_ASSERT static_assert
-#else
-#define OPENKACHE_SMITHY_STATIC_ASSERT _Static_assert
-#endif
-
 OPENKACHE_SMITHY_STATIC_ASSERT(sizeof(openkache_smithy_namespace_descriptor_t) ==
                    OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
                "Smithy namespace descriptor size changed");
 ${descriptor_offset_asserts}
 #undef OPENKACHE_SMITHY_STATIC_ASSERT
+#undef OPENKACHE_SMITHY_ALIGNOF
+#undef OPENKACHE_SMITHY_ALIGN_UP
 
 #define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u

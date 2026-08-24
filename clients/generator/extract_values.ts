@@ -2,7 +2,6 @@
 
 import {
   CLIENT_DEFAULTS_TRAIT_ID,
-  LEGACY_GATE0_DEFAULTS,
   VALUE_ENVELOPE_TRAIT_ID,
   VALUE_FORMAT_TRAIT_ID,
 } from "./config"
@@ -18,13 +17,10 @@ import { encode_vu128 } from "./utils"
 function gate0_integer_member(
   object: Readonly<Record<string, unknown>>,
   member: string,
-  fallback: number,
   minimum: number,
   maximum = Number.MAX_SAFE_INTEGER,
 ): number {
-  return object[member] === undefined
-    ? fallback
-    : integer_member(object, member, CLIENT_DEFAULTS_TRAIT_ID, minimum, maximum)
+  return integer_member(object, member, CLIENT_DEFAULTS_TRAIT_ID, minimum, maximum)
 }
 
 export function value_format_contract(value: unknown): Value_Format_Contract {
@@ -274,14 +270,11 @@ export function value_envelope_contract(value: unknown): Value_Envelope_Contract
 
 export function client_defaults_contract(value: unknown): Client_Defaults_Contract {
   const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
-  const gate0_item_id_root_key_hex =
-    contract.gate0ItemIdRootKeyHex === undefined
-      ? LEGACY_GATE0_DEFAULTS.item_id_root_key_hex
-      : string_member(
-          contract,
-          "gate0ItemIdRootKeyHex",
-          CLIENT_DEFAULTS_TRAIT_ID,
-        )
+  const gate0_item_id_root_key_hex = string_member(
+    contract,
+    "gate0ItemIdRootKeyHex",
+    CLIENT_DEFAULTS_TRAIT_ID,
+  )
   if (
     gate0_item_id_root_key_hex.length !== 64 ||
     !/^[0-9a-f]{64}$/i.test(gate0_item_id_root_key_hex)
@@ -360,21 +353,18 @@ export function client_defaults_contract(value: unknown): Client_Defaults_Contra
     gate0_alpn_version: gate0_integer_member(
       contract,
       "gate0AlpnVersion",
-      LEGACY_GATE0_DEFAULTS.alpn_version,
       1,
       0xff,
     ),
     gate0_compression: gate0_integer_member(
       contract,
       "gate0Compression",
-      LEGACY_GATE0_DEFAULTS.compression,
       0,
       0xff,
     ),
     gate0_encryption: gate0_integer_member(
       contract,
       "gate0Encryption",
-      LEGACY_GATE0_DEFAULTS.encryption,
       0,
       0xff,
     ),
@@ -382,13 +372,11 @@ export function client_defaults_contract(value: unknown): Client_Defaults_Contra
     gate0_namespace_id: gate0_integer_member(
       contract,
       "gate0NamespaceId",
-      LEGACY_GATE0_DEFAULTS.namespace_id,
       1,
     ),
     gate0_value_selector: gate0_integer_member(
       contract,
       "gate0ValueSelector",
-      LEGACY_GATE0_DEFAULTS.value_selector,
       0,
       0xff,
     ),

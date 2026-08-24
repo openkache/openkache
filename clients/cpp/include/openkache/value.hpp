@@ -93,6 +93,11 @@ private:
 };
 
 /// Bounded work budget shared by the structured encoder and decoder.
+///
+/// `max_depth` counts nested arrays and maps (a scalar root has depth zero).
+/// It defaults to 128 and may be lowered per operation, but it cannot exceed
+/// `MAX_ALLOWED_VALUE_DEPTH`; rejecting larger values keeps recursive parsing
+/// and destruction within a bounded native stack budget.
 struct Value_Limits {
   std::size_t max_bytes = OPENKACHE_SMITHY_MAX_VALUE_BYTES;
   std::size_t max_depth = 128;
@@ -101,6 +106,10 @@ struct Value_Limits {
 };
 
 /// Hard upper bound for caller-selected traversal depth.
+///
+/// This is an implementation ceiling, not a wire-format preference. Callers
+/// that need a stricter contract should set `Value_Limits::max_depth` below
+/// this value; values above it are rejected before traversal begins.
 // The decoder is deliberately bounded below the platform's typical native
 // stack budget.  A caller can still choose a lower limit per operation, while
 // this hard ceiling prevents a user-controlled limit from turning the
@@ -460,6 +469,20 @@ public:
     return Value(::openkache::Integer(value));
   }
 
+#if defined(__SIZEOF_INT128__)
+  /// Constructs an exact arbitrary-precision value from a compiler-native
+  /// unsigned 128-bit integer without narrowing it through `uint64_t`.
+  static Value integer(::openkache::Integer::unsigned_int128 value) {
+    return Value(::openkache::Integer::from_u128(value));
+  }
+
+  /// Constructs an exact arbitrary-precision value from a compiler-native
+  /// signed 128-bit integer without narrowing it through `int64_t`.
+  static Value integer(::openkache::Integer::signed_int128 value) {
+    return Value(::openkache::Integer::from_i128(value));
+  }
+#endif
+
   template <typename T>
     requires(std::is_integral_v<T> &&
              !std::is_same_v<std::remove_cv_t<T>, std::int64_t>)
@@ -477,6 +500,16 @@ public:
   }
 
   static Value Integer(std::int64_t value) { return integer(value); }
+
+#if defined(__SIZEOF_INT128__)
+  static Value Integer(::openkache::Integer::unsigned_int128 value) {
+    return integer(value);
+  }
+
+  static Value Integer(::openkache::Integer::signed_int128 value) {
+    return integer(value);
+  }
+#endif
 
   template <typename T>
     requires(std::is_integral_v<T> &&

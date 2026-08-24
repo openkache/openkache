@@ -360,7 +360,19 @@ if(CMAKE_THREAD_LIBS_INIT)
        ${CMAKE_THREAD_LIBS_INIT})
 endif()
 if(CMAKE_DL_LIBS)
-  list(APPEND _openkache_client_pkgconfig_private_libs_list ${CMAKE_DL_LIBS})
+  if(CMAKE_DL_LIBS MATCHES "^-l")
+    list(
+      APPEND
+      _openkache_client_pkgconfig_private_libs_list
+      ${CMAKE_DL_LIBS}
+    )
+  else()
+    list(
+      APPEND
+      _openkache_client_pkgconfig_private_libs_list
+      "-l${CMAKE_DL_LIBS}"
+    )
+  endif()
 endif()
 string(
   JOIN
@@ -376,7 +388,7 @@ if(OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED)
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_LINK_LIBRARIES
-    "-L\${libdir} -l${OPENKACHE_CLIENT_PKGCONFIG_LIBRARY_NAME}"
+    "-L\${libdir} -lopenkache-client-gate0 -l${OPENKACHE_CLIENT_PKGCONFIG_LIBRARY_NAME}"
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_PRIVATE_LIBS
@@ -399,7 +411,7 @@ if(OPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC)
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_LINK_LIBRARIES
-    "\${libdir}/${OPENKACHE_CLIENT_INSTALLED_STATIC_NAME}"
+    "-L\${libdir} -lopenkache-client-gate0 \${libdir}/${OPENKACHE_CLIENT_INSTALLED_STATIC_NAME}"
   )
   set(
     OPENKACHE_CLIENT_PKGCONFIG_PRIVATE_LIBS

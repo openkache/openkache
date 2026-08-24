@@ -150,11 +150,8 @@ openkache_client_gate0_delete_value(const openkache_client_t *client,
   if (request == NULL) {
     return NULL;
   }
-  while (openkache_client_request_poll(request) ==
-         OPENKACHE_SMITHY_FFI_REQUEST_STATE_PENDING) {
-  }
   openkache_client_result_t *result = openkache_client_request_wait(
-      request, OPENKACHE_SMITHY_SET_INHERIT_EXPIRATION_BITS);
+      request, OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS);
   openkache_client_request_free(request);
   return result;
 }

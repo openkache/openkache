@@ -16,6 +16,12 @@ duplicate-key, and resource-limited inputs throw `openkache::Value_Error`.
 `get` always returns a tagged `Get_Result`, so a stored `Null` or `Undefined`
 cannot be confused with a missing item.
 
+Structured values are bounded by `Value_Limits`: the default traversal ceiling
+is 128 nested arrays/maps, and `MAX_ALLOWED_VALUE_DEPTH` (1024) is a hard
+implementation maximum.  A caller may choose a lower `max_depth`, but larger
+limits are rejected before parsing or encoding so recursive native stack usage
+stays bounded.
+
 ## Build
 
 Build the shared native ABI, then configure this package.  CMake generates the

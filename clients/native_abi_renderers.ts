@@ -193,6 +193,39 @@ function native_abi_c_type(
   }
 }
 
+function native_abi_layout_c_type(
+  type: Native_Abi_Type,
+  structure_name?: string,
+): string {
+  switch (type) {
+    case "client_pointer":
+      return "openkache_client_t *"
+    case "result_pointer":
+      return "openkache_client_result_t *"
+    case "request_pointer":
+      return "openkache_client_request_t *"
+    case "u8_pointer":
+      return "uint8_t *"
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("C native struct pointer has no structure name")
+      }
+      return `${native_abi_structure_c_type_name(structure_name)} *`
+    case "size":
+      return "size_t"
+    case "uint8":
+      return "uint8_t"
+    case "int32":
+      return "int32_t"
+    case "uint32":
+      return "uint32_t"
+    case "uint64":
+      return "uint64_t"
+    case "void":
+      throw new Error("C native structure field cannot be void")
+  }
+}
+
 function native_abi_c_return_type(
   type: Native_Abi_Type,
   structure_name?: string,
@@ -215,6 +248,52 @@ ${fields}
 } ${native_abi_structure_c_type_name(structure.name)};`
     })
     .join("\n\n")
+}
+
+/**
+ * Emits assertions for the complete natural C layout of every Smithy-modeled
+ * native structure. The expected offsets are expressed in terms of the target
+ * compiler's type sizes and alignments, so the checks remain valid on both
+ * 32-bit and 64-bit targets while still rejecting packing, field-order, and
+ * declaration drift.
+ */
+export function render_c_native_structure_assertions(
+  contract: Client_Contract,
+): string {
+  return contract.ffi.native_abi_structures
+    .map((structure) => {
+      const structure_type = native_abi_structure_c_type_name(structure.name)
+      const field_assertions = structure.fields
+        .map((field, index) => {
+          const field_name = native_abi_c_identifier(field.name)
+          const expected_offset =
+            index === 0
+              ? "0u"
+              : `OPENKACHE_SMITHY_ALIGN_UP(offsetof(${structure_type}, ${
+                  native_abi_c_identifier(structure.fields[index - 1]!.name)
+                }) + sizeof(((${structure_type} *)0)->${
+                  native_abi_c_identifier(structure.fields[index - 1]!.name)
+                }), OPENKACHE_SMITHY_ALIGNOF(${native_abi_layout_c_type(
+                  field.type,
+                  field.structure_name,
+                )}))`
+          return `OPENKACHE_SMITHY_STATIC_ASSERT(
+    offsetof(${structure_type}, ${field_name}) == ${expected_offset},
+    "Smithy native structure ${structure.name}.${field.name} offset changed");`
+        })
+        .join("\n")
+      const last_field = structure.fields[structure.fields.length - 1]!
+      const last_name = native_abi_c_identifier(last_field.name)
+      const size_expression = `OPENKACHE_SMITHY_ALIGN_UP(
+    offsetof(${structure_type}, ${last_name}) +
+        sizeof(((${structure_type} *)0)->${last_name}),
+    OPENKACHE_SMITHY_ALIGNOF(${structure_type}))`
+      return `${field_assertions}
+OPENKACHE_SMITHY_STATIC_ASSERT(
+    sizeof(${structure_type}) == ${size_expression},
+    "Smithy native structure ${structure.name} size changed");`
+    })
+    .join("\n")
 }
 
 export function render_c_native_functions(contract: Client_Contract): string {

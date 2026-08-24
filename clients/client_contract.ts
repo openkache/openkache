@@ -19,7 +19,6 @@ import {
   swift_property_name,
 } from "./generator_names"
 import { encode_vu128 } from "./generator_values"
-import { LEGACY_GATE0_DEFAULTS } from "./generator/config"
 import type {
   Api_Contract,
   Api_Enum,
@@ -73,11 +72,7 @@ export interface Value_Envelope_Contract {
 /** Defaults shared by the Rust client core and its native language adapters. */
 export interface Client_Defaults_Contract {
   readonly connect_timeout_milliseconds: number
-  /**
-   * Gate 0 defaults are required by the maintained Smithy model. The
-   * extractor still supplies legacy values for synthetic pre-Gate-0 AST
-   * fixtures so those fixtures remain structurally comparable.
-   */
+  /** Gate 0 defaults are required by the maintained Smithy model. */
   readonly gate0_alpn_version: number
   readonly gate0_compression: number
   readonly gate0_encryption: number
@@ -1577,15 +1572,11 @@ function value_envelope_contract(value: unknown): Value_Envelope_Contract {
 
 function client_defaults_contract(value: unknown): Client_Defaults_Contract {
   const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
-  const legacy_gate0 = contract.gate0ItemIdRootKeyHex === undefined
-  const gate0_item_id_root_key_hex =
-    legacy_gate0
-      ? LEGACY_GATE0_DEFAULTS.item_id_root_key_hex
-      : string_member(
-          contract,
-          "gate0ItemIdRootKeyHex",
-          CLIENT_DEFAULTS_TRAIT_ID,
-        )
+  const gate0_item_id_root_key_hex = string_member(
+    contract,
+    "gate0ItemIdRootKeyHex",
+    CLIENT_DEFAULTS_TRAIT_ID,
+  )
   if (
     gate0_item_id_root_key_hex.length !== 64 ||
     !/^[0-9a-f]{64}$/i.test(gate0_item_id_root_key_hex)
@@ -1661,56 +1652,41 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
     ),
-    gate0_alpn_version:
-      contract.gate0AlpnVersion === undefined
-        ? LEGACY_GATE0_DEFAULTS.alpn_version
-        : integer_member(
-            contract,
-            "gate0AlpnVersion",
-            CLIENT_DEFAULTS_TRAIT_ID,
-            1,
-            0xff,
-          ),
-    gate0_compression:
-      contract.gate0Compression === undefined
-        ? LEGACY_GATE0_DEFAULTS.compression
-        : integer_member(
-            contract,
-            "gate0Compression",
-            CLIENT_DEFAULTS_TRAIT_ID,
-            0,
-            0xff,
-          ),
-    gate0_encryption:
-      contract.gate0Encryption === undefined
-        ? LEGACY_GATE0_DEFAULTS.encryption
-        : integer_member(
-            contract,
-            "gate0Encryption",
-            CLIENT_DEFAULTS_TRAIT_ID,
-            0,
-            0xff,
-          ),
+    gate0_alpn_version: integer_member(
+      contract,
+      "gate0AlpnVersion",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+      0xff,
+    ),
+    gate0_compression: integer_member(
+      contract,
+      "gate0Compression",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    gate0_encryption: integer_member(
+      contract,
+      "gate0Encryption",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+      0xff,
+    ),
     gate0_item_id_root_key_hex,
-    gate0_namespace_id:
-      contract.gate0NamespaceId === undefined
-        ? LEGACY_GATE0_DEFAULTS.namespace_id
-        : integer_member(
-            contract,
-            "gate0NamespaceId",
-            CLIENT_DEFAULTS_TRAIT_ID,
-            1,
-          ),
-    gate0_value_selector:
-      contract.gate0ValueSelector === undefined
-        ? LEGACY_GATE0_DEFAULTS.value_selector
-        : integer_member(
-            contract,
-            "gate0ValueSelector",
-            CLIENT_DEFAULTS_TRAIT_ID,
-            0,
-            0xff,
-          ),
+    gate0_namespace_id: integer_member(
+      contract,
+      "gate0NamespaceId",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    gate0_value_selector: integer_member(
+      contract,
+      "gate0ValueSelector",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+      0xff,
+    ),
   } satisfies Client_Defaults_Contract
   if (defaults.zstandard_level_min > defaults.zstandard_level_max) {
     throw new Error(
@@ -1724,20 +1700,6 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
     throw new Error(
       `${CLIENT_DEFAULTS_TRAIT_ID}.zstandardLevel must be within the configured range`,
     )
-  }
-  if (legacy_gate0) {
-    // Keep historical synthetic AST snapshots structurally comparable while
-    // still exposing compatibility values to renderers that read properties.
-    for (const member of [
-      "gate0_alpn_version",
-      "gate0_compression",
-      "gate0_encryption",
-      "gate0_item_id_root_key_hex",
-      "gate0_namespace_id",
-      "gate0_value_selector",
-    ] as const) {
-      Object.defineProperty(defaults, member, { enumerable: false })
-    }
   }
   return defaults
 }
