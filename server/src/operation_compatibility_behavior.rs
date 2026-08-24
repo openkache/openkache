@@ -18,7 +18,7 @@ use super::operation_compatibility_decode::{
 };
 use super::operation_compatibility_services::{
     DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState,
-    SetState, StatsState, SyncState, storage_write_options,
+    SetState, ExperimentalStatsState, ExperimentalSyncState, storage_write_options,
 };
 use super::operation_contract::{OperationId, OperationStatus, telemetry_operation_id};
 use super::operation_outcome::{
@@ -427,8 +427,8 @@ pub(super) fn delete<'a, S: StorageDataPort>(
     }
 }
 
-pub(super) fn stats<'a, S: StorageAdministrationPort>(
-    state: &'a StatsState<S>,
+pub(super) fn experimental_stats<'a, S: StorageAdministrationPort>(
+    state: &'a ExperimentalStatsState<S>,
     decoded: NamespaceInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
@@ -442,7 +442,7 @@ pub(super) fn stats<'a, S: StorageAdministrationPort>(
             );
         }
         match cache
-            .stats(telemetry_operation_id(OperationId::Stats))
+            .stats(telemetry_operation_id(OperationId::ExperimentalStats))
             .await
         {
             Ok(workers) => {
@@ -479,8 +479,8 @@ pub(super) fn stats<'a, S: StorageAdministrationPort>(
     }
 }
 
-pub(super) fn sync<'a, S: StorageAdministrationPort>(
-    state: &'a SyncState<S>,
+pub(super) fn experimental_sync<'a, S: StorageAdministrationPort>(
+    state: &'a ExperimentalSyncState<S>,
     decoded: NamespaceInput,
 ) -> impl Future<Output = OperationOutcome> + 'a {
     async move {
@@ -503,7 +503,7 @@ pub(super) fn sync<'a, S: StorageAdministrationPort>(
             }
         };
         match cache
-            .sync_routes(&dirty_workers, telemetry_operation_id(OperationId::Sync))
+            .sync_routes(&dirty_workers, telemetry_operation_id(OperationId::ExperimentalSync))
             .await
         {
             Ok(()) => {

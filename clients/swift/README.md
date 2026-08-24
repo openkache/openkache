@@ -32,7 +32,7 @@ The native library exports the versioned ABI declared in
 Build or install the `openkache-client-core` Rust `cdylib` for the target platform
 and make it visible to the linker as `openkache_client_core`.
 
-The generated `STATS` and `SYNC` methods are transitional experimental
+The generated `EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` methods are transitional experimental
 maintenance operations and are disabled by default. Enable
 `enable_experimental_api = true` explicitly and coordinate exact revision
 `draft-2026-08-19.4` out of band as described in
@@ -88,8 +88,8 @@ try await client.set(
     )
 )
 let value = try await client.get("session")
-let statisticsJSON = try await client.stats()
-try await client.sync()
+let statisticsJSON = try await client.experimentalStats()
+try await client.experimentalSync()
 await client.close()
 ```
 

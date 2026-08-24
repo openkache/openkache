@@ -50,12 +50,12 @@ openkache-cli set greeting "hello OpenKache"
 printf 'binary value' | openkache-cli set payload --value-stdin
 openkache-cli get payload --output base64
 openkache-cli delete greeting
-openkache-cli stats
-openkache-cli sync
+openkache-cli experimental_stats
+openkache-cli experimental_sync
 openkache-cli shell
 ```
 
-`stats` and `sync` are transitional experimental maintenance commands and are
+`experimental_stats` and `experimental_sync` are transitional experimental maintenance commands and are
 disabled by default. Enable `enable_experimental_api = true` explicitly and
 coordinate exact revision `draft-2026-08-19.4` out of band as described in
 [`protocol/EXPERIMENTAL.md`](../../protocol/EXPERIMENTAL.md) before using them;
@@ -66,8 +66,8 @@ data-operation set.
 default and replaces invalid UTF-8 bytes lossily; `base64` is safe for
 binary values in shell pipelines.
 
-When attached to a terminal, `stats` renders a readable table and maintenance
-waits show a spinner on stderr. Piped `stats` output remains
+When attached to a terminal, `experimental_stats` renders a readable table and maintenance
+waits show a spinner on stderr. Piped `experimental_stats` output remains
 plain JSON, while the other commands keep their existing plain or raw stdout
 contracts, so scripts do not receive terminal control sequences. `shell` uses
 an editable prompt with history and Tab completion; set `NO_COLOR=1` to

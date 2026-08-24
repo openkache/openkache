@@ -35,14 +35,14 @@ pub(super) struct DeleteState<S = StoragePort> {
     pub(super) membership: NamespaceMembershipCapabilityHandle,
 }
 
-pub(super) struct StatsState<S = StoragePort> {
+pub(super) struct ExperimentalStatsState<S = StoragePort> {
     pub(super) storage: S,
     pub(super) coordination: NamespaceCoordinationCapabilityHandle,
     pub(super) catalog: NamespaceCatalogCapabilityHandle,
     pub(super) observability: ObservabilityCapabilityHandle,
 }
 
-pub(super) struct SyncState<S = StoragePort> {
+pub(super) struct ExperimentalSyncState<S = StoragePort> {
     pub(super) storage: S,
     pub(super) coordination: NamespaceCoordinationCapabilityHandle,
     pub(super) catalog: NamespaceCatalogCapabilityHandle,

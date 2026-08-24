@@ -145,7 +145,7 @@ function render_rust_operation_contract(contract: Client_Contract): string {
     )
     // Generic operations use the shape-neutral RAW discriminator. Explicit
     // compatibility adapters own domain result semantics; this keeps an
-    // operation such as experimental SYNC on the canonical `Ok` result while
+    // operation such as EXPERIMENTAL_SYNC on the canonical `Ok` result while
     // leaving route-less future operations shape-neutral.
     const generic_result_name = "raw"
     const status_mapping = operation.contract.success_statuses.map((status) => {

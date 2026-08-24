@@ -12,7 +12,7 @@ use super::operation_compatibility_handlers as handlers;
 use super::operation_compatibility_prepare as prepare;
 use super::operation_compatibility_services::{
     DeleteState, GetState, NamespaceDeleteState, NamespaceOpenState, NamespaceUpdateState, SetState,
-    StatsState, SyncState,
+    ExperimentalStatsState, ExperimentalSyncState,
 };
 use super::operation_composition::ApiModule;
 use super::operation_contract::OperationId;
@@ -69,8 +69,8 @@ fn initialize_module(
         }),
     )?;
     states.bind(
-        OperationId::Stats,
-        Arc::new(StatsState {
+        OperationId::ExperimentalStats,
+        Arc::new(ExperimentalStatsState {
             storage: storage.clone(),
             coordination: Arc::clone(coordination),
             catalog: Arc::clone(catalog),
@@ -78,8 +78,8 @@ fn initialize_module(
         }),
     )?;
     states.bind(
-        OperationId::Sync,
-        Arc::new(SyncState {
+        OperationId::ExperimentalSync,
+        Arc::new(ExperimentalSyncState {
             storage: storage.clone(),
             coordination: Arc::clone(coordination),
             catalog: Arc::clone(catalog),
@@ -132,15 +132,15 @@ const OPERATIONS: &[ServerOperationRegistration] = &[
         .authorize(authorization_none)
         .mutation()
         .build(),
-    RegistrationBuilder::new(OperationId::Stats, handlers::stats_handler)
-        .state::<StatsState>()
-        .prepare(prepare::prepare_stats_namespace)
+    RegistrationBuilder::new(OperationId::ExperimentalStats, handlers::experimental_stats_handler)
+        .state::<ExperimentalStatsState>()
+        .prepare(prepare::prepare_experimental_stats_namespace)
         .authorize(authorization_administrator)
         .read_only()
         .build(),
-    RegistrationBuilder::new(OperationId::Sync, handlers::sync_handler)
-        .state::<SyncState>()
-        .prepare(prepare::prepare_sync_namespace)
+    RegistrationBuilder::new(OperationId::ExperimentalSync, handlers::experimental_sync_handler)
+        .state::<ExperimentalSyncState>()
+        .prepare(prepare::prepare_experimental_sync_namespace)
         .authorize(authorization_administrator)
         .mutation()
         .build(),

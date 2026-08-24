@@ -17,7 +17,7 @@ Experimental layouts are not a compatibility surface. Clients MUST enable
 their use explicitly and MUST coordinate the server's documented experimental
 revision before sending them. Stable-v1 clients MUST NOT send these opcodes.
 
-## `STATS`
+## `EXPERIMENTAL_STATS`
 
 Opcode `05` currently carries:
 
@@ -63,10 +63,5 @@ The current response behavior is:
 | Unauthorized | `Forbidden` with an optional diagnostic |
 | Authorized namespace missing | `NamespaceNotFound` |
 | Barrier failure or transport failure | connection close; outcome unknown |
-
-The wire name `EXPERIMENTAL_SYNC` is the normative name used by this document.
-The transitional Smithy model calls the same opcode `Sync` and uses enum text
-`sync`; this is only a model naming difference, not a second operation or a
-stable assignment.
 
 Neither operation is a stable server capability requirement.

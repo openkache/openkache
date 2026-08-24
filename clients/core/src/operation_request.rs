@@ -2,7 +2,7 @@
 
 use openkache_protocol::request_fields::{
     op_delete, op_get, op_namespace_delete, op_namespace_open, op_namespace_update_policy, op_set,
-    op_stats, op_sync,
+    op_experimental_stats, op_experimental_sync,
 };
 use openkache_protocol::{
     ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, Opcode, OwnedRequestFrame, WireSegment,
@@ -80,19 +80,19 @@ impl OperationRequest {
         Ok(request)
     }
 
-    pub(crate) fn stats(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::Stats, Operation::Stats, false, false);
+    pub(crate) fn experimental_stats(namespace_id: u64) -> Result<Self> {
+        let mut request = Self::new(Opcode::ExperimentalStats, Operation::ExperimentalStats, false, false);
         request.insert(
-            op_stats::NAMESPACE_ID,
+            op_experimental_stats::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
         );
         Ok(request)
     }
 
-    pub(crate) fn sync(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::Sync, Operation::Sync, false, false);
+    pub(crate) fn experimental_sync(namespace_id: u64) -> Result<Self> {
+        let mut request = Self::new(Opcode::ExperimentalSync, Operation::ExperimentalSync, false, false);
         request.insert(
-            op_sync::NAMESPACE_ID,
+            op_experimental_sync::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
         );
         Ok(request)

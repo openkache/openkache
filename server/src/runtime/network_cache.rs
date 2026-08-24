@@ -174,22 +174,24 @@ impl NetworkWorkerCache {
             .await
     }
 
-    pub(crate) async fn stats(&self, operation: Operation) -> Result<Vec<String>> {
+    pub(crate) async fn experimental_stats(&self, operation: Operation) -> Result<Vec<String>> {
         let mut stats = Vec::with_capacity(self.cache.worker_count());
         for worker in 0..self.cache.worker_count() {
             let response = self
                 .cache
                 .try_network_request(worker, operation, self.network_worker, |response| {
-                    WorkerRequest::Control(WorkerControlRequest::Stats { response })
+                    WorkerRequest::Control(WorkerControlRequest::ExperimentalStats { response })
                 })?
                 .await?;
             match response {
-                WorkerResponse::Control(super::WorkerControlResponse::Stats(worker_stats)) => {
+                WorkerResponse::Control(
+                    super::WorkerControlResponse::ExperimentalStats(worker_stats),
+                ) => {
                     stats.push(format!("thread={worker} {worker_stats}"));
                 }
                 response => {
                     return Err(KvError::Worker(format!(
-                        "unexpected stats response: {response:?}"
+                        "unexpected experimental_stats response: {response:?}"
                     )));
                 }
             }
@@ -197,7 +199,7 @@ impl NetworkWorkerCache {
         Ok(stats)
     }
 
-    pub(crate) async fn sync(&self, operation: Operation) -> Result<()> {
+    pub(crate) async fn experimental_sync(&self, operation: Operation) -> Result<()> {
         let workers = 0..self.cache.worker_count();
         for worker in workers {
             self.sync_worker(worker, operation).await?;
@@ -212,13 +214,13 @@ impl NetworkWorkerCache {
         match self
             .cache
             .try_network_request(worker, operation, self.network_worker, move |response| {
-                WorkerRequest::Control(WorkerControlRequest::Sync { response })
+                WorkerRequest::Control(WorkerControlRequest::ExperimentalSync { response })
             })?
             .await?
         {
-            WorkerResponse::Control(super::WorkerControlResponse::Synced) => Ok(()),
+            WorkerResponse::Control(super::WorkerControlResponse::ExperimentalSynced) => Ok(()),
             response => Err(KvError::Worker(format!(
-                "unexpected sync response: {response:?}"
+                "unexpected experimental_sync response: {response:?}"
             ))),
         }
     }

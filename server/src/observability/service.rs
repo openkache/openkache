@@ -248,7 +248,7 @@ impl NetworkWorkerMetrics {
 /// connection update is directed to the network worker shard that owns it;
 /// storage execution updates are directed to the storage worker shard. The
 /// management listener reads those shards and reduces them into one bounded
-/// snapshot for Prometheus, health probes, and authenticated `STATS`.
+/// snapshot for Prometheus, health probes, and authenticated `EXPERIMENTAL_STATS`.
 pub(crate) struct ObservabilityState {
     started_at: Instant,
     enabled: bool,

@@ -940,13 +940,13 @@ macro_rules! protected_client_methods {
         }
 
         /// Returns server statistics as their JSON text.
-        pub async fn stats(&self) -> Result<String> {
-            self.raw.stats().await
+        pub async fn experimental_stats(&self) -> Result<String> {
+            self.raw.experimental_stats().await
         }
 
         /// Waits until prior mutations satisfy the server durability barrier.
-        pub async fn sync(&self) -> Result<()> {
-            self.raw.sync().await
+        pub async fn experimental_sync(&self) -> Result<()> {
+            self.raw.experimental_sync().await
         }
 
         /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.

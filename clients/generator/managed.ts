@@ -359,7 +359,7 @@ export function operation_fields(
 /**
  * Returns the item-ID members only for operations whose request contract
  * actually carries item IDs. Renderers build all operation methods from one
- * pass, so asking for this role on PING, STATS, or namespace operations must
+ * pass, so asking for this role on PING, EXPERIMENTAL_STATS, or namespace operations must
  * not fail generation before their own response projection is selected.
  */
 export function operation_item_fields(
