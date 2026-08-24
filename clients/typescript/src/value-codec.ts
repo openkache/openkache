@@ -714,6 +714,13 @@ export function decode_structured_value(
       const magnitude = input.slice(cursor, cursor + length)
       cursor += length
       if (magnitude[0] === 0) throw new Structured_Value_Error("bignum magnitude is not minimal", "invalid_integer")
+      if (
+        head.value === 3n &&
+        magnitude.every((byte) => byte === 0xff) &&
+        length === budget.max_integer_bytes
+      ) {
+        resource("integer bytes", budget.max_integer_bytes, length + 1)
+      }
       let number = 0n
       for (const byte of magnitude) number = (number << 8n) | BigInt(byte)
       accept(new Integer_Value(head.value === 2n ? number : -number - 1n))
