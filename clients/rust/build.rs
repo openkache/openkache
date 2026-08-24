@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generated_output =
         PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?);
     let (output, operations_output) = generated_output_paths(&generated_output);
+    let packaged_snapshot = client_directory.join("src/contract_snapshot");
 
     println!("cargo:rerun-if-changed={}", generator.display());
     println!("cargo:rerun-if-changed={}", generator_sources.display());
@@ -32,6 +33,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("cargo:rerun-if-changed={}", model.display());
     println!("cargo:rerun-if-changed={}", protocol_model.display());
+    println!("cargo:rerun-if-changed={}", packaged_snapshot.display());
+
+    // A crates.io package contains the client source, but not the sibling
+    // workspace that owns the Smithy generator and its models. Keep a
+    // generated snapshot in the package so docs.rs and downstream Cargo
+    // builds do not need Bun or Smithy installed. Source checkouts still
+    // regenerate from the canonical inputs above.
+    if !generator.is_file()
+        || !generator_sources.is_dir()
+        || !protocol_wire_generator.is_file()
+        || !model.is_dir()
+        || !protocol_model.is_dir()
+    {
+        for (name, destination) in [
+            ("smithy_api.rs", &output),
+            ("smithy_operations.rs", &operations_output),
+        ] {
+            let source = packaged_snapshot.join(name);
+            if !source.is_file() {
+                return Err(
+                    format!("generated Smithy fallback is missing: {}", source.display()).into(),
+                );
+            }
+            std::fs::copy(&source, destination).map_err(|error| {
+                format!(
+                    "could not copy packaged Smithy fallback {} to {}: {error}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+        }
+        return Ok(());
+    }
 
     let bun = std::env::var_os("OPENKACHE_BUN_EXECUTABLE")
         .map(PathBuf::from)

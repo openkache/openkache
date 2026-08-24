@@ -76,6 +76,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkout_clients_directory = core_directory
         .parent()
         .ok_or("client core manifest has no parent directory")?;
+    let packaged_snapshot = core_directory.join("src/contract_snapshot");
+    let output_directory = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?,
+    );
+    let output = output_directory.join("client_contract.rs");
+    let operation_constants_output = output_directory.join("operation_constants.rs");
+
     // Source checkouts keep this crate under `clients/core`. Python sdists
     // flatten the shared sources to `core/` and place the generator/model
     // under a sibling `clients/` directory, so resolve both supported layouts
@@ -90,12 +97,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if flattened_clients_directory.join("generate.ts").is_file() {
             flattened_clients_directory
         } else {
-            return Err(format!(
-                "client generator is missing from {} and {}",
-                checkout_clients_directory.display(),
-                flattened_clients_directory.display()
-            )
-            .into());
+            // A crates.io package intentionally contains no repository-level
+            // generator tree. Copy the generated contract snapshot instead
+            // of requiring Bun and Smithy in every consumer environment.
+            for (name, destination) in [
+                ("client_contract.rs", &output),
+                ("operation_constants.rs", &operation_constants_output),
+            ] {
+                let source = packaged_snapshot.join(name);
+                if !source.is_file() {
+                    return Err(format!(
+                        "generated client fallback is missing: {}",
+                        source.display()
+                    )
+                    .into());
+                }
+                std::fs::copy(&source, destination).map_err(|error| {
+                    format!(
+                        "could not copy packaged client fallback {} to {}: {error}",
+                        source.display(),
+                        destination.display()
+                    )
+                })?;
+            }
+            return Ok(());
         }
     };
     let generator = client_directory.join("generate.ts");
@@ -112,12 +137,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protocol_wire_spec_renderer = client_directory.join("../protocol/wire_spec.ts");
     let client_model = client_directory.join("model");
     let protocol_model = client_directory.join("../protocol/model");
-    let output_directory = std::path::PathBuf::from(
-        std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?,
-    );
-    let output = output_directory.join("client_contract.rs");
-    let operation_constants_output = output_directory.join("operation_constants.rs");
-
     println!("cargo:rerun-if-changed={}", generator.display());
     println!("cargo:rerun-if-changed={}", generator_modules.display());
     println!("cargo:rerun-if-changed={}", api_shape_renderers.display());
@@ -147,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("cargo:rerun-if-changed={}", client_model.display());
     println!("cargo:rerun-if-changed={}", protocol_model.display());
+    println!("cargo:rerun-if-changed={}", packaged_snapshot.display());
 
     let bun = std::env::var_os("OPENKACHE_BUN_EXECUTABLE")
         .map(std::path::PathBuf::from)

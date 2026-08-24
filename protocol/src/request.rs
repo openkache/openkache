@@ -57,8 +57,7 @@ pub enum RequestFrameStep {
     FixedField { field: usize, bytes: usize },
     /// Treat the next fixed-width bytes as the body without an outer length.
     ///
-    /// This is the generic fixed-body counterpart to
-    /// [`RequestFrameStep::ValueLength`].  It is
+    /// This is the generic fixed-body counterpart to [`Self::ValueLength`].  It is
     /// selected by an API for a dense required tuple, so a future API can use
     /// compact fixed framing without a protocol-specific parser branch. It
     /// MUST be the final step in a layout.

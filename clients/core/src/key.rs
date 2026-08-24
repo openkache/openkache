@@ -1389,10 +1389,6 @@ impl ClientRootKey {
     pub(crate) fn master_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
         Zeroizing::new(self.master_key)
     }
-
-    pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
-        Zeroizing::new(self.value_root_key)
-    }
 }
 
 /// Backwards-compatible spelling retained while bindings migrate to

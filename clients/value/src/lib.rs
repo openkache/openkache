@@ -181,7 +181,8 @@ impl Integer {
 
     /// Returns whether this integer is zero.
     pub const fn is_zero(&self) -> bool {
-        self.magnitude.is_empty()
+        // `Vec::is_empty` is not const on the crate's 1.85 MSRV.
+        self.magnitude.len() == 0
     }
 
     /// Returns the mathematical sign.
@@ -432,7 +433,6 @@ impl Drop for Value {
                     | Self::Float32(_)
                     | Self::Float64(_) => {}
                 }
-                std::mem::forget(value);
             }
         }
     }

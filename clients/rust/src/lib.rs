@@ -1,4 +1,16 @@
-//! Ergonomic Rust API layered over the reusable OpenKache client core.
+//! Ergonomic asynchronous Rust API for the OpenKache cache server.
+//!
+//! The default [`Client`] uses Tokio and Quinn. The crate also exposes a
+//! Compio-local client and a TLS-over-TCP client behind feature flags. All
+//! variants share the same key mapping, value protection, retry, deadline,
+//! and bounded-resource contracts from [`openkache_client_core`].
+//!
+//! Start with [`Client::connect`] for system-trusted endpoints or
+//! [`Client::builder`] when a certificate, mutual-TLS identity, namespace, or
+//! transport policy must be explicit. The published crate contains a
+//! generated Smithy fallback, so documentation and downstream builds do not
+//! need the repository's Bun/Smithy toolchain.
+#![doc(html_root_url = "https://docs.rs/openkache-client/0.1.0")]
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -25,10 +37,10 @@ pub use openkache_client_core::{
     DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
     ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
     ItemValue, KeyError, KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
-    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
-    PrivateKey, RequestBudget, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition,
-    SetOptions, SetOutcome, StructuredValue, TypedInteger, TypedKey, ValueKeyring,
-    canonical_key_bytes, value, value_envelope,
+    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PrivateKey,
+    RequestBudget, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions,
+    SetOutcome, StructuredValue, TypedInteger, TypedKey, ValueKeyring, canonical_key_bytes, value,
+    value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -528,7 +540,7 @@ macro_rules! client_methods {
             /// `OpaqueBytes`.
             pub async fn get_json(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
             ) -> Result<GetOutcome<value::JsonValue>> {
                 self.inner.get_json(key).await
             }
@@ -537,7 +549,7 @@ macro_rules! client_methods {
             /// reinterpretation.
             pub async fn get_structured(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
             ) -> Result<GetOutcome<StructuredValue>> {
                 self.inner.get_structured(key).await
             }
@@ -565,10 +577,7 @@ macro_rules! client_methods {
             }
 
             /// Retrieves a caller-owned version-0 envelope for a portable key.
-            pub async fn get_v0(
-                &self,
-                key: impl Into<PortableKey>,
-            ) -> Result<GetOutcome<Vec<u8>>> {
+            pub async fn get_v0(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
                 self.inner.get_v0(key).await
             }
 
@@ -600,7 +609,7 @@ macro_rules! client_methods {
             /// `OpaqueBytes`.
             pub async fn set_json(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: value::JsonValue,
                 options: SetOptions,
             ) -> Result<SetOutcome> {
@@ -611,7 +620,7 @@ macro_rules! client_methods {
             /// reinterpretation.
             pub async fn set_structured(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: StructuredValue,
                 options: SetOptions,
             ) -> Result<SetOutcome> {
@@ -647,7 +656,7 @@ macro_rules! client_methods {
             /// Stores a caller-owned version-0 envelope for a portable key.
             pub async fn set_v0(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: Vec<u8>,
                 options: SetOptions,
             ) -> Result<SetOutcome> {

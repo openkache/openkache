@@ -4,6 +4,24 @@ version = "0.1.0"
 edition.workspace = true
 description = "Low-level client core for the OpenKache cache server"
 license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/openkache/openkache"
+homepage = "https://openkache.com"
+documentation = "https://docs.rs/openkache-client-core"
+keywords = ["cache", "client", "quic", "tls", "openkache"]
+categories = ["network-programming", "database"]
+rust-version = "1.85"
+include = [
+    "Cargo.toml",
+    "*.md",
+    "LICENSE",
+    "build.rs",
+    "include/**",
+    "src/**/*.rs",
+]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]
@@ -27,10 +45,11 @@ compio = { version = "*", default-features = false, features = ["io-uring", "net
 compio-quic = { version = "*", features = ["ring"], optional = true }
 crossfire = "*"
 futures-util = "*"
-getrandom = "*"
+# `fill` is the 0.3 API; older registry releases only expose `getrandom`.
+getrandom = "0.3"
 http = "*"
-openkache-protocol = { path = "../../protocol" }
-openkache-value = { path = "../value" }
+openkache-protocol = { version = "*", path = "../../protocol" }
+openkache-value = { version = "*", path = "../value" }
 polyval = { version = "=0.7.3", features = ["zeroize"] }
 quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
 rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }

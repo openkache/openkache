@@ -17,6 +17,7 @@ filegroup(
     srcs = [
         "Cargo.toml",
         "README.md",
+        "LICENSE",
         "build.rs",
     ] + glob([
         "include/**",
@@ -55,7 +56,7 @@ cargo_build_script(
 
 rust_library(
     name = "openkache_client_core",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"], exclude = ["src/contract_snapshot/**"]),
     aliases = crate_aliases("clients/core"),
     crate_features = [
         "quic-compio",
@@ -78,7 +79,7 @@ rust_library(
 # rules_rust does not expose a shared-library target as a Rust dependency.
 rust_library(
     name = "openkache_client_core_ffi_library",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"], exclude = ["src/contract_snapshot/**"]),
     aliases = crate_aliases("clients/core"),
     crate_features = [
         "ffi",
@@ -101,7 +102,7 @@ rust_library(
 # adapters. The checked-in headers remain available through source_tree.
 rust_shared_library(
     name = "openkache_client_core_ffi",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"], exclude = ["src/contract_snapshot/**"]),
     aliases = crate_aliases("clients/core"),
     crate_features = [
         "ffi",
