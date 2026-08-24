@@ -77,15 +77,16 @@ investigate the registry state before choosing a new version.
 
 The checked-in
 [`publish-npm.yml`](../../.github/workflows/publish-npm.yml) workflow is
-intentionally disabled. It remains as the complete release definition, but it
-has no automatic event trigger and every job requires the
-`OPENKACHE_NPM_RELEASE_ENABLED=true` repository variable. Repository Actions is
-currently disabled, so no event consumes a runner or publishes to npm.
+manual-only. Dispatch it from the committed `typescript-v<version>` tag with
+the matching `version` input and the literal `RELEASE` confirmation. It builds
+the JavaScript output and a Linux x64, Linux ARM64, and Apple Silicon native
+adapter matrix, verifies each artifact checksum and source commit, then waits
+for the protected `npm-release` environment before calling
+`release:publish`.
 
-Before enabling the workflow, assign it to an approved customer runner and
-configure the `NPM_TOKEN` repository secret. Then restore the
-`typescript-v<version>` tag trigger, set the release variable to `true`, and
-remove the disabled job guard only if the runner and credential policy allows
-it. The enabled workflow must publish only from a committed public `main`
-snapshot; a manually selected branch must not be used for a production
-publication.
+Configure the `NPM_TOKEN` repository secret only in that environment. A failed
+preflight does not publish. npm versions are immutable; if npm accepts a
+version, treat it as consumed and publish a corrected higher version rather
+than attempting a republish. The repository-wide
+[release guide](../../RELEASING.md) documents the other package workflows,
+operator inputs, provenance files, and rollback limits.

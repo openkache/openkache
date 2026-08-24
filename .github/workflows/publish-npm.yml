@@ -1,11 +1,19 @@
-name: Publish TypeScript package
+name: Release TypeScript npm package
 
-# Keep the complete release definition in-tree without an automatic event
-# trigger. Repository Actions is disabled; the manual definition remains for
-# later enablement after an approved customer runner and npm credentials are
-# provisioned.
+# Releases are deliberately manual. Dispatch this workflow from the exact
+# typescript-v<version> tag only after the protected npm-release environment
+# has approved the run.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable package version in clients/typescript/package.json"
+        required: true
+        type: string
+      confirm:
+        description: 'Type RELEASE to build and publish this immutable version'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,126 +22,277 @@ concurrency:
   group: npm-typescript-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_CONFIRM: ${{ inputs.confirm }}
+
 jobs:
-  build-linux:
-    name: Build Linux native adapters
-    if: ${{ vars.OPENKACHE_NPM_RELEASE_ENABLED == 'true' }}
+  guard:
+    name: Verify tag, version, and clean source
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject an unconfirmed or mismatched release
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_TYPE: ${{ github.ref_type }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_CONFIRM}" != "RELEASE" ]]; then
+            echo "The confirmation input must be exactly RELEASE." >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Version must be a stable three-part SemVer value." >&2
+            exit 1
+          fi
+          expected_tag="typescript-v${RELEASE_VERSION}"
+          if [[ "${SOURCE_REF_TYPE}" != "tag" || "${SOURCE_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Dispatch this workflow from ${expected_tag}; got ${SOURCE_REF_TYPE}:${SOURCE_REF_NAME}." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "${expected_tag}^{commit}")" != "${SOURCE_SHA}" ]]; then
+            echo "The selected tag does not resolve to the workflow commit." >&2
+            exit 1
+          fi
+          if [[ "$(jq -r '.version' clients/typescript/package.json)" != "${RELEASE_VERSION}" ]]; then
+            echo "package.json version does not match the release input." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The release checkout is dirty; refusing to continue." >&2
+            exit 1
+          fi
+
+  build-typescript:
+    name: Build TypeScript declarations and JavaScript
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: ./.github/actions/setup-smithy-codegen
 
+      - name: Build and type-check the package
+        working-directory: clients/typescript
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run build
+
+      - name: Stage and checksum JavaScript outputs
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-typescript-dist"
+          mkdir -p "${release_root}/dist"
+          cp -R clients/typescript/dist/. "${release_root}/dist/"
+          printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
+            > "${release_root}/RELEASE-METADATA"
+          (
+            cd "${release_root}"
+            find dist -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          )
+
+      - name: Upload JavaScript artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-typescript-dist
+          path: ${{ runner.temp }}/openkache-typescript-dist
+          if-no-files-found: error
+          retention-days: 14
+
+  build-native:
+    name: Build ${{ matrix.name }} native adapter
+    needs: guard
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+            artifact: openkache-client.linux-x64-gnu.node
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            runner: ubuntu-24.04
+            artifact: openkache-client.linux-arm64-gnu.node
+            target: aarch64-unknown-linux-gnu
+          - name: darwin-arm64
+            runner: macos-14
+            artifact: openkache-client.darwin-arm64.node
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.13
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild for Linux
+        if: startsWith(matrix.name, 'linux-')
+        run: cargo install cargo-zigbuild --locked --version 0.23.0
 
       - uses: mlugg/setup-zig@aa9ad5c14eb3452e235a441c4f9a8e89f20d97bd # v2.0.0
+        if: startsWith(matrix.name, 'linux-')
         with:
           version: 0.16.0
 
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --locked --version 0.23.0
-
-      - name: Build package JavaScript and Linux adapters
-        working-directory: clients/typescript
-        run: |
-          bun install --frozen-lockfile
-          bun run build
-          bun run build:native
-
-      - name: Stage Linux release artifacts
-        run: |
-          set -euo pipefail
-          release_root="${RUNNER_TEMP}/openkache-typescript-linux"
-          mkdir -p "${release_root}/dist" "${release_root}/target/native"
-          cp -R clients/typescript/dist/. "${release_root}/dist/"
-          cp clients/typescript/target/native/openkache-client.linux-*.node \
-            "${release_root}/target/native/"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: openkache-typescript-linux
-          path: ${{ runner.temp }}/openkache-typescript-linux
-          if-no-files-found: error
-          retention-days: 7
-
-  build-darwin:
-    name: Build Apple Silicon native adapter
-    if: ${{ vars.OPENKACHE_NPM_RELEASE_ENABLED == 'true' }}
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.13
-
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          targets: aarch64-apple-darwin
-
-      - name: Build Apple Silicon adapter
+      - name: Build native adapters
         working-directory: clients/typescript
         run: bun run build:native
 
-      - name: Stage Apple Silicon release artifact
+      - name: Stage and checksum native adapter
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+          NATIVE_ARTIFACT: ${{ matrix.artifact }}
         run: |
           set -euo pipefail
-          release_root="${RUNNER_TEMP}/openkache-typescript-darwin"
+          source_path="clients/typescript/target/native/${NATIVE_ARTIFACT}"
+          if [[ ! -s "${source_path}" ]]; then
+            echo "Native build did not produce ${NATIVE_ARTIFACT}." >&2
+            exit 1
+          fi
+          release_root="${RUNNER_TEMP}/openkache-typescript-native-${{ matrix.name }}"
           mkdir -p "${release_root}/target/native"
-          cp clients/typescript/target/native/openkache-client.darwin-arm64.node \
-            "${release_root}/target/native/"
+          cp "${source_path}" "${release_root}/target/native/"
+          printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\nnative_artifact=%s\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" "${NATIVE_ARTIFACT}" \
+            > "${release_root}/RELEASE-METADATA"
+          (
+            cd "${release_root}"
+            sha256sum "target/native/${NATIVE_ARTIFACT}" > SHA256SUMS
+          )
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload native artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: openkache-typescript-darwin
-          path: ${{ runner.temp }}/openkache-typescript-darwin
+          name: openkache-typescript-native-${{ matrix.name }}
+          path: ${{ runner.temp }}/openkache-typescript-native-${{ matrix.name }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
 
   publish:
-    name: Publish openkache
-    if: ${{ vars.OPENKACHE_NPM_RELEASE_ENABLED == 'true' }}
-    needs: [build-linux, build-darwin]
+    name: Publish immutable npm version
+    needs: [guard, build-typescript, build-native]
     runs-on: ubuntu-24.04
+    environment: npm-release
+    permissions:
+      contents: read
+    timeout-minutes: 20
     env:
       NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+      OPENKACHE_RELEASE_ARTIFACTS_READY: "1"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.13
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download JavaScript and native artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: openkache-typescript-linux
-          path: ${{ runner.temp }}/openkache-typescript-linux
+          pattern: openkache-typescript-*
+          path: ${{ runner.temp }}/openkache-typescript-release
+          merge-multiple: false
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: openkache-typescript-darwin
-          path: ${{ runner.temp }}/openkache-typescript-darwin
-
-      - name: Assemble and publish one package
-        working-directory: clients/typescript
+      - name: Verify provenance, checksums, and complete package outputs
         env:
-          OPENKACHE_RELEASE_ARTIFACTS_READY: "1"
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          mkdir -p dist target/native
-          cp -R "${RUNNER_TEMP}/openkache-typescript-linux/dist/." dist/
-          cp "${RUNNER_TEMP}/openkache-typescript-linux/target/native/"*.node \
-            target/native/
-          cp "${RUNNER_TEMP}/openkache-typescript-darwin/target/native/"*.node \
-            target/native/
+          release_root="${RUNNER_TEMP}/openkache-typescript-release"
+          for artifact in \
+            openkache-typescript-dist \
+            openkache-typescript-native-linux-x64 \
+            openkache-typescript-native-linux-arm64 \
+            openkache-typescript-native-darwin-arm64; do
+            artifact_root="${release_root}/${artifact}"
+            [[ -s "${artifact_root}/RELEASE-METADATA" ]] || {
+              echo "Missing provenance metadata for ${artifact}." >&2
+              exit 1
+            }
+            grep -Fx "source_commit=${SOURCE_SHA}" "${artifact_root}/RELEASE-METADATA"
+            grep -Fx "source_tag=${SOURCE_REF_NAME}" "${artifact_root}/RELEASE-METADATA"
+            grep -Fx "package_version=${RELEASE_VERSION}" "${artifact_root}/RELEASE-METADATA"
+            (
+              cd "${artifact_root}"
+              sha256sum --check SHA256SUMS
+            )
+          done
+          mkdir -p clients/typescript/dist clients/typescript/target/native
+          cp -R "${release_root}/openkache-typescript-dist/dist/." clients/typescript/dist/
+          for native_root in \
+            openkache-typescript-native-linux-x64 \
+            openkache-typescript-native-linux-arm64 \
+            openkache-typescript-native-darwin-arm64; do
+            cp "${release_root}/${native_root}/target/native/"*.node \
+              clients/typescript/target/native/
+          done
+          expected=(
+            openkache-client.linux-x64-gnu.node
+            openkache-client.linux-arm64-gnu.node
+            openkache-client.darwin-arm64.node
+          )
+          for artifact in "${expected[@]}"; do
+            [[ -s "clients/typescript/target/native/${artifact}" ]] || {
+              echo "Missing assembled native adapter ${artifact}." >&2
+              exit 1
+            }
+          done
+          if [[ "$(find clients/typescript/target/native -maxdepth 1 -type f -name '*.node' | wc -l)" -ne 3 ]]; then
+            echo "The assembled package contains an unexpected native adapter set." >&2
+            exit 1
+          fi
+          if [[ -n "$(git diff -- clients/typescript)" ]]; then
+            echo "Artifact assembly modified tracked package files." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies and run release preflight
+        working-directory: clients/typescript
+        run: |
+          set -euo pipefail
           bun install --frozen-lockfile
-          bun run release:publish
+          bun run release:verify
+
+      - name: Publish to npm
+        working-directory: clients/typescript
+        run: bun run release:publish

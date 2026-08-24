@@ -1,0 +1,213 @@
+name: Release openkache-server crate
+
+# Releases are deliberately manual. Dispatch this workflow from the exact
+# server-v<version> tag only after the protected crates-io-release environment
+# has approved the run and configured the CARGO_REGISTRY_TOKEN secret.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable crate version in server/Cargo.toml"
+        required: true
+        type: string
+      confirm:
+        description: 'Type RELEASE to build and publish this immutable version'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-openkache-server-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_CONFIRM: ${{ inputs.confirm }}
+
+jobs:
+  guard:
+    name: Verify tag, version, and clean source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject an unconfirmed or mismatched release
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_TYPE: ${{ github.ref_type }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_CONFIRM}" != "RELEASE" ]]; then
+            echo "The confirmation input must be exactly RELEASE." >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Version must be a stable three-part SemVer value." >&2
+            exit 1
+          fi
+          expected_tag="server-v${RELEASE_VERSION}"
+          if [[ "${SOURCE_REF_TYPE}" != "tag" || "${SOURCE_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Dispatch this workflow from ${expected_tag}; got ${SOURCE_REF_TYPE}:${SOURCE_REF_NAME}." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "${expected_tag}^{commit}")" != "${SOURCE_SHA}" ]]; then
+            echo "The selected tag does not resolve to the workflow commit." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The release checkout is dirty; refusing to continue." >&2
+            exit 1
+          fi
+
+  package:
+    name: Build and inspect crate archive
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Verify crate metadata and package archive
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          crate_version="$(
+            cargo metadata --manifest-path server/Cargo.toml --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "openkache-server") | .version'
+          )"
+          if [[ "${crate_version}" != "${RELEASE_VERSION}" ]]; then
+            echo "server/Cargo.toml version does not match the release input." >&2
+            exit 1
+          fi
+          cargo package --manifest-path server/Cargo.toml --locked --no-verify
+          crate_path="target/package/openkache-server-${RELEASE_VERSION}.crate"
+          [[ -s "${crate_path}" ]] || {
+            echo "cargo package did not produce ${crate_path}." >&2
+            exit 1
+          }
+          tar -tzf "${crate_path}" | grep -Fx "openkache-server-${RELEASE_VERSION}/Cargo.toml"
+          tar -tzf "${crate_path}" | grep -F "openkache-server-${RELEASE_VERSION}/src/lib.rs"
+          release_root="${RUNNER_TEMP}/openkache-server-crate"
+          mkdir -p "${release_root}"
+          cp "${crate_path}" "${release_root}/"
+          printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\ncrate_name=openkache-server\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
+            > "${release_root}/RELEASE-METADATA"
+          (
+            cd "${release_root}"
+            sha256sum "openkache-server-${RELEASE_VERSION}.crate" > SHA256SUMS
+          )
+
+      - name: Upload crate archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-server-crate
+          path: ${{ runner.temp }}/openkache-server-crate
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish immutable crates.io version
+    needs: [guard, package]
+    runs-on: ubuntu-24.04
+    environment: crates-io-release
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Download crate archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openkache-server-crate
+          path: ${{ runner.temp }}/openkache-server-crate
+
+      - name: Verify provenance and exact crate before publication
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-server-crate"
+          crate_file="openkache-server-${RELEASE_VERSION}.crate"
+          downloaded_crate="${release_root}/${crate_file}"
+          expected_metadata="${RUNNER_TEMP}/openkache-server-expected-metadata"
+          printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\ncrate_name=openkache-server\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
+            > "${expected_metadata}"
+          if ! cmp -s "${expected_metadata}" "${release_root}/RELEASE-METADATA"; then
+            echo "Downloaded crate metadata does not match the checked-out release tag." >&2
+            diff -u "${expected_metadata}" "${release_root}/RELEASE-METADATA" >&2 || true
+            exit 1
+          fi
+          (
+            cd "${release_root}"
+            sha256sum --check SHA256SUMS
+            [[ -s "${crate_file}" ]]
+          )
+          crate_version="$(
+            cargo metadata --manifest-path server/Cargo.toml --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "openkache-server") | .version'
+          )"
+          if [[ "${crate_version}" != "${RELEASE_VERSION}" ]]; then
+            echo "server/Cargo.toml version does not match the release input." >&2
+            exit 1
+          fi
+          # cargo publish repackages the checkout; prove its deterministic
+          # archive matches the staged artifact before allowing publication.
+          rm -rf target/package
+          cargo package --manifest-path server/Cargo.toml --locked --no-verify
+          recreated_crate="target/package/${crate_file}"
+          [[ -s "${recreated_crate}" ]] || {
+            echo "cargo package did not recreate ${crate_file}." >&2
+            exit 1
+          }
+          tar -tzf "${recreated_crate}" | grep -Fx "openkache-server-${RELEASE_VERSION}/Cargo.toml"
+          tar -tzf "${recreated_crate}" | grep -F "openkache-server-${RELEASE_VERSION}/src/lib.rs"
+          downloaded_sha256="$(sha256sum "${downloaded_crate}" | cut -d ' ' -f 1)"
+          recreated_sha256="$(sha256sum "${recreated_crate}" | cut -d ' ' -f 1)"
+          if [[ "${recreated_sha256}" != "${downloaded_sha256}" ]]; then
+            echo "The release tag recreated a different crate archive than the downloaded artifact." >&2
+            echo "Downloaded SHA-256: ${downloaded_sha256}" >&2
+            echo "Recreated SHA-256: ${recreated_sha256}" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The publish checkout is dirty; refusing to continue." >&2
+            exit 1
+          fi
+
+      - name: Publish to crates.io
+        run: cargo publish --manifest-path server/Cargo.toml --locked --token "${CARGO_REGISTRY_TOKEN}"
