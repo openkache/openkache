@@ -1,8 +1,8 @@
 //! Client API bindings for generated request layouts.
 
 use openkache_protocol::request_fields::{
-    op_delete, op_get, op_namespace_delete, op_namespace_open, op_namespace_update_policy, op_set,
-    op_experimental_stats, op_experimental_sync,
+    op_delete, op_experimental_stats, op_experimental_sync, op_get, op_namespace_delete,
+    op_namespace_open, op_namespace_update_policy, op_set,
 };
 use openkache_protocol::{
     ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, Opcode, OwnedRequestFrame, WireSegment,
@@ -81,7 +81,12 @@ impl OperationRequest {
     }
 
     pub(crate) fn experimental_stats(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::ExperimentalStats, Operation::ExperimentalStats, false, false);
+        let mut request = Self::new(
+            Opcode::ExperimentalStats,
+            Operation::ExperimentalStats,
+            false,
+            false,
+        );
         request.insert(
             op_experimental_stats::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -90,7 +95,12 @@ impl OperationRequest {
     }
 
     pub(crate) fn experimental_sync(namespace_id: u64) -> Result<Self> {
-        let mut request = Self::new(Opcode::ExperimentalSync, Operation::ExperimentalSync, false, false);
+        let mut request = Self::new(
+            Opcode::ExperimentalSync,
+            Operation::ExperimentalSync,
+            false,
+            false,
+        );
         request.insert(
             op_experimental_sync::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -154,8 +164,12 @@ impl OperationRequest {
     }
 
     pub(crate) fn namespace_delete(namespace_id: u64, expected_revision: u64) -> Result<Self> {
-        let mut request =
-            Self::new(Opcode::NamespaceDelete, Operation::NamespaceDelete, true, false);
+        let mut request = Self::new(
+            Opcode::NamespaceDelete,
+            Operation::NamespaceDelete,
+            true,
+            false,
+        );
         request.insert(
             op_namespace_delete::NAMESPACE_ID,
             WireSegment::inline(&namespace_id_bytes(namespace_id)?),
@@ -167,12 +181,7 @@ impl OperationRequest {
         Ok(request)
     }
 
-    fn new(
-        opcode: Opcode,
-        operation: Operation,
-        mutation: bool,
-        creates_resource: bool,
-    ) -> Self {
+    fn new(opcode: Opcode, operation: Operation, mutation: bool, creates_resource: bool) -> Self {
         Self {
             context: RequestContext {
                 opcode,

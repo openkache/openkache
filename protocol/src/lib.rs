@@ -163,7 +163,6 @@ impl ItemId {
     pub fn into_bytes(self) -> Vec<u8> {
         self.as_bytes().to_vec()
     }
-
 }
 
 impl AsRef<[u8]> for ItemId {

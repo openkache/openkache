@@ -33,7 +33,7 @@ rust_library(
     crate_root = "src/lib.rs",
     edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache-cli"),
-    deps = ["//clients/rust:openkache_client"] + cargo_deps("clients/cli"),
+    deps = ["//clients/core:openkache_client_core"] + cargo_deps("clients/cli"),
 )
 
 rust_binary(

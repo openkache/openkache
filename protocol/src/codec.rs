@@ -3,7 +3,7 @@
 //! This module knows only wire value shapes. It deliberately does not know
 //! operation names, API roles, storage types, or client ABI discriminators.
 //! Server and client adapters provide the generated codec-name lookup and map
-//! [`crate::codec::CodecError`] to their local error boundary.
+//! [`CodecError`](crate::codec::CodecError) to their local error boundary.
 
 use crate::{decode_varuint, encode_varuint};
 
