@@ -85,10 +85,7 @@ fn decode_current_policy(input: &[u8]) -> io::Result<Option<(NamespacePolicy, us
         }
         (ExpirationDefault::FixedTtl { ttl_ms }, 1 + encoded_len)
     };
-    Ok(Some((
-        policy_from_flags(flags, default_expiration),
-        used,
-    )))
+    Ok(Some((policy_from_flags(flags, default_expiration), used)))
 }
 
 fn policy_from_flags(flags: u8, default_expiration: ExpirationDefault) -> NamespacePolicy {

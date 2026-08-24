@@ -2696,7 +2696,19 @@ pub unsafe extern "C" fn openkache_client_connect_transport(
     }))
 }
 
-/// Connects through the additive keyring configuration path.
+/// Connects through the v1 keyring configuration path.
+///
+/// The keyring options keep Item-ID derivation independent from value
+/// encryption keys. The base options must leave `data_protection_key` empty;
+/// the caller supplies the Item-ID root and, for protected values, value keys.
+/// Failures are encoded in the returned result pointer.
+///
+/// # Safety
+///
+/// `options` must be either null or a valid, properly aligned pointer to an
+/// initialized [`FfiConnectOptionsWithKeyring`] for the duration of this call.
+/// The nested `base` pointer and every non-empty pointer/length pair in the
+/// options must identify readable memory for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_with_keyring_options(
     options: *const FfiConnectOptionsWithKeyring,
