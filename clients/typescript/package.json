@@ -1,6 +1,6 @@
 {
   "name": "@openkache/client",
-  "version": "0.2.0",
+  "version": "0.0.1",
   "license": "Apache-2.0",
   "description": "Promise-based OpenKache client for Node.js, Bun, and Deno with a runtime-neutral structured-value codec.",
   "keywords": [
@@ -51,7 +51,11 @@
     "prepublishOnly": "bun run build:package",
     "typecheck": "bun run typecheck:node && bun run typecheck:browser",
     "typecheck:browser": "bun ./node_modules/typescript/bin/tsc --project tsconfig.browser.json",
-    "typecheck:node": "bun ./node_modules/typescript/bin/tsc --project tsconfig.json --noEmit"
+    "typecheck:node": "bun ./node_modules/typescript/bin/tsc --project tsconfig.json --noEmit",
+    "release:verify": "bun pm pack --dry-run && bun run scripts/check-publish.ts",
+    "release:check": "bun run build:package && bun run release:verify",
+    "release:dry-run": "bun run release:check && bun publish --dry-run --access public --tag latest --ignore-scripts",
+    "release:publish": "bun run scripts/publish-typescript.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
