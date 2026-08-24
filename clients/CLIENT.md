@@ -151,12 +151,16 @@ TypedKey =
 `Integer` accepts exactly `-2^63..=2^63-1`. `Text` is length-delimited UTF-8
 and may be empty or contain U+0000. `Bytes` preserves every byte, including
 empty and zero bytes. Adapters MUST infer one unambiguous variant or require
-an explicit typed-key constructor; booleans, floating-point values, null,
-collections, arbitrary objects, invalid UTF-8, and out-of-range integers MUST
-be rejected. Stringification and lossy numeric coercion are forbidden.
+an explicit typed-key constructor; booleans, non-integral floating-point
+values, null, collections, arbitrary objects, invalid UTF-8, and out-of-range
+integers MUST be rejected. Stringification and lossy numeric coercion are
+forbidden.
 Canonical bytes and Item-ID derivation are normative in [`KEY_FORMAT.md`](KEY_FORMAT.md).
-In JavaScript/TypeScript, Gate 0 rejects `number` keys (including integral
-safe numbers) as ambiguous; callers use signed-`i64` `bigint` keys.
+In JavaScript/TypeScript, Gate 0 accepts a `number` key only when it is a
+finite safe integer other than negative zero; the adapter normalizes it to the
+same signed-`i64` `Integer` as `BigInt(number)`. Fractional, non-finite,
+unsafe, and negative-zero numbers remain invalid. A `bigint` key is accepted
+when it fits signed `i64`.
 
 ### Structured values
 

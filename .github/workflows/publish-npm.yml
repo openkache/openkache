@@ -98,7 +98,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish @openkache/client
+    name: Publish openkache
     if: ${{ vars.OPENKACHE_NPM_RELEASE_ENABLED == 'true' }}
     needs: [build-linux, build-darwin]
     runs-on: ubuntu-24.04

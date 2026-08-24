@@ -9,7 +9,7 @@ const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const CLIENT_DIRECTORY = dirname(SCRIPT_DIRECTORY)
 const PACKAGE_MANIFEST_PATH = join(CLIENT_DIRECTORY, "package.json")
 const REGISTRY_URL = "https://registry.npmjs.org"
-const EXPECTED_PACKAGE_NAME = "@openkache/client"
+const EXPECTED_PACKAGE_NAME = "openkache"
 const EXPECTED_FILES = [
   "dist/index.js",
   "dist/index.d.ts",
@@ -75,7 +75,7 @@ function require_public_access(manifest: Package_Manifest): void {
   ) {
     fail(
       'package.json must set publishConfig.access to "public".\n' +
-        "Why: @openkache/client is a scoped package and must not be published privately.\n" +
+        "Why: openkache is the public package and must not be published privately.\n" +
         'Fix: add `"publishConfig": { "access": "public" }`.',
     )
   }
@@ -233,7 +233,7 @@ async function main(): Promise<void> {
   if (package_name !== EXPECTED_PACKAGE_NAME) {
     fail(
       `package.json name is "${package_name}", expected "${EXPECTED_PACKAGE_NAME}".\n` +
-        "Why: the release command is scoped to the OpenKache TypeScript package.\n" +
+        "Why: the release command targets the OpenKache TypeScript package.\n" +
         "Fix: correct the package name or use a package-specific release workflow.",
     )
   }

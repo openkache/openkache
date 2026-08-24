@@ -1,144 +1,7 @@
-/**
- * Runtime-neutral structured-value codec and JSON validation helpers.
- */
+/** Runtime-neutral StructuredValue-CBOR-v1 codec and lossless model. */
 
-const MAX_JSON_DEPTH = 128
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
-
-/**
- * JSON value accepted by the core-owned canonical JSON API.
- */
-export type Json_Value =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly Json_Value[]
-  | Json_Object
-
-/**
- * JSON object with string keys. The JSON helpers reject `undefined` properties.
- */
-export interface Json_Object {
-  readonly [key: string]: Json_Value
-}
-
-/**
- * Validates a value against the shared JSON value model.
- *
- * @param value - Candidate native value.
- * @throws {Error} When the value contains unsupported, cyclic, sparse, or
- * non-finite data.
- */
-export function assert_json_value(value: unknown): asserts value is Json_Value {
-  validate_json_value(value, "$", new WeakSet())
-}
-
-function validate_json_value(
-  value: unknown,
-  path: string,
-  ancestors: WeakSet<object>,
-  depth = 0,
-): void {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new Error(`${path} must contain a finite JSON number`)
-    }
-    return
-  }
-  if (Array.isArray(value)) {
-    if (depth >= MAX_JSON_DEPTH) {
-      throw new Error(`${path} exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}`)
-    }
-    validate_json_container(value, path, ancestors, (): void => {
-      for (let index = 0; index < value.length; index += 1) {
-        if (!(index in value)) {
-          throw new Error(`${path}[${index}] must not be a sparse array entry`)
-        }
-        validate_json_value(value[index], `${path}[${index}]`, ancestors, depth + 1)
-      }
-      for (const key of Object.keys(value)) {
-        if (
-          !/^(?:0|[1-9][0-9]*)$/.test(key) ||
-          Number(key) >= value.length
-        ) {
-          throw new Error(`${path} must not contain enumerable property ${JSON.stringify(key)}`)
-        }
-      }
-      for (const symbol of Object.getOwnPropertySymbols(value)) {
-        if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
-          throw new Error(`${path} must not contain enumerable symbol properties`)
-        }
-      }
-    })
-    return
-  }
-  if (is_regular_object(value)) {
-    if (depth >= MAX_JSON_DEPTH) {
-      throw new Error(`${path} exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}`)
-    }
-    validate_json_container(value, path, ancestors, (): void => {
-      for (const [key, property_value] of Object.entries(value)) {
-        if (property_value === undefined) {
-          throw new Error(`${property_path(path, key)} contains unsupported JSON value undefined`)
-        }
-        validate_json_value(
-          property_value,
-          property_path(path, key),
-          ancestors,
-          depth + 1,
-        )
-      }
-      for (const symbol of Object.getOwnPropertySymbols(value)) {
-        if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
-          throw new Error(`${path} must not contain enumerable symbol properties`)
-        }
-      }
-    })
-    return
-  }
-  if (typeof value === "undefined") {
-    throw new Error(`${path} contains unsupported JSON value undefined`)
-  }
-  throw new Error(`${path} contains unsupported JSON value ${describe_value(value)}`)
-}
-
-function validate_json_container(
-  value: object,
-  path: string,
-  ancestors: WeakSet<object>,
-  validate_children: () => void,
-): void {
-  if (ancestors.has(value)) {
-    throw new Error(`${path} contains a cyclic reference`)
-  }
-  ancestors.add(value)
-  try {
-    validate_children()
-  } finally {
-    ancestors.delete(value)
-  }
-}
-
-function is_regular_object(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function property_path(path: string, key: string): string {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)
-    ? `${path}.${key}`
-    : `${path}[${JSON.stringify(key)}]`
-}
 
 function describe_value(value: unknown): string {
   if (typeof value === "bigint") return "bigint"
@@ -146,6 +9,12 @@ function describe_value(value: unknown): string {
   if (typeof value === "function") return "function"
   if (typeof value === "symbol") return "symbol"
   return Object.prototype.toString.call(value)
+}
+
+function is_regular_object(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +138,17 @@ export class Array_Value {
     if (!Array.isArray(values)) {
       throw new Structured_Value_Error("Array_Value requires an array")
     }
-    this.values = values.map((value): Structured_Value => to_value(value))
+    const converted: Structured_Value[] = []
+    for (let index = 0; index < values.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(values, index)) {
+        throw new Structured_Value_Error(
+          `array entry ${index} is sparse`,
+          "conversion",
+        )
+      }
+      converted.push(to_value(values[index]))
+    }
+    this.values = converted
   }
 
   get length(): number {
@@ -295,17 +174,34 @@ export class Map_Value {
       throw new Structured_Value_Error("Map_Value requires entry pairs")
     }
     const converted: [Structured_Value, Structured_Value][] = []
-    entries.forEach((entry, index): void => {
+    const key_identities = new Set<string>()
+    for (let index = 0; index < entries.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(entries, index)) {
+        throw new Structured_Value_Error(
+          `map entry ${index} is sparse`,
+          "conversion",
+        )
+      }
+      const entry = entries[index]
       if (!Array.isArray(entry) || entry.length !== 2) {
         throw new Structured_Value_Error(
           `map entry ${index} must be a two-item pair`,
         )
       }
+      if (
+        !Object.prototype.hasOwnProperty.call(entry, 0) ||
+        !Object.prototype.hasOwnProperty.call(entry, 1)
+      ) {
+        throw new Structured_Value_Error(
+          `map entry ${index} is sparse`,
+          "conversion",
+        )
+      }
       const key = to_value(entry[0])
       const value = to_value(entry[1])
-      validate_map_key(key, index, converted)
+      validate_map_key(key, index, key_identities)
       converted.push([key, value])
-    })
+    }
     this.entries = converted
   }
 
@@ -360,12 +256,29 @@ export type Structured_Value =
 /** Singleton helper for constructing the model's undefined value. */
 export const UNDEFINED_VALUE = new Undefined_Value()
 
-/** Converts a JavaScript native value into the lossless model. */
-export function to_value(value: unknown): Structured_Value {
-  return convert_value(value, new Set<object>())
+/**
+ * Converts a JavaScript native value into the lossless model.
+ *
+ * @param value - Native or already-modelled structured value.
+ * @param limits - Structural resource limits used while converting native
+ *   containers.
+ * @returns The lossless structured-value model.
+ * @throws {Structured_Value_Error} When conversion exceeds a resource limit
+ *   or the native value cannot be represented losslessly.
+ */
+export function to_value(
+  value: unknown,
+  limits: Value_Limits = {},
+): Structured_Value {
+  return convert_value(value, new Set<object>(), 0, checked_limits(limits))
 }
 
-function convert_value(value: unknown, ancestors: Set<object>): Structured_Value {
+function convert_value(
+  value: unknown,
+  ancestors: Set<object>,
+  depth: number,
+  budget: Required<Value_Limits>,
+): Structured_Value {
   if (
     value instanceof Undefined_Value ||
     value instanceof Integer_Value ||
@@ -390,15 +303,16 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
   if (Array.isArray(value)) {
     assert_acyclic(value, ancestors)
     try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
       const children: Structured_Value[] = []
       for (let index = 0; index < value.length; index += 1) {
-        if (!(index in value)) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) {
           throw new Structured_Value_Error(
             `array entry ${index} is sparse`,
             "conversion",
           )
         }
-        children.push(convert_value(value[index], ancestors))
+        children.push(convert_value(value[index], ancestors, depth + 1, budget))
       }
       return new Array_Value(children)
     } finally {
@@ -408,11 +322,12 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
   if (value instanceof Map) {
     assert_acyclic(value, ancestors)
     try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
       return new Map_Value(
         [...value.entries()].map(
           ([key, child]): readonly [Structured_Value, Structured_Value] => [
-            convert_value(key, ancestors),
-            convert_value(child, ancestors),
+            convert_value(key, ancestors, depth + 1, budget),
+            convert_value(child, ancestors, depth + 1, budget),
           ],
         ),
       )
@@ -423,6 +338,7 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
   if (is_regular_object(value)) {
     assert_acyclic(value, ancestors)
     try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
       for (const symbol of Object.getOwnPropertySymbols(value)) {
         if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
           throw new Structured_Value_Error(
@@ -434,7 +350,7 @@ function convert_value(value: unknown, ancestors: Set<object>): Structured_Value
         Object.keys(value).map(
           (key): readonly [Structured_Value, Structured_Value] => [
             new TextString_Value(key),
-            convert_value(value[key], ancestors),
+            convert_value(value[key], ancestors, depth + 1, budget),
           ],
         ),
       )
@@ -461,7 +377,7 @@ function is_scalar_key(value: Structured_Value): boolean {
 function validate_map_key(
   key: Structured_Value,
   index: number,
-  entries: readonly (readonly [Structured_Value, Structured_Value])[],
+  key_identities: Set<string>,
 ): void {
   if (!is_scalar_key(key)) {
     throw new Structured_Value_Error(
@@ -469,12 +385,37 @@ function validate_map_key(
       "non_scalar_key",
     )
   }
-  if (entries.some(([candidate]): boolean => model_equal(candidate, key))) {
+  const identity = scalar_key_identity(key)
+  if (key_identities.has(identity)) {
     throw new Structured_Value_Error(
       `duplicate map key at entry ${index}`,
       "duplicate_key",
     )
   }
+  key_identities.add(identity)
+}
+
+function scalar_key_identity(value: Structured_Value): string {
+  if (value === null) return "null"
+  if (typeof value === "boolean") return value ? "boolean:true" : "boolean:false"
+  if (value instanceof Undefined_Value) return "undefined"
+  if (value instanceof Integer_Value) return `integer:${value.value}`
+  if (value instanceof Float_Value) {
+    return `float:${value.width}:${value.raw_bits}`
+  }
+  if (value instanceof ByteString_Value) {
+    return `bytes:${bytes_to_hex(value.value)}`
+  }
+  if (value instanceof TextString_Value) {
+    return `text:${bytes_to_hex(TEXT_ENCODER.encode(value.value))}`
+  }
+  throw new Structured_Value_Error("map key is not scalar", "non_scalar_key")
+}
+
+function bytes_to_hex(value: Uint8Array): string {
+  const chunks: string[] = []
+  for (const byte of value) chunks.push(byte.toString(16).padStart(2, "0"))
+  return chunks.join("")
 }
 
 /** Model structural equality, including float width/raw bits and key kinds. */
@@ -538,7 +479,7 @@ export function encode_structured_value(
   limits: Value_Limits = {},
 ): Uint8Array {
   const budget = checked_limits(limits)
-  const model = to_value(value)
+  const model = to_value(value, budget)
   const output: number[] = []
   const tasks: [Structured_Value, number][] = [[model, 0]]
   let item_count = 0
@@ -632,14 +573,16 @@ function append_head(
 function encode_integer(value: bigint, output: number[], budget: Required<Value_Limits>): void {
   const negative = value < 0n
   const transformed = negative ? -value - 1n : value
+  const magnitude_length =
+    transformed === 0n ? 0 : Math.ceil(transformed.toString(2).length / 8)
+  if (magnitude_length > budget.max_integer_bytes) {
+    resource("integer bytes", budget.max_integer_bytes, magnitude_length)
+  }
   if (transformed <= 0xffff_ffff_ffff_ffffn) {
     append_head(negative ? 1 : 0, transformed, output, budget)
     return
   }
-  const magnitude = bigint_bytes(transformed, Math.ceil(transformed.toString(2).length / 8))
-  if (magnitude.length > budget.max_integer_bytes) {
-    resource("integer bytes", budget.max_integer_bytes, magnitude.length)
-  }
+  const magnitude = bigint_bytes(transformed, magnitude_length)
   append_head(6, negative ? 3n : 2n, output, budget)
   append_head(2, BigInt(magnitude.length), output, budget)
   append(output, magnitude, budget)
@@ -671,7 +614,13 @@ export function decode_structured_value(
   let item_count = 0
   type Frame =
     | { kind: "array"; remaining: number; values: Structured_Value[] }
-    | { kind: "map"; remaining: number; entries: [Structured_Value, Structured_Value][]; pending?: Structured_Value }
+    | {
+        kind: "map"
+        remaining: number
+        entries: [Structured_Value, Structured_Value][]
+        key_identities: Set<string>
+        pending?: Structured_Value
+      }
   const frames: Frame[] = []
 
   const accept = (value: Structured_Value): void => {
@@ -684,7 +633,7 @@ export function decode_structured_value(
       }
       if (frame.kind === "array") frame.values.push(current)
       else if (frame.pending === undefined) {
-        validate_map_key(current, frame.entries.length, frame.entries)
+        validate_map_key(current, frame.entries.length, frame.key_identities)
         frame.pending = current
       } else {
         frame.entries.push([frame.pending, current])
@@ -733,18 +682,23 @@ export function decode_structured_value(
     } else if (head.major === 4) {
       const length = safe_length(head.value, budget)
       if (length > budget.max_items) resource("items", budget.max_items, length)
+      if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
       if (length === 0) accept(new Array_Value([]))
       else {
-        if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
         frames.push({ kind: "array", remaining: length, values: [] })
       }
     } else if (head.major === 5) {
       const length = safe_length(head.value, budget)
       if (length * 2 > budget.max_items) resource("items", budget.max_items, length * 2)
+      if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
       if (length === 0) accept(new Map_Value([]))
       else {
-        if (frames.length >= budget.max_depth) resource("depth", budget.max_depth, frames.length + 1)
-        frames.push({ kind: "map", remaining: length * 2, entries: [] })
+        frames.push({
+          kind: "map",
+          remaining: length * 2,
+          entries: [],
+          key_identities: new Set<string>(),
+        })
       }
     } else if (head.major === 6) {
       if (head.value !== 2n && head.value !== 3n) {
@@ -812,12 +766,31 @@ function safe_length(value: bigint, budget: Required<Value_Limits>): number {
   return length
 }
 
-/** Strict native projection: Integer -> bigint and Map -> Map. */
+/**
+ * Strict native projection for values that JavaScript can represent without
+ * semantic loss.
+ *
+ * `Undefined_Value` cannot become JavaScript `undefined`, because that would
+ * erase the distinction between a stored undefined value and a missing value.
+ * `Float_Value` cannot become JavaScript `number`, because that would erase
+ * its original width and raw bits. Callers that need either value must keep
+ * the lossless model returned by `decode_structured_value`.
+ *
+ * @param value - Lossless structured value to project.
+ * @param options - Optional checked integer convenience conversion.
+ * @returns A native value with the model distinctions supported by JavaScript.
+ * @throws {Structured_Value_Error} If the value cannot be represented without
+ * semantic loss.
+ */
 export function to_native(
   value: Structured_Value,
   options: { readonly safe_integer?: boolean } = {},
 ): unknown {
-  if (value instanceof Undefined_Value) return undefined
+  if (value instanceof Undefined_Value) {
+    throw new Structured_Value_Error(
+      "Undefined cannot be represented by strict native projection; use the lossless model",
+    )
+  }
   if (value === null || typeof value === "boolean") return value
   if (value instanceof Integer_Value) {
     if (options.safe_integer && (value.value < BigInt(Number.MIN_SAFE_INTEGER) || value.value > BigInt(Number.MAX_SAFE_INTEGER))) {
@@ -825,7 +798,11 @@ export function to_native(
     }
     return options.safe_integer ? Number(value.value) : value.value
   }
-  if (value instanceof Float_Value) return decode_float(value)
+  if (value instanceof Float_Value) {
+    throw new Structured_Value_Error(
+      "Float width and raw bits cannot be represented by JavaScript number; use the lossless model",
+    )
+  }
   if (value instanceof ByteString_Value) return value.value.slice()
   if (value instanceof TextString_Value) return value.value
   if (value instanceof Array_Value) return value.values.map((child): unknown => to_native(child, options))
@@ -859,7 +836,15 @@ function native_map_key_equal(left: unknown, right: unknown): boolean {
   return left === right
 }
 
-/** Decodes one payload and applies the strict native projection. */
+/**
+ * Decodes one payload and applies the strict native projection.
+ *
+ * @param input - One complete StructuredValue-CBOR-v1 payload.
+ * @param options - Optional checked integer convenience conversion.
+ * @returns A native value when every model value is representable without loss.
+ * @throws {Structured_Value_Error} If decoding fails or native projection
+ * would lose model semantics.
+ */
 export function decode_native_value(
   input: Uint8Array,
   options: { readonly safe_integer?: boolean } = {},
@@ -867,13 +852,27 @@ export function decode_native_value(
   return to_native(decode_structured_value(input), options)
 }
 
-/** Safely projects a text-keyed lossless map to a null-prototype object. */
+/**
+ * Safely projects a text-keyed lossless map to a null-prototype object.
+ *
+ * Values use the same strict rules as `to_native`; undefined values and
+ * floating-point values are rejected instead of being coerced. The projection
+ * also rejects text-keyed maps whose JavaScript object property order would
+ * differ from the model entry order.
+ *
+ * @param value - Lossless map with text keys.
+ * @returns A null-prototype object containing the map entries.
+ * @throws {Structured_Value_Error} If a key or value cannot be represented
+ * without semantic loss.
+ */
 export function to_plain_object(value: Map_Value): Record<string, unknown> {
   const result = Object.create(null) as Record<string, unknown>
+  const expected_keys: string[] = []
   for (const [key, child] of value.entries) {
     if (!(key instanceof TextString_Value)) {
       throw new Structured_Value_Error("map contains a non-text key")
     }
+    expected_keys.push(key.value)
     Object.defineProperty(result, key.value, {
       configurable: true,
       enumerable: true,
@@ -881,27 +880,12 @@ export function to_plain_object(value: Map_Value): Record<string, unknown> {
       value: to_native(child),
     })
   }
+  if (!Object.keys(result).every((key, index): boolean => key === expected_keys[index])) {
+    throw new Structured_Value_Error(
+      "map keys cannot be represented by a JavaScript object without changing entry order",
+    )
+  }
   return result
-}
-
-function decode_float(value: Float_Value): number {
-  if (value.width === 64) {
-    const buffer = new ArrayBuffer(8)
-    new DataView(buffer).setBigUint64(0, value.raw_bits, false)
-    return new DataView(buffer).getFloat64(0, false)
-  }
-  if (value.width === 32) {
-    const buffer = new ArrayBuffer(4)
-    new DataView(buffer).setUint32(0, Number(value.raw_bits), false)
-    return new DataView(buffer).getFloat32(0, false)
-  }
-  const bits = Number(value.raw_bits)
-  const sign = (bits & 0x8000) === 0 ? 1 : -1
-  const exponent = (bits >>> 10) & 0x1f
-  const fraction = bits & 0x3ff
-  if (exponent === 0) return sign * 2 ** -14 * (fraction / 2 ** 10)
-  if (exponent === 0x1f) return fraction === 0 ? sign * Infinity : NaN
-  return sign * 2 ** (exponent - 15) * (1 + fraction / 2 ** 10)
 }
 
 function assert_valid_unicode_string(value: string): void {
@@ -909,7 +893,11 @@ function assert_valid_unicode_string(value: string): void {
     const code_unit = value.charCodeAt(index)
     if (code_unit >= 0xd800 && code_unit <= 0xdbff) {
       const next_code_unit = value.charCodeAt(index + 1)
-      if (next_code_unit < 0xdc00 || next_code_unit > 0xdfff) {
+      if (
+        Number.isNaN(next_code_unit) ||
+        next_code_unit < 0xdc00 ||
+        next_code_unit > 0xdfff
+      ) {
         throw new Structured_Value_Error("text contains unpaired surrogates", "invalid_utf8")
       }
       index += 1

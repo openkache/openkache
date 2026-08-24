@@ -1,176 +1,26 @@
 /**
- * Node.js, Bun, and Deno loading contract for the packaged Node-API adapter.
+ * Private Node-API boundary for the Gate 0 client.
+ *
+ * This module is intentionally not re-exported from the package entry point.
+ * The native adapter owns transport, retries, TLS, and value-envelope details;
+ * the public TypeScript facade exposes only the five Gate 0 operations.
  */
 
 import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
-import type {
-  Smithy_Eviction_Mode,
-  Smithy_Expiration_Mode,
-  Smithy_Namespace_Descriptor,
-  Smithy_Namespace_Open_Output,
-  Smithy_Namespace_Policy,
-  Smithy_Set_Condition,
-  Smithy_Set_Outcome,
-} from "./generated_local/smithy-api.js"
 
-export interface Native_Identity {
-  readonly certificate_chain: readonly Uint8Array[]
-  readonly private_key: Uint8Array
-}
-
+/** Options consumed by the private native connector. */
 export interface Native_Client_Options {
   readonly address: string
-  readonly server_name: string
-  readonly certificate: Uint8Array
-  readonly identity?: Native_Identity
-  readonly data_protection_key?: Uint8Array
-  readonly compression_enabled: boolean
-  readonly compression_level?: number
-  readonly minimum_input_size?: number
-  readonly minimum_savings?: number
-  readonly connect_timeout_ms?: number
-  readonly request_timeout_ms?: number
-  readonly retry_max_attempts?: number
-  readonly max_in_flight?: number
-  readonly max_in_flight_bytes?: number
-  readonly encryption?: "compact" | "robust"
-  readonly key_spec?: "integer" | "text" | "bytes"
-  readonly transport?: "quic" | "tls_tcp" | "quic_insecure" | "tls_tcp_insecure"
 }
 
-export type Native_Namespace_Policy = Smithy_Namespace_Policy
-
-export type Native_Namespace_Descriptor = Smithy_Namespace_Descriptor
-
-export type Native_Namespace_Open_Output = Smithy_Namespace_Open_Output
-
+/** The private native operation surface used by the TypeScript facade. */
 export interface Native_Client {
-  ping(): Promise<void>
   get(key: Uint8Array): Promise<Uint8Array | null>
-  /** Returns one canonical structured-value payload, or null when absent. */
-  get_structured(key: Uint8Array): Promise<Uint8Array | null>
-  get_json(key: Uint8Array): Promise<string | null>
-  get_v0(key: Uint8Array): Promise<Uint8Array | null>
-  set(
-    key: Uint8Array,
-    value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: number,
-  ): Promise<Smithy_Set_Outcome>
-  /** Stores one structured-value payload without JSON reinterpretation. */
-  set_structured(
-    key: Uint8Array,
-    value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: number,
-  ): Promise<Smithy_Set_Outcome>
-  set_json(
-    key: Uint8Array,
-    value: string,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: number,
-  ): Promise<Smithy_Set_Outcome>
-  set_v0(
-    key: Uint8Array,
-    value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: number,
-  ): Promise<Smithy_Set_Outcome>
-  get_json_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-  ): Promise<string | null>
-  set_json_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-    value: string,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: bigint,
-  ): Promise<Smithy_Set_Outcome>
-  get_structured_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-  ): Promise<Uint8Array | null>
-  set_structured_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-    value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: bigint,
-  ): Promise<Smithy_Set_Outcome>
-  get_v0_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-  ): Promise<Uint8Array | null>
-  set_v0_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-    value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: bigint,
-  ): Promise<Smithy_Set_Outcome>
+  set(key: Uint8Array, value: Uint8Array): Promise<string>
   delete(key: Uint8Array): Promise<boolean>
-  experimental_stats(): Promise<string>
-  experimental_sync(): Promise<void>
   close(): Promise<void>
   close_now(): void
-  connection_state(): string
-  reconnect(): Promise<void>
-  raw_get(item_id: Uint8Array): Promise<Uint8Array | null>
-  raw_get_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-  ): Promise<Uint8Array | null>
-  raw_set(
-    item_id: Uint8Array,
-    value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: number,
-  ): Promise<Smithy_Set_Outcome>
-  raw_set_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-    value: Uint8Array,
-    condition?: Smithy_Set_Condition,
-    expiration_mode?: Smithy_Expiration_Mode,
-    eviction_mode?: Smithy_Eviction_Mode,
-    ttl_ms?: bigint,
-  ): Promise<Smithy_Set_Outcome>
-  raw_delete(item_id: Uint8Array): Promise<boolean>
-  raw_delete_in_namespace(
-    namespace_id: bigint,
-    item_id: Uint8Array,
-  ): Promise<boolean>
-  namespace_open(
-    name: string,
-    create_if_missing: boolean,
-    policy?: Native_Namespace_Policy,
-  ): Promise<Native_Namespace_Open_Output>
-  namespace_update_policy(
-    namespace_id: bigint,
-    expected_revision: bigint,
-    policy: Native_Namespace_Policy,
-  ): Promise<Native_Namespace_Descriptor>
-  namespace_delete(namespace_id: bigint, expected_revision: bigint): Promise<void>
-  experimental_stats_in_namespace(namespace_id: bigint): Promise<string>
-  experimental_sync_in_namespace(namespace_id: bigint): Promise<void>
 }
 
 interface Native_Module {
@@ -180,15 +30,17 @@ interface Native_Module {
 const REQUIRE = createRequire(import.meta.url)
 
 /**
- * Loads the Node.js, Bun, or Deno Node-API adapter for the current platform.
+ * Loads the packaged Node-API adapter for the current platform.
  *
- * @param native_path - Optional custom `.node` adapter path.
- * @returns The semantic native client module.
+ * The loader remains private so callers cannot select a transport, trust
+ * policy, certificate, retry policy, or native artifact through the Gate 0
+ * facade.
+ *
+ * @returns The private native module.
  * @throws {Error} When the platform is unsupported or the addon cannot load.
  */
-export function load_native_module(native_path?: string): Native_Module {
-  const module_path = native_path ?? default_native_path()
-  return REQUIRE(module_path) as Native_Module
+export function load_native_module(): Native_Module {
+  return REQUIRE(default_native_path()) as Native_Module
 }
 
 function default_native_path(): string {
@@ -205,7 +57,7 @@ function default_native_path(): string {
   if (artifact_name === undefined) {
     throw new Error(
       `packaged native adapter supports Linux x64/ARM64 and Apple Silicon macOS, ` +
-        `got ${process.platform} ${process.arch}; provide native_path for a custom build`,
+        `got ${process.platform} ${process.arch}`,
     )
   }
   return fileURLToPath(

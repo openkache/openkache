@@ -1,4 +1,4 @@
-# Releasing `@openkache/client`
+# Releasing `openkache`
 
 This package is published to the public npm registry with Bun. The version in
 `package.json` is the only release version source of truth; npm versions are
@@ -9,7 +9,7 @@ has been built.
 
 `release:verify` refuses to continue unless:
 
-- the package name and public scoped-package access are correct;
+- the package name and public package access are correct;
 - the version is a stable three-part SemVer value;
 - the public Git worktree has no tracked changes;
 - a tag, when running in GitHub Actions, is `typescript-v<version>`;
@@ -65,8 +65,8 @@ After a successful publication, verify the registry metadata and install the
 published package from a clean consumer project:
 
 ```bash
-bun pm view @openkache/client@0.0.1
-bun add @openkache/client@0.0.1
+bun pm view openkache@0.0.1
+bun add openkache@0.0.1
 ```
 
 The package cannot be republished at the same version. If publication fails
