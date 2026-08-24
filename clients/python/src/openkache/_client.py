@@ -1,8 +1,7 @@
-"""Async Python API layered over the shared OpenKache client core."""
+"""Synchronous Python API layered over the shared OpenKache client core."""
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import math
@@ -162,7 +161,7 @@ class OpenKacheUnknownMutationError(OpenKacheError):
 
 
 class OpenKacheCancelledError(OpenKacheError):
-    """The native boundary cancelled the operation before a definitive result."""
+    """The native boundary canceled the operation before a definitive result."""
 
     kind = "cancelled"
 
@@ -442,11 +441,11 @@ ValueRepresentation = Literal["lossless", "native"]
 
 
 class OpenKacheClient:
-    """Protected application-key client with asyncio-friendly operations.
+    """Protected application-key client with blocking operations.
 
     ``clients/core`` owns QUIC, TLS, retries, key derivation, compression, and
-    authenticated value protection. Python only converts native objects and
-    schedules blocking ctypes calls on worker threads.
+    authenticated value protection. Python converts native objects and calls
+    the stable blocking ctypes ABI.
     """
 
     def __init__(self, native: _NativeClient, key_spec: KeySpec | None) -> None:
@@ -456,7 +455,7 @@ class OpenKacheClient:
         self._raw: RawClient | None = None
 
     @classmethod
-    async def connect(
+    def connect(
         cls,
         address: str,
         *,
@@ -477,8 +476,7 @@ class OpenKacheClient:
             None if key_spec is None else _normalize_key_spec(key_spec)
         )
         try:
-            settings = await asyncio.to_thread(
-                _connection_settings,
+            settings = _connection_settings(
                 address,
                 certificate=certificate,
                 data_protection_key=data_protection_key,
@@ -492,32 +490,22 @@ class OpenKacheClient:
                 transport=transport,
                 native_path=native_path,
             )
-            native = await asyncio.to_thread(_NativeClient.connect, **settings)
+            native = _NativeClient.connect(**settings)
         except NativeError as error:
             _raise_native_error(error)
         except OSError as error:
             raise OpenKacheError(str(error)) from error
         return cls(native, selected_key_spec)
 
-    @classmethod
-    def connect_sync(cls, address: str, **kwargs: Any) -> OpenKacheClient:
-        """Synchronous convenience wrapper for scripts without an event loop."""
-
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(cls.connect(address, **kwargs))
-        raise OpenKacheError("connect_sync cannot run inside an active event loop")
-
-    async def ping(self) -> None:
+    def ping(self) -> None:
         self._assert_open()
-        await self._execute(SMITHY_OPCODE_PING)
+        self._execute(SMITHY_OPCODE_PING)
 
-    async def get(self, key: str | int | bytes | bytearray | memoryview) -> Any | None:
+    def get(self, key: str | int | bytes | bytearray | memoryview) -> Any | None:
         """Gets a JSON value, or ``None`` when the key is absent."""
 
         self._assert_open()
-        payload = await self._value_operation(SMITHY_FFI_OPERATION_GET_JSON, key)
+        payload = self._value_operation(SMITHY_FFI_OPERATION_GET_JSON, key)
         if payload is None:
             return None
         try:
@@ -525,7 +513,7 @@ class OpenKacheClient:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise OpenKacheError(f"value decoding failed: {error}") from error
 
-    async def set(
+    def set(
         self,
         key: str | int | bytes | bytearray | memoryview,
         value: Any,
@@ -535,17 +523,17 @@ class OpenKacheClient:
 
         self._assert_open()
         payload = _json_bytes(value)
-        return await self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
+        return self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
 
-    async def get_v0(
+    def get_v0(
         self, key: str | int | bytes | bytearray | memoryview
     ) -> bytes | None:
         """Gets a caller-owned version-0 envelope without interpreting its body."""
 
         self._assert_open()
-        return await self._value_operation(SMITHY_FFI_OPERATION_GET_V0, key, "GET_V0")
+        return self._value_operation(SMITHY_FFI_OPERATION_GET_V0, key, "GET_V0")
 
-    async def set_v0(
+    def set_v0(
         self,
         key: str | int | bytes | bytearray | memoryview,
         value: bytes | bytearray | memoryview,
@@ -554,14 +542,14 @@ class OpenKacheClient:
         """Stores a caller-owned version-0 envelope without transforming its body."""
 
         self._assert_open()
-        return await self._set_operation(
+        return self._set_operation(
             SMITHY_FFI_OPERATION_SET_V0,
             key,
             _value_bytes(value),
             options,
         )
 
-    async def get_structured(
+    def get_structured(
         self,
         key: str | int | bytes | bytearray | memoryview,
         representation: ValueRepresentation = "lossless",
@@ -584,8 +572,7 @@ class OpenKacheClient:
                 "structured-value ABI is unavailable in the loaded native adapter"
             )
         try:
-            payload = await _await_sync_boundary(
-                operation,
+            payload = operation(
                 key=_key_bytes(key, self._key_spec),
             )
         except NativeError as error:
@@ -607,7 +594,7 @@ class OpenKacheClient:
                 f"structured value decoding failed: {error}"
             ) from error
 
-    async def set_structured(
+    def set_structured(
         self,
         key: str | int | bytes | bytearray | memoryview,
         value: Any,
@@ -629,8 +616,7 @@ class OpenKacheClient:
             ) from error
         selected = options or SetOptions()
         try:
-            result = await _await_sync_boundary(
-                operation,
+            result = operation(
                 key=_key_bytes(key, self._key_spec),
                 value=payload,
                 set_flags=selected._wire_flags,
@@ -648,15 +634,15 @@ class OpenKacheClient:
                 ) from error
         return _set_outcome(int(kind))
 
-    async def get_raw(
+    def get_raw(
         self, key: str | int | bytes | bytearray | memoryview
     ) -> bytes | None:
         """Gets exact decrypted Raw bytes, or ``None`` when absent."""
 
         self._assert_open()
-        return await self._value_operation(SMITHY_OPCODE_GET, key)
+        return self._value_operation(SMITHY_OPCODE_GET, key)
 
-    async def set_raw(
+    def set_raw(
         self,
         key: str | int | bytes | bytearray | memoryview,
         value: bytes | bytearray | memoryview,
@@ -665,28 +651,28 @@ class OpenKacheClient:
         """Stores exact bytes through the core Raw value format."""
 
         self._assert_open()
-        return await self._set_operation(
+        return self._set_operation(
             SMITHY_OPCODE_SET, key, _value_bytes(value), options
         )
 
-    async def delete(
+    def delete(
         self, key: str | int | bytes | bytearray | memoryview
     ) -> bool:
         self._assert_open()
         key_spec, key_bytes = _typed_key_input(key)
-        kind, _ = await self._execute(
+        kind, _ = self._execute(
             SMITHY_OPCODE_DELETE,
             key=key_bytes,
             key_spec=key_spec,
         )
         return _delete_outcome(kind)
 
-    async def stats(self) -> ServerStats:
-        return ServerStats.from_json(await self.stats_json())
+    def stats(self) -> ServerStats:
+        return ServerStats.from_json(self.stats_json())
 
-    async def stats_json(self) -> str:
+    def stats_json(self) -> str:
         self._assert_open()
-        kind, payload = await self._execute(SMITHY_OPCODE_STATS)
+        kind, payload = self._execute(SMITHY_OPCODE_STATS)
         if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"STATS returned unexpected native result {kind}")
         try:
@@ -694,13 +680,13 @@ class OpenKacheClient:
         except UnicodeDecodeError as error:
             raise OpenKacheError(f"STATS response is not UTF-8: {error}") from error
 
-    async def sync(self) -> None:
+    def sync(self) -> None:
         self._assert_open()
-        await self._execute(SMITHY_OPCODE_SYNC)
+        self._execute(SMITHY_OPCODE_SYNC)
 
-    async def reconnect(self) -> None:
+    def reconnect(self) -> None:
         self._assert_open()
-        await self._execute(SMITHY_FFI_OPERATION_RECONNECT)
+        self._execute(SMITHY_FFI_OPERATION_RECONNECT)
 
     def connection_state(self) -> ConnectionState:
         if self._closed:
@@ -725,24 +711,24 @@ class OpenKacheClient:
             self._raw = RawClient(self)
         return self._raw
 
-    async def close(self) -> None:
+    def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        await asyncio.to_thread(self._native.close)
+        self._native.close()
 
-    async def __aenter__(self) -> OpenKacheClient:
+    def __enter__(self) -> OpenKacheClient:
         self._assert_open()
         return self
 
-    async def __aexit__(self, *_: object) -> None:
-        await self.close()
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def _assert_open(self) -> None:
         if self._closed:
             raise OpenKacheError("client is closed")
 
-    async def _execute(
+    def _execute(
         self,
         operation: int,
         *,
@@ -754,18 +740,7 @@ class OpenKacheClient:
         self._assert_open()
         selected = options or SetOptions()
         try:
-            execute_async = getattr(self._native, "execute_with_options_async", None)
-            if callable(execute_async):
-                return await execute_async(
-                    operation,
-                    key=key,
-                    value=value,
-                    key_spec=key_spec,
-                    set_flags=selected._wire_flags,
-                    ttl_ms=selected.ttl_ms or 0,
-                )
-            return await _await_sync_boundary(
-                self._native.execute_with_options,
+            return self._native.execute_with_options(
                 operation,
                 key=_canonical_key_bytes(key, key_spec),
                 value=value,
@@ -775,14 +750,14 @@ class OpenKacheClient:
         except NativeError as error:
             _raise_native_error(error)
 
-    async def _value_operation(
+    def _value_operation(
         self,
         operation: int,
         key: str | int | bytes | bytearray | memoryview,
         operation_name: str = "GET",
     ) -> bytes | None:
         key_spec, key_bytes = _typed_key_input(key)
-        kind, payload = await self._execute(operation, key=key_bytes, key_spec=key_spec)
+        kind, payload = self._execute(operation, key=key_bytes, key_spec=key_spec)
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return None
         if kind != SMITHY_FFI_RESULT_VALUE:
@@ -791,7 +766,7 @@ class OpenKacheClient:
             )
         return payload
 
-    async def _execute_raw(
+    def _execute_raw(
         self,
         operation: int,
         *,
@@ -802,17 +777,7 @@ class OpenKacheClient:
         self._assert_open()
         selected = options or SetOptions()
         try:
-            execute_async = getattr(self._native, "execute_raw_with_options_async", None)
-            if callable(execute_async):
-                return await execute_async(
-                    operation,
-                    item_id=item_id,
-                    value=value,
-                    set_flags=selected._wire_flags,
-                    ttl_ms=selected.ttl_ms or 0,
-                )
-            return await _await_sync_boundary(
-                self._native.execute_raw_with_options,
+            return self._native.execute_raw_with_options(
                 operation,
                 item_id=item_id,
                 value=value,
@@ -822,7 +787,7 @@ class OpenKacheClient:
         except NativeError as error:
             _raise_native_error(error)
 
-    async def _execute_scoped(
+    def _execute_scoped(
         self,
         operation: int,
         *,
@@ -838,8 +803,7 @@ class OpenKacheClient:
             )
         selected = options or SetOptions()
         try:
-            return await _await_sync_boundary(
-                self._native.execute_scoped,
+            return self._native.execute_scoped(
                 operation,
                 namespace_id=namespace_id,
                 item_id=item_id,
@@ -850,7 +814,7 @@ class OpenKacheClient:
         except NativeError as error:
             _raise_native_error(error)
 
-    async def _set_operation(
+    def _set_operation(
         self,
         operation: int,
         key: str | int | bytes | bytearray | memoryview,
@@ -858,7 +822,7 @@ class OpenKacheClient:
         options: SetOptions | None,
     ) -> SmithySetOutcome:
         key_spec, key_bytes = _typed_key_input(key)
-        kind, _ = await self._execute(
+        kind, _ = self._execute(
             operation,
             key=key_bytes,
             key_spec=key_spec,
@@ -874,14 +838,14 @@ class RawClient(SmithyOpenKacheApi):
     def __init__(self, owner: OpenKacheClient) -> None:
         self._owner = owner
 
-    async def ping(self, input: SmithyPingInput | None = None) -> SmithyPingOutput:
+    def ping(self, input: SmithyPingInput | None = None) -> SmithyPingOutput:
         del input
-        await self._owner.ping()
+        self._owner.ping()
         return SmithyPingOutput()
 
-    async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
+    def get(self, input: SmithyGetInput) -> SmithyGetOutput:
         item_id = _item_id(input.item_id)
-        kind, payload = await self._owner._execute_scoped(
+        kind, payload = self._owner._execute_scoped(
             SMITHY_OPCODE_GET,
             namespace_id=input.namespace_id,
             item_id=item_id,
@@ -892,10 +856,10 @@ class RawClient(SmithyOpenKacheApi):
             raise OpenKacheError(f"GET returned unexpected native result {kind}")
         return SmithyGetOutput(value=payload)
 
-    async def get_json(self, input: SmithyGetInput) -> SmithyGetOutput:
+    def get_json(self, input: SmithyGetInput) -> SmithyGetOutput:
         """Gets canonical JSON UTF-8 bytes for an exact Item ID."""
 
-        kind, payload = await self._owner._execute_scoped(
+        kind, payload = self._owner._execute_scoped(
             SMITHY_FFI_OPERATION_GET_JSON,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
@@ -906,10 +870,10 @@ class RawClient(SmithyOpenKacheApi):
             raise OpenKacheError(f"GET_JSON returned unexpected native result {kind}")
         return SmithyGetOutput(value=payload)
 
-    async def get_v0(self, input: SmithyGetInput) -> SmithyGetOutput:
+    def get_v0(self, input: SmithyGetInput) -> SmithyGetOutput:
         """Gets a caller-owned version-0 envelope for an exact Item ID."""
 
-        kind, payload = await self._owner._execute_scoped(
+        kind, payload = self._owner._execute_scoped(
             SMITHY_FFI_OPERATION_GET_V0,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
@@ -920,7 +884,7 @@ class RawClient(SmithyOpenKacheApi):
             raise OpenKacheError(f"GET_V0 returned unexpected native result {kind}")
         return SmithyGetOutput(value=payload)
 
-    async def set(self, input: SmithySetInput) -> SmithySetOutput:
+    def set(self, input: SmithySetInput) -> SmithySetOutput:
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
             raise OpenKacheValueError(
                 "ttl_milliseconds is only valid with "
@@ -932,7 +896,7 @@ class RawClient(SmithyOpenKacheApi):
             eviction_mode=input.eviction_mode,
             ttl_ms=input.ttl_milliseconds,
         )
-        kind, _ = await self._owner._execute_scoped(
+        kind, _ = self._owner._execute_scoped(
             SMITHY_OPCODE_SET,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
@@ -941,7 +905,7 @@ class RawClient(SmithyOpenKacheApi):
         )
         return SmithySetOutput(outcome=_set_outcome(kind))
 
-    async def set_json(self, input: SmithySetInput) -> SmithySetOutput:
+    def set_json(self, input: SmithySetInput) -> SmithySetOutput:
         """Stores canonical JSON UTF-8 bytes for an exact Item ID."""
 
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
@@ -955,7 +919,7 @@ class RawClient(SmithyOpenKacheApi):
             eviction_mode=input.eviction_mode,
             ttl_ms=input.ttl_milliseconds,
         )
-        kind, _ = await self._owner._execute_scoped(
+        kind, _ = self._owner._execute_scoped(
             SMITHY_FFI_OPERATION_SET_JSON,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
@@ -964,7 +928,7 @@ class RawClient(SmithyOpenKacheApi):
         )
         return SmithySetOutput(outcome=_set_outcome(kind))
 
-    async def set_v0(self, input: SmithySetInput) -> SmithySetOutput:
+    def set_v0(self, input: SmithySetInput) -> SmithySetOutput:
         """Stores a caller-owned version-0 envelope for an exact Item ID."""
 
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
@@ -978,7 +942,7 @@ class RawClient(SmithyOpenKacheApi):
             eviction_mode=input.eviction_mode,
             ttl_ms=input.ttl_milliseconds,
         )
-        kind, _ = await self._owner._execute_scoped(
+        kind, _ = self._owner._execute_scoped(
             SMITHY_FFI_OPERATION_SET_V0,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
@@ -987,10 +951,10 @@ class RawClient(SmithyOpenKacheApi):
         )
         return SmithySetOutput(outcome=_set_outcome(kind))
 
-    async def get_structured(self, input: SmithyGetInput) -> SmithyGetOutput:
+    def get_structured(self, input: SmithyGetInput) -> SmithyGetOutput:
         """Gets StructuredValue-CBOR-v1 bytes for an exact Item ID."""
 
-        kind, payload = await self._owner._execute_scoped(
+        kind, payload = self._owner._execute_scoped(
             SMITHY_FFI_OPERATION_GET_STRUCTURED,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
@@ -1003,7 +967,7 @@ class RawClient(SmithyOpenKacheApi):
             )
         return SmithyGetOutput(value=payload)
 
-    async def set_structured(self, input: SmithySetInput) -> SmithySetOutput:
+    def set_structured(self, input: SmithySetInput) -> SmithySetOutput:
         """Stores StructuredValue-CBOR-v1 bytes for an exact Item ID."""
 
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
@@ -1017,7 +981,7 @@ class RawClient(SmithyOpenKacheApi):
             eviction_mode=input.eviction_mode,
             ttl_ms=input.ttl_milliseconds,
         )
-        kind, _ = await self._owner._execute_scoped(
+        kind, _ = self._owner._execute_scoped(
             SMITHY_FFI_OPERATION_SET_STRUCTURED,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
@@ -1026,16 +990,16 @@ class RawClient(SmithyOpenKacheApi):
         )
         return SmithySetOutput(outcome=_set_outcome(kind))
 
-    async def delete(self, input: SmithyDeleteInput) -> SmithyDeleteOutput:
-        kind, _ = await self._owner._execute_scoped(
+    def delete(self, input: SmithyDeleteInput) -> SmithyDeleteOutput:
+        kind, _ = self._owner._execute_scoped(
             SMITHY_OPCODE_DELETE,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
         )
         return SmithyDeleteOutput(deleted=_delete_outcome(kind))
 
-    async def stats(self, input: SmithyStatsInput) -> SmithyStatsOutput:
-        kind, payload = await self._owner._execute_scoped(
+    def stats(self, input: SmithyStatsInput) -> SmithyStatsOutput:
+        kind, payload = self._owner._execute_scoped(
             SMITHY_OPCODE_STATS,
             namespace_id=input.namespace_id,
         )
@@ -1046,14 +1010,14 @@ class RawClient(SmithyOpenKacheApi):
         except UnicodeDecodeError as error:
             raise OpenKacheError(f"STATS response is not UTF-8: {error}") from error
 
-    async def sync(self, input: SmithySyncInput) -> SmithySyncOutput:
-        await self._owner._execute_scoped(
+    def sync(self, input: SmithySyncInput) -> SmithySyncOutput:
+        self._owner._execute_scoped(
             SMITHY_OPCODE_SYNC,
             namespace_id=input.namespace_id,
         )
         return SmithySyncOutput()
 
-    async def namespace_open(
+    def namespace_open(
         self, input: SmithyNamespaceOpenInput
     ) -> SmithyNamespaceOpenOutput:
         if input.create_if_missing and input.policy is None:
@@ -1066,8 +1030,7 @@ class RawClient(SmithyOpenKacheApi):
             )
         policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
         try:
-            kind, payload = await _await_sync_boundary(
-                self._owner._native.namespace_open,
+            kind, payload = self._owner._native.namespace_open(
                 name=input.name.encode("utf-8"),
                 create_if_missing=input.create_if_missing,
                 policy_flags=policy_flags,
@@ -1078,10 +1041,7 @@ class RawClient(SmithyOpenKacheApi):
         if kind not in (SMITHY_FFI_RESULT_OK, SMITHY_FFI_RESULT_CREATED):
             raise OpenKacheError(f"NAMESPACE_OPEN returned unexpected native result {kind}")
         try:
-            decoded = await asyncio.to_thread(
-                self._owner._native.decode_namespace_descriptor,
-                payload,
-            )
+            decoded = self._owner._native.decode_namespace_descriptor(payload)
         except NativeError as error:
             _raise_native_error(error)
         return SmithyNamespaceOpenOutput(
@@ -1089,13 +1049,12 @@ class RawClient(SmithyOpenKacheApi):
             created=kind == SMITHY_FFI_RESULT_CREATED,
         )
 
-    async def namespace_update_policy(
+    def namespace_update_policy(
         self, input: SmithyNamespaceUpdatePolicyInput
     ) -> SmithyNamespaceUpdatePolicyOutput:
         policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
         try:
-            kind, payload = await _await_sync_boundary(
-                self._owner._native.namespace_update_policy,
+            kind, payload = self._owner._native.namespace_update_policy(
                 namespace_id=input.namespace_id,
                 expected_revision=input.expected_revision,
                 policy_flags=policy_flags,
@@ -1108,22 +1067,18 @@ class RawClient(SmithyOpenKacheApi):
                 f"NAMESPACE_UPDATE_POLICY returned unexpected native result {kind}"
             )
         try:
-            decoded = await asyncio.to_thread(
-                self._owner._native.decode_namespace_descriptor,
-                payload,
-            )
+            decoded = self._owner._native.decode_namespace_descriptor(payload)
         except NativeError as error:
             _raise_native_error(error)
         return SmithyNamespaceUpdatePolicyOutput(
             descriptor=_namespace_descriptor(decoded)
         )
 
-    async def namespace_delete(
+    def namespace_delete(
         self, input: SmithyNamespaceDeleteInput
     ) -> SmithyNamespaceDeleteOutput:
         try:
-            await _await_sync_boundary(
-                self._owner._native.namespace_delete,
+            self._owner._native.namespace_delete(
                 namespace_id=input.namespace_id,
                 expected_revision=input.expected_revision,
             )
@@ -1131,40 +1086,11 @@ class RawClient(SmithyOpenKacheApi):
             _raise_native_error(error)
         return SmithyNamespaceDeleteOutput()
 
-    async def close(self) -> None:
-        await self._owner.close()
+    def close(self) -> None:
+        self._owner.close()
 
 
 Client = OpenKacheClient
-
-
-async def _await_sync_boundary(
-    function: Any,
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    """Wait for a legacy synchronous ABI call before honoring cancellation.
-
-    Structured, scoped, and namespace operations do not yet have dedicated
-    request-handle entry points in ABI v6.  Keeping their native call alive
-    until its core deadline is the safe ownership boundary: a canceled task
-    never abandons a mutation whose result could still become unknown.
-    """
-
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        # Shield the native call from task cancellation, then return its
-        # definitive result (including UnknownMutation) to the caller.
-        current = asyncio.current_task()
-        while True:
-            if current is not None:
-                current.uncancel()
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
 
 
 def _typed_key_input(

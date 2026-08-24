@@ -45,7 +45,7 @@ function python_api_type(type: Api_Type, required: boolean): string {
   return required ? rendered : `${rendered} | None`
 }
 
-/** Renders Smithy operation types and a Python async protocol interface.
+/** Renders Smithy operation types and a Python synchronous protocol interface.
  *
  * @param contract - Validated language-neutral wire and API contract.
  * @returns Deterministic Python source with a trailing newline.
@@ -84,7 +84,7 @@ ${body}`
   const operations = contract.api.operations
     .map(
       (operation) =>
-        `    async def ${snake_case(operation.name)}(
+        `    def ${snake_case(operation.name)}(
         self, input: ${python_api_name(operation.input)}
     ) -> ${python_api_name(operation.output)}: ...`,
     )
@@ -101,7 +101,7 @@ ${[...enums, ...structures].join("\n\n")}
 
 
 class SmithyOpenKacheApi(Protocol):
-    """Async operations defined by the OpenKache Smithy service."""
+    """Synchronous operations defined by the OpenKache Smithy service."""
 
 ${operations}
 `

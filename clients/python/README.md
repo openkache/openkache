@@ -1,9 +1,9 @@
 # OpenKache Python client
 
-`openkache` is an asyncio-friendly Python client for the OpenKache cache
-server. It uses the shared Rust client core for QUIC, TLS 1.3 over TCP,
-retries, compression, authenticated value protection, and the wire protocol.
-The Python layer provides validation, Python value conversion, and async
+`openkache` is a synchronous Python client for the OpenKache cache server. It
+uses the shared Rust client core for QUIC, TLS 1.3 over TCP, retries,
+compression, authenticated value protection, and the wire protocol. The
+Python layer provides validation, Python value conversion, and deterministic
 resource management.
 
 This is an experimental preview. The protocol and generated Smithy API are
@@ -33,37 +33,36 @@ certificate. `OPENKACHE_CA_CERT` may be a PEM/DER file path or the equivalent
 bytes passed directly to `Client.connect`.
 
 ```python
-import asyncio
 import os
 from pathlib import Path
 
 from openkache import Client, SetOptions
 
 
-async def main() -> None:
+def main() -> None:
     address = os.environ.get("OPENKACHE_ADDRESS", "127.0.0.1:4433")
     ca_certificate = Path(os.environ["OPENKACHE_CA_CERT"])
 
-    async with await Client.connect(
+    with Client.connect(
         address,
         certificate=ca_certificate,
     ) as client:
-        await client.ping()
-        outcome = await client.set(
+        client.ping()
+        outcome = client.set(
             "profile",
             {"name": "Kim", "visits": 42, "active": True},
             SetOptions(condition="if_absent", ttl_ms=300_000),
         )
-        profile = await client.get("profile")
+        profile = client.get("profile")
         print(outcome.value, profile)
 
 
-asyncio.run(main())
+main()
 ```
 
-The same lifecycle can be written with explicit `await client.close()`; close
-is idempotent. See [`examples/basic.py`](examples/basic.py) for a runnable
-version with environment-variable handling.
+The same lifecycle can be written with explicit `client.close()`; close is
+idempotent. See [`examples/basic.py`](examples/basic.py) for a runnable version
+with environment-variable handling.
 
 ## Values and keys
 
@@ -129,10 +128,9 @@ The high-level client exposes:
 `native_path`. Keep native artifacts produced by the same package release; the
 Python wrapper checks the generated ABI version before using one.
 
-Cancellation has explicit safety semantics. A cancellation before native
-admission raises `OpenKacheCancelledError`; once a mutation may have reached
-the server, it raises `OpenKacheUnknownMutationError` instead of pretending
-that the mutation did not happen.
+If a native failure leaves a mutation outcome uncertain, the client raises
+`OpenKacheUnknownMutationError` instead of pretending that the mutation did
+not happen.
 
 ## Raw Smithy API
 
@@ -143,10 +141,10 @@ and interoperability work. Item IDs are `bytes` values of at most 32 bytes:
 from openkache import SmithyGetInput, SmithySetInput
 
 namespace_id = 1  # Replace with the server-assigned namespace ID.
-await client.raw.set(
+client.raw.set(
     SmithySetInput(namespace_id=namespace_id, item_id=b"item", value=b"opaque")
 )
-result = await client.raw.get(
+result = client.raw.get(
     SmithyGetInput(namespace_id=namespace_id, item_id=b"item")
 )
 ```
@@ -191,7 +189,7 @@ python setup.py generate_smithy
 
 ## Package layout
 
-- `src/openkache/_client.py` — public async API, validation, and result mapping.
+- `src/openkache/_client.py` — public synchronous API, validation, and result mapping.
 - `src/openkache/_native.py` — ctypes ownership and native ABI conversion.
 - `src/openkache/_value.py` — lossless StructuredValue-CBOR-v1 conversion.
 - `src/openkache/_generated/` — generated Smithy API, operations, constants, and

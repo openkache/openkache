@@ -103,7 +103,7 @@ function python_api_type(type: Api_Type, required: boolean): string {
   return required ? rendered : `${rendered} | None`
 }
 
-/** Renders Smithy operation types and a Python async protocol interface.
+/** Renders Smithy operation types and a Python synchronous protocol interface.
  *
  * @param contract - Validated language-neutral wire and API contract.
  * @returns Deterministic Python source with a trailing newline.
@@ -142,7 +142,7 @@ ${body}`
   const operations = contract.api.operations
     .map(
       (operation) =>
-        `    async def ${snake_case(operation.name)}(
+        `    def ${snake_case(operation.name)}(
         self, input: ${python_api_name(operation.input)}
     ) -> ${python_api_name(operation.output)}: ...`,
     )
@@ -159,7 +159,7 @@ ${[...enums, ...structures].join("\n\n")}
 
 
 class SmithyOpenKacheApi(Protocol):
-    """Async operations defined by the OpenKache Smithy service."""
+    """Synchronous operations defined by the OpenKache Smithy service."""
 
 ${operations}
 `
@@ -227,9 +227,9 @@ function render_python_operation_method(
             ${operation_value},
             expected_kinds=(${result_kinds},),
         )`
-      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+      return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        _, payload = await ${invocation}
+        _, payload = ${invocation}
         return ${output}(${output_payload}=payload)`
     },
     opaque: () => {
@@ -263,9 +263,9 @@ function render_python_operation_method(
             item_id=${input_item_id_expression},
 ${scoped_request_value}            expected_kinds=(${result_kinds},),
         )`)
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        _, payload = await ${invocation}
+        _, payload = ${invocation}
         return ${output}(
             ${output_payload}=${decoded_payload}
         )`
@@ -313,9 +313,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
             item_id=${input_item_id_expression},
 ${scoped_request_value}            expected_kinds=(${result_kinds},),
         )`)
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        _, payload = await ${invocation}
+        _, payload = ${invocation}
         values = ${response_values}
         return ${output_expression}`
     },
@@ -325,9 +325,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
           .map((member) => operation_field_name(member, "python"))
           .map((name, index) => `${name}=values[${index}]`)
           .join(",\n            ")
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        _, payload = await self._smithy_transport.invoke_scoped(
+        _, payload = self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
@@ -339,9 +339,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
             ${output_values}
         )`
       }
-      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+      return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        kind, payload = await self._smithy_transport.invoke_scoped(
+        kind, payload = self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
@@ -354,9 +354,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
         )`
     },
     status_outcome: () => {
-      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+      return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        kind, _ = await self._smithy_transport.invoke_scoped(
+        kind, _ = self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
@@ -375,9 +375,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
         return ${output}(${output_outcome}=outcome)`
     },
     boolean_outcome: () => {
-      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+      return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        kind, _ = await self._smithy_transport.invoke_scoped(
+        kind, _ = self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
@@ -388,9 +388,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
         )`
     },
     text_payload: () => {
-      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+      return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        _, payload = await self._smithy_transport.invoke_scoped(
+        _, payload = self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             expected_kinds=(${result_kinds},),
@@ -401,9 +401,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
     },
     empty: () => {
       if (operation_is_global_empty(operation)) {
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.invoke(
+        self._smithy_transport.invoke(
             ${operation_value},
             value=b"",
             expected_kinds=(${result_kinds},),
@@ -421,9 +421,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
             operation,
             String(operation_value),
           )
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.invoke(
+        self._smithy_transport.invoke(
             ${operation_value},
             value=${request_payload},
             expected_kinds=(${result_kinds},),
@@ -440,9 +440,9 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
             ttl_milliseconds=input.${input_ttl_milliseconds},
 `
           : ""
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.invoke_scoped(
+        self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
@@ -451,9 +451,9 @@ ${request_arguments}            expected_kinds=(${result_kinds},),
         return ${output}()`
       }
       if (operation_uses_compact_request_route(operation, "namespace_delete")) {
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.namespace_delete(
+        self._smithy_transport.namespace_delete(
             namespace_id=input.${input_namespace_id},
             expected_revision=input.${input_expected_revision},
         )
@@ -462,9 +462,9 @@ ${request_arguments}            expected_kinds=(${result_kinds},),
       if (!operation_uses_compact_namespace_request(operation)) {
         throw new Error(`unsupported generated Python empty operation ${operation.name}`)
       }
-      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+      return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.invoke_scoped(
+        self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             expected_kinds=(${result_kinds},),
@@ -473,9 +473,9 @@ ${request_arguments}            expected_kinds=(${result_kinds},),
     },
     descriptor: () => {
       if (operation_uses_compact_request_route(operation, "namespace_open")) {
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return await self._smithy_transport.namespace_open(
+        return self._smithy_transport.namespace_open(
             name=input.${input_name},
             create_if_missing=input.${input_create_if_missing},
             policy_default_expiration=(
@@ -506,10 +506,10 @@ ${request_arguments}            expected_kinds=(${result_kinds},),
         )`
       }
       if (operation_uses_compact_request_route(operation, "namespace_update_policy")) {
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        return `    def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         return ${output}(
-            ${output_descriptor}=await self._smithy_transport.namespace_update_policy(
+            ${output_descriptor}=self._smithy_transport.namespace_update_policy(
                 namespace_id=input.${input_namespace_id},
                 expected_revision=input.${input_expected_revision},
                 default_expiration=input.${input_policy}.${policy_default_expiration},
@@ -659,7 +659,7 @@ class SmithyOperationTransport(Protocol):
 
     def assert_open(self) -> None: ...
 
-    async def invoke(
+    def invoke(
         self,
         operation: int,
         *,
@@ -672,7 +672,7 @@ class SmithyOperationTransport(Protocol):
         expected_kinds: tuple[int, ...],
     ) -> tuple[int, bytes]: ...
 
-    async def invoke_scoped(
+    def invoke_scoped(
         self,
         operation: int,
         *,
@@ -688,7 +688,7 @@ class SmithyOperationTransport(Protocol):
 
     def decode_utf8(self, payload: bytes, operation: int) -> str: ...
 
-    async def namespace_open(
+    def namespace_open(
         self,
         *,
         name: str,
@@ -700,7 +700,7 @@ class SmithyOperationTransport(Protocol):
         policy_eviction_override: SmithyOverridePolicy | None,
     ) -> SmithyNamespaceOpenOutput: ...
 
-    async def namespace_update_policy(
+    def namespace_update_policy(
         self,
         *,
         namespace_id: int,
@@ -712,7 +712,7 @@ class SmithyOperationTransport(Protocol):
         eviction_override: SmithyOverridePolicy,
     ) -> SmithyNamespaceDescriptor: ...
 
-    async def namespace_delete(
+    def namespace_delete(
         self, *, namespace_id: int, expected_revision: int
     ) -> None: ...
 
