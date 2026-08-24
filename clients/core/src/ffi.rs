@@ -436,8 +436,7 @@ impl FfiClient {
         retry: RetryPolicy,
         max_in_flight: usize,
     ) -> std::result::Result<Self, String> {
-        let (commands, receiver) =
-            crossfire::mpsc::bounded_blocking_async(COMMAND_QUEUE_CAPACITY);
+        let (commands, receiver) = crossfire::mpsc::bounded_blocking_async(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
@@ -1298,7 +1297,10 @@ macro_rules! impl_ffi_raw_client {
             ) -> crate::Result<DeleteOutcome> {
                 self.delete_in_namespace(namespace_id, item_id).await
             }
-            async fn experimental_stats_in_namespace(&self, namespace_id: u64) -> crate::Result<String> {
+            async fn experimental_stats_in_namespace(
+                &self,
+                namespace_id: u64,
+            ) -> crate::Result<String> {
                 self.experimental_stats_in_namespace(namespace_id).await
             }
             async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> crate::Result<()> {
@@ -1525,12 +1527,8 @@ macro_rules! impl_ffi_protected_client {
                 value: &[u8],
                 options: SetOptions,
             ) -> crate::Result<SetOutcome> {
-                self.set_structured_canonical_key_cbor_unchecked(
-                    canonical_key,
-                    value,
-                    options,
-                )
-                .await
+                self.set_structured_canonical_key_cbor_unchecked(canonical_key, value, options)
+                    .await
             }
             async fn set_v0_canonical_key_unchecked(
                 &self,
@@ -3483,10 +3481,14 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             {
                 Err("operation does not accept a value".to_owned())
             }
-            FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync if !item_id.is_empty() => {
+            FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync
+                if !item_id.is_empty() =>
+            {
                 Err("operation does not accept an item_id".to_owned())
             }
-            FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync if !value.is_empty() => {
+            FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync
+                if !value.is_empty() =>
+            {
                 Err("operation does not accept a value".to_owned())
             }
             FfiOperation::GetJson
@@ -3780,7 +3782,10 @@ fn validated_execute(
         SetOptions::new()
     };
     match operation {
-        FfiOperation::Ping | FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync | FfiOperation::Reconnect
+        FfiOperation::Ping
+        | FfiOperation::ExperimentalStats
+        | FfiOperation::ExperimentalSync
+        | FfiOperation::Reconnect
             if !key.is_empty() =>
         {
             Err("operation does not accept an application key".to_owned())
@@ -3844,7 +3849,10 @@ fn typed_execute_entry(
         )?;
         let key = if matches!(
             operation,
-            FfiOperation::Ping | FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync | FfiOperation::Reconnect
+            FfiOperation::Ping
+                | FfiOperation::ExperimentalStats
+                | FfiOperation::ExperimentalSync
+                | FfiOperation::Reconnect
         ) {
             // Keyless operations use an empty application-key buffer.  Do
             // not turn that buffer into a canonical empty Bytes key before
@@ -4397,7 +4405,10 @@ fn validate_input_lengths(
     }
     if matches!(
         operation,
-        FfiOperation::Ping | FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync | FfiOperation::Reconnect
+        FfiOperation::Ping
+            | FfiOperation::ExperimentalStats
+            | FfiOperation::ExperimentalSync
+            | FfiOperation::Reconnect
     ) && application_key_length != 0
     {
         return Err("operation does not accept an application key".to_owned());
@@ -4432,8 +4443,10 @@ fn validate_scoped_input_lengths(
     if matches!(operation, FfiOperation::Get | FfiOperation::Delete) && value_length != 0 {
         return Err("operation does not accept a value".to_owned());
     }
-    if matches!(operation, FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync)
-        && (item_id_length != 0 || value_length != 0)
+    if matches!(
+        operation,
+        FfiOperation::ExperimentalStats | FfiOperation::ExperimentalSync
+    ) && (item_id_length != 0 || value_length != 0)
     {
         return Err("operation does not accept item_id or value".to_owned());
     }

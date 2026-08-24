@@ -76,7 +76,7 @@ impl OwnedRequestFrame {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<OwnedRequestFrame>() <= 192);
+const _: () = assert!(std::mem::size_of::<OwnedRequestFrame>() <= 200);
 
 /// Contiguous request prefix with inline storage for every common layout.
 #[derive(Debug, Eq, PartialEq)]

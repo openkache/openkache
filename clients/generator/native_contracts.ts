@@ -643,9 +643,13 @@ pub const GATE0_ENCRYPTION: u8 = ${formatted_byte(gate0.encryption)};
 /// Gate 0 public development Item-ID root key.
 pub const GATE0_ITEM_ID_ROOT_KEY: [u8; 32] = ${rust_byte_array_literal(gate0_item_id_root)};
 /// Gate 0 namespace identity.
-pub const GATE0_NAMESPACE_ID: u64 = ${formatted_decimal(gate0.namespace_id)};
-/// Gate 0 value-format selector byte.
-pub const GATE0_VALUE_SELECTOR: u8 = ${formatted_byte(gate0.value_selector)};
+pub const GATE0_NAMESPACE_ID: u64 = CLIENT_GATE0_NAMESPACE_ID;
+/// Gate 0 Item-ID root retained under the original Rust facade name.
+pub const GATE0_ITEM_ID_ROOT: [u8; ${gate0_item_id_root.length}] = CLIENT_GATE0_ITEM_ID_ROOT;
+/// Gate 0 value-format selector retained under the original Rust facade name.
+pub const GATE0_VALUE_FORMAT_SELECTOR: u8 = CLIENT_GATE0_VALUE_SELECTOR;
+/// Gate 0 value selector retained under the maintained native facade name.
+pub const GATE0_VALUE_SELECTOR: u8 = CLIENT_GATE0_VALUE_SELECTOR;
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};

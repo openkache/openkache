@@ -26,20 +26,23 @@ adapter depends on this core directly.
 
 ## Related documentation
 
-- The [client index](../README.md) covers package inventory and implementation
-  status.
-- The [client implementation guide](../CLIENT.md) defines the shared boundary
-  between this core and maintained language adapters.
-- The [key-format specification](../KEY_FORMAT.md) defines typed keys and Item
-  ID mapping.
-- The [value model](../value/SPEC.md) defines cross-language structured values,
-  native mappings, and the initial codec profile.
-- The [value-format specification](../VALUE_FORMAT.md) defines the formatted
-  value envelope and compression.
-- The [security model](../../SECURITY_MODEL.md) defines the threat model,
-  value-key schedule, AAD, and cryptographic constructions.
-- The [wire protocol specification](../../protocol/SPEC.md) defines framing,
-  operations, limits, and ambiguous operation outcomes.
+- The [client index](https://github.com/openkache/openkache/blob/main/clients/README.md)
+  covers package inventory and implementation status.
+- The [client implementation guide](https://github.com/openkache/openkache/blob/main/clients/CLIENT.md)
+  defines the shared boundary between this core and maintained language
+  adapters.
+- The [key-format specification](https://github.com/openkache/openkache/blob/main/clients/KEY_FORMAT.md)
+  defines typed keys and Item ID mapping.
+- The [value model](https://github.com/openkache/openkache/blob/main/clients/value/SPEC.md)
+  defines cross-language structured values, native mappings, and the initial
+  codec profile.
+- The [value-format specification](https://github.com/openkache/openkache/blob/main/clients/VALUE_FORMAT.md)
+  defines the formatted value envelope and compression.
+- The [security model](https://github.com/openkache/openkache/blob/main/SECURITY_MODEL.md)
+  defines the threat model, value-key schedule, AAD, and cryptographic
+  constructions.
+- The [wire protocol specification](https://github.com/openkache/openkache/blob/main/protocol/SPEC.md)
+  defines framing, operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
 - The [target design](TARGET.md) summarizes the post-migration core contract.
 

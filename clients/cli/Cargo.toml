@@ -7,8 +7,8 @@ license = "Apache-2.0"
 
 [features]
 default = ["quic-compio"]
-quic-compio = ["dep:compio", "openkache-client/quic-compio"]
-quic-quinn = ["dep:tokio", "openkache-client/quic-quinn"]
+quic-compio = ["dep:compio", "openkache-client-core/quic-compio"]
+quic-quinn = ["dep:tokio", "openkache-client-core/quic-quinn"]
 
 [dependencies]
 anstream = "*"
@@ -18,7 +18,7 @@ comfy-table = "*"
 compio = { version = "*", default-features = false, features = ["io-uring", "runtime", "time"], optional = true }
 indicatif = "*"
 miette = { version = "*", features = ["fancy"] }
-openkache-client = { path = "../rust", default-features = false }
+openkache-client-core = { path = "../core", default-features = false }
 owo-colors = "*"
 reedline = "*"
 serde_json = "*"

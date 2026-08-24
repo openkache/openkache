@@ -1,5 +1,5 @@
 [package]
-name = "openkache"
+name = "openkache-server"
 version = "0.1.0"
 edition.workspace = true
 license = "AGPL-3.0-or-later"

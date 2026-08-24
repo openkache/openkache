@@ -13,13 +13,13 @@ use base64::engine::general_purpose::STANDARD;
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{Table, presets::UTF8_FULL};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-#[cfg(feature = "quic-quinn")]
-use openkache_client::Client;
 #[cfg(feature = "quic-compio")]
-use openkache_client::LocalClient;
-use openkache_client::{
+use openkache_client_core::LocalProtectedClient as LocalClient;
+#[cfg(feature = "quic-quinn")]
+use openkache_client_core::ProtectedClient as Client;
+use openkache_client_core::{
     Certificate, ClientIdentity, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
-    KeySpec, PrivateKey, ServerTrust, SetOptions, SetOutcome,
+    PrivateKey, ServerTrust, SetOptions, SetOutcome,
 };
 use owo_colors::OwoColorize;
 use reedline::{
@@ -40,7 +40,7 @@ compile_error!("enable one CLI QUIC backend feature");
 pub enum CliError {
     /// A client operation or connection failed.
     #[error(transparent)]
-    Client(#[from] openkache_client::Error),
+    Client(#[from] openkache_client_core::Error),
     /// Reading a certificate, key file, or stdin failed.
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -275,7 +275,7 @@ enum ConnectedClient {
 }
 
 impl ConnectedClient {
-    async fn ping(&self) -> openkache_client::Result<()> {
+    async fn ping(&self) -> openkache_client_core::Result<()> {
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client) => client.ping().await.map(|_| ()),
@@ -284,7 +284,10 @@ impl ConnectedClient {
         }
     }
 
-    async fn get(&self, application_key: &[u8]) -> openkache_client::Result<GetOutcome<Vec<u8>>> {
+    async fn get(
+        &self,
+        application_key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client) => client.get(application_key).await,
@@ -298,24 +301,16 @@ impl ConnectedClient {
         application_key: &[u8],
         value: Vec<u8>,
         options: SetOptions,
-    ) -> openkache_client::Result<SetOutcome> {
+    ) -> openkache_client_core::Result<SetOutcome> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => {
-                client
-                    .set_with_options(application_key, value, options)
-                    .await
-            }
+            Self::Compio(client) => client.set(application_key, value, options).await,
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => {
-                client
-                    .set_with_options(application_key, value, options)
-                    .await
-            }
+            Self::Quinn(client) => client.set(application_key, value, options).await,
         }
     }
 
-    async fn delete(&self, application_key: &[u8]) -> openkache_client::Result<DeleteOutcome> {
+    async fn delete(&self, application_key: &[u8]) -> openkache_client_core::Result<DeleteOutcome> {
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client) => client.delete(application_key).await,
@@ -324,7 +319,7 @@ impl ConnectedClient {
         }
     }
 
-    async fn experimental_stats(&self) -> openkache_client::Result<String> {
+    async fn experimental_stats(&self) -> openkache_client_core::Result<String> {
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client) => client.experimental_stats().await,
@@ -333,7 +328,7 @@ impl ConnectedClient {
         }
     }
 
-    async fn experimental_sync(&self) -> openkache_client::Result<()> {
+    async fn experimental_sync(&self) -> openkache_client_core::Result<()> {
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client) => client.experimental_sync().await,
@@ -355,8 +350,7 @@ async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
             Some(key) => LocalClient::builder(endpoint, key),
             None => LocalClient::builder_unprotected(endpoint),
         }
-        .server_trust(trust)
-        .key_spec(KeySpec::Text);
+        .server_trust(trust);
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }
@@ -373,8 +367,7 @@ async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
             Some(key) => Client::builder(endpoint, key),
             None => Client::builder_unprotected(endpoint),
         }
-        .server_trust(trust)
-        .key_spec(KeySpec::Text);
+        .server_trust(trust);
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }
@@ -412,9 +405,7 @@ fn endpoint_from_arguments(arguments: &Arguments) -> Result<Endpoint> {
     Endpoint::from_str(address).map_err(CliError::from)
 }
 
-fn data_protection_key_from_arguments(
-    arguments: &Arguments,
-) -> Result<Option<DataProtectionKey>> {
+fn data_protection_key_from_arguments(arguments: &Arguments) -> Result<Option<DataProtectionKey>> {
     let encoded = match (
         arguments.data_protection_key.as_deref(),
         arguments.data_protection_key_file.as_deref(),
@@ -526,12 +517,11 @@ fn print_stats(payload: &str) -> Result<()> {
         return Ok(());
     }
 
-    let value: Value = serde_json::from_str(payload)
-        .map_err(|error| {
-            CliError::Command(format!(
-                "EXPERIMENTAL_STATS response is not valid JSON: {error}"
-            ))
-        })?;
+    let value: Value = serde_json::from_str(payload).map_err(|error| {
+        CliError::Command(format!(
+            "EXPERIMENTAL_STATS response is not valid JSON: {error}"
+        ))
+    })?;
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header(["metric", "value"]);
@@ -715,7 +705,16 @@ async fn run_shell(client: &ConnectedClient, address: &str) -> Result<()> {
 
 fn shell_editor() -> Reedline {
     let commands = [
-        "ping", "get", "set", "delete", "del", "experimental_stats", "experimental_sync", "help", "exit", "quit",
+        "ping",
+        "get",
+        "set",
+        "delete",
+        "del",
+        "experimental_stats",
+        "experimental_sync",
+        "help",
+        "exit",
+        "quit",
     ]
     .into_iter()
     .map(str::to_owned)

@@ -1,0 +1,557 @@
+//! Operation-neutral ownership for ordered wire byte segments.
+
+use std::ops::Range;
+use std::sync::Arc;
+
+use smallvec::{Array, SmallVec};
+
+use crate::internal_protocol::{ProtocolError, Result, StableOwnerLease};
+
+// Keep the common framing/payload pair inline without making every frame
+// carry a large array of segment owners. Longer plans spill metadata only;
+// their payload allocations remain unchanged.
+pub(crate) const INLINE_SEGMENTS: usize = 2;
+const INLINE_REQUEST_PREFIX_BYTES: usize = 64;
+
+/// Owned wire frame using the common two-segment inline storage.
+pub type OwnedFrame = SegmentFrame<[WireSegment; INLINE_SEGMENTS]>;
+
+/// One ownership-preserving encoded request frame.
+///
+/// Common request prefixes remain contiguous and inline. Payload and other
+/// retained owners follow as ordered segments without coalescing their bytes.
+#[derive(Debug, Eq, PartialEq)]
+pub struct OwnedRequestFrame {
+    prefix: RequestPrefix,
+    suffix: OwnedFrame,
+    encoded_len: usize,
+}
+
+impl OwnedRequestFrame {
+    pub(crate) fn from_parts(
+        prefix: RequestPrefix,
+        suffix: SmallVec<[WireSegment; INLINE_SEGMENTS]>,
+    ) -> Result<Self> {
+        let suffix = OwnedFrame::from_segments(suffix)?;
+        let encoded_len = prefix
+            .as_slice()
+            .len()
+            .checked_add(suffix.len())
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        Ok(Self {
+            prefix,
+            suffix,
+            encoded_len,
+        })
+    }
+
+    /// Returns the ordered non-empty byte segments.
+    pub fn segments(&self) -> impl Iterator<Item = &[u8]> {
+        std::iter::once(self.prefix.as_slice())
+            .chain(self.suffix.segments().iter().map(WireSegment::as_slice))
+            .filter(|segment| !segment.is_empty())
+    }
+
+    /// Returns the checked complete frame length.
+    pub const fn len(&self) -> usize {
+        self.encoded_len
+    }
+
+    /// Returns whether the complete frame is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.encoded_len == 0
+    }
+
+    /// Copies this frame into one self-contained owner.
+    ///
+    /// Retry plans may retain external owners that intentionally are not
+    /// cloneable. A transport that needs an owned replay copy can use this
+    /// explicit compatibility boundary rather than coalescing normal request
+    /// segments on the hot path.
+    pub fn clone_owned(&self) -> Result<Self> {
+        let bytes = self.segments().flatten().copied().collect::<Vec<_>>();
+        let mut prefix = RequestPrefix::with_capacity(bytes.len());
+        prefix.try_extend_from_slice(&bytes)?;
+        Self::from_parts(prefix, SmallVec::new())
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<OwnedRequestFrame>() <= 200);
+
+/// Contiguous request prefix with inline storage for every common layout.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum RequestPrefix {
+    Inline {
+        bytes: [u8; INLINE_REQUEST_PREFIX_BYTES],
+        len: u8,
+    },
+    Owned(Vec<u8>),
+}
+
+impl RequestPrefix {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        if capacity <= INLINE_REQUEST_PREFIX_BYTES {
+            Self::Inline {
+                bytes: [0; INLINE_REQUEST_PREFIX_BYTES],
+                len: 0,
+            }
+        } else {
+            Self::Owned(Vec::with_capacity(capacity))
+        }
+    }
+
+    pub(crate) fn try_extend_from_slice(&mut self, suffix: &[u8]) -> Result<()> {
+        match self {
+            Self::Inline { bytes, len } => {
+                let start = usize::from(*len);
+                let end = start
+                    .checked_add(suffix.len())
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if end > INLINE_REQUEST_PREFIX_BYTES {
+                    return Err(ProtocolError::FrameLength {
+                        expected: INLINE_REQUEST_PREFIX_BYTES,
+                        actual: end,
+                    });
+                }
+                bytes[start..end].copy_from_slice(suffix);
+                *len = u8::try_from(end).expect("inline request prefix length fits in u8");
+            }
+            Self::Owned(bytes) => {
+                let required = bytes
+                    .len()
+                    .checked_add(suffix.len())
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if required > bytes.capacity() {
+                    return Err(ProtocolError::FrameLength {
+                        expected: bytes.capacity(),
+                        actual: required,
+                    });
+                }
+                bytes.extend_from_slice(suffix);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { bytes, len } => &bytes[..usize::from(*len)],
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+/// An owned buffer with a logical byte range.
+///
+/// Keeping the range beside its allocation lets request and response paths
+/// transfer payload ownership without shifting bytes to offset zero.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedRange {
+    buffer: Vec<u8>,
+    range: Range<usize>,
+}
+
+impl OwnedRange {
+    /// Retains a validated logical range of an owned buffer.
+    pub fn new(buffer: Vec<u8>, range: Range<usize>) -> Option<Self> {
+        (range.start <= range.end && range.end <= buffer.len()).then_some(Self { buffer, range })
+    }
+
+    /// Owns one complete buffer.
+    pub fn whole(buffer: Vec<u8>) -> Self {
+        let end = buffer.len();
+        Self {
+            buffer,
+            range: 0..end,
+        }
+    }
+
+    /// Returns the visible bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        self.buffer
+            .get(self.range.clone())
+            .expect("owned byte range remains within its buffer")
+    }
+
+    /// Returns the visible byte count.
+    pub fn len(&self) -> usize {
+        self.range.len()
+    }
+
+    /// Returns whether the visible range is empty.
+    pub fn is_empty(&self) -> bool {
+        self.range.is_empty()
+    }
+
+    /// Transfers a subrange relative to the visible bytes without copying.
+    ///
+    /// Invalid ranges return the original owner so callers can preserve the
+    /// allocation and decide how to report or recover from the error.
+    pub fn into_subrange(self, range: Range<usize>) -> std::result::Result<Self, Self> {
+        if range.start > range.end || range.end > self.range.len() {
+            return Err(self);
+        }
+        let (buffer, owner_range) = self.into_parts();
+        Ok(Self {
+            buffer,
+            range: (owner_range.start + range.start)..(owner_range.start + range.end),
+        })
+    }
+
+    /// Recovers the buffer and logical range without copying.
+    pub fn into_parts(self) -> (Vec<u8>, Range<usize>) {
+        (self.buffer, self.range)
+    }
+}
+
+impl From<Vec<u8>> for OwnedRange {
+    fn from(buffer: Vec<u8>) -> Self {
+        Self::whole(buffer)
+    }
+}
+
+impl AsRef<[u8]> for OwnedRange {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+/// Allocation-free ownership for one bounded byte sequence.
+///
+/// Encoders can append directly into this owner and then move it into a
+/// [`WireSegment`] without an intermediate `Vec` or payload copy.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct InlineBytes(SmallVec<[u8; 32]>);
+
+impl InlineBytes {
+    /// Creates an empty inline byte owner.
+    pub const fn new() -> Self {
+        Self(SmallVec::new_const())
+    }
+
+    /// Appends bytes while preserving inline-only ownership.
+    pub fn try_extend_from_slice(&mut self, value: &[u8]) -> Result<()> {
+        let size = self
+            .0
+            .len()
+            .checked_add(value.len())
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        if size > self.0.inline_size() {
+            return Err(ProtocolError::ValueTooLarge {
+                size,
+                maximum: self.0.inline_size(),
+            });
+        }
+        self.0.extend_from_slice(value);
+        Ok(())
+    }
+
+    /// Returns the encoded bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// An owner for one stable byte sequence.
+///
+/// Implementations may retain aligned buffers, pooled read leases, shared
+/// segments, or another byte owner without exposing that implementation to the
+/// consumer. The returned slice must keep the same length while the owner is
+/// held by [`StableBytes`].
+pub trait StableByteOwner: Send + Sync + 'static {
+    /// Returns the complete visible bytes owned by this value.
+    fn as_bytes(&self) -> &[u8];
+}
+
+/// Backward-compatible name for owners passed to [`WireSegment::external`].
+pub use StableByteOwner as WireByteOwner;
+
+/// Type-erased ownership for one stable byte sequence.
+///
+/// This operation-neutral container can cross application, storage, and
+/// transport boundaries without copying its payload or repeating type erasure.
+pub struct StableBytes {
+    owner: StableBytesOwner,
+}
+
+enum StableBytesOwner {
+    Shared {
+        owner: Arc<dyn StableByteOwner>,
+        range: Range<usize>,
+    },
+    External {
+        owner: Box<dyn StableByteOwner>,
+        len: usize,
+    },
+    Pooled {
+        lease: StableOwnerLease,
+        len: usize,
+    },
+}
+
+const _: () = assert!(std::mem::size_of::<StableBytes>() <= 40);
+
+impl StableBytes {
+    /// Erases one byte owner's concrete type.
+    pub fn new(owner: impl StableByteOwner) -> Self {
+        let len = owner.as_bytes().len();
+        Self {
+            owner: StableBytesOwner::External {
+                owner: Box::new(owner),
+                len,
+            },
+        }
+    }
+
+    /// Retains a shared owner and its complete visible bytes.
+    pub fn from_shared<T>(owner: Arc<T>) -> Self
+    where
+        T: StableByteOwner,
+    {
+        let len = owner.as_bytes().len();
+        Self::from_shared_range(owner, 0..len)
+            .expect("a shared owner's complete byte range is valid")
+    }
+
+    /// Retains a shared owner and one validated visible byte range.
+    pub fn from_shared_range<T>(owner: Arc<T>, range: Range<usize>) -> Option<Self>
+    where
+        T: StableByteOwner,
+    {
+        (range.start <= range.end && range.end <= owner.as_bytes().len()).then(|| Self {
+            owner: StableBytesOwner::Shared { owner, range },
+        })
+    }
+
+    /// Retains a preallocated owner slot without allocating.
+    pub fn from_pooled(lease: StableOwnerLease) -> Self {
+        let len = lease.as_bytes().len();
+        Self {
+            owner: StableBytesOwner::Pooled { lease, len },
+        }
+    }
+
+    /// Returns the stable visible bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        match &self.owner {
+            StableBytesOwner::Shared { owner, range } => owner
+                .as_bytes()
+                .get(range.clone())
+                .expect("stable byte owner changed its visible length"),
+            StableBytesOwner::External { owner, len } => {
+                let bytes = owner.as_bytes();
+                assert_eq!(
+                    bytes.len(),
+                    *len,
+                    "stable byte owner changed its visible length"
+                );
+                bytes
+            }
+            StableBytesOwner::Pooled { lease, len } => {
+                let bytes = lease.as_bytes();
+                assert_eq!(
+                    bytes.len(),
+                    *len,
+                    "stable byte owner pool changed its visible length"
+                );
+                bytes
+            }
+        }
+    }
+}
+
+impl StableByteOwner for Vec<u8> {
+    fn as_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::fmt::Debug for StableBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("StableBytes")
+            .field(&self.as_slice())
+            .finish()
+    }
+}
+
+impl PartialEq for StableBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for StableBytes {}
+
+/// Type-erased ownership for one stable external byte sequence.
+///
+/// Construct this through [`WireSegment::external`].
+pub struct ExternalWireBytes(StableBytes);
+
+impl ExternalWireBytes {
+    fn new(owner: impl StableByteOwner) -> Self {
+        Self(StableBytes::new(owner))
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl std::fmt::Debug for ExternalWireBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("External")
+            .field(&self.as_slice())
+            .finish()
+    }
+}
+
+impl PartialEq for ExternalWireBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for ExternalWireBytes {}
+
+/// One owned segment in an operation-neutral wire plan.
+///
+/// Small framing prefixes stay inline while application and storage bytes
+/// retain their original allocation and logical range.
+#[derive(Debug, Eq, PartialEq)]
+pub enum WireSegment {
+    /// Framing bytes stored inline without a heap allocation.
+    Inline(SmallVec<[u8; 32]>),
+    /// Application, storage, or framing bytes retaining their allocation.
+    Owned(OwnedRange),
+    /// Bytes retaining an operation-neutral external owner.
+    External(ExternalWireBytes),
+}
+
+const _: () = assert!(std::mem::size_of::<WireSegment>() <= 48);
+
+impl WireSegment {
+    /// Copies bounded framing bytes into inline storage.
+    pub fn inline(bytes: &[u8]) -> Self {
+        Self::Inline(SmallVec::from_slice(bytes))
+    }
+
+    /// Retains owned bytes and their logical range without copying.
+    pub fn owned(bytes: impl Into<OwnedRange>) -> Self {
+        Self::Owned(bytes.into())
+    }
+
+    /// Retains an external byte owner without copying its payload.
+    pub fn external(owner: impl StableByteOwner) -> Self {
+        Self::External(ExternalWireBytes::new(owner))
+    }
+
+    /// Returns the visible wire bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline(bytes) => bytes,
+            Self::Owned(bytes) => bytes.as_slice(),
+            Self::External(bytes) => bytes.as_slice(),
+        }
+    }
+
+    /// Returns the visible byte count.
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Returns whether the segment is empty.
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
+impl From<OwnedRange> for WireSegment {
+    fn from(value: OwnedRange) -> Self {
+        Self::owned(value)
+    }
+}
+
+impl From<InlineBytes> for WireSegment {
+    fn from(value: InlineBytes) -> Self {
+        Self::Inline(value.0)
+    }
+}
+
+impl From<StableBytes> for WireSegment {
+    fn from(value: StableBytes) -> Self {
+        Self::External(ExternalWireBytes(value))
+    }
+}
+
+impl From<Vec<u8>> for WireSegment {
+    fn from(value: Vec<u8>) -> Self {
+        Self::owned(value)
+    }
+}
+
+/// Ordered owned wire segments with a checked cached byte length.
+#[derive(Debug, Eq, PartialEq)]
+pub struct SegmentFrame<A>
+where
+    A: Array<Item = WireSegment>,
+{
+    segments: SmallVec<A>,
+    encoded_len: usize,
+}
+
+impl<A> SegmentFrame<A>
+where
+    A: Array<Item = WireSegment>,
+{
+    /// Builds one frame without coalescing independently owned segments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::FrameLengthOverflow`] when the combined
+    /// segment length cannot be represented by `usize`.
+    pub fn new<I, T>(segments: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<WireSegment>,
+    {
+        let segments: SmallVec<A> = segments.into_iter().map(Into::into).collect();
+        Self::from_segments(segments)
+    }
+
+    pub(crate) fn from_segments(segments: SmallVec<A>) -> Result<Self> {
+        let encoded_len = segments.iter().try_fold(0usize, |total, segment| {
+            total
+                .checked_add(segment.len())
+                .ok_or(ProtocolError::FrameLengthOverflow)
+        })?;
+        Ok(Self {
+            segments,
+            encoded_len,
+        })
+    }
+
+    /// Returns the ordered segments without exposing their storage.
+    pub fn segments(&self) -> &[WireSegment] {
+        &self.segments
+    }
+
+    /// Returns the checked complete frame length.
+    pub const fn len(&self) -> usize {
+        self.encoded_len
+    }
+
+    /// Returns whether the frame contains no visible bytes.
+    pub const fn is_empty(&self) -> bool {
+        self.encoded_len == 0
+    }
+
+    /// Recovers the ordered segment owners without copying payload bytes.
+    pub fn into_segments(self) -> SmallVec<A> {
+        self.segments
+    }
+}
+
+/// Compatibility name for response APIs while ownership becomes shared.
+pub use WireSegment as ResponseSegment;
