@@ -488,3 +488,8 @@ bun run pack:check   # also builds host native adapters
 `src/generated_local/`; release packaging adds platform `.node` adapters under
 ignored `target/native/`. Private integration tests live in the monorepo's
 `tests/clients/` workspace rather than this public package.
+
+Maintainers should follow [`RELEASING.md`](./RELEASING.md) for the versioned
+npm publication process. `bun run release:dry-run` validates the complete
+multi-platform artifact without publishing; `bun run release:publish` is the
+only package-local command that performs the authenticated publication.
