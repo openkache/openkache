@@ -26,6 +26,7 @@ filegroup(
     srcs = [
         "Cargo.toml",
         "README.md",
+        "LICENSE",
         "build.rs",
     ] + glob([
         "model/**",

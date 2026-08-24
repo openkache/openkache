@@ -18,8 +18,8 @@ use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
 use openkache_protocol::ITEM_ID_BYTES;
 use openkache_value::{
-    Limits as StructuredLimits, Value as StructuredValue, decode_with_limits_and_budget,
-    encode_with_limits_and_budget,
+    Float, FloatWidth, Limits as StructuredLimits, Value as StructuredValue,
+    decode_with_limits_and_budget, encode_with_limits_and_budget,
 };
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
@@ -2753,7 +2753,10 @@ fn json_to_structured(
         Ok(match value {
             JsonValue::Null => StructuredValue::Null,
             JsonValue::Boolean(value) => StructuredValue::Boolean(*value),
-            JsonValue::Number(value) => StructuredValue::Float64(value.to_bits()),
+            JsonValue::Number(value) => StructuredValue::Float(Float {
+                width: FloatWidth::Bits64,
+                raw_bits: value.to_bits(),
+            }),
             JsonValue::String(value) => {
                 StructuredValue::TextString(allocation.clone_string(value)?)
             }
@@ -2807,11 +2810,17 @@ fn structured_to_json(
             StructuredValue::Undefined => None,
             StructuredValue::Null => Some(JsonValue::Null),
             StructuredValue::Boolean(value) => Some(JsonValue::Boolean(*value)),
-            StructuredValue::Float16(bits) => Some(JsonValue::number(f16_to_f64(*bits))?),
-            StructuredValue::Float32(bits) => {
-                Some(JsonValue::number(f32::from_bits(*bits) as f64)?)
+            StructuredValue::Float(float) => {
+                if !float.is_valid() {
+                    return Err(Error::UnsupportedStructuredValue);
+                }
+                let value = match float.width {
+                    FloatWidth::Bits16 => f16_to_f64(float.raw_bits as u16),
+                    FloatWidth::Bits32 => f32::from_bits(float.raw_bits as u32) as f64,
+                    FloatWidth::Bits64 => f64::from_bits(float.raw_bits),
+                };
+                Some(JsonValue::number(value)?)
             }
-            StructuredValue::Float64(bits) => Some(JsonValue::number(f64::from_bits(*bits))?),
             StructuredValue::Integer(integer) => {
                 Some(JsonValue::number(integer_to_binary64(integer)?)?)
             }

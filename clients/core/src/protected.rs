@@ -8,8 +8,8 @@ use crate::value::{Compression, Encryption, JsonValue, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts, ConnectionState,
     DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
-    NamespaceDescriptor, NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust,
-    SetOptions, SetOutcome, TypedKey,
+    NamespaceDescriptor, NamespacePolicy, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    TypedKey,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -53,10 +53,11 @@ impl ProtectionSettings {
     fn finish_with_budget(self, budget: crate::RequestBudget) -> Result<Arc<DataProtection>> {
         let protection = match self.key {
             Some(key) => match self.keyring {
-                Some(keyring) => DataProtection::with_keyring_and_key_spec(
+                Some(keyring) => DataProtection::with_keyring_and_key_spec_and_format(
                     key,
                     keyring,
                     self.key_spec,
+                    self.key_format,
                     self.compression,
                     self.encryption,
                 ),
@@ -297,7 +298,7 @@ macro_rules! protected_client_methods {
 
         /// Retrieves and validates a canonical JSON helper value for a
         /// portable key. JSON is stored as selector-0 `OpaqueBytes`.
-        pub async fn get_json(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<JsonValue>> {
+        pub async fn get_json(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<JsonValue>> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
             self.get_json_at_item_id(namespace_id, item_id).await
@@ -306,7 +307,7 @@ macro_rules! protected_client_methods {
         /// Retrieves and decodes a StructuredValue-CBOR-v1 value for a portable key.
         pub async fn get_structured(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
         ) -> Result<GetOutcome<StructuredValue>> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
@@ -566,7 +567,7 @@ macro_rules! protected_client_methods {
         /// `OpaqueBytes`.
         pub async fn set_json(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             value: JsonValue,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -583,7 +584,7 @@ macro_rules! protected_client_methods {
         /// Serializes, protects, and stores a StructuredValue-CBOR-v1 value for a portable key.
         pub async fn set_structured(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             value: StructuredValue,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -651,7 +652,7 @@ macro_rules! protected_client_methods {
         /// Stores a caller-owned version-0 envelope at a portable key.
         pub async fn set_v0(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             bytes: Vec<u8>,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -664,7 +665,7 @@ macro_rules! protected_client_methods {
         }
 
         /// Retrieves a caller-owned version-0 envelope at a portable key.
-        pub async fn get_v0(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
+        pub async fn get_v0(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
             match self

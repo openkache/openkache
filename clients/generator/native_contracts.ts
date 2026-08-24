@@ -609,6 +609,12 @@ pub const CLIENT_GATE0_ITEM_ID_ROOT: [u8; ${gate0_item_id_root.length}] = ${rust
 pub const CLIENT_GATE0_NAMESPACE_ID: u64 = ${formatted_decimal(defaults.gate0_namespace_id)};
 /// Gate 0's fixed value-format selector byte.
 pub const CLIENT_GATE0_VALUE_SELECTOR: u8 = ${formatted_byte(defaults.gate0_value_selector)};
+/// Gate 0 namespace ID retained under the original Rust facade name.
+pub const GATE0_NAMESPACE_ID: u64 = CLIENT_GATE0_NAMESPACE_ID;
+/// Gate 0 Item-ID root retained under the original Rust facade name.
+pub const GATE0_ITEM_ID_ROOT: [u8; ${gate0_item_id_root.length}] = CLIENT_GATE0_ITEM_ID_ROOT;
+/// Gate 0 value-format selector retained under the original Rust facade name.
+pub const GATE0_VALUE_FORMAT_SELECTOR: u8 = CLIENT_GATE0_VALUE_SELECTOR;
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
