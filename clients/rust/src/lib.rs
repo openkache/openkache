@@ -1,1102 +1,214 @@
-//! Ergonomic asynchronous Rust API for the OpenKache cache server.
+//! The maintained OpenKache Rust client.
 //!
-//! The default [`Client`] uses Tokio and Quinn. The crate also exposes a
-//! Compio-local client and a TLS-over-TCP client behind feature flags. All
-//! variants share the same key mapping, value protection, retry, deadline,
-//! and bounded-resource contracts from [`openkache_client_core`].
-//!
-//! Start with [`Client::connect`] for system-trusted endpoints or
-//! [`Client::builder`] when a certificate, mutual-TLS identity, namespace, or
-//! transport policy must be explicit. The published crate contains a
-//! generated Smithy fallback, so documentation and downstream builds do not
-//! need the repository's Bun/Smithy toolchain.
-#![doc(html_root_url = "https://docs.rs/openkache-client/0.1.0")]
+//! The published facade intentionally has one small surface: [`Client::connect`],
+//! [`Client::get`], [`Client::set`], [`Client::delete`], and [`Client::close`].
+//! Gate 0 fixes the development transport profile, NamespaceHash key mapping,
+//! and `StructuredValue-CBOR-v1`; callers cannot select certificates,
+//! protection, compression, retries, or cancellation.
 
-#[cfg(feature = "ffi")]
-pub mod ffi;
+#![doc(html_root_url = "https://docs.rs/openkache/0.1.0")]
 
-/// Smithy-generated service operation inputs, outputs, enums, and client trait.
-pub mod smithy {
-    include!(concat!(env!("OUT_DIR"), "/smithy_api.rs"));
-}
+#[path = "internal/core/lib.rs"]
+#[allow(
+    dead_code,
+    rustdoc::private_intra_doc_links,
+    unexpected_cfgs,
+    unused_imports
+)]
+mod internal_core;
+#[path = "internal/protocol/lib.rs"]
+#[allow(dead_code, unexpected_cfgs, unused_imports)]
+mod internal_protocol;
+#[path = "internal/value/lib.rs"]
+#[allow(dead_code, unexpected_cfgs, unused_imports)]
+mod internal_value;
 
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
-use std::future::{Future, IntoFuture};
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
-use std::pin::Pin;
-use std::sync::Arc;
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
-use std::time::Duration;
+mod maintained {
+    use std::fmt;
 
-/// Client-only generated defaults, ABI discriminators, and value-format identifiers.
-pub use openkache_client_core::contract;
-#[allow(deprecated)]
-pub use openkache_client_core::{
-    AlpnPolicy, Backend, BytePermit, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity,
-    ClientRootKey, ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
-    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, InFlightByteBudget, ItemId,
-    ItemValue, KeyError, KeyFormat, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
-    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PrivateKey,
-    RequestBudget, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions,
-    SetOutcome, StructuredValue, TypedInteger, TypedKey, ValueKeyring, canonical_key_bytes, value,
-    value_envelope,
-};
-#[cfg(feature = "quic-compio")]
-use openkache_client_core::{
-    LocalProtectedClient as SharedLocalClient,
-    LocalProtectedClientBuilder as SharedLocalClientBuilder,
-};
-#[cfg(feature = "quic-compio")]
-pub use openkache_client_core::{LocalRawClient, LocalRawClientBuilder};
-#[cfg(feature = "quic-quinn")]
-use openkache_client_core::{
-    ProtectedClient as SharedClient, ProtectedClientBuilder as SharedClientBuilder,
-};
-#[cfg(feature = "quic-quinn")]
-pub use openkache_client_core::{RawClient, RawClientBuilder};
-#[cfg(feature = "tls-tcp")]
-use openkache_client_core::{
-    TlsTcpProtectedClient as SharedTlsTcpClient,
-    TlsTcpProtectedClientBuilder as SharedTlsTcpClientBuilder,
-};
-#[cfg(feature = "tls-tcp")]
-pub use openkache_client_core::{TlsTcpRawClient, TlsTcpRawClientBuilder};
+    use super::internal_core as core;
+    use core::value::{Compression, Encryption};
+    use core::{GetOutcome as CoreGetOutcome, Operation, SetOutcome as CoreSetOutcome};
 
-fn smithy_set_options(
-    condition: Option<smithy::SetCondition>,
-    expiration_mode: Option<smithy::ExpirationMode>,
-    ttl_milliseconds: Option<u64>,
-    eviction_mode: Option<smithy::EvictionMode>,
-) -> Result<SetOptions> {
-    let mut options = match condition {
-        None => SetOptions::new(),
-        Some(smithy::SetCondition::Any) => SetOptions::new(),
-        Some(smithy::SetCondition::IfAbsent) => SetOptions::new().if_absent(),
-        Some(smithy::SetCondition::IfPresent) => SetOptions::new().if_present(),
+    pub use super::internal_value::{
+        Error as ValueError, Float, FloatWidth, Integer, Limits as ValueLimits, Sign, Value,
     };
-    match expiration_mode.unwrap_or(smithy::ExpirationMode::Inherit) {
-        smithy::ExpirationMode::Inherit => {
-            if ttl_milliseconds.is_some() {
-                return Err(Error::Configuration {
-                    field: "set.ttl_milliseconds",
-                    message: format!(
-                        "is only valid with {} expiration mode",
-                        contract::SMITHY_EXPIRATION_MODE_EXPLICIT_TTL
-                    ),
-                });
+    pub use core::KeyError;
+    pub use core::TypedKey;
+
+    /// A successful lookup result. `Missing` is distinct from every stored
+    /// value, including `Value::Null` and `Value::Undefined`.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum GetResult<T> {
+        /// No item exists for the supplied key.
+        Missing,
+        /// The item exists and contains the supplied value.
+        Found(T),
+    }
+
+    /// Result of an unconditional `set`.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SetOutcome {
+        /// The key was absent and a new item was created.
+        Created,
+        /// An existing item was replaced.
+        Replaced,
+    }
+
+    /// Result of an idempotent `delete`.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum DeleteOutcome {
+        /// An existing item was removed.
+        Deleted,
+        /// No item existed for the supplied key.
+        NotFound,
+    }
+
+    /// A mutation whose response was lost after admission.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Mutation {
+        /// The unknown operation was `set`.
+        Set,
+        /// The unknown operation was `delete`.
+        Delete,
+    }
+
+    /// Errors returned by the maintained facade.
+    #[derive(Debug, thiserror::Error)]
+    pub enum Error {
+        /// A mutation may have taken effect, but the response could not be
+        /// confirmed. The client never retries this operation automatically.
+        #[error("{operation:?} result is unknown after request admission")]
+        UnknownMutation {
+            /// The mutation whose result is unknown.
+            operation: Mutation,
+        },
+        /// A connection, protocol, key, or value failure from the internal
+        /// implementation.
+        #[error("client operation failed: {0}")]
+        Core(String),
+        /// The server returned a conditional-set status even though Gate 0
+        /// never sends conditional options.
+        #[error("server returned an unsupported set outcome")]
+        UnsupportedSetOutcome,
+    }
+
+    /// Result alias for the maintained facade.
+    pub type Result<T> = std::result::Result<T, Error>;
+
+    impl<T> GetResult<T> {
+        /// Applies a function only when the lookup found an item.
+        pub fn map<U>(self, function: impl FnOnce(T) -> U) -> GetResult<U> {
+            match self {
+                Self::Missing => GetResult::Missing,
+                Self::Found(value) => GetResult::Found(function(value)),
             }
-            options = options.inherit_expiration();
-        }
-        smithy::ExpirationMode::NoExpiry => {
-            if ttl_milliseconds.is_some() {
-                return Err(Error::Configuration {
-                    field: "set.ttl_milliseconds",
-                    message: format!(
-                        "is only valid with {} expiration mode",
-                        contract::SMITHY_EXPIRATION_MODE_EXPLICIT_TTL
-                    ),
-                });
-            }
-            options = options.no_expiry();
-        }
-        smithy::ExpirationMode::ExplicitTtl => {
-            let ttl_milliseconds = ttl_milliseconds.ok_or_else(|| Error::Configuration {
-                field: "set.ttl_milliseconds",
-                message: format!(
-                    "is required with {} expiration mode",
-                    contract::SMITHY_EXPIRATION_MODE_EXPLICIT_TTL
-                ),
-            })?;
-            if ttl_milliseconds == 0 {
-                return Err(Error::Configuration {
-                    field: "set.ttl_milliseconds",
-                    message: "must be greater than zero milliseconds".into(),
-                });
-            }
-            options = options.expires_after_millis(ttl_milliseconds);
         }
     }
-    match eviction_mode.unwrap_or(smithy::EvictionMode::Inherit) {
-        smithy::EvictionMode::Inherit => {
-            options = options.inherit_eviction();
-        }
-        smithy::EvictionMode::Evictable => {
-            options = options.evictable();
-        }
-        smithy::EvictionMode::EvictionProtected => {
-            options = options.eviction_protected();
+
+    impl fmt::Display for Mutation {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(match self {
+                Self::Set => "set",
+                Self::Delete => "delete",
+            })
         }
     }
-    Ok(options)
-}
 
-fn smithy_namespace_policy(policy: smithy::NamespacePolicy) -> Result<NamespacePolicy> {
-    let default_expiration = match policy.default_expiration {
-        smithy::ExpirationDefault::NoExpiry => {
-            if policy.default_ttl_milliseconds.is_some() {
-                return Err(Error::Configuration {
-                    field: "namespace.policy.default_ttl_milliseconds",
-                    message: format!(
-                        "is only valid with {} expiration",
-                        contract::SMITHY_EXPIRATION_DEFAULT_FIXED_TTL
-                    ),
-                });
-            }
-            ExpirationDefault::NoExpiry
-        }
-        smithy::ExpirationDefault::FixedTtl => {
-            let ttl_ms = policy
-                .default_ttl_milliseconds
-                .ok_or_else(|| Error::Configuration {
-                    field: "namespace.policy.default_ttl_milliseconds",
-                    message: format!(
-                        "is required with {} expiration",
-                        contract::SMITHY_EXPIRATION_DEFAULT_FIXED_TTL
-                    ),
-                })?;
-            if ttl_ms == 0 {
-                return Err(Error::Configuration {
-                    field: "namespace.policy.default_ttl_milliseconds",
-                    message: "must be greater than zero milliseconds".into(),
-                });
-            }
-            ExpirationDefault::FixedTtl { ttl_ms }
-        }
-    };
-    Ok(NamespacePolicy {
-        default_expiration,
-        expiration_override: match policy.expiration_override {
-            smithy::OverridePolicy::Allowed => OverridePolicy::Allowed,
-            smithy::OverridePolicy::Disallowed => OverridePolicy::Disallowed,
-        },
-        default_eviction: match policy.default_eviction {
-            smithy::EvictionDefault::Evictable => EvictionDefault::Evictable,
-            smithy::EvictionDefault::EvictionProtected => EvictionDefault::EvictionProtected,
-        },
-        eviction_override: match policy.eviction_override {
-            smithy::OverridePolicy::Allowed => OverridePolicy::Allowed,
-            smithy::OverridePolicy::Disallowed => OverridePolicy::Disallowed,
-        },
-    })
-}
-
-fn smithy_namespace_descriptor(descriptor: NamespaceDescriptor) -> smithy::NamespaceDescriptor {
-    let (default_expiration, default_ttl_milliseconds) = match descriptor.policy.default_expiration
-    {
-        ExpirationDefault::NoExpiry => (smithy::ExpirationDefault::NoExpiry, None),
-        ExpirationDefault::FixedTtl { ttl_ms } => {
-            (smithy::ExpirationDefault::FixedTtl, Some(ttl_ms))
-        }
-    };
-    smithy::NamespaceDescriptor {
-        namespace_id: descriptor.namespace_id,
-        revision: descriptor.revision,
-        policy: smithy::NamespacePolicy {
-            default_expiration,
-            default_ttl_milliseconds,
-            expiration_override: match descriptor.policy.expiration_override {
-                OverridePolicy::Allowed => smithy::OverridePolicy::Allowed,
-                OverridePolicy::Disallowed => smithy::OverridePolicy::Disallowed,
-            },
-            default_eviction: match descriptor.policy.default_eviction {
-                EvictionDefault::Evictable => smithy::EvictionDefault::Evictable,
-                EvictionDefault::EvictionProtected => smithy::EvictionDefault::EvictionProtected,
-            },
-            eviction_override: match descriptor.policy.eviction_override {
-                OverridePolicy::Allowed => smithy::OverridePolicy::Allowed,
-                OverridePolicy::Disallowed => smithy::OverridePolicy::Disallowed,
-            },
-        },
-    }
-}
-
-macro_rules! impl_smithy_api {
-    ($client:ident) => {
-        impl smithy::OpenKacheApi for $client {
-            type Error = Error;
-
-            async fn ping(
-                &self,
-                _input: smithy::PingInput,
-            ) -> std::result::Result<smithy::PingOutput, Self::Error> {
-                $client::ping(self).await?;
-                Ok(smithy::PingOutput {
-                    payload: Vec::new(),
-                })
-            }
-
-            async fn get(
-                &self,
-                input: smithy::GetInput,
-            ) -> std::result::Result<smithy::GetOutput, Self::Error> {
-                let item_id = ItemId::from_slice(&input.item_id)?;
-                let value =
-                    match $client::get_in_namespace(self, input.namespace_id, item_id).await? {
-                        GetOutcome::Found(value) => Some(value.into_bytes()),
-                        GetOutcome::NotFound => None,
-                    };
-                Ok(smithy::GetOutput { value })
-            }
-
-            async fn set(
-                &self,
-                input: smithy::SetInput,
-            ) -> std::result::Result<smithy::SetOutput, Self::Error> {
-                let item_id = ItemId::from_slice(&input.item_id)?;
-                let options = smithy_set_options(
-                    input.condition,
-                    input.expiration_mode,
-                    input.ttl_milliseconds,
-                    input.eviction_mode,
-                )?;
-                let outcome = $client::set_in_namespace(
-                    self,
-                    input.namespace_id,
-                    item_id,
-                    ItemValue::new(input.value),
-                    options,
-                )
-                .await?;
-                let outcome = match outcome {
-                    SetOutcome::Created => smithy::SetOutcome::Created,
-                    SetOutcome::Replaced => smithy::SetOutcome::Replaced,
-                    SetOutcome::NotStored => smithy::SetOutcome::NotStored,
+    fn map_core_error(error: core::Error) -> Error {
+        match error {
+            core::Error::AmbiguousOutcome { operation, .. } => {
+                let operation = match operation {
+                    Operation::Delete => Mutation::Delete,
+                    _ => Mutation::Set,
                 };
-                Ok(smithy::SetOutput { outcome })
+                Error::UnknownMutation { operation }
             }
-
-            async fn delete(
-                &self,
-                input: smithy::DeleteInput,
-            ) -> std::result::Result<smithy::DeleteOutput, Self::Error> {
-                let item_id = ItemId::from_slice(&input.item_id)?;
-                let deleted = $client::delete_in_namespace(self, input.namespace_id, item_id)
-                    .await?
-                    == DeleteOutcome::Deleted;
-                Ok(smithy::DeleteOutput { deleted })
-            }
-
-            async fn experimental_stats(
-                &self,
-                input: smithy::ExperimentalStatsInput,
-            ) -> std::result::Result<smithy::ExperimentalStatsOutput, Self::Error> {
-                let json =
-                    $client::experimental_stats_in_namespace(self, input.namespace_id).await?;
-                Ok(smithy::ExperimentalStatsOutput { json })
-            }
-
-            async fn experimental_sync(
-                &self,
-                input: smithy::ExperimentalSyncInput,
-            ) -> std::result::Result<smithy::ExperimentalSyncOutput, Self::Error> {
-                $client::experimental_sync_in_namespace(self, input.namespace_id).await?;
-                Ok(smithy::ExperimentalSyncOutput)
-            }
-
-            async fn namespace_open(
-                &self,
-                input: smithy::NamespaceOpenInput,
-            ) -> std::result::Result<smithy::NamespaceOpenOutput, Self::Error> {
-                let policy = input.policy.map(smithy_namespace_policy).transpose()?;
-                let (descriptor, created) = $client::namespace_open_with_outcome(
-                    self,
-                    input.name.into_bytes(),
-                    input.create_if_missing,
-                    policy,
-                )
-                .await?;
-                Ok(smithy::NamespaceOpenOutput {
-                    descriptor: smithy_namespace_descriptor(descriptor),
-                    created,
-                })
-            }
-
-            async fn namespace_update_policy(
-                &self,
-                input: smithy::NamespaceUpdatePolicyInput,
-            ) -> std::result::Result<smithy::NamespaceUpdatePolicyOutput, Self::Error> {
-                let policy = smithy_namespace_policy(input.policy)?;
-                let descriptor = $client::namespace_update_policy(
-                    self,
-                    input.namespace_id,
-                    input.expected_revision,
-                    policy,
-                )
-                .await?;
-                Ok(smithy::NamespaceUpdatePolicyOutput {
-                    descriptor: smithy_namespace_descriptor(descriptor),
-                })
-            }
-
-            async fn namespace_delete(
-                &self,
-                input: smithy::NamespaceDeleteInput,
-            ) -> std::result::Result<smithy::NamespaceDeleteOutput, Self::Error> {
-                $client::namespace_delete(self, input.namespace_id, input.expected_revision)
-                    .await?;
-                Ok(smithy::NamespaceDeleteOutput)
-            }
-        }
-    };
-}
-
-#[cfg(feature = "quic-quinn")]
-impl_smithy_api!(RawClient);
-
-#[cfg(feature = "quic-compio")]
-impl_smithy_api!(LocalRawClient);
-
-#[cfg(feature = "tls-tcp")]
-impl_smithy_api!(TlsTcpRawClient);
-
-macro_rules! builder_methods {
-    ($builder:ident) => {
-        impl $builder {
-            /// Uses only the supplied server trust roots.
-            pub fn server_trust(mut self, trust: ServerTrust) -> Self {
-                self.inner = self.inner.server_trust(trust);
-                self
-            }
-
-            /// Trusts one explicit CA or self-signed server certificate.
-            pub fn trust_certificate(mut self, certificate: Certificate) -> Self {
-                self.inner = self.inner.trust_certificate(certificate);
-                self
-            }
-
-            /// Presents a mutual TLS client identity.
-            pub fn client_identity(mut self, identity: ClientIdentity) -> Self {
-                self.inner = self.inner.client_identity(identity);
-                self
-            }
-
-            /// Configures the supported `openkache/1` protocol.
-            pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
-                self.inner = self.inner.alpn_policy(policy);
-                self
-            }
-
-            /// Sets connection and complete-request deadlines.
-            pub fn timeouts(mut self, timeouts: ClientTimeouts) -> Self {
-                self.inner = self.inner.timeouts(timeouts);
-                self
-            }
-
-            /// Sets retry attempts for response-safe operations.
-            pub fn retry_policy(mut self, retry: RetryPolicy) -> Self {
-                self.inner = self.inner.retry_policy(retry);
-                self
-            }
-
-            /// Bounds simultaneous request lanes on one connection.
-            ///
-            /// TLS-over-TCP always exposes one ordered lane; for that
-            /// transport this setting is retained for source compatibility
-            /// and the shared core enforces the one-lane limit.
-            pub fn max_in_flight(mut self, maximum: usize) -> Self {
-                self.inner = self.inner.max_in_flight(maximum);
-                self
-            }
-
-            /// Sets the aggregate bytes retained across transport and value work.
-            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
-                self.inner = self.inner.max_in_flight_bytes(maximum);
-                self
-            }
-
-            /// Selects a previously server-assigned namespace ID without resolving a name.
-            pub fn namespace_id(mut self, namespace_id: u64) -> Self {
-                self.inner = self.inner.namespace_id(namespace_id);
-                self
-            }
-
-            /// Resolves this namespace name with `CreateIfMissing` during connection setup.
-            pub fn namespace_name(mut self, namespace_name: impl AsRef<[u8]>) -> Self {
-                self.inner = self.inner.namespace_name(namespace_name);
-                self
-            }
-
-            /// Supplies the policy used if the configured namespace name is missing.
-            pub fn namespace_policy(mut self, policy: NamespacePolicy) -> Self {
-                self.inner = self.inner.namespace_policy(policy);
-                self
-            }
-
-            /// Applies optional client-side compression before encryption.
-            pub fn compression(mut self, compression: value::Compression) -> Self {
-                self.inner = self.inner.compression(compression);
-                self
-            }
-
-            /// Selects the authenticated-encryption profile for stored values.
-            ///
-            /// # Arguments
-            ///
-            /// * `encryption` - Compact or Robust authenticated-encryption profile.
-            ///
-            /// # Returns
-            ///
-            /// This builder with the selected value protection profile.
-            pub fn encryption(mut self, encryption: value::Encryption) -> Self {
-                self.inner = self.inner.encryption(encryption);
-                self
-            }
-
-            /// Retains the pre-contract key-type selector for source
-            /// compatibility.
-            ///
-            /// v1 infers `TypedKey` from each operation; a namespace does not
-            /// enforce one key type. New callers should omit this setting.
-            #[deprecated(note = "TypedKey is inferred per operation in v1")]
-            #[allow(deprecated)]
-            pub fn key_spec(mut self, key_spec: KeyType) -> Self {
-                self.inner = self.inner.key_spec(key_spec);
-                self
-            }
-
-            /// Configures immutable value-key IDs for read-old/write-new rotation.
-            pub fn value_keyring(mut self, keyring: ValueKeyring) -> Self {
-                self.inner = self.inner.value_keyring(keyring);
-                self
-            }
-
-            /// Selects the client-local Item ID mapping profile.
-            ///
-            /// `NamespaceHash` is the default and binds mapped keys to the
-            /// configured root and namespace. `PublicKeyOrHash` is an
-            /// explicit opt-in for public, cross-namespace key identity.
-            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
-                self.inner = self.inner.key_format(key_format);
-                self
-            }
-        }
-    };
-}
-
-#[cfg(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp"))]
-macro_rules! client_methods {
-    ($client:ident, $request:ident) => {
-        impl $client {
-            /// Verifies the connection and returns the complete request round-trip time.
-            pub async fn ping(&self) -> Result<Duration> {
-                self.inner.ping().await
-            }
-
-            /// Returns the currently selected server-assigned namespace ID.
-            pub fn namespace_id(&self) -> Option<u64> {
-                self.inner.namespace_id()
-            }
-
-            /// Resolves a namespace name and optionally creates it.
-            pub async fn namespace_open(
-                &self,
-                name: impl AsRef<[u8]>,
-                create_if_missing: bool,
-                policy: Option<NamespacePolicy>,
-            ) -> Result<NamespaceDescriptor> {
-                self.inner
-                    .namespace_open(name, create_if_missing, policy)
-                    .await
-            }
-
-            /// Replaces a namespace policy using its current revision.
-            pub async fn namespace_update_policy(
-                &self,
-                namespace_id: u64,
-                expected_revision: u64,
-                policy: NamespacePolicy,
-            ) -> Result<NamespaceDescriptor> {
-                self.inner
-                    .namespace_update_policy(namespace_id, expected_revision, policy)
-                    .await
-            }
-
-            /// Deletes an empty namespace using its current revision.
-            pub async fn namespace_delete(
-                &self,
-                namespace_id: u64,
-                expected_revision: u64,
-            ) -> Result<()> {
-                self.inner
-                    .namespace_delete(namespace_id, expected_revision)
-                    .await
-            }
-
-            /// Retrieves and decodes a value for a portable key.
-            pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
-                self.inner.get(key).await
-            }
-
-            /// Retrieves and decodes a value in the shared logical value model.
-            pub async fn get_value(
-                &self,
-                key: impl Into<TypedKey>,
-            ) -> Result<GetOutcome<value::Value>> {
-                self.inner.get_value(key).await
-            }
-
-            /// Retrieves a canonical JSON helper value stored as selector-0
-            /// `OpaqueBytes`.
-            pub async fn get_json(
-                &self,
-                key: impl Into<TypedKey>,
-            ) -> Result<GetOutcome<value::JsonValue>> {
-                self.inner.get_json(key).await
-            }
-
-            /// Retrieves a StructuredValue-CBOR-v1 value without JSON
-            /// reinterpretation.
-            pub async fn get_structured(
-                &self,
-                key: impl Into<TypedKey>,
-            ) -> Result<GetOutcome<StructuredValue>> {
-                self.inner.get_structured(key).await
-            }
-
-            /// Retrieves canonical JSON at an exact Item ID.
-            pub async fn get_json_exact_item_id(
-                &self,
-                namespace_id: u64,
-                item_id: ItemId,
-            ) -> Result<GetOutcome<value::JsonValue>> {
-                self.inner
-                    .get_json_exact_item_id(namespace_id, item_id)
-                    .await
-            }
-
-            /// Retrieves StructuredValue-CBOR-v1 at an exact Item ID.
-            pub async fn get_structured_exact_item_id(
-                &self,
-                namespace_id: u64,
-                item_id: ItemId,
-            ) -> Result<GetOutcome<StructuredValue>> {
-                self.inner
-                    .get_structured_exact_item_id(namespace_id, item_id)
-                    .await
-            }
-
-            /// Retrieves a caller-owned version-0 envelope for a portable key.
-            pub async fn get_v0(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
-                self.inner.get_v0(key).await
-            }
-
-            /// Retrieves a caller-owned version-0 envelope at an exact Item ID.
-            pub async fn get_v0_exact_item_id(
-                &self,
-                namespace_id: u64,
-                item_id: ItemId,
-            ) -> Result<GetOutcome<Vec<u8>>> {
-                self.inner.get_v0_exact_item_id(namespace_id, item_id).await
-            }
-
-            /// Deletes a value for a portable key.
-            pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
-                self.inner.delete(key).await
-            }
-
-            /// Serializes, protects, and stores a value in the shared logical value model.
-            pub async fn set_value(
-                &self,
-                key: impl Into<TypedKey>,
-                value: value::Value,
-                options: SetOptions,
-            ) -> Result<SetOutcome> {
-                self.inner.set_value(key, value, options).await
-            }
-
-            /// Canonicalizes and stores a JSON helper value as selector-0
-            /// `OpaqueBytes`.
-            pub async fn set_json(
-                &self,
-                key: impl Into<TypedKey>,
-                value: value::JsonValue,
-                options: SetOptions,
-            ) -> Result<SetOutcome> {
-                self.inner.set_json(key, value, options).await
-            }
-
-            /// Stores a StructuredValue-CBOR-v1 value without JSON
-            /// reinterpretation.
-            pub async fn set_structured(
-                &self,
-                key: impl Into<TypedKey>,
-                value: StructuredValue,
-                options: SetOptions,
-            ) -> Result<SetOutcome> {
-                self.inner.set_structured(key, value, options).await
-            }
-
-            /// Stores canonical JSON at an exact Item ID.
-            pub async fn set_json_exact_item_id(
-                &self,
-                namespace_id: u64,
-                item_id: ItemId,
-                value: value::JsonValue,
-                options: SetOptions,
-            ) -> Result<SetOutcome> {
-                self.inner
-                    .set_json_exact_item_id(namespace_id, item_id, value, options)
-                    .await
-            }
-
-            /// Stores StructuredValue-CBOR-v1 at an exact Item ID.
-            pub async fn set_structured_exact_item_id(
-                &self,
-                namespace_id: u64,
-                item_id: ItemId,
-                value: StructuredValue,
-                options: SetOptions,
-            ) -> Result<SetOutcome> {
-                self.inner
-                    .set_structured_exact_item_id(namespace_id, item_id, value, options)
-                    .await
-            }
-
-            /// Stores a caller-owned version-0 envelope for a portable key.
-            pub async fn set_v0(
-                &self,
-                key: impl Into<TypedKey>,
-                value: Vec<u8>,
-                options: SetOptions,
-            ) -> Result<SetOutcome> {
-                self.inner.set_v0(key, value, options).await
-            }
-
-            /// Stores a caller-owned version-0 envelope at an exact Item ID.
-            pub async fn set_v0_exact_item_id(
-                &self,
-                namespace_id: u64,
-                item_id: ItemId,
-                value: Vec<u8>,
-                options: SetOptions,
-            ) -> Result<SetOutcome> {
-                self.inner
-                    .set_v0_exact_item_id(namespace_id, item_id, value, options)
-                    .await
-            }
-
-            /// Returns server statistics as their JSON text.
-            pub async fn experimental_stats(&self) -> Result<String> {
-                self.inner.experimental_stats().await
-            }
-
-            /// Waits until prior mutations satisfy the server durability barrier.
-            pub async fn experimental_sync(&self) -> Result<()> {
-                self.inner.experimental_sync().await
-            }
-
-            /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
-            pub fn connection_state(&self) -> ConnectionState {
-                self.inner.connection_state()
-            }
-
-            /// Explicitly replaces the current connection without replaying an operation.
-            pub async fn reconnect(&self) -> Result<()> {
-                self.inner.reconnect().await
-            }
-
-            /// Permanently and idempotently closes this client instance.
-            pub async fn close(&self) -> Result<()> {
-                self.inner.close().await
-            }
-
-            /// Starts an awaitable set request inheriting namespace policy defaults.
-            pub fn set<'a>(
-                &'a self,
-                key: impl Into<TypedKey>,
-                value: impl IntoValue,
-            ) -> $request<'a> {
-                self.set_with_options(key, value, SetOptions::new())
-            }
-
-            /// Starts an awaitable set request with explicit wire-level options.
-            pub fn set_with_options<'a>(
-                &'a self,
-                key: impl Into<TypedKey>,
-                value: impl IntoValue,
-                options: SetOptions,
-            ) -> $request<'a> {
-                $request {
-                    client: self,
-                    application_key: key.into(),
-                    value: value.into_value(),
-                    options,
-                }
-            }
-        }
-    };
-}
-
-#[cfg(feature = "quic-quinn")]
-/// High-level application-key and plaintext-value client running on Tokio and Quinn.
-#[derive(Clone)]
-pub struct Client {
-    inner: SharedClient,
-}
-
-#[cfg(feature = "quic-quinn")]
-/// Connection and value-layer builder for Tokio clients.
-pub struct ClientBuilder {
-    inner: SharedClientBuilder,
-}
-
-#[cfg(feature = "quic-quinn")]
-builder_methods!(ClientBuilder);
-
-#[cfg(feature = "quic-quinn")]
-impl ClientBuilder {
-    /// Connects a Tokio/Quinn client with the configured layers.
-    pub async fn connect(self) -> Result<Client> {
-        self.inner.connect().await.map(|inner| Client { inner })
-    }
-}
-
-#[cfg(feature = "quic-quinn")]
-impl Client {
-    /// Connects with data protection, system trust, and default client behavior.
-    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
-        Self::builder(endpoint.parse()?, data_protection_key)
-            .connect()
-            .await
-    }
-
-    /// Starts explicit client configuration.
-    pub fn builder(endpoint: Endpoint, data_protection_key: DataProtectionKey) -> ClientBuilder {
-        ClientBuilder {
-            inner: SharedClient::builder(endpoint, data_protection_key),
+            other => Error::Core(other.to_string()),
         }
     }
 
-    /// Starts a client with an explicit Item-ID root and independent value
-    /// keyring.
+    #[cfg(feature = "quic-quinn")]
+    use core::ProtectedClient;
+
+    /// A connected Gate 0 client.
     ///
-    /// [`ClientRootKey::public`] (or [`ClientRootKey::zero`]) intentionally
-    /// selects publicly derivable Item IDs. Value confidentiality comes only
-    /// from the supplied keyring.
-    pub fn builder_with_keyring(
-        endpoint: Endpoint,
-        item_id_root: ClientRootKey,
-        keyring: ValueKeyring,
-    ) -> ClientBuilder {
-        ClientBuilder {
-            inner: SharedClient::builder_with_keyring(endpoint, item_id_root, keyring),
-        }
+    /// The only supported operations are [`Client::get`], [`Client::set`],
+    /// [`Client::delete`], and [`Client::close`]. Values are always
+    /// `StructuredValue-CBOR-v1`; the fixed profile is uncompressed and
+    /// unprotected inside TLS.
+    #[cfg(feature = "quic-quinn")]
+    #[derive(Clone)]
+    pub struct Client {
+        inner: ProtectedClient,
     }
 
-    /// Starts an unprotected client with namespace-bound Item IDs.
-    pub fn builder_unprotected(endpoint: Endpoint) -> ClientBuilder {
-        ClientBuilder {
-            inner: SharedClient::builder_unprotected(endpoint),
-        }
-    }
-
-    /// Borrows the exact protocol layer owned by this client.
-    pub fn raw(&self) -> &RawClient {
-        self.inner.raw()
-    }
-}
-
-#[cfg(feature = "quic-quinn")]
-client_methods!(Client, SetRequest);
-
-#[cfg(feature = "tls-tcp")]
-/// High-level application-key and plaintext-value client running on Tokio and
-/// the one-lane TLS-over-TCP transport.
-#[derive(Clone)]
-pub struct TlsTcpClient {
-    inner: SharedTlsTcpClient,
-}
-
-#[cfg(feature = "tls-tcp")]
-/// Connection and value-layer builder for the Tokio/TLS-over-TCP client.
-pub struct TlsTcpClientBuilder {
-    inner: SharedTlsTcpClientBuilder,
-}
-
-#[cfg(feature = "tls-tcp")]
-builder_methods!(TlsTcpClientBuilder);
-
-#[cfg(feature = "tls-tcp")]
-impl TlsTcpClientBuilder {
-    /// Connects a Tokio/TLS-over-TCP client with the configured layers.
-    pub async fn connect(self) -> Result<TlsTcpClient> {
-        self.inner
+    #[cfg(feature = "quic-quinn")]
+    impl Client {
+        /// Connects using the fixed Gate 0 development profile.
+        ///
+        /// The profile intentionally disables certificate verification for
+        /// local development. It still requires a TLS 1.3 handshake and never
+        /// falls back to plaintext. Do not use this trust profile in production.
+        pub async fn connect(endpoint: impl AsRef<str>) -> Result<Self> {
+            let endpoint = endpoint.as_ref().parse().map_err(map_core_error)?;
+            let inner = ProtectedClient::builder(
+                endpoint,
+                core::DataProtectionKey::from_bytes(core::contract::GATE0_ITEM_ID_ROOT),
+            )
+            .server_trust(core::ServerTrust::Insecure)
+            .namespace_id(core::contract::GATE0_NAMESPACE_ID)
+            .compression(Compression::Disabled)
+            .encryption(Encryption::Unprotected)
             .connect()
             .await
-            .map(|inner| TlsTcpClient { inner })
-    }
-}
-
-#[cfg(feature = "tls-tcp")]
-impl TlsTcpClient {
-    /// Connects with data protection, system trust, and default TLS-over-TCP behavior.
-    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
-        Self::builder(endpoint.parse()?, data_protection_key)
-            .connect()
-            .await
-    }
-
-    /// Starts explicit TLS-over-TCP client configuration.
-    pub fn builder(
-        endpoint: Endpoint,
-        data_protection_key: DataProtectionKey,
-    ) -> TlsTcpClientBuilder {
-        TlsTcpClientBuilder {
-            inner: SharedTlsTcpClient::builder(endpoint, data_protection_key),
+            .map_err(map_core_error)?;
+            Ok(Self { inner })
         }
-    }
 
-    /// Starts an unprotected TLS-over-TCP client with namespace-bound Item IDs.
-    pub fn builder_unprotected(endpoint: Endpoint) -> TlsTcpClientBuilder {
-        TlsTcpClientBuilder {
-            inner: SharedTlsTcpClient::builder_unprotected(endpoint),
-        }
-    }
-
-    /// Borrows the exact protocol layer owned by this client.
-    pub fn raw(&self) -> &TlsTcpRawClient {
-        self.inner.raw()
-    }
-}
-
-#[cfg(feature = "tls-tcp")]
-client_methods!(TlsTcpClient, TlsTcpSetRequest);
-
-#[cfg(feature = "quic-compio")]
-/// High-level application-key and plaintext-value client confined to a Compio runtime.
-#[derive(Clone)]
-pub struct LocalClient {
-    inner: SharedLocalClient,
-}
-
-#[cfg(feature = "quic-compio")]
-/// Connection and value-layer builder for Compio clients.
-pub struct LocalClientBuilder {
-    inner: SharedLocalClientBuilder,
-}
-
-#[cfg(feature = "quic-compio")]
-builder_methods!(LocalClientBuilder);
-
-#[cfg(feature = "quic-compio")]
-impl LocalClientBuilder {
-    /// Connects a high-level Compio client with the configured layers.
-    pub async fn connect(self) -> Result<LocalClient> {
-        self.inner
-            .connect()
-            .await
-            .map(|inner| LocalClient { inner })
-    }
-}
-
-#[cfg(feature = "quic-compio")]
-impl LocalClient {
-    /// Connects with data protection, system trust, and default Compio behavior.
-    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
-        Self::builder(endpoint.parse()?, data_protection_key)
-            .connect()
-            .await
-    }
-
-    /// Starts explicit Compio client configuration.
-    pub fn builder(
-        endpoint: Endpoint,
-        data_protection_key: DataProtectionKey,
-    ) -> LocalClientBuilder {
-        LocalClientBuilder {
-            inner: SharedLocalClient::builder(endpoint, data_protection_key),
-        }
-    }
-
-    /// Starts a Compio client with an explicit Item-ID root and independent
-    /// value keyring.
-    ///
-    /// [`ClientRootKey::public`] (or [`ClientRootKey::zero`]) intentionally
-    /// selects publicly derivable Item IDs. Value confidentiality comes only
-    /// from the supplied keyring.
-    pub fn builder_with_keyring(
-        endpoint: Endpoint,
-        item_id_root: ClientRootKey,
-        keyring: ValueKeyring,
-    ) -> LocalClientBuilder {
-        LocalClientBuilder {
-            inner: SharedLocalClient::builder_with_keyring(endpoint, item_id_root, keyring),
-        }
-    }
-
-    /// Starts an unprotected client with namespace-bound Item IDs.
-    pub fn builder_unprotected(endpoint: Endpoint) -> LocalClientBuilder {
-        LocalClientBuilder {
-            inner: SharedLocalClient::builder_unprotected(endpoint),
-        }
-    }
-
-    /// Borrows the exact protocol layer owned by this client.
-    pub fn raw(&self) -> &LocalRawClient {
-        self.inner.raw()
-    }
-}
-
-#[cfg(feature = "quic-compio")]
-client_methods!(LocalClient, LocalSetRequest);
-
-/// Conversion into an owned value buffer without separate borrowed and owned method names.
-pub trait IntoValue {
-    /// Converts the value to the owned buffer used by an asynchronous request.
-    fn into_value(self) -> Vec<u8>;
-}
-
-impl IntoValue for Vec<u8> {
-    fn into_value(self) -> Vec<u8> {
-        self
-    }
-}
-
-impl IntoValue for Box<[u8]> {
-    fn into_value(self) -> Vec<u8> {
-        self.into_vec()
-    }
-}
-
-impl IntoValue for String {
-    fn into_value(self) -> Vec<u8> {
-        self.into_bytes()
-    }
-}
-
-fn copy_borrowed_value<T: AsRef<[u8]> + ?Sized>(value: &T) -> Vec<u8> {
-    value.as_ref().to_vec()
-}
-
-macro_rules! impl_borrowed_into_value {
-    ($($type:ty),+ $(,)?) => {
-        $(
-            impl IntoValue for $type {
-                fn into_value(self) -> Vec<u8> {
-                    copy_borrowed_value(self)
-                }
-            }
-        )+
-    };
-}
-
-impl_borrowed_into_value!(&str, &[u8], &Vec<u8>);
-
-impl<const N: usize> IntoValue for [u8; N] {
-    fn into_value(self) -> Vec<u8> {
-        self.to_vec()
-    }
-}
-
-impl<const N: usize> IntoValue for &[u8; N] {
-    fn into_value(self) -> Vec<u8> {
-        copy_borrowed_value(self)
-    }
-}
-
-impl IntoValue for &Arc<Vec<u8>> {
-    fn into_value(self) -> Vec<u8> {
-        self.as_ref().clone()
-    }
-}
-
-impl IntoValue for Arc<Vec<u8>> {
-    fn into_value(self) -> Vec<u8> {
-        self.as_ref().clone()
-    }
-}
-
-#[cfg(feature = "quic-quinn")]
-/// Awaitable Tokio set request with optional condition and TTL modifiers.
-pub struct SetRequest<'a> {
-    client: &'a Client,
-    application_key: TypedKey,
-    value: Vec<u8>,
-    options: SetOptions,
-}
-
-#[cfg(feature = "quic-compio")]
-/// Awaitable Compio set request with optional condition and TTL modifiers.
-pub struct LocalSetRequest<'a> {
-    client: &'a LocalClient,
-    application_key: TypedKey,
-    value: Vec<u8>,
-    options: SetOptions,
-}
-
-#[cfg(feature = "tls-tcp")]
-/// Awaitable TLS-over-TCP set request with optional condition and TTL modifiers.
-pub struct TlsTcpSetRequest<'a> {
-    client: &'a TlsTcpClient,
-    application_key: TypedKey,
-    value: Vec<u8>,
-    options: SetOptions,
-}
-
-macro_rules! set_request_methods {
-    ($request:ident) => {
-        impl $request<'_> {
-            /// Replaces all set options with an explicit value.
-            pub fn options(mut self, options: SetOptions) -> Self {
-                self.options = options;
-                self
-            }
-
-            /// Stores only if the key does not exist.
-            pub fn if_absent(mut self) -> Self {
-                self.options = self.options.if_absent();
-                self
-            }
-
-            /// Stores only if the key already exists.
-            pub fn if_present(mut self) -> Self {
-                self.options = self.options.if_present();
-                self
-            }
-
-            /// Sets a positive relative expiration in exact milliseconds.
-            pub fn expires_after_millis(mut self, milliseconds: u64) -> Self {
-                self.options = self.options.expires_after_millis(milliseconds);
-                self
-            }
-        }
-    };
-}
-
-macro_rules! set_request_future {
-    ($request:ident $(+ $bound:ident)?) => {
-        impl<'a> IntoFuture for $request<'a> {
-            type Output = Result<SetOutcome>;
-            type IntoFuture =
-                Pin<Box<dyn Future<Output = Self::Output> $(+ $bound)? + 'a>>;
-
-            fn into_future(self) -> Self::IntoFuture {
-                Box::pin(async move {
-                    self.client
-                        .inner
-                        .set(self.application_key, self.value, self.options)
-                        .await
+        /// Retrieves one lossless structured value.
+        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetResult<Value>> {
+            self.inner
+                .get_structured(key)
+                .await
+                .map(|outcome| match outcome {
+                    CoreGetOutcome::Found(value) => GetResult::Found(value),
+                    CoreGetOutcome::NotFound => GetResult::Missing,
                 })
-            }
+                .map_err(map_core_error)
         }
-    };
+
+        /// Stores one lossless structured value using an unconditional write.
+        pub async fn set(&self, key: impl Into<TypedKey>, value: Value) -> Result<SetOutcome> {
+            self.inner
+                .set_structured(key, value, core::SetOptions::new())
+                .await
+                .map_err(map_core_error)
+                .and_then(|outcome| match outcome {
+                    CoreSetOutcome::Created => Ok(SetOutcome::Created),
+                    CoreSetOutcome::Replaced => Ok(SetOutcome::Replaced),
+                    CoreSetOutcome::NotStored => Err(Error::UnsupportedSetOutcome),
+                })
+        }
+
+        /// Deletes one key. Repeating the operation is safe and returns
+        /// [`DeleteOutcome::NotFound`].
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
+            self.inner
+                .delete(key)
+                .await
+                .map_err(map_core_error)
+                .map(|outcome| match outcome {
+                    core::DeleteOutcome::Deleted => DeleteOutcome::Deleted,
+                    core::DeleteOutcome::NotFound => DeleteOutcome::NotFound,
+                })
+        }
+
+        /// Idempotently closes the client and waits for owned work to finish.
+        pub async fn close(&self) -> Result<()> {
+            self.inner.close().await.map_err(map_core_error)
+        }
+    }
 }
 
-#[cfg(feature = "quic-quinn")]
-set_request_methods!(SetRequest);
-
-#[cfg(feature = "quic-quinn")]
-set_request_future!(SetRequest + Send);
-
-#[cfg(feature = "quic-compio")]
-set_request_methods!(LocalSetRequest);
-
-#[cfg(feature = "quic-compio")]
-set_request_future!(LocalSetRequest);
-
-#[cfg(feature = "tls-tcp")]
-set_request_methods!(TlsTcpSetRequest);
-
-#[cfg(feature = "tls-tcp")]
-set_request_future!(TlsTcpSetRequest + Send);
+pub use maintained::*;

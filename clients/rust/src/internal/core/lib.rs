@@ -1,0 +1,2183 @@
+//! Low-level transport-neutral client core for the OpenKache binary protocol.
+
+/// Client-only defaults, ABI discriminators, and value-format constants generated from
+/// `clients/model/openkache.smithy`.
+pub mod contract {
+    include!("contract_snapshot/client_contract.rs");
+}
+
+mod config;
+#[cfg(feature = "ffi")]
+pub mod ffi;
+#[cfg(feature = "ffi")]
+mod ffi_admission;
+mod key;
+mod protected;
+mod protection;
+mod protocol;
+mod request;
+mod request_engine;
+mod transport;
+pub mod value;
+pub mod value_envelope;
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+use crate::internal_protocol::{MAX_RESPONSE_FRAME_BYTES, Response, Status, operation_wire_spec};
+#[cfg(feature = "quic-compio")]
+use compio::net::ToSocketAddrsAsync;
+use protocol::OperationRequest;
+use request::{PendingRequest, RequestAttempt, RequestAttempts, RequestBuilder, RequestContext};
+use transport::{ClientConnection, ClientLane, RequestBudgetPermit};
+
+pub use crate::internal_protocol::ITEM_ID_BYTES;
+pub use crate::internal_value::{
+    Float, FloatWidth, Value as StructuredValue, decode as decode_structured_value,
+    encode as encode_structured_value,
+};
+pub use config::{
+    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy,
+    ServerTrust, SetOptions,
+};
+pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
+#[allow(deprecated)]
+pub use key::{
+    CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
+    KeyError, KeyFormat, KeySpace, KeySpec, KeyType, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
+    MAX_KEY_INPUT_BYTES, PortableInteger, PortableKey, ResolvedKey, TypedInteger, TypedKey,
+    canonical_key_bytes,
+};
+#[cfg(feature = "quic-compio")]
+pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
+#[cfg(feature = "quic-quinn")]
+pub use protected::{ProtectedClient, ProtectedClientBuilder};
+#[cfg(feature = "tls-tcp")]
+pub use protected::{TlsTcpProtectedClient, TlsTcpProtectedClientBuilder};
+pub use protection::DataProtection;
+pub use protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
+    NamespacePolicy, OverridePolicy, ProtocolError, SetCondition,
+};
+pub use request_engine::{
+    BytePermit, EngineError, InFlightByteBudget, RequestAdmission, RequestBytes, RequestEngine,
+    RequestHandle, RequestKind, RequestMetadata, ResponseBytes, TransportConnection,
+    TransportError, TransportKind, TransportLane,
+};
+pub use transport::{BytePermit as ValueBytePermit, RequestBudget};
+#[cfg(feature = "quic-quinn")]
+pub use transport::{QuinnTransportConnection, QuinnTransportLane};
+#[cfg(feature = "tls-tcp")]
+pub use transport::{TcpLane, TcpTransport, TlsTcpLane, TlsTcpTransport};
+pub use value::{
+    ItemValue, MAX_EXPANDED_PAYLOAD_BYTES, MAX_VALUE_ENVELOPE_BYTES, MAX_ZSTD_WINDOW_BYTES,
+    ValueKeyring, ValueLimits,
+};
+
+#[cfg(not(any(feature = "quic-compio", feature = "quic-quinn", feature = "tls-tcp")))]
+compile_error!("enable at least one client transport backend feature");
+
+/// Client-owned identifier for an asynchronous runtime and QUIC backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Backend {
+    /// Tokio and Quinn.
+    Quinn,
+    /// Compio and Compio-QUIC.
+    Compio,
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Quinn => "quinn",
+            Self::Compio => "compio",
+        })
+    }
+}
+
+/// Stable client operation or operation phase used by structured errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Operation {
+    /// `PING` request.
+    Ping,
+    /// `GET` request.
+    Get,
+    /// `SET` request.
+    Set,
+    /// `DELETE` request.
+    Delete,
+    /// `EXPERIMENTAL_STATS` request.
+    ExperimentalStats,
+    /// `EXPERIMENTAL_SYNC` request.
+    ExperimentalSync,
+    /// `NAMESPACE_OPEN` request.
+    NamespaceOpen,
+    /// `NAMESPACE_UPDATE_POLICY` request.
+    NamespaceUpdatePolicy,
+    /// `NAMESPACE_DELETE` request.
+    NamespaceDelete,
+    /// DNS lookup.
+    DnsResolution,
+    /// Initial QUIC and TLS connection establishment.
+    ConnectionSetup,
+    /// Replacement connection establishment.
+    ConnectionRetry,
+    /// Reusable stream-lane acquisition.
+    StreamAcquisition,
+    /// Request encoding and transmission.
+    RequestWrite,
+    /// Response-header receipt.
+    ResponseHeaderRead,
+    /// Response-body receipt.
+    ResponseBodyRead,
+    /// TLS-to-QUIC configuration conversion.
+    TlsInitialization,
+    /// Local QUIC endpoint initialization.
+    EndpointInitialization,
+    /// Remote connection initialization.
+    ConnectionInitialization,
+    /// QUIC and TLS handshake.
+    Handshake,
+    /// Bidirectional stream creation.
+    StreamOpen,
+    /// QUIC stream write.
+    StreamWrite,
+    /// QUIC stream read.
+    StreamRead,
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Ping => "PING",
+            Self::Get => "GET",
+            Self::Set => "SET",
+            Self::Delete => "DELETE",
+            Self::ExperimentalStats => "EXPERIMENTAL_STATS",
+            Self::ExperimentalSync => "EXPERIMENTAL_SYNC",
+            Self::NamespaceOpen => "NAMESPACE_OPEN",
+            Self::NamespaceUpdatePolicy => "NAMESPACE_UPDATE_POLICY",
+            Self::NamespaceDelete => "NAMESPACE_DELETE",
+            Self::DnsResolution => "DNS resolution",
+            Self::ConnectionSetup => "connection setup",
+            Self::ConnectionRetry => "connection retry",
+            Self::StreamAcquisition => "stream acquisition",
+            Self::RequestWrite => "request write",
+            Self::ResponseHeaderRead => "response header read",
+            Self::ResponseBodyRead => "response body read",
+            Self::TlsInitialization => "TLS initialization",
+            Self::EndpointInitialization => "endpoint initialization",
+            Self::ConnectionInitialization => "connection initialization",
+            Self::Handshake => "handshake",
+            Self::StreamOpen => "stream open",
+            Self::StreamWrite => "stream write",
+            Self::StreamRead => "stream read",
+        })
+    }
+}
+
+/// Programmatic category for a server-side failure.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ServerErrorCode(Status);
+
+#[allow(non_upper_case_globals)]
+impl ServerErrorCode {
+    /// The request was malformed or violated an operation constraint.
+    pub const InvalidRequest: Self = Self(Status::InvalidRequest);
+    /// The server does not implement the requested operation.
+    pub const UnsupportedOperation: Self = Self(Status::UnsupportedOpcode);
+    /// The request exceeded a protocol or server size limit.
+    pub const TooLarge: Self = Self(Status::TooLarge);
+    /// The server could not accept more work.
+    pub const Overloaded: Self = Self(Status::Overloaded);
+    /// The server-side operation exceeded its deadline.
+    pub const Timeout: Self = Self(Status::Timeout);
+    /// The authenticated identity is not authorized for the operation.
+    pub const Forbidden: Self = Self(Status::Forbidden);
+    /// The server encountered an internal failure.
+    pub const Internal: Self = Self(Status::InternalError);
+    /// The request could not be admitted because protected items consume available capacity.
+    pub const NoCapacity: Self = Self(Status::NoCapacity);
+    /// The request selected an item policy disallowed by its namespace.
+    pub const PolicyConflict: Self = Self(Status::PolicyConflict);
+    /// An optimistic namespace revision did not match.
+    pub const Conflict: Self = Self(Status::Conflict);
+    /// The requested namespace does not exist.
+    pub const NamespaceNotFound: Self = Self(Status::NamespaceNotFound);
+    /// Namespace deletion raced an in-flight namespace operation.
+    pub const NamespaceNotEmpty: Self = Self(Status::NamespaceNotEmpty);
+
+    const fn from_status(status: Status) -> Self {
+        Self(status)
+    }
+
+    /// Returns the stable numeric protocol code.
+    pub const fn as_u8(self) -> u8 {
+        self.0 as u8
+    }
+}
+
+impl std::fmt::Debug for ServerErrorCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self.0 {
+            Status::UnsupportedOpcode => "UnsupportedOperation",
+            Status::InternalError => "Internal",
+            status => return status.fmt(formatter),
+        })
+    }
+}
+
+/// All client-level failures.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// A client setting was invalid.
+    #[error("invalid {field}: {message}")]
+    Configuration {
+        /// Stable setting identifier.
+        field: &'static str,
+        /// Human-readable validation detail.
+        message: String,
+    },
+    /// Connection setup or replacement failed.
+    #[error("connection failed: {0}")]
+    Connection(String),
+    /// A complete client operation exceeded its deadline.
+    #[error("operation timed out during {operation}")]
+    Timeout {
+        /// Operation phase that reached the deadline.
+        operation: Operation,
+    },
+    /// The selected asynchronous runtime is unavailable.
+    #[error("{backend} runtime unavailable: {message}")]
+    Runtime {
+        /// Stable runtime backend name.
+        backend: Backend,
+        /// Human-readable runtime requirement.
+        message: String,
+    },
+    /// A typed QUIC transport operation failed.
+    #[error("{backend} QUIC {operation} failed: {message}")]
+    Transport {
+        /// Stable QUIC backend name.
+        backend: Backend,
+        /// Stable failed-operation name.
+        operation: Operation,
+        /// Human-readable backend detail.
+        message: String,
+    },
+    /// The server returned an error status.
+    #[error("server returned {code:?}: {message}")]
+    Server {
+        /// Client-owned programmatic server error category.
+        code: ServerErrorCode,
+        /// Human-readable server payload.
+        message: String,
+    },
+    /// A response had an inapplicable status or invalid payload shape.
+    #[error("unexpected {operation} response: {message}")]
+    UnexpectedResponse {
+        /// Operation whose response was invalid.
+        operation: Operation,
+        /// Human-readable protocol detail.
+        message: String,
+    },
+    /// A response exceeded the protocol frame limit.
+    #[error("response exceeds protocol limit of {maximum} bytes")]
+    ResponseTooLarge {
+        /// Maximum accepted response bytes.
+        maximum: usize,
+    },
+    /// The shared client byte budget cannot admit another bounded allocation.
+    #[error("client in-flight byte budget {maximum} bytes exceeded by {requested}")]
+    ResourceLimit {
+        /// Bytes requested by the operation.
+        requested: usize,
+        /// Configured aggregate limit.
+        maximum: usize,
+    },
+    /// TLS configuration or certificate validation failed.
+    #[error("TLS configuration failed: {0}")]
+    Tls(String),
+    /// Binary protocol encoding or decoding failed.
+    #[error("protocol failed: {0}")]
+    Protocol(String),
+    /// An operating-system I/O operation failed.
+    #[error("I/O failed: {0}")]
+    Io(String),
+    /// Client-side value encoding or decoding failed.
+    #[error("value transformation failed: {0}")]
+    Value(#[from] value::Error),
+    /// Client-side key conversion or Item ID derivation failed.
+    #[error("key transformation failed: {0}")]
+    Key(#[from] key::KeyError),
+    /// The client was explicitly and permanently closed.
+    #[error("client is closed")]
+    ClientClosed,
+    /// A mutation may have reached the server before its response could be confirmed.
+    #[error("{operation} result is unknown after request transmission: {cause}")]
+    AmbiguousOutcome {
+        /// Mutation whose result is unknown.
+        operation: Operation,
+        /// Structured client-owned failure that prevented confirmation.
+        #[source]
+        cause: Box<Error>,
+    },
+}
+
+impl Error {
+    pub(crate) fn configuration(field: &'static str, message: impl Into<String>) -> Self {
+        Self::Configuration {
+            field,
+            message: message.into(),
+        }
+    }
+
+    fn is_connection_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Connection(_) | Self::Timeout { .. } | Self::Transport { .. } | Self::Io(_)
+        )
+    }
+
+    fn invalidates_connection_before_send(&self) -> bool {
+        matches!(
+            self,
+            Self::Connection(_) | Self::Transport { .. } | Self::Io(_)
+        )
+    }
+
+    fn tls(error: rustls::Error) -> Self {
+        Self::Tls(error.to_string())
+    }
+
+    fn protocol(error: impl std::fmt::Display) -> Self {
+        Self::Protocol(error.to_string())
+    }
+
+    fn io(error: std::io::Error) -> Self {
+        Self::Io(error.to_string())
+    }
+}
+
+/// Convenience alias for client results.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Successful lookup result, separate from transport or protocol failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GetOutcome<T> {
+    /// The key existed and returned its value.
+    Found(T),
+    /// The key did not exist.
+    NotFound,
+}
+
+impl<T> GetOutcome<T> {
+    /// Converts the outcome to Rust's conventional optional-value representation.
+    pub fn into_option(self) -> Option<T> {
+        match self {
+            Self::Found(value) => Some(value),
+            Self::NotFound => None,
+        }
+    }
+
+    /// Returns whether the outcome contains a value matching the predicate.
+    pub fn is_found_and(self, predicate: impl FnOnce(T) -> bool) -> bool {
+        match self {
+            Self::Found(value) => predicate(value),
+            Self::NotFound => false,
+        }
+    }
+}
+
+/// Successful result of storing a key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SetOutcome {
+    /// A new key was stored.
+    Created,
+    /// An existing key was replaced.
+    Replaced,
+    /// A conditional set did not match and changed nothing.
+    NotStored,
+}
+
+/// Successful result of deleting a key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeleteOutcome {
+    /// The existing key was removed.
+    Deleted,
+    /// The key did not exist.
+    NotFound,
+}
+
+struct Core<C: ClientConnection> {
+    connection: RwLock<Arc<C>>,
+    reconnect: futures_util::lock::Mutex<()>,
+    namespace_open: futures_util::lock::Mutex<()>,
+    address: SocketAddr,
+    server_name: String,
+    tls: rustls::ClientConfig,
+    alpn: AlpnPolicy,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    retry: RetryPolicy,
+    max_in_flight: usize,
+    request_budget: RequestBudget,
+    namespace_id: AtomicU64,
+    namespace_name: Vec<u8>,
+    namespace_policy: NamespacePolicy,
+    state: AtomicU32,
+    next_request_id: AtomicU64,
+    // Correlation entries are touched only while performing short,
+    // synchronous map operations.  A synchronous mutex lets the reservation
+    // guard remove an entry from `Drop` when a caller cancels an async
+    // operation; an async mutex cannot be acquired reliably from `Drop`.
+    pending: Mutex<HashMap<u64, PendingEntry>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingEntry {
+    operation: Operation,
+    mutation: bool,
+    transmitted: bool,
+}
+
+/// Owns one correlation-table reservation for the duration of a request
+/// future.
+///
+/// Every normal completion removes its entry explicitly.  If the caller
+/// drops/cancels the future at any await point, this guard removes the entry
+/// synchronously so abandoned operations cannot leak the correlation table.
+struct PendingRequestReservation<'a, C: ClientConnection> {
+    core: &'a Core<C>,
+    request_id: u64,
+    completed: bool,
+}
+
+impl<C: ClientConnection> PendingRequestReservation<'_, C> {
+    fn complete(&mut self) {
+        self.core.complete_request(self.request_id);
+        self.completed = true;
+    }
+}
+
+impl<C: ClientConnection> Drop for PendingRequestReservation<'_, C> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let entry = self
+            .core
+            .pending
+            .lock()
+            .expect("request correlation table lock is not poisoned")
+            .remove(&self.request_id);
+        // A dropped transmitted mutation cannot be reported to a caller whose
+        // future was cancelled.  Retire the connection so a later operation
+        // cannot accidentally treat that abandoned lane as a known outcome.
+        if entry.is_some_and(|entry| {
+            entry.transmitted
+                && (entry.mutation || matches!(entry.operation, Operation::ExperimentalSync))
+        }) {
+            let _ = self
+                .core
+                .state
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                    (state != ConnectionState::Closed.code())
+                        .then_some(ConnectionState::Disconnected.code())
+                });
+        }
+    }
+}
+
+struct RequestFailure {
+    error: Error,
+    may_have_reached_server: bool,
+    invalidates_connection: bool,
+}
+
+/// Returns whether losing the response can leave the operation's outcome
+/// unknown after transmission.
+///
+/// `EXPERIMENTAL_SYNC` is an experimental maintenance barrier rather than a mutation, but
+/// its barrier may have linearized before a terminal transport failure.  Keep
+/// that transport boundary distinct from cancellation, where only actual
+/// mutating operations are surfaced as `UnknownMutation`.
+const fn operation_has_unknown_outcome(context: RequestContext) -> bool {
+    context.mutation || matches!(context.operation, Operation::ExperimentalSync)
+}
+
+impl RequestFailure {
+    fn before_send(error: Error) -> Self {
+        let invalidates_connection = error.invalidates_connection_before_send();
+        Self {
+            error,
+            may_have_reached_server: false,
+            invalidates_connection,
+        }
+    }
+
+    fn after_send(error: Error) -> Self {
+        let invalidates_connection = error.is_connection_failure();
+        Self {
+            error,
+            may_have_reached_server: true,
+            invalidates_connection,
+        }
+    }
+
+    fn after_response(error: Error) -> Self {
+        Self {
+            error,
+            may_have_reached_server: true,
+            invalidates_connection: false,
+        }
+    }
+}
+
+impl<C: ClientConnection> Core<C> {
+    async fn connect(
+        address: SocketAddr,
+        server_name: String,
+        tls: rustls::ClientConfig,
+        alpn: AlpnPolicy,
+        timeouts: ClientTimeouts,
+        retry: RetryPolicy,
+        max_in_flight: usize,
+        max_in_flight_bytes: usize,
+        namespace_id: Option<u64>,
+        namespace_name: Vec<u8>,
+        namespace_policy: NamespacePolicy,
+        deadline: transport::Deadline,
+    ) -> Result<Self> {
+        let request_budget = RequestBudget::new(max_in_flight_bytes);
+        let connection = C::connect(
+            address,
+            &server_name,
+            tls.clone(),
+            deadline.remaining(Operation::ConnectionSetup)?,
+            max_in_flight,
+            request_budget.clone(),
+        )
+        .await?;
+        if let Some(protocol) = connection.negotiated_alpn() {
+            if let Err(error) = alpn.validate_negotiated(protocol) {
+                connection.close();
+                return Err(error);
+            }
+        } else {
+            connection.close();
+            return Err(Error::Connection(
+                "server did not negotiate an ALPN protocol".into(),
+            ));
+        }
+        let core = Self {
+            connection: RwLock::new(Arc::new(connection)),
+            reconnect: futures_util::lock::Mutex::new(()),
+            namespace_open: futures_util::lock::Mutex::new(()),
+            address,
+            server_name,
+            tls,
+            alpn,
+            connect_timeout: timeouts.connect,
+            request_timeout: timeouts.request,
+            retry,
+            max_in_flight,
+            request_budget,
+            namespace_id: AtomicU64::new(namespace_id.unwrap_or(0)),
+            namespace_name,
+            namespace_policy,
+            state: AtomicU32::new(ConnectionState::Connected.code()),
+            next_request_id: AtomicU64::new(0),
+            pending: Mutex::new(HashMap::new()),
+        };
+        Ok(core)
+    }
+
+    fn connection_state(&self) -> ConnectionState {
+        ConnectionState::try_from(self.state.load(Ordering::Acquire))
+            .unwrap_or(ConnectionState::Unknown)
+    }
+
+    fn request_budget(&self) -> RequestBudget {
+        self.request_budget.clone()
+    }
+
+    async fn ping(&self) -> Result<Duration> {
+        let started = Instant::now();
+        self.request(OperationRequest::ping(), |response| {
+            expect_status(Operation::Ping, response.status, &[Status::Ok])?;
+            if response.payload != b"PONG" {
+                return Err(Error::UnexpectedResponse {
+                    operation: Operation::Ping,
+                    message: "payload is not PONG".into(),
+                });
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(started.elapsed())
+    }
+
+    async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.get_in_namespace(namespace_id, item_id).await
+    }
+
+    async fn get_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<GetOutcome<ItemValue>> {
+        validate_client_namespace_id(namespace_id)?;
+        self.request(
+            OperationRequest::get(namespace_id, item_id.into_protocol())
+                .map_err(Error::protocol)?,
+            |response| match response.status {
+                Status::Ok => Ok(GetOutcome::Found(ItemValue::new(response.payload))),
+                Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
+                Status::NotFound => Err(Error::UnexpectedResponse {
+                    operation: Operation::Get,
+                    message: "NotFound response must have an empty payload".into(),
+                }),
+                status => Err(unexpected_status(Operation::Get, status)),
+            },
+        )
+        .await
+    }
+
+    async fn get_in_namespace_with_permit(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<GetOutcome<ItemValue>> {
+        validate_client_namespace_id(namespace_id)?;
+        self.request_with_permit(
+            OperationRequest::get(namespace_id, item_id.into_protocol())
+                .map_err(Error::protocol)?,
+            |response, permit| match response.status {
+                Status::Ok => Ok(GetOutcome::Found(ItemValue::with_response_permit(
+                    response.payload,
+                    permit,
+                ))),
+                Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
+                Status::NotFound => Err(Error::UnexpectedResponse {
+                    operation: Operation::Get,
+                    message: "NotFound response must have an empty payload".into(),
+                }),
+                status => Err(unexpected_status(Operation::Get, status)),
+            },
+        )
+        .await
+    }
+
+    async fn set(
+        &self,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.set_in_namespace(namespace_id, item_id, value, options)
+            .await
+    }
+
+    async fn set_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        validate_client_namespace_id(namespace_id)?;
+        let request = OperationRequest::set(
+            namespace_id,
+            item_id.into_protocol(),
+            options.into_wire_options()?,
+            value.into_bytes(),
+        )
+        .map_err(Error::protocol)?;
+        self.request(request, |response| match response.status {
+            Status::Created if response.payload.is_empty() => Ok(SetOutcome::Created),
+            Status::Replaced if response.payload.is_empty() => Ok(SetOutcome::Replaced),
+            Status::NotStored if response.payload.is_empty() => Ok(SetOutcome::NotStored),
+            Status::Created | Status::Replaced | Status::NotStored => {
+                Err(Error::UnexpectedResponse {
+                    operation: Operation::Set,
+                    message: "SET success responses must have an empty payload".into(),
+                })
+            }
+            status => Err(unexpected_status(Operation::Set, status)),
+        })
+        .await
+    }
+
+    async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.delete_in_namespace(namespace_id, item_id).await
+    }
+
+    async fn delete_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<DeleteOutcome> {
+        validate_client_namespace_id(namespace_id)?;
+        self.request(
+            OperationRequest::delete(namespace_id, item_id.into_protocol())
+                .map_err(Error::protocol)?,
+            |response| match response.status {
+                Status::Deleted if response.payload.is_empty() => Ok(DeleteOutcome::Deleted),
+                Status::NotFound if response.payload.is_empty() => Ok(DeleteOutcome::NotFound),
+                Status::Deleted | Status::NotFound => Err(Error::UnexpectedResponse {
+                    operation: Operation::Delete,
+                    message: "DELETE domain responses must have an empty payload".into(),
+                }),
+                status => Err(unexpected_status(Operation::Delete, status)),
+            },
+        )
+        .await
+    }
+
+    async fn experimental_stats(&self) -> Result<String> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.experimental_stats_in_namespace(namespace_id).await
+    }
+
+    async fn experimental_stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
+        validate_client_namespace_id(namespace_id)?;
+        self.request(
+            OperationRequest::experimental_stats(namespace_id).map_err(Error::protocol)?,
+            |response| {
+                expect_status(Operation::ExperimentalStats, response.status, &[Status::Ok])?;
+                validate_experimental_stats_payload(&response.payload)?;
+                String::from_utf8(response.payload).map_err(|error| {
+                    Error::Protocol(format!("EXPERIMENTAL_STATS response is not UTF-8: {error}"))
+                })
+            },
+        )
+        .await
+    }
+
+    async fn experimental_sync(&self) -> Result<()> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.experimental_sync_in_namespace(namespace_id).await
+    }
+
+    async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+        validate_client_namespace_id(namespace_id)?;
+        self.request(
+            OperationRequest::experimental_sync(namespace_id).map_err(Error::protocol)?,
+            |response| {
+                expect_status(Operation::ExperimentalSync, response.status, &[Status::Ok])?;
+                if response.payload.is_empty() {
+                    Ok(())
+                } else {
+                    Err(Error::UnexpectedResponse {
+                        operation: Operation::ExperimentalSync,
+                        message: "EXPERIMENTAL_SYNC success responses must have an empty payload"
+                            .into(),
+                    })
+                }
+            },
+        )
+        .await
+    }
+
+    async fn request<R, T>(
+        &self,
+        request: R,
+        mut decode: impl FnMut(Response) -> Result<T>,
+    ) -> Result<T>
+    where
+        R: RequestBuilder,
+    {
+        self.request_with_permit(request, |response, _permit| decode(response))
+            .await
+    }
+
+    async fn request_with_permit<R, T>(
+        &self,
+        request: R,
+        mut decode: impl FnMut(Response, Option<RequestBudgetPermit>) -> Result<T>,
+    ) -> Result<T>
+    where
+        R: RequestBuilder,
+    {
+        if self.connection_state() == ConnectionState::Closed {
+            return Err(Error::ClientClosed);
+        }
+        let deadline = transport::Deadline::after(self.request_timeout)?;
+        if self.connection_state() == ConnectionState::Disconnected {
+            self.reconnect_before(deadline).await?;
+        }
+        let context = request.context();
+        let response_safe = context.retry_policy.is_safe();
+        let request_id = self.reserve_request_id(context.operation, context.mutation)?;
+        let mut reservation = PendingRequestReservation {
+            core: self,
+            request_id,
+            completed: false,
+        };
+        let (success_statuses, error_statuses) = {
+            let wire = operation_wire_spec(context.opcode);
+            (wire.success_statuses, wire.error_statuses)
+        };
+        let max_attempts = if response_safe {
+            self.retry.max_attempts
+        } else {
+            1
+        };
+        let mut attempts =
+            RequestAttempts::new(request, response_safe && max_attempts > 1, request_id)?;
+        for attempt in 1..=max_attempts {
+            let connection = match self.current_connection() {
+                Ok(connection) => connection,
+                Err(error) => {
+                    reservation.complete();
+                    return Err(error);
+                }
+            };
+            let Some(attempt_request) = attempts.next(attempt == max_attempts) else {
+                reservation.complete();
+                return Err(Error::Connection(
+                    "request retry state was exhausted before the final attempt".into(),
+                ));
+            };
+            match self
+                .request_once(
+                    &connection,
+                    attempt_request,
+                    context,
+                    request_id,
+                    success_statuses,
+                    error_statuses,
+                    &mut decode,
+                    deadline,
+                )
+                .await
+            {
+                Ok(result) => {
+                    reservation.complete();
+                    return result;
+                }
+                Err(failure) => {
+                    if failure.invalidates_connection {
+                        self.mark_disconnected(&connection);
+                    }
+                    if response_safe && failure.invalidates_connection && attempt < max_attempts {
+                        self.reconnect_failed(&connection, deadline).await?;
+                        continue;
+                    }
+                    let transmitted = self.pending_was_transmitted(request_id);
+                    reservation.complete();
+                    if operation_has_unknown_outcome(context)
+                        && (failure.may_have_reached_server || transmitted)
+                    {
+                        return Err(Error::AmbiguousOutcome {
+                            operation: context.operation,
+                            cause: Box::new(failure.error),
+                        });
+                    }
+                    return Err(failure.error);
+                }
+            }
+        }
+        Err(Error::Connection(
+            "request retry policy did not permit an attempt".into(),
+        ))
+    }
+
+    fn reserve_request_id(&self, operation: Operation, mutation: bool) -> Result<u64> {
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("request correlation table lock is not poisoned");
+        for _ in 0..=u64::MAX {
+            let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+            if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(request_id) {
+                entry.insert(PendingEntry {
+                    operation,
+                    mutation,
+                    transmitted: false,
+                });
+                return Ok(request_id);
+            }
+        }
+        Err(Error::Connection(
+            "request correlation table is exhausted".into(),
+        ))
+    }
+
+    fn mark_transmitted(&self, request_id: u64) {
+        if let Some(entry) = self
+            .pending
+            .lock()
+            .expect("request correlation table lock is not poisoned")
+            .get_mut(&request_id)
+        {
+            entry.transmitted = true;
+        }
+    }
+
+    fn pending_was_transmitted(&self, request_id: u64) -> bool {
+        self.pending
+            .lock()
+            .expect("request correlation table lock is not poisoned")
+            .get(&request_id)
+            .is_some_and(|entry| {
+                let _ = (entry.operation, entry.mutation);
+                entry.transmitted
+            })
+    }
+
+    fn complete_request(&self, request_id: u64) {
+        self.pending
+            .lock()
+            .expect("request correlation table lock is not poisoned")
+            .remove(&request_id);
+    }
+
+    fn selected_namespace_id(&self) -> Result<u64> {
+        match self.namespace_id.load(Ordering::Acquire) {
+            namespace_id @ 1.. => Ok(namespace_id),
+            0 => Err(Error::configuration(
+                "namespace",
+                "no namespace is selected; call namespace_open first",
+            )),
+        }
+    }
+
+    async fn ensure_namespace(&self) -> Result<u64> {
+        if let Ok(namespace_id) = self.selected_namespace_id() {
+            return Ok(namespace_id);
+        }
+        let _guard = self.namespace_open.lock().await;
+        if let Ok(namespace_id) = self.selected_namespace_id() {
+            return Ok(namespace_id);
+        }
+        self.open_namespace(
+            self.namespace_name.clone(),
+            true,
+            Some(self.namespace_policy),
+        )
+        .await
+        .map(|descriptor| descriptor.namespace_id)
+    }
+
+    /// Returns the currently selected server-assigned namespace ID.
+    fn namespace_id(&self) -> Option<u64> {
+        match self.namespace_id.load(Ordering::Acquire) {
+            namespace_id @ 1.. => Some(namespace_id),
+            0 => None,
+        }
+    }
+
+    async fn open_namespace(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> Result<NamespaceDescriptor> {
+        self.open_namespace_with_outcome(name, create_if_missing, policy)
+            .await
+            .map(|(descriptor, _created)| descriptor)
+    }
+
+    async fn open_namespace_with_outcome(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> Result<(NamespaceDescriptor, bool)> {
+        let (descriptor, created) = self
+            .request(
+                OperationRequest::namespace_open(name, create_if_missing, policy)
+                    .map_err(Error::protocol)?,
+                |response| {
+                    let status = response.status;
+                    if status != Status::Ok && !(create_if_missing && status == Status::Created) {
+                        return Err(unexpected_status(Operation::NamespaceOpen, status));
+                    }
+                    let descriptor =
+                        decode_namespace_descriptor(Operation::NamespaceOpen, &response.payload)?;
+                    Ok((descriptor, status == Status::Created))
+                },
+            )
+            .await?;
+        self.namespace_id
+            .store(descriptor.namespace_id, Ordering::Release);
+        Ok((descriptor, created))
+    }
+
+    async fn update_namespace_policy(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> Result<NamespaceDescriptor> {
+        let descriptor = self
+            .request(
+                OperationRequest::namespace_update_policy(namespace_id, expected_revision, policy)
+                    .map_err(Error::protocol)?,
+                |response| {
+                    expect_status(
+                        Operation::NamespaceUpdatePolicy,
+                        response.status,
+                        &[Status::Ok],
+                    )?;
+                    let descriptor = decode_namespace_descriptor(
+                        Operation::NamespaceUpdatePolicy,
+                        &response.payload,
+                    )?;
+                    if descriptor.namespace_id != namespace_id {
+                        return Err(Error::UnexpectedResponse {
+                            operation: Operation::NamespaceUpdatePolicy,
+                            message: format!(
+                                "descriptor namespace ID {} does not match requested namespace ID {namespace_id}",
+                                descriptor.namespace_id
+                            ),
+                        });
+                    }
+                    let expected_next_revision =
+                        expected_revision.checked_add(1).ok_or_else(|| {
+                            Error::UnexpectedResponse {
+                                operation: Operation::NamespaceUpdatePolicy,
+                                message:
+                                    "successful policy update cannot follow the maximum revision"
+                                        .into(),
+                            }
+                        })?;
+                    if descriptor.revision != expected_next_revision {
+                        return Err(Error::UnexpectedResponse {
+                            operation: Operation::NamespaceUpdatePolicy,
+                            message: format!(
+                                "descriptor revision {} does not follow expected revision {expected_revision}",
+                                descriptor.revision
+                            ),
+                        });
+                    }
+                    Ok(descriptor)
+                },
+            )
+            .await?;
+        if self.namespace_id.load(Ordering::Acquire) == namespace_id {
+            self.namespace_id
+                .store(descriptor.namespace_id, Ordering::Release);
+        }
+        Ok(descriptor)
+    }
+
+    async fn delete_namespace(&self, namespace_id: u64, expected_revision: u64) -> Result<()> {
+        self.request(
+            OperationRequest::namespace_delete(namespace_id, expected_revision)
+                .map_err(Error::protocol)?,
+            |response| {
+                expect_status(
+                    Operation::NamespaceDelete,
+                    response.status,
+                    &[Status::Deleted],
+                )?;
+                if response.payload.is_empty() {
+                    Ok(())
+                } else {
+                    Err(Error::UnexpectedResponse {
+                        operation: Operation::NamespaceDelete,
+                        message: "NAMESPACE_DELETE success responses must have an empty payload"
+                            .into(),
+                    })
+                }
+            },
+        )
+        .await?;
+        let _ = self.namespace_id.compare_exchange(
+            namespace_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        Ok(())
+    }
+
+    async fn request_once<R, T>(
+        &self,
+        connection: &C,
+        request: PendingRequest<R>,
+        context: RequestContext,
+        request_id: u64,
+        success_statuses: &'static [Status],
+        error_statuses: &'static [Status],
+        decode: &mut impl FnMut(Response, Option<RequestBudgetPermit>) -> Result<T>,
+        deadline: transport::Deadline,
+    ) -> std::result::Result<Result<T>, RequestFailure>
+    where
+        R: RequestBuilder,
+    {
+        let mut stream = connection
+            .acquire_lane(deadline)
+            .await
+            .map_err(RequestFailure::before_send)?;
+        let request = match request {
+            PendingRequest::Once(request) => RequestAttempt::Once(
+                request
+                    .into_frame(request_id)
+                    .map_err(RequestFailure::before_send)?,
+            ),
+            PendingRequest::Replay(parts) => RequestAttempt::Replay(parts),
+        };
+        let write_timeout = deadline
+            .remaining(Operation::RequestWrite)
+            .map_err(RequestFailure::before_send)?;
+        stream
+            .write_request(request, write_timeout)
+            .await
+            .map_err(RequestFailure::after_send)?;
+        self.mark_transmitted(request_id);
+        let parts = stream
+            .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
+            .await
+            .map_err(RequestFailure::after_send)?;
+        let response = parts
+            .into_response()
+            .map_err(Error::protocol)
+            .map_err(RequestFailure::after_send)?;
+        if response.request_id != request_id {
+            return Err(RequestFailure::after_response(Error::UnexpectedResponse {
+                operation: context.operation,
+                message: format!(
+                    "response request ID {} does not match request ID {request_id}",
+                    response.request_id
+                ),
+            }));
+        }
+        if !request_engine::stable_status_allowed(context.operation, response.status) {
+            return Err(RequestFailure::after_response(unexpected_status(
+                context.operation,
+                response.status,
+            )));
+        }
+        if error_statuses.contains(&response.status) {
+            // A server may reject a request before consuming its complete frame
+            // and close the lane. Retiring every confirmed error lane is safe.
+            return Ok(Err(Error::Server {
+                code: ServerErrorCode::from_status(response.status),
+                message: String::from_utf8_lossy(&response.payload).into_owned(),
+            }));
+        }
+        if !success_statuses.contains(&response.status) {
+            return Err(RequestFailure::after_response(unexpected_status(
+                context.operation,
+                response.status,
+            )));
+        }
+        let permit = stream.take_response_permit();
+        let decoded = decode(response, permit).map_err(RequestFailure::after_response)?;
+        stream.release();
+        Ok(Ok(decoded))
+    }
+
+    fn mark_disconnected(&self, failed: &Arc<C>) {
+        let Ok(current) = self.connection.read() else {
+            return;
+        };
+        if !Arc::ptr_eq(&current, failed) {
+            return;
+        }
+        let _ = self
+            .state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (state != ConnectionState::Closed.code())
+                    .then_some(ConnectionState::Disconnected.code())
+            });
+    }
+
+    fn set_state_unless_closed(&self, next: ConnectionState) -> Result<()> {
+        self.state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (state != ConnectionState::Closed.code()).then_some(next.code())
+            })
+            .map(|_| ())
+            .map_err(|_| Error::ClientClosed)
+    }
+
+    fn current_connection(&self) -> Result<Arc<C>> {
+        if self.connection_state() == ConnectionState::Closed {
+            return Err(Error::ClientClosed);
+        }
+        self.connection
+            .read()
+            .map(|connection| Arc::clone(&connection))
+            .map_err(|_| Error::Connection("connection state lock is poisoned".into()))
+    }
+
+    async fn reconnect_before(&self, deadline: transport::Deadline) -> Result<()> {
+        let current = self.current_connection()?;
+        self.reconnect_failed(&current, deadline).await
+    }
+
+    async fn reconnect_failed(&self, failed: &Arc<C>, deadline: transport::Deadline) -> Result<()> {
+        let remaining = deadline.remaining(Operation::ConnectionRetry)?;
+        let Some(_guard) = C::timeout(remaining, self.reconnect.lock()).await? else {
+            return Err(Error::Timeout {
+                operation: Operation::ConnectionRetry,
+            });
+        };
+        if self.connection_state() == ConnectionState::Closed {
+            return Err(Error::ClientClosed);
+        }
+        if self.connection_state() == ConnectionState::Connected {
+            return Ok(());
+        }
+        let current = self.current_connection()?;
+        if !Arc::ptr_eq(&current, failed) {
+            return Ok(());
+        }
+        self.set_state_unless_closed(ConnectionState::Reconnecting)?;
+        let timeout = deadline
+            .remaining(Operation::ConnectionRetry)?
+            .min(self.connect_timeout);
+        let replacement = match C::connect(
+            self.address,
+            &self.server_name,
+            self.tls.clone(),
+            timeout,
+            self.max_in_flight,
+            self.request_budget.clone(),
+        )
+        .await
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                self.mark_disconnected(failed);
+                return Err(error);
+            }
+        };
+        if let Some(protocol) = replacement.negotiated_alpn() {
+            if let Err(error) = self.alpn.validate_negotiated(protocol) {
+                replacement.close();
+                self.mark_disconnected(failed);
+                return Err(error);
+            }
+        } else {
+            replacement.close();
+            self.mark_disconnected(failed);
+            return Err(Error::Connection(
+                "server did not negotiate an ALPN protocol".into(),
+            ));
+        }
+        let mut connection = self
+            .connection
+            .write()
+            .map_err(|_| Error::Connection("connection state lock is poisoned".into()))?;
+        if self.connection_state() == ConnectionState::Closed {
+            replacement.close();
+            return Err(Error::ClientClosed);
+        }
+        if !Arc::ptr_eq(&connection, failed) {
+            replacement.close();
+            return Ok(());
+        }
+        failed.close();
+        *connection = Arc::new(replacement);
+        self.set_state_unless_closed(ConnectionState::Connected)?;
+        Ok(())
+    }
+
+    async fn reconnect(&self) -> Result<()> {
+        let deadline = transport::Deadline::after(self.connect_timeout)?;
+        let current = self.current_connection()?;
+        self.mark_disconnected(&current);
+        self.reconnect_failed(&current, deadline).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        let previous = self
+            .state
+            .swap(ConnectionState::Closed.code(), Ordering::AcqRel);
+        if previous != ConnectionState::Closed.code() {
+            let connection = self
+                .connection
+                .read()
+                .map_err(|_| Error::Connection("connection state lock is poisoned".into()))?;
+            connection.close();
+        }
+        Ok(())
+    }
+}
+
+fn validate_client_namespace_id(namespace_id: u64) -> Result<()> {
+    if namespace_id == 0 {
+        return Err(Error::configuration(
+            "namespace_id",
+            "must be a positive server-assigned namespace ID",
+        ));
+    }
+    Ok(())
+}
+
+struct BuilderSettings {
+    endpoint: Endpoint,
+    trust: ServerTrust,
+    identity: Option<ClientIdentity>,
+    alpn: AlpnPolicy,
+    timeouts: ClientTimeouts,
+    retry: RetryPolicy,
+    max_in_flight: usize,
+    max_in_flight_bytes: usize,
+    namespace_id: Option<u64>,
+    namespace_name: Vec<u8>,
+    namespace_policy: NamespacePolicy,
+}
+
+impl BuilderSettings {
+    fn new(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            trust: ServerTrust::default(),
+            identity: None,
+            alpn: AlpnPolicy::default(),
+            timeouts: ClientTimeouts::default(),
+            retry: RetryPolicy::default(),
+            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            max_in_flight_bytes: crate::internal_protocol::MAX_RESPONSE_FRAME_BYTES,
+            namespace_id: None,
+            namespace_name: Vec::new(),
+            namespace_policy: NamespacePolicy::default(),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.timeouts.connect.is_zero() || self.timeouts.request.is_zero() {
+            return Err(Error::configuration(
+                "timeouts",
+                "must be greater than zero",
+            ));
+        }
+        for (field, timeout) in [
+            ("timeouts.connect", self.timeouts.connect),
+            ("timeouts.request", self.timeouts.request),
+        ] {
+            if Instant::now().checked_add(timeout).is_none() {
+                return Err(Error::configuration(
+                    field,
+                    "exceeds the platform clock range",
+                ));
+            }
+        }
+        if self.retry.max_attempts == 0 {
+            return Err(Error::configuration(
+                "retry.max_attempts",
+                "must be greater than zero",
+            ));
+        }
+        if self.max_in_flight == 0 {
+            return Err(Error::configuration(
+                "max_in_flight",
+                "must be greater than zero",
+            ));
+        }
+        if self.max_in_flight > u32::MAX as usize {
+            return Err(Error::configuration(
+                "max_in_flight",
+                "must not exceed u32::MAX",
+            ));
+        }
+        if self.max_in_flight_bytes == 0
+            || self.max_in_flight_bytes > crate::internal_protocol::MAX_RESPONSE_FRAME_BYTES
+        {
+            return Err(Error::configuration(
+                "max_in_flight_bytes",
+                format!(
+                    "must be between 1 and {} bytes",
+                    crate::internal_protocol::MAX_RESPONSE_FRAME_BYTES
+                ),
+            ));
+        }
+        if self.namespace_id == Some(0) {
+            return Err(Error::configuration(
+                "namespace_id",
+                "must be a positive server-assigned namespace ID",
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<ConnectionSettings> {
+        self.validate()?;
+        let tls = make_tls_config(self.trust, self.identity, &self.alpn)?;
+        Ok(ConnectionSettings {
+            endpoint: self.endpoint,
+            tls,
+            alpn: self.alpn,
+            timeouts: self.timeouts,
+            retry: self.retry,
+            max_in_flight: self.max_in_flight,
+            max_in_flight_bytes: self.max_in_flight_bytes,
+            namespace_id: self.namespace_id,
+            namespace_name: self.namespace_name,
+            namespace_policy: self.namespace_policy,
+        })
+    }
+}
+
+struct ConnectionSettings {
+    endpoint: Endpoint,
+    tls: rustls::ClientConfig,
+    alpn: AlpnPolicy,
+    timeouts: ClientTimeouts,
+    retry: RetryPolicy,
+    max_in_flight: usize,
+    max_in_flight_bytes: usize,
+    namespace_id: Option<u64>,
+    namespace_name: Vec<u8>,
+    namespace_policy: NamespacePolicy,
+}
+
+macro_rules! builder_methods {
+    ($builder:ident) => {
+        impl $builder {
+            /// Uses only the supplied server trust roots.
+            pub fn server_trust(mut self, trust: ServerTrust) -> Self {
+                self.settings.trust = trust;
+                self
+            }
+
+            /// Trusts one explicit CA or self-signed server certificate.
+            pub fn trust_certificate(mut self, certificate: Certificate) -> Self {
+                self.settings.trust = ServerTrust::Custom(vec![certificate]);
+                self
+            }
+
+            /// Presents a mutual TLS client identity.
+            pub fn client_identity(mut self, identity: ClientIdentity) -> Self {
+                self.settings.identity = Some(identity);
+                self
+            }
+
+            /// Configures the supported `openkache/1` protocol.
+            pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
+                self.settings.alpn = policy;
+                self
+            }
+
+            /// Sets connection and complete-request deadlines.
+            pub fn timeouts(mut self, timeouts: ClientTimeouts) -> Self {
+                self.settings.timeouts = timeouts;
+                self
+            }
+
+            /// Sets retry attempts for response-safe operations.
+            pub fn retry_policy(mut self, retry: RetryPolicy) -> Self {
+                self.settings.retry = retry;
+                self
+            }
+
+            /// Bounds simultaneous request lanes on one connection.
+            ///
+            /// TLS-over-TCP retains one ordered lane regardless of this
+            /// value; the setting remains shared for API compatibility.
+            pub fn max_in_flight(mut self, maximum: usize) -> Self {
+                self.settings.max_in_flight = maximum;
+                self
+            }
+
+            /// Sets the aggregate bytes retained across network and value work.
+            ///
+            /// The limit is shared by response bodies, decrypted/decompressed
+            /// payloads, and codec allocations. It is independent of the
+            /// stream-lane count configured by [`Self::max_in_flight`].
+            pub fn max_in_flight_bytes(mut self, maximum: usize) -> Self {
+                self.settings.max_in_flight_bytes = maximum;
+                self
+            }
+
+            /// Selects the server-assigned namespace ID used by data-plane requests.
+            ///
+            /// Namespace IDs are opaque positive 64-bit values returned by
+            /// `NAMESPACE_OPEN`; this setting does not create or resolve a namespace.
+            pub fn namespace_id(mut self, namespace_id: u64) -> Self {
+                self.settings.namespace_id = Some(namespace_id);
+                self
+            }
+
+            /// Selects the namespace name resolved during connection setup.
+            ///
+            /// The default is the empty namespace name. The wire protocol has no default
+            /// namespace; this is only an SDK convenience that performs `NAMESPACE_OPEN` with
+            /// `CreateIfMissing` before the first data-plane request.
+            pub fn namespace_name(mut self, namespace_name: impl AsRef<[u8]>) -> Self {
+                self.settings.namespace_name = namespace_name.as_ref().to_vec();
+                self
+            }
+
+            /// Supplies the policy used if the configured namespace name is missing.
+            pub fn namespace_policy(mut self, policy: NamespacePolicy) -> Self {
+                self.settings.namespace_policy = policy;
+                self
+            }
+        }
+    };
+}
+
+macro_rules! raw_client_methods {
+    ($client:ident) => {
+        impl $client {
+            /// Verifies the connection and returns the complete request round-trip time.
+            pub async fn ping(&self) -> Result<Duration> {
+                self.0.ping().await
+            }
+
+            /// Returns the currently selected server-assigned namespace ID.
+            pub fn namespace_id(&self) -> Option<u64> {
+                self.0.namespace_id()
+            }
+
+            /// Resolves and returns the namespace used by formatted operations.
+            ///
+            /// If no explicit namespace ID is configured, this opens the
+            /// configured namespace name with the builder's policy.
+            pub async fn ensure_namespace_id(&self) -> Result<u64> {
+                self.0.ensure_namespace().await
+            }
+
+            /// Resolves a namespace name and optionally creates it.
+            ///
+            /// A zero-length name is an ordinary valid namespace name. This method changes the
+            /// namespace selected by subsequent data-plane calls on this client.
+            pub async fn namespace_open(
+                &self,
+                name: impl AsRef<[u8]>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> Result<NamespaceDescriptor> {
+                self.0
+                    .open_namespace(name.as_ref().to_vec(), create_if_missing, policy)
+                    .await
+            }
+
+            /// Resolves a namespace and reports whether the request created it.
+            pub async fn namespace_open_with_outcome(
+                &self,
+                name: impl AsRef<[u8]>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> Result<(NamespaceDescriptor, bool)> {
+                self.0
+                    .open_namespace_with_outcome(name.as_ref().to_vec(), create_if_missing, policy)
+                    .await
+            }
+
+            /// Replaces a namespace policy using its current revision.
+            pub async fn namespace_update_policy(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+                policy: NamespacePolicy,
+            ) -> Result<NamespaceDescriptor> {
+                self.0
+                    .update_namespace_policy(namespace_id, expected_revision, policy)
+                    .await
+            }
+
+            /// Deletes an empty namespace using its current revision.
+            pub async fn namespace_delete(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+            ) -> Result<()> {
+                self.0
+                    .delete_namespace(namespace_id, expected_revision)
+                    .await
+            }
+
+            /// Retrieves exact encoded bytes for a `0..=32`-byte item ID.
+            pub async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
+                self.0.get(item_id).await
+            }
+
+            /// Retrieves exact encoded bytes in an explicitly supplied namespace.
+            pub async fn get_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<ItemValue>> {
+                self.0.get_in_namespace(namespace_id, item_id).await
+            }
+
+            pub(crate) async fn get_in_namespace_with_permit(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<ItemValue>> {
+                self.0
+                    .get_in_namespace_with_permit(namespace_id, item_id)
+                    .await
+            }
+
+            /// Stores exact encoded bytes with explicit wire-level set options.
+            pub async fn set(
+                &self,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.0.set(item_id, value, options).await
+            }
+
+            /// Stores exact encoded bytes in an explicitly supplied namespace.
+            pub async fn set_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.0
+                    .set_in_namespace(namespace_id, item_id, value, options)
+                    .await
+            }
+
+            /// Deletes a `0..=32`-byte item ID.
+            pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
+                self.0.delete(item_id).await
+            }
+
+            /// Deletes a `0..=32`-byte item ID in an explicitly supplied namespace.
+            pub async fn delete_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<DeleteOutcome> {
+                self.0.delete_in_namespace(namespace_id, item_id).await
+            }
+
+            /// Returns server statistics as their JSON text.
+            pub async fn experimental_stats(&self) -> Result<String> {
+                self.0.experimental_stats().await
+            }
+
+            /// Returns statistics for an explicitly supplied namespace.
+            pub async fn experimental_stats_in_namespace(
+                &self,
+                namespace_id: u64,
+            ) -> Result<String> {
+                self.0.experimental_stats_in_namespace(namespace_id).await
+            }
+
+            /// Waits until prior mutations satisfy the server durability barrier.
+            pub async fn experimental_sync(&self) -> Result<()> {
+                self.0.experimental_sync().await
+            }
+
+            /// Waits for the durability barrier for an explicitly supplied namespace.
+            pub async fn experimental_sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+                self.0.experimental_sync_in_namespace(namespace_id).await
+            }
+
+            /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
+            pub fn connection_state(&self) -> ConnectionState {
+                self.0.connection_state()
+            }
+
+            /// Explicitly replaces the current connection without replaying an operation.
+            pub async fn reconnect(&self) -> Result<()> {
+                self.0.reconnect().await
+            }
+
+            /// Permanently and idempotently closes this client instance.
+            pub async fn close(&self) -> Result<()> {
+                self.0.close().await
+            }
+
+            pub(crate) fn request_budget(&self) -> RequestBudget {
+                self.0.request_budget()
+            }
+        }
+    };
+}
+
+#[cfg(feature = "quic-quinn")]
+/// Exact-item-ID, exact-value protocol client running on Tokio and Quinn.
+#[derive(Clone)]
+pub struct RawClient(Arc<Core<transport::QuinnConnection>>);
+
+#[cfg(feature = "quic-quinn")]
+/// Connection builder for the Tokio/Quinn low-level client.
+pub struct RawClientBuilder {
+    settings: BuilderSettings,
+}
+
+#[cfg(feature = "quic-quinn")]
+builder_methods!(RawClientBuilder);
+
+#[cfg(feature = "quic-quinn")]
+impl RawClientBuilder {
+    /// Connects the configured exact protocol client.
+    pub async fn connect(self) -> Result<RawClient> {
+        Ok(RawClient(connect_quinn(self.settings.finish()?).await?))
+    }
+}
+
+#[cfg(feature = "quic-quinn")]
+impl RawClient {
+    /// Connects an exact protocol client with system trust.
+    pub async fn connect(endpoint: &str) -> Result<Self> {
+        Self::builder(endpoint.parse()?).connect().await
+    }
+
+    /// Starts explicit configuration for an exact protocol client.
+    pub fn builder(endpoint: Endpoint) -> RawClientBuilder {
+        RawClientBuilder {
+            settings: BuilderSettings::new(endpoint),
+        }
+    }
+}
+
+#[cfg(feature = "quic-quinn")]
+raw_client_methods!(RawClient);
+
+#[cfg(feature = "tls-tcp")]
+/// Exact-item-ID, exact-value protocol client running on Tokio and TLS-over-TCP.
+#[derive(Clone)]
+pub struct TlsTcpRawClient(Arc<Core<transport::tcp::Connection>>);
+
+#[cfg(feature = "tls-tcp")]
+/// Connection builder for the Tokio/TLS-over-TCP low-level client.
+pub struct TlsTcpRawClientBuilder {
+    settings: BuilderSettings,
+}
+
+#[cfg(feature = "tls-tcp")]
+builder_methods!(TlsTcpRawClientBuilder);
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpRawClientBuilder {
+    /// Connects the configured exact protocol client.
+    pub async fn connect(self) -> Result<TlsTcpRawClient> {
+        Ok(TlsTcpRawClient(
+            connect_tls_tcp(self.settings.finish()?).await?,
+        ))
+    }
+}
+
+#[cfg(feature = "tls-tcp")]
+impl TlsTcpRawClient {
+    /// Connects an exact protocol client with system trust.
+    pub async fn connect(endpoint: &str) -> Result<Self> {
+        Self::builder(endpoint.parse()?).connect().await
+    }
+
+    /// Starts explicit configuration for an exact TLS-over-TCP protocol client.
+    pub fn builder(endpoint: Endpoint) -> TlsTcpRawClientBuilder {
+        TlsTcpRawClientBuilder {
+            settings: BuilderSettings::new(endpoint),
+        }
+    }
+}
+
+#[cfg(feature = "tls-tcp")]
+raw_client_methods!(TlsTcpRawClient);
+
+#[cfg(feature = "quic-compio")]
+/// Exact-item-ID, exact-value protocol client confined to a Compio runtime.
+#[derive(Clone)]
+pub struct LocalRawClient(Arc<Core<transport::CompioConnection>>);
+
+#[cfg(feature = "quic-compio")]
+/// Connection builder for the Compio low-level client.
+pub struct LocalRawClientBuilder {
+    settings: BuilderSettings,
+}
+
+#[cfg(feature = "quic-compio")]
+builder_methods!(LocalRawClientBuilder);
+
+#[cfg(feature = "quic-compio")]
+impl LocalRawClientBuilder {
+    /// Connects the configured exact protocol client on Compio.
+    pub async fn connect(self) -> Result<LocalRawClient> {
+        Ok(LocalRawClient(
+            connect_compio(self.settings.finish()?).await?,
+        ))
+    }
+}
+
+#[cfg(feature = "quic-compio")]
+impl LocalRawClient {
+    /// Connects an exact protocol client with system trust on an active Compio runtime.
+    pub async fn connect(endpoint: &str) -> Result<Self> {
+        Self::builder(endpoint.parse()?).connect().await
+    }
+
+    /// Starts explicit configuration for an exact Compio protocol client.
+    pub fn builder(endpoint: Endpoint) -> LocalRawClientBuilder {
+        LocalRawClientBuilder {
+            settings: BuilderSettings::new(endpoint),
+        }
+    }
+}
+
+#[cfg(feature = "quic-compio")]
+raw_client_methods!(LocalRawClient);
+
+#[cfg(feature = "quic-quinn")]
+async fn connect_quinn(
+    settings: ConnectionSettings,
+) -> Result<Arc<Core<transport::QuinnConnection>>> {
+    let deadline = transport::Deadline::after(settings.timeouts.connect)?;
+    let address = resolve_quinn(
+        &settings.endpoint,
+        deadline.remaining(Operation::DnsResolution)?,
+    )
+    .await?;
+    Core::connect(
+        address,
+        settings.endpoint.server_name().to_owned(),
+        settings.tls,
+        settings.alpn,
+        settings.timeouts,
+        settings.retry,
+        settings.max_in_flight,
+        settings.max_in_flight_bytes,
+        settings.namespace_id,
+        settings.namespace_name,
+        settings.namespace_policy,
+        deadline,
+    )
+    .await
+    .map(Arc::new)
+}
+
+#[cfg(feature = "quic-compio")]
+async fn connect_compio(
+    settings: ConnectionSettings,
+) -> Result<Arc<Core<transport::CompioConnection>>> {
+    let deadline = transport::Deadline::after(settings.timeouts.connect)?;
+    let address = resolve_compio(
+        &settings.endpoint,
+        deadline.remaining(Operation::DnsResolution)?,
+    )
+    .await?;
+    Core::connect(
+        address,
+        settings.endpoint.server_name().to_owned(),
+        settings.tls,
+        settings.alpn,
+        settings.timeouts,
+        settings.retry,
+        settings.max_in_flight,
+        settings.max_in_flight_bytes,
+        settings.namespace_id,
+        settings.namespace_name,
+        settings.namespace_policy,
+        deadline,
+    )
+    .await
+    .map(Arc::new)
+}
+
+#[cfg(feature = "tls-tcp")]
+async fn connect_tls_tcp(
+    settings: ConnectionSettings,
+) -> Result<Arc<Core<transport::tcp::Connection>>> {
+    let deadline = transport::Deadline::after(settings.timeouts.connect)?;
+    let address = resolve_tls_tcp(
+        &settings.endpoint,
+        deadline.remaining(Operation::DnsResolution)?,
+    )
+    .await?;
+    Core::connect(
+        address,
+        settings.endpoint.server_name().to_owned(),
+        settings.tls,
+        settings.alpn,
+        settings.timeouts,
+        settings.retry,
+        settings.max_in_flight,
+        settings.max_in_flight_bytes,
+        settings.namespace_id,
+        settings.namespace_name,
+        settings.namespace_policy,
+        deadline,
+    )
+    .await
+    .map(Arc::new)
+}
+
+#[cfg(feature = "quic-quinn")]
+async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(Error::Runtime {
+            backend: Backend::Quinn,
+            message: "an active Tokio runtime is required".into(),
+        });
+    }
+    if let Some(address) = endpoint.resolved_address() {
+        return Ok(address);
+    }
+    let addresses = tokio::time::timeout(
+        timeout,
+        tokio::net::lookup_host((endpoint.host(), endpoint.port())),
+    )
+    .await
+    .map_err(|_| Error::Timeout {
+        operation: Operation::DnsResolution,
+    })?
+    .map_err(Error::io)?;
+    addresses.into_iter().next().ok_or_else(|| {
+        Error::Connection(format!(
+            "{}:{} resolved to no addresses",
+            endpoint.host(),
+            endpoint.port()
+        ))
+    })
+}
+
+#[cfg(feature = "quic-compio")]
+async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+    if compio::runtime::Runtime::try_current().is_none() {
+        return Err(Error::Runtime {
+            backend: Backend::Compio,
+            message: "an active Compio runtime is required".into(),
+        });
+    }
+    if let Some(address) = endpoint.resolved_address() {
+        return Ok(address);
+    }
+    let target = (endpoint.host(), endpoint.port());
+    let addresses = compio::runtime::time::timeout(timeout, target.to_socket_addrs_async())
+        .await
+        .map_err(|_| Error::Timeout {
+            operation: Operation::DnsResolution,
+        })?
+        .map_err(Error::io)?;
+    addresses.into_iter().next().ok_or_else(|| {
+        Error::Connection(format!(
+            "{}:{} resolved to no addresses",
+            endpoint.host(),
+            endpoint.port()
+        ))
+    })
+}
+
+#[cfg(feature = "tls-tcp")]
+async fn resolve_tls_tcp(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(Error::Connection(
+            "an active Tokio runtime is required".into(),
+        ));
+    }
+    if let Some(address) = endpoint.resolved_address() {
+        return Ok(address);
+    }
+    let addresses = tokio::time::timeout(
+        timeout,
+        tokio::net::lookup_host((endpoint.host(), endpoint.port())),
+    )
+    .await
+    .map_err(|_| Error::Timeout {
+        operation: Operation::DnsResolution,
+    })?
+    .map_err(Error::io)?;
+    addresses.into_iter().next().ok_or_else(|| {
+        Error::Connection(format!(
+            "{}:{} resolved to no addresses",
+            endpoint.host(),
+            endpoint.port()
+        ))
+    })
+}
+
+fn make_tls_config(
+    trust: ServerTrust,
+    identity: Option<ClientIdentity>,
+    alpn: &AlpnPolicy,
+) -> Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    let insecure = matches!(&trust, ServerTrust::Insecure);
+    match trust {
+        ServerTrust::System => {
+            let result = rustls_native_certs::load_native_certs();
+            if result.certs.is_empty() {
+                return Err(Error::Tls(format!(
+                    "system trust store contained no usable certificates: {:?}",
+                    result.errors
+                )));
+            }
+            for certificate in result.certs {
+                roots
+                    .add(certificate)
+                    .map_err(|error| Error::Tls(error.to_string()))?;
+            }
+        }
+        ServerTrust::Custom(certificates) => {
+            if certificates.is_empty() {
+                return Err(Error::configuration(
+                    "server_trust",
+                    "custom trust requires at least one certificate",
+                ));
+            }
+            for certificate in certificates {
+                roots
+                    .add(certificate.into_der())
+                    .map_err(|error| Error::Tls(error.to_string()))?;
+            }
+        }
+        ServerTrust::Insecure => {}
+    }
+    let builder = rustls::ClientConfig::builder_with_provider(config::strict_pq_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(Error::tls)?
+        .with_root_certificates(roots);
+    let mut config = match identity {
+        Some(identity) => {
+            let (chain, key) = identity.into_rustls();
+            builder
+                .with_client_auth_cert(chain, key)
+                .map_err(Error::tls)?
+        }
+        None => builder.with_no_client_auth(),
+    };
+    if insecure {
+        config
+            .dangerous()
+            .set_certificate_verifier(std::sync::Arc::new(SkipServerVerification::new()));
+    }
+    // A resumed TLS 1.3 PSK handshake has no negotiated key-exchange group to
+    // validate. Disable resumption so every connection performs the mandatory
+    // X25519MLKEM768 hybrid exchange.
+    config.resumption = rustls::client::Resumption::disabled();
+    config.alpn_protocols = alpn.protocols().to_vec();
+    Ok(config)
+}
+
+/// Certificate verifier used only by the explicit [`ServerTrust::Insecure`]
+/// opt-out. TLS 1.3 and the mandatory hybrid key exchange remain enforced.
+#[derive(Debug)]
+struct SkipServerVerification {
+    provider: std::sync::Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl SkipServerVerification {
+    fn new() -> Self {
+        Self {
+            provider: config::strict_pq_provider(),
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn expect_status(operation: Operation, status: Status, expected: &[Status]) -> Result<()> {
+    if expected.contains(&status) {
+        Ok(())
+    } else {
+        Err(unexpected_status(operation, status))
+    }
+}
+
+fn validate_experimental_stats_payload(payload: &[u8]) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_slice(payload).map_err(|error| Error::UnexpectedResponse {
+            operation: Operation::ExperimentalStats,
+            message: format!("EXPERIMENTAL_STATS response is not valid JSON: {error}"),
+        })?;
+    let object = value.as_object().ok_or_else(|| Error::UnexpectedResponse {
+        operation: Operation::ExperimentalStats,
+        message: "EXPERIMENTAL_STATS response must be a JSON object".into(),
+    })?;
+    if object
+        .get("storage")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        return Err(Error::UnexpectedResponse {
+            operation: Operation::ExperimentalStats,
+            message: "EXPERIMENTAL_STATS response must contain a string storage member".into(),
+        });
+    }
+    let workers = object
+        .get("workers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| Error::UnexpectedResponse {
+            operation: Operation::ExperimentalStats,
+            message: "EXPERIMENTAL_STATS response must contain a workers array".into(),
+        })?;
+    if workers
+        .iter()
+        .any(|worker| serde_json::Value::as_str(worker).is_none())
+    {
+        return Err(Error::UnexpectedResponse {
+            operation: Operation::ExperimentalStats,
+            message: "EXPERIMENTAL_STATS workers entries must be strings".into(),
+        });
+    }
+    Ok(())
+}
+
+fn decode_namespace_descriptor(
+    operation: Operation,
+    payload: &[u8],
+) -> Result<NamespaceDescriptor> {
+    NamespaceDescriptor::decode(payload).map_err(|error| Error::UnexpectedResponse {
+        operation,
+        message: format!("invalid namespace descriptor: {error}"),
+    })
+}
+
+fn unexpected_status(operation: Operation, status: Status) -> Error {
+    Error::UnexpectedResponse {
+        operation,
+        message: format!("unexpected status {status:?}"),
+    }
+}

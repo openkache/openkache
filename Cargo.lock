@@ -1092,7 +1092,7 @@ dependencies = [
  "parking_lot",
  "rustix",
  "serde",
- "signal-hook 0.3.18",
+ "signal-hook",
  "signal-hook-mio",
  "winapi",
 ]
@@ -1713,7 +1713,7 @@ dependencies = [
  "rlimit",
  "scoped-tls",
  "scopeguard",
- "signal-hook 0.3.18",
+ "signal-hook",
  "sketches-ddsketch",
  "smallvec",
  "socket2 0.4.10",
@@ -2635,47 +2635,30 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "openkache"
 version = "0.1.0"
 dependencies = [
- "anstream",
+ "aes 0.9.1",
+ "aes-gcm-siv",
+ "aes-siv",
+ "base64",
  "blake3",
- "boring",
- "clap",
- "comnoq",
- "compio",
- "compio-quic",
- "crc32fast",
+ "cmac",
+ "crossbeam-queue",
  "crossfire",
- "event-listener",
- "flume 0.10.14",
  "futures-util",
- "glommio",
- "kanal",
- "kimojio",
- "libc",
- "miette",
- "mimalloc",
- "monoio",
- "openkache-protocol",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "owo-colors",
- "quiche",
- "rand 0.9.5",
- "rcgen",
- "rustix",
+ "getrandom 0.3.4",
+ "http",
+ "polyval 0.7.3",
+ "quinn",
  "rustls",
+ "rustls-native-certs",
  "serde",
- "sha2",
- "signal-hook 0.4.4",
+ "serde_json",
+ "serde_json_canonicalizer",
  "smallvec",
- "snmalloc-rs",
- "socket2 0.4.10",
  "thiserror",
- "tikv-jemallocator",
- "time",
- "toml",
- "tracing",
- "tracing-subscriber",
+ "tokio",
+ "vu128",
+ "zeroize",
+ "zstd-pure-rs",
 ]
 
 [[package]]
@@ -2689,19 +2672,11 @@ dependencies = [
  "compio",
  "indicatif",
  "miette",
- "openkache-client",
+ "openkache-client-core",
  "owo-colors",
  "reedline",
  "serde_json",
  "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "openkache-client"
-version = "0.1.0"
-dependencies = [
- "openkache-client-core",
  "tokio",
 ]
 
@@ -2758,6 +2733,53 @@ dependencies = [
  "smallvec",
  "thiserror",
  "vu128",
+]
+
+[[package]]
+name = "openkache-server"
+version = "0.1.0"
+dependencies = [
+ "anstream",
+ "blake3",
+ "boring",
+ "clap",
+ "comnoq",
+ "compio",
+ "compio-quic",
+ "crc32fast",
+ "crossfire",
+ "event-listener",
+ "flume 0.10.14",
+ "futures-util",
+ "glommio",
+ "kanal",
+ "kimojio",
+ "libc",
+ "miette",
+ "mimalloc",
+ "monoio",
+ "openkache-protocol",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "owo-colors",
+ "quiche",
+ "rand 0.9.5",
+ "rcgen",
+ "rustix",
+ "rustls",
+ "serde",
+ "sha2",
+ "signal-hook",
+ "smallvec",
+ "snmalloc-rs",
+ "socket2 0.4.10",
+ "thiserror",
+ "tikv-jemallocator",
+ "time",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3620,16 +3642,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "signal-hook"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
 name = "signal-hook-mio"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3637,7 +3649,7 @@ checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
 dependencies = [
  "libc",
  "mio",
- "signal-hook 0.3.18",
+ "signal-hook",
 ]
 
 [[package]]

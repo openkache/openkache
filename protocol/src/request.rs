@@ -399,8 +399,7 @@ fn decode_request_frame_metadata_progress<const PROJECT_FIELDS: bool>(
         &mut state,
         projections,
         &conditional_selectors,
-    )?
-    {
+    )? {
         return Ok(DecodeProgress::Need(additional));
     }
     if state
@@ -705,15 +704,14 @@ fn decode_request_frame_steps<const PROJECT_FIELDS: bool>(
                     ));
                 }
                 if state.packed_values[selector] == expected
-                    && let DecodeProgress::Need(additional) = decode_request_frame_steps::<
-                        PROJECT_FIELDS,
-                    >(
-                        prefix,
-                        steps,
-                        state,
-                        projections,
-                        conditional_selectors,
-                    )?
+                    && let DecodeProgress::Need(additional) =
+                        decode_request_frame_steps::<PROJECT_FIELDS>(
+                            prefix,
+                            steps,
+                            state,
+                            projections,
+                            conditional_selectors,
+                        )?
                 {
                     return Ok(DecodeProgress::Need(additional));
                 }
@@ -849,11 +847,12 @@ fn collect_conditional_selectors(
             selector, steps, ..
         } = *step
         {
-            let selected = selectors.get_mut(selector).ok_or(
-                ProtocolError::InvalidFieldSequence(
-                    "conditional step references an unavailable packed selector",
-                ),
-            )?;
+            let selected =
+                selectors
+                    .get_mut(selector)
+                    .ok_or(ProtocolError::InvalidFieldSequence(
+                        "conditional step references an unavailable packed selector",
+                    ))?;
             *selected = true;
             collect_conditional_selectors(steps, selectors)?;
         }

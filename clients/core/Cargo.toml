@@ -1,5 +1,6 @@
 [package]
 name = "openkache-client-core"
+publish = false
 version = "0.1.0"
 edition.workspace = true
 description = "Low-level client core for the OpenKache cache server"

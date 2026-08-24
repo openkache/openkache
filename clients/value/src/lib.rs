@@ -372,6 +372,66 @@ impl From<u128> for Integer {
     }
 }
 
+/// IEEE-754 floating-point widths represented by [`Float`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FloatWidth {
+    /// IEEE-754 binary16 (half precision).
+    Bits16,
+    /// IEEE-754 binary32 (single precision).
+    Bits32,
+    /// IEEE-754 binary64 (double precision).
+    Bits64,
+}
+
+impl FloatWidth {
+    const fn raw_bits_mask(self) -> u64 {
+        match self {
+            Self::Bits16 => u16::MAX as u64,
+            Self::Bits32 => u32::MAX as u64,
+            Self::Bits64 => u64::MAX,
+        }
+    }
+
+    const fn byte_width(self) -> usize {
+        match self {
+            Self::Bits16 => 2,
+            Self::Bits32 => 4,
+            Self::Bits64 => 8,
+        }
+    }
+}
+
+/// An IEEE-754 value with its wire width and exact raw bits.
+///
+/// `raw_bits` stores the bit pattern in the least-significant bits. For
+/// [`FloatWidth::Bits16`] and [`FloatWidth::Bits32`], the upper bits MUST be
+/// zero. Constructors and decoders enforce this invariant; the public fields
+/// remain available for direct model construction and are validated by every
+/// encoder.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Float {
+    /// IEEE-754 width of the value.
+    pub width: FloatWidth,
+    /// Raw IEEE-754 bits, right-aligned in this `u64`.
+    pub raw_bits: u64,
+}
+
+impl Float {
+    /// Constructs a float when `raw_bits` fits the selected width.
+    pub const fn new(width: FloatWidth, raw_bits: u64) -> Option<Self> {
+        if raw_bits & !width.raw_bits_mask() == 0 {
+            Some(Self { width, raw_bits })
+        } else {
+            None
+        }
+    }
+
+    /// Returns whether the raw bits fit the selected IEEE-754 width.
+    pub const fn is_valid(self) -> bool {
+        self.raw_bits & !self.width.raw_bits_mask() == 0
+    }
+}
+
 /// A logical value in the cross-language model.
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -383,12 +443,8 @@ pub enum Value {
     Boolean(bool),
     /// An exact arbitrary-precision integer.
     Integer(Integer),
-    /// An IEEE-754 binary16 value represented by its raw bits.
-    Float16(u16),
-    /// An IEEE-754 binary32 value represented by its raw bits.
-    Float32(u32),
-    /// An IEEE-754 binary64 value represented by its raw bits.
-    Float64(u64),
+    /// An IEEE-754 value with its width and exact raw bits.
+    Float(Float),
     /// A well-formed UTF-8 string.
     TextString(String),
     /// An uninterpreted byte string.
@@ -426,12 +482,7 @@ impl Drop for Value {
                     Self::Integer(integer) => std::ptr::drop_in_place(integer),
                     Self::TextString(text) => std::ptr::drop_in_place(text),
                     Self::Bytes(bytes) => std::ptr::drop_in_place(bytes),
-                    Self::Undefined
-                    | Self::Null
-                    | Self::Boolean(_)
-                    | Self::Float16(_)
-                    | Self::Float32(_)
-                    | Self::Float64(_) => {}
+                    Self::Undefined | Self::Null | Self::Boolean(_) | Self::Float(_) => {}
                 }
             }
         }
@@ -446,17 +497,26 @@ impl Value {
 
     /// Constructs a binary16 value from raw IEEE-754 bits.
     pub const fn float16(raw_bits: u16) -> Self {
-        Self::Float16(raw_bits)
+        Self::Float(Float {
+            width: FloatWidth::Bits16,
+            raw_bits: raw_bits as u64,
+        })
     }
 
     /// Constructs a binary32 value from raw IEEE-754 bits.
     pub const fn float32(raw_bits: u32) -> Self {
-        Self::Float32(raw_bits)
+        Self::Float(Float {
+            width: FloatWidth::Bits32,
+            raw_bits: raw_bits as u64,
+        })
     }
 
     /// Constructs a binary64 value from raw IEEE-754 bits.
     pub const fn float64(raw_bits: u64) -> Self {
-        Self::Float64(raw_bits)
+        Self::Float(Float {
+            width: FloatWidth::Bits64,
+            raw_bits,
+        })
     }
 
     /// Constructs a UTF-8 text string.
@@ -496,9 +556,7 @@ impl Value {
                 | Self::Null
                 | Self::Boolean(_)
                 | Self::Integer(_)
-                | Self::Float16(_)
-                | Self::Float32(_)
-                | Self::Float64(_)
+                | Self::Float(_)
                 | Self::TextString(_)
                 | Self::Bytes(_)
         )
@@ -546,6 +604,8 @@ pub enum ErrorKind {
     DuplicateKey,
     /// An allocation could not be reserved.
     Allocation,
+    /// A float contains bits outside its selected IEEE-754 width.
+    InvalidFloat,
 }
 
 /// Resource that can be bounded by [`Limits`].
@@ -579,6 +639,14 @@ pub enum Error {
     Allocation {
         /// Requested allocation.
         size: usize,
+    },
+    /// A float contains bits outside its selected IEEE-754 width.
+    #[error("invalid {width:?} float raw bits {raw_bits:#018x}")]
+    InvalidFloat {
+        /// Selected IEEE-754 width.
+        width: FloatWidth,
+        /// Supplied right-aligned raw bits.
+        raw_bits: u64,
     },
     /// No complete item begins at the reported byte.
     #[error("truncated CBOR at byte {offset}")]
@@ -652,6 +720,7 @@ impl Error {
         match self {
             Self::ResourceLimit { .. } => ErrorKind::ResourceLimit,
             Self::Allocation { .. } => ErrorKind::Allocation,
+            Self::InvalidFloat { .. } => ErrorKind::InvalidFloat,
             Self::Truncated { .. } => ErrorKind::Truncated,
             Self::TrailingBytes { .. } => ErrorKind::TrailingBytes,
             Self::InvalidEncoding { .. } | Self::IndefiniteLength { .. } => {
@@ -732,17 +801,26 @@ pub fn encode_with_limits_and_budget(
             Value::Integer(integer) => {
                 encode_integer(integer, &mut output, limits, &mut allocation)?
             }
-            Value::Float16(bits) => {
-                push_bytes(&mut output, &[0xf9], limits, &mut allocation)?;
-                push_bytes(&mut output, &bits.to_be_bytes(), limits, &mut allocation)?;
-            }
-            Value::Float32(bits) => {
-                push_bytes(&mut output, &[0xfa], limits, &mut allocation)?;
-                push_bytes(&mut output, &bits.to_be_bytes(), limits, &mut allocation)?;
-            }
-            Value::Float64(bits) => {
-                push_bytes(&mut output, &[0xfb], limits, &mut allocation)?;
-                push_bytes(&mut output, &bits.to_be_bytes(), limits, &mut allocation)?;
+            Value::Float(float) => {
+                if !float.is_valid() {
+                    return Err(Error::InvalidFloat {
+                        width: float.width,
+                        raw_bits: float.raw_bits,
+                    });
+                }
+                let (marker, width) = match float.width {
+                    FloatWidth::Bits16 => (0xf9, FloatWidth::Bits16),
+                    FloatWidth::Bits32 => (0xfa, FloatWidth::Bits32),
+                    FloatWidth::Bits64 => (0xfb, FloatWidth::Bits64),
+                };
+                push_bytes(&mut output, &[marker], limits, &mut allocation)?;
+                let bytes = float.raw_bits.to_be_bytes();
+                push_bytes(
+                    &mut output,
+                    &bytes[8 - width.byte_width()..],
+                    limits,
+                    &mut allocation,
+                )?;
             }
             Value::TextString(text) => {
                 append_head(3, text.len(), &mut output, limits, &mut allocation)?;
@@ -1137,6 +1215,14 @@ fn validate_map_entries(entries: &[(Value, Value)]) -> Result<()> {
         if !key.is_scalar_key() {
             return Err(Error::NonScalarKey { index });
         }
+        if let Value::Float(float) = key {
+            if !float.is_valid() {
+                return Err(Error::InvalidFloat {
+                    width: float.width,
+                    raw_bits: float.raw_bits,
+                });
+            }
+        }
         if key_index.contains(entries, key) {
             return Err(Error::DuplicateKey { index });
         }
@@ -1153,6 +1239,14 @@ fn validate_map_entries_with_budget(
     for (index, (key, _)) in entries.iter().enumerate() {
         if !key.is_scalar_key() {
             return Err(Error::NonScalarKey { index });
+        }
+        if let Value::Float(float) = key {
+            if !float.is_valid() {
+                return Err(Error::InvalidFloat {
+                    width: float.width,
+                    raw_bits: float.raw_bits,
+                });
+            }
         }
         if key_index.contains(entries, key) {
             return Err(Error::DuplicateKey { index });
@@ -1296,16 +1390,8 @@ fn scalar_key_hash(value: &Value) -> u64 {
             3u8.hash(&mut hasher);
             value.hash(&mut hasher);
         }
-        Value::Float16(value) => {
+        Value::Float(value) => {
             4u8.hash(&mut hasher);
-            value.hash(&mut hasher);
-        }
-        Value::Float32(value) => {
-            5u8.hash(&mut hasher);
-            value.hash(&mut hasher);
-        }
-        Value::Float64(value) => {
-            6u8.hash(&mut hasher);
             value.hash(&mut hasher);
         }
         Value::TextString(value) => {
@@ -1326,9 +1412,7 @@ fn scalar_equal(left: &Value, right: &Value) -> bool {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
         (Value::Boolean(left), Value::Boolean(right)) => left == right,
         (Value::Integer(left), Value::Integer(right)) => left == right,
-        (Value::Float16(left), Value::Float16(right)) => left == right,
-        (Value::Float32(left), Value::Float32(right)) => left == right,
-        (Value::Float64(left), Value::Float64(right)) => left == right,
+        (Value::Float(left), Value::Float(right)) => left == right,
         (Value::TextString(left), Value::TextString(right)) => left == right,
         (Value::Bytes(left), Value::Bytes(right)) => left == right,
         _ => false,
@@ -1342,9 +1426,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => {}
             (Value::Boolean(left), Value::Boolean(right)) if left == right => {}
             (Value::Integer(left), Value::Integer(right)) if left == right => {}
-            (Value::Float16(left), Value::Float16(right)) if left == right => {}
-            (Value::Float32(left), Value::Float32(right)) if left == right => {}
-            (Value::Float64(left), Value::Float64(right)) if left == right => {}
+            (Value::Float(left), Value::Float(right)) if left == right => {}
             (Value::TextString(left), Value::TextString(right)) if left == right => {}
             (Value::Bytes(left), Value::Bytes(right)) if left == right => {}
             (Value::Array(left), Value::Array(right)) if left.len() == right.len() => {
@@ -1653,21 +1735,26 @@ fn parse_item(
             23 => Ok(ParsedItem::Value(Value::Undefined)),
             25 => {
                 let raw = read_fixed(bytes, cursor, 2, offset)?;
-                Ok(ParsedItem::Value(Value::Float16(u16::from_be_bytes([
-                    raw[0], raw[1],
-                ]))))
+                Ok(ParsedItem::Value(Value::Float(Float {
+                    width: FloatWidth::Bits16,
+                    raw_bits: u64::from(u16::from_be_bytes([raw[0], raw[1]])),
+                })))
             }
             26 => {
                 let raw = read_fixed(bytes, cursor, 4, offset)?;
-                Ok(ParsedItem::Value(Value::Float32(u32::from_be_bytes([
-                    raw[0], raw[1], raw[2], raw[3],
-                ]))))
+                Ok(ParsedItem::Value(Value::Float(Float {
+                    width: FloatWidth::Bits32,
+                    raw_bits: u64::from(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]])),
+                })))
             }
             27 => {
                 let raw = read_fixed(bytes, cursor, 8, offset)?;
-                Ok(ParsedItem::Value(Value::Float64(u64::from_be_bytes([
-                    raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                ]))))
+                Ok(ParsedItem::Value(Value::Float(Float {
+                    width: FloatWidth::Bits64,
+                    raw_bits: u64::from_be_bytes([
+                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                    ]),
+                })))
             }
             31 => Err(Error::IndefiniteLength { offset }),
             _ => Err(Error::UnsupportedType {

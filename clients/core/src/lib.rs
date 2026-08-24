@@ -48,7 +48,8 @@ pub use key::{
 };
 pub use openkache_protocol::ITEM_ID_BYTES;
 pub use openkache_value::{
-    Value as StructuredValue, decode as decode_structured_value, encode as encode_structured_value,
+    Float, FloatWidth, Value as StructuredValue, decode as decode_structured_value,
+    encode as encode_structured_value,
 };
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
@@ -480,7 +481,8 @@ impl<C: ClientConnection> Drop for PendingRequestReservation<'_, C> {
         // future was cancelled.  Retire the connection so a later operation
         // cannot accidentally treat that abandoned lane as a known outcome.
         if entry.is_some_and(|entry| {
-            entry.transmitted && (entry.mutation || matches!(entry.operation, Operation::ExperimentalSync))
+            entry.transmitted
+                && (entry.mutation || matches!(entry.operation, Operation::ExperimentalSync))
         }) {
             let _ = self
                 .core

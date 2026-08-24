@@ -1,39 +1,50 @@
 [package]
-name = "openkache-client"
+name = "openkache"
 version = "0.1.0"
 edition.workspace = true
-description = "Ergonomic Rust client for the OpenKache cache server"
+description = "Maintained Rust client for the OpenKache cache server"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/openkache/openkache"
 homepage = "https://openkache.com"
-documentation = "https://docs.rs/openkache-client"
+documentation = "https://docs.rs/openkache"
 keywords = ["cache", "client", "quic", "tls", "openkache"]
 categories = ["network-programming", "database"]
 rust-version = "1.85"
-include = [
-    "Cargo.toml",
-    "README.md",
-    "LICENSE",
-    "build.rs",
-    "src/**/*.rs",
-    "examples/**/*.rs",
-]
+include = ["Cargo.toml", "README.md", "LICENSE", "src/**/*.rs", "examples/**/*.rs"]
 
 [package.metadata.docs.rs]
 all-features = true
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
-default = ["quic-quinn", "runtime-tokio"]
-ffi = ["openkache-client-core/ffi"]
-quic-compio = ["openkache-client-core/quic-compio"]
-quic-quinn = ["openkache-client-core/quic-quinn"]
-runtime-tokio = ["dep:tokio"]
-tls-tcp = ["openkache-client-core/tls-tcp"]
+default = ["quic-quinn"]
+quic-quinn = ["dep:quinn", "dep:tokio"]
 
 [dependencies]
-openkache-client-core = { version = "*", path = "../core", default-features = false }
-tokio = { version = "*", features = ["macros", "rt-multi-thread"], optional = true }
+aes = { version = "=0.9.1", features = ["zeroize"] }
+aes-gcm-siv = { version = "=0.12.0-rc.3", features = ["zeroize"] }
+aes-siv = { version = "=0.8.0-rc.3", features = ["zeroize"] }
+base64 = "*"
+blake3 = { version = "*", features = ["zeroize"] }
+cmac = { version = "=0.8.0", features = ["zeroize"] }
+crossbeam-queue = "*"
+crossfire = "*"
+futures-util = "*"
+getrandom = "0.3"
+http = "*"
+polyval = { version = "=0.7.3", features = ["zeroize"] }
+quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
+rustls-native-certs = "*"
+serde = "*"
+serde_json = "*"
+serde_json_canonicalizer = "*"
+smallvec = { version = "*", features = ["const_new"] }
+thiserror = "*"
+tokio = { version = "*", features = ["io-util", "net", "rt", "time", "macros", "rt-multi-thread"], optional = true }
+vu128 = "*"
+zeroize = { version = "*", features = ["derive"] }
+zstd-pure-rs = "*"
