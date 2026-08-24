@@ -1,6 +1,6 @@
 {
   "name": "openkache",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "Promise-based OpenKache client for Node.js, Bun, and Deno with a runtime-neutral structured-value codec.",
   "keywords": [
@@ -38,6 +38,7 @@
     "target/native/openkache-client.darwin-arm64.node",
     "target/native/openkache-client.linux-arm64-gnu.node",
     "target/native/openkache-client.linux-x64-gnu.node",
+    "LICENSE",
     "README.md"
   ],
   "publishConfig": {

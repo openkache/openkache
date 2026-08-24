@@ -297,6 +297,12 @@ install(
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 install(
+  FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE"
+    "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
+)
+install(
   FILES "${_openkache_client_generated_contract}"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/openkache"
 )
