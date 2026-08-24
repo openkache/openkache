@@ -62,7 +62,13 @@ const DEFAULT_VALUE_LIMITS: Required<Value_Limits> = {
   max_items: 1_000_000,
   max_integer_bytes: 1 << 20,
 }
+const MAX_ALLOWED_VALUE_DEPTH = 1_024
 const MISSING_VALUE = Symbol("missing structured value root")
+
+interface Conversion_State {
+  items: number
+  bytes: number
+}
 
 /** Lossless model value for JavaScript ``undefined``. */
 export class Undefined_Value {
@@ -270,7 +276,13 @@ export function to_value(
   value: unknown,
   limits: Value_Limits = {},
 ): Structured_Value {
-  return convert_value(value, new Set<object>(), 0, checked_limits(limits))
+  return convert_value(
+    value,
+    new Set<object>(),
+    0,
+    checked_limits(limits),
+    { items: 0, bytes: 0 },
+  )
 }
 
 function convert_value(
@@ -278,32 +290,126 @@ function convert_value(
   ancestors: Set<object>,
   depth: number,
   budget: Required<Value_Limits>,
+  state: Conversion_State,
 ): Structured_Value {
-  if (
-    value instanceof Undefined_Value ||
-    value instanceof Integer_Value ||
-    value instanceof Float_Value ||
-    value instanceof ByteString_Value ||
-    value instanceof TextString_Value ||
-    value instanceof Array_Value ||
-    value instanceof Map_Value
-  ) {
+  if (value instanceof Undefined_Value) {
+    consume_items(state, budget, 1)
     return value
   }
-  if (typeof value === "undefined") return UNDEFINED_VALUE
-  if (value === null || typeof value === "boolean") return value
+  if (value instanceof Integer_Value) {
+    consume_items(state, budget, 1)
+    consume_integer_bytes(value.value, budget)
+    consume_bytes(state, budget, encoded_integer_size(value.value))
+    return value
+  }
+  if (value instanceof Float_Value) {
+    consume_items(state, budget, 1)
+    consume_bytes(state, budget, 1 + value.width / 8)
+    return value
+  }
+  if (value instanceof ByteString_Value) {
+    consume_items(state, budget, 1)
+    consume_bytes(
+      state,
+      budget,
+      cbor_head_size(BigInt(value.value.byteLength)) + value.value.byteLength,
+    )
+    return value
+  }
+  if (value instanceof TextString_Value) {
+    consume_items(state, budget, 1)
+    const byte_length = TEXT_ENCODER.encode(value.value).byteLength
+    consume_bytes(
+      state,
+      budget,
+      cbor_head_size(BigInt(byte_length)) + byte_length,
+    )
+    return value
+  }
+  if (value instanceof Array_Value) {
+    assert_acyclic(value, ancestors)
+    try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
+      consume_items(state, budget, 1)
+      consume_bytes(state, budget, cbor_head_size(BigInt(value.values.length)))
+      for (const child of value.values) {
+        convert_value(child, ancestors, depth + 1, budget, state)
+      }
+      return value
+    } finally {
+      ancestors.delete(value)
+    }
+  }
+  if (value instanceof Map_Value) {
+    assert_acyclic(value, ancestors)
+    try {
+      if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
+      consume_items(state, budget, 1)
+      consume_bytes(state, budget, cbor_head_size(BigInt(value.entries.length)))
+      const key_identities = new Set<string>()
+      for (let index = 0; index < value.entries.length; index += 1) {
+        const [key, child] = value.entries[index]!
+        const converted_key = convert_value(
+          key,
+          ancestors,
+          depth + 1,
+          budget,
+          state,
+        )
+        validate_map_key(converted_key, index, key_identities)
+        convert_value(child, ancestors, depth + 1, budget, state)
+      }
+      return value
+    } finally {
+      ancestors.delete(value)
+    }
+  }
+  if (typeof value === "undefined") {
+    consume_items(state, budget, 1)
+    return UNDEFINED_VALUE
+  }
+  if (value === null || typeof value === "boolean") {
+    consume_items(state, budget, 1)
+    return value
+  }
   if (typeof value === "number") {
+    consume_items(state, budget, 1)
+    consume_bytes(state, budget, 9)
     const bits = new ArrayBuffer(8)
     new DataView(bits).setFloat64(0, value, false)
     return new Float_Value(64, new DataView(bits).getBigUint64(0, false))
   }
-  if (typeof value === "bigint") return new Integer_Value(value)
-  if (typeof value === "string") return new TextString_Value(value)
-  if (value instanceof Uint8Array) return new ByteString_Value(value)
+  if (typeof value === "bigint") {
+    consume_items(state, budget, 1)
+    consume_integer_bytes(value, budget)
+    consume_bytes(state, budget, encoded_integer_size(value))
+    return new Integer_Value(value)
+  }
+  if (typeof value === "string") {
+    consume_items(state, budget, 1)
+    const byte_length = TEXT_ENCODER.encode(value).byteLength
+    consume_bytes(
+      state,
+      budget,
+      cbor_head_size(BigInt(byte_length)) + byte_length,
+    )
+    return new TextString_Value(value)
+  }
+  if (value instanceof Uint8Array) {
+    consume_items(state, budget, 1)
+    consume_bytes(
+      state,
+      budget,
+      cbor_head_size(BigInt(value.byteLength)) + value.byteLength,
+    )
+    return new ByteString_Value(value)
+  }
   if (Array.isArray(value)) {
     assert_acyclic(value, ancestors)
     try {
       if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
+      consume_items(state, budget, 1)
+      consume_bytes(state, budget, cbor_head_size(BigInt(value.length)))
       const children: Structured_Value[] = []
       for (let index = 0; index < value.length; index += 1) {
         if (!Object.prototype.hasOwnProperty.call(value, index)) {
@@ -312,7 +418,9 @@ function convert_value(
             "conversion",
           )
         }
-        children.push(convert_value(value[index], ancestors, depth + 1, budget))
+        children.push(
+          convert_value(value[index], ancestors, depth + 1, budget, state),
+        )
       }
       return new Array_Value(children)
     } finally {
@@ -323,14 +431,27 @@ function convert_value(
     assert_acyclic(value, ancestors)
     try {
       if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
-      return new Map_Value(
-        [...value.entries()].map(
-          ([key, child]): readonly [Structured_Value, Structured_Value] => [
-            convert_value(key, ancestors, depth + 1, budget),
-            convert_value(child, ancestors, depth + 1, budget),
-          ],
-        ),
-      )
+      consume_items(state, budget, 1)
+      consume_bytes(state, budget, cbor_head_size(BigInt(value.size)))
+      const entries: [Structured_Value, Structured_Value][] = []
+      const key_identities = new Set<string>()
+      let index = 0
+      for (const [key, child] of value.entries()) {
+        const converted_key = convert_value(
+          key,
+          ancestors,
+          depth + 1,
+          budget,
+          state,
+        )
+        validate_map_key(converted_key, index, key_identities)
+        entries.push([
+          converted_key,
+          convert_value(child, ancestors, depth + 1, budget, state),
+        ])
+        index += 1
+      }
+      return new Map_Value(entries)
     } finally {
       ancestors.delete(value)
     }
@@ -339,6 +460,8 @@ function convert_value(
     assert_acyclic(value, ancestors)
     try {
       if (depth >= budget.max_depth) resource("depth", budget.max_depth, depth + 1)
+      consume_items(state, budget, 1)
+      consume_bytes(state, budget, cbor_head_size(BigInt(Object.keys(value).length)))
       for (const symbol of Object.getOwnPropertySymbols(value)) {
         if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
           throw new Structured_Value_Error(
@@ -349,8 +472,8 @@ function convert_value(
       return new Map_Value(
         Object.keys(value).map(
           (key): readonly [Structured_Value, Structured_Value] => [
-            new TextString_Value(key),
-            convert_value(value[key], ancestors, depth + 1, budget),
+            convert_value(key, ancestors, depth + 1, budget, state),
+            convert_value(value[key], ancestors, depth + 1, budget, state),
           ],
         ),
       )
@@ -361,6 +484,74 @@ function convert_value(
   throw new Structured_Value_Error(
     `unsupported JavaScript value ${describe_value(value)}`,
   )
+}
+
+function consume_items(
+  state: Conversion_State,
+  budget: Required<Value_Limits>,
+  count: number,
+): void {
+  if (
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    count > Number.MAX_SAFE_INTEGER - state.items
+  ) {
+    resource("items", budget.max_items, Number.MAX_SAFE_INTEGER)
+  }
+  const actual = state.items + count
+  if (actual > budget.max_items) resource("items", budget.max_items, actual)
+  state.items = actual
+}
+
+function consume_bytes(
+  state: Conversion_State,
+  budget: Required<Value_Limits>,
+  count: number,
+): void {
+  if (
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    count > Number.MAX_SAFE_INTEGER - state.bytes
+  ) {
+    resource("bytes", budget.max_bytes, Number.MAX_SAFE_INTEGER)
+  }
+  const actual = state.bytes + count
+  if (actual > budget.max_bytes) resource("bytes", budget.max_bytes, actual)
+  state.bytes = actual
+}
+
+function consume_integer_bytes(
+  value: bigint,
+  budget: Required<Value_Limits>,
+): void {
+  const magnitude = value < 0n ? -value : value
+  const count = magnitude === 0n ? 0 : Math.ceil(magnitude.toString(2).length / 8)
+  if (count > budget.max_integer_bytes) {
+    resource("integer bytes", budget.max_integer_bytes, count)
+  }
+}
+
+function encoded_integer_size(value: bigint): number {
+  const negative = value < 0n
+  const transformed = negative ? -value - 1n : value
+  if (transformed <= 0xffff_ffff_ffff_ffffn) {
+    return cbor_head_size(transformed)
+  }
+  const magnitude_length = Math.ceil(transformed.toString(2).length / 8)
+  return (
+    cbor_head_size(2n) +
+    cbor_head_size(BigInt(magnitude_length)) +
+    magnitude_length
+  )
+}
+
+function cbor_head_size(length: bigint): number {
+  if (length < 24n) return 1
+  if (length <= 0xffn) return 2
+  if (length <= 0xffffn) return 3
+  if (length <= 0xffff_ffffn) return 5
+  if (length <= 0xffff_ffff_ffff_ffffn) return 9
+  return Number.MAX_SAFE_INTEGER
 }
 
 function assert_acyclic(value: object, ancestors: Set<object>): void {
@@ -535,6 +726,9 @@ function checked_limits(limits: Value_Limits): Required<Value_Limits> {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Structured_Value_Error(`${name} must be a positive safe integer`, "resource_limit")
     }
+  }
+  if (budget.max_depth > MAX_ALLOWED_VALUE_DEPTH) {
+    resource("depth", MAX_ALLOWED_VALUE_DEPTH, budget.max_depth)
   }
   return budget
 }
