@@ -1,0 +1,213 @@
+name: Release Python PyPI package
+
+# Releases are deliberately manual. Dispatch this workflow from the exact
+# python-v<version> tag only after the protected pypi-release environment has
+# approved the run and configured a PyPI trusted publisher for this workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable package version in clients/python/pyproject.toml"
+        required: true
+        type: string
+      confirm:
+        description: 'Type RELEASE to build and publish this immutable version'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-python-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_CONFIRM: ${{ inputs.confirm }}
+
+jobs:
+  guard:
+    name: Verify tag, version, and clean source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject an unconfirmed or mismatched release
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_TYPE: ${{ github.ref_type }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_CONFIRM}" != "RELEASE" ]]; then
+            echo "The confirmation input must be exactly RELEASE." >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Version must be a stable three-part SemVer value." >&2
+            exit 1
+          fi
+          expected_tag="python-v${RELEASE_VERSION}"
+          if [[ "${SOURCE_REF_TYPE}" != "tag" || "${SOURCE_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Dispatch this workflow from ${expected_tag}; got ${SOURCE_REF_TYPE}:${SOURCE_REF_NAME}." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "${expected_tag}^{commit}")" != "${SOURCE_SHA}" ]]; then
+            echo "The selected tag does not resolve to the workflow commit." >&2
+            exit 1
+          fi
+          package_version="$(
+            python3 -c \
+              'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("clients/python/pyproject.toml").read_text())["project"]["version"])'
+          )"
+          if [[ "${package_version}" != "${RELEASE_VERSION}" ]]; then
+            echo "pyproject.toml version does not match the release input." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The release checkout is dirty; refusing to continue." >&2
+            exit 1
+          fi
+
+  build:
+    name: Build sdist and Linux wheel
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-smithy-codegen
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Install package builders
+        run: python3 -m pip install --disable-pip-version-check --upgrade build twine
+
+      - name: Build and inspect distributions
+        working-directory: clients/python
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/openkache-python-dist"
+          mkdir -p "${RUNNER_TEMP}/openkache-python-dist"
+          python3 -m build --sdist --wheel --outdir "${RUNNER_TEMP}/openkache-python-dist"
+          sdist_count="$(
+            find "${RUNNER_TEMP}/openkache-python-dist" -maxdepth 1 \
+              -type f -name "openkache-${RELEASE_VERSION}.tar.gz" | wc -l
+          )"
+          wheel_count="$(
+            find "${RUNNER_TEMP}/openkache-python-dist" -maxdepth 1 \
+              -type f -name "openkache-${RELEASE_VERSION}-*.whl" | wc -l
+          )"
+          [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 1 ]] || {
+            echo "Expected exactly one sdist and one wheel." >&2
+            exit 1
+          }
+          python3 -m twine check "${RUNNER_TEMP}"/openkache-python-dist/*
+
+      - name: Record provenance and checksums
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-python-dist"
+          printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
+            > "${release_root}/RELEASE-METADATA"
+          (
+            cd "${release_root}"
+            sha256sum openkache-* > SHA256SUMS
+          )
+
+      - name: Upload Python distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-python-distributions
+          path: ${{ runner.temp }}/openkache-python-dist
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish immutable PyPI version
+    needs: [guard, build]
+    runs-on: ubuntu-24.04
+    environment: pypi-release
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 15
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Download Python distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openkache-python-distributions
+          path: ${{ runner.temp }}/openkache-python-dist
+
+      - name: Verify provenance, checksums, and complete distributions
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-python-dist"
+          grep -Fx "source_commit=${SOURCE_SHA}" "${release_root}/RELEASE-METADATA"
+          grep -Fx "source_tag=${SOURCE_REF_NAME}" "${release_root}/RELEASE-METADATA"
+          grep -Fx "package_version=${RELEASE_VERSION}" "${release_root}/RELEASE-METADATA"
+          (
+            cd "${release_root}"
+            sha256sum --check SHA256SUMS
+            sdist_count="$(find . -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}.tar.gz" | wc -l)"
+            wheel_count="$(find . -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}-*.whl" | wc -l)"
+            [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 1 ]] || {
+              echo "Expected exactly one sdist and one wheel." >&2
+              exit 1
+            }
+          )
+
+      - name: Install Twine and validate distributions
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --upgrade twine
+          python -m twine check \
+            "${RUNNER_TEMP}"/openkache-python-dist/openkache-*.tar.gz \
+            "${RUNNER_TEMP}"/openkache-python-dist/openkache-*.whl
+
+      - name: Stage only validated distributions for PyPI
+        run: |
+          set -euo pipefail
+          publish_root="${RUNNER_TEMP}/openkache-python-publish"
+          mkdir -p "${publish_root}"
+          cp "${RUNNER_TEMP}"/openkache-python-dist/openkache-*.tar.gz "${publish_root}/"
+          cp "${RUNNER_TEMP}"/openkache-python-dist/openkache-*.whl "${publish_root}/"
+
+      - name: Publish with PyPI trusted publishing
+        uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0 # v1.9.0
+        with:
+          packages-dir: ${{ runner.temp }}/openkache-python-publish
+          skip-existing: false

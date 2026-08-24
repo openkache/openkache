@@ -1,0 +1,164 @@
+name: Build C and C++ CMake archives
+
+# This workflow creates reviewable source archives and never publishes a
+# registry release. Dispatch it from the exact cmake-v<version> tag after the
+# protected cmake-release environment has approved the run.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable CMake client version in clients/c and clients/cpp"
+        required: true
+        type: string
+      confirm:
+        description: 'Type RELEASE to build the immutable source archives'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cmake-clients-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_CONFIRM: ${{ inputs.confirm }}
+
+jobs:
+  guard:
+    name: Verify tag, versions, and clean source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject an unconfirmed or mismatched release
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_TYPE: ${{ github.ref_type }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_CONFIRM}" != "RELEASE" ]]; then
+            echo "The confirmation input must be exactly RELEASE." >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Version must be a stable three-part SemVer value." >&2
+            exit 1
+          fi
+          expected_tag="cmake-v${RELEASE_VERSION}"
+          if [[ "${SOURCE_REF_TYPE}" != "tag" || "${SOURCE_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Dispatch this workflow from ${expected_tag}; got ${SOURCE_REF_TYPE}:${SOURCE_REF_NAME}." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "${expected_tag}^{commit}")" != "${SOURCE_SHA}" ]]; then
+            echo "The selected tag does not resolve to the workflow commit." >&2
+            exit 1
+          fi
+          c_version="$(
+            sed -nE 's/^project\(openkache_client_c VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' \
+              clients/c/CMakeLists.txt
+          )"
+          cpp_version="$(
+            sed -nE 's/^project\(openkache_client_cpp VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' \
+              clients/cpp/CMakeLists.txt
+          )"
+          if [[ "${c_version}" != "${RELEASE_VERSION}" || "${cpp_version}" != "${RELEASE_VERSION}" ]]; then
+            echo "C and C++ CMake project versions must match the release input." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The release checkout is dirty; refusing to continue." >&2
+            exit 1
+          fi
+
+  package:
+    name: Build and inspect CMake source archives
+    needs: guard
+    runs-on: ubuntu-24.04
+    environment: cmake-release
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-smithy-codegen
+
+      - name: Run C and C++ CMake configure/build smoke checks
+        run: |
+          set -euo pipefail
+          smoke_root="${RUNNER_TEMP}/openkache-cmake-smoke"
+          mkdir -p "${smoke_root}"
+          ar rcs "${smoke_root}/libopenkache_client_core.a"
+          cmake -S clients/c -B "${smoke_root}/c-build" \
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${smoke_root}/libopenkache_client_core.a"
+          cmake --build "${smoke_root}/c-build"
+          cmake -S clients/cpp -B "${smoke_root}/cpp-build" \
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${smoke_root}/libopenkache_client_core.a"
+          cmake --build "${smoke_root}/cpp-build"
+
+      - name: Create deterministic C and C++ source archives
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-cmake-release"
+          mkdir -p "${release_root}"
+          support_paths=(
+            clients/LICENSE
+            clients/cmake
+            clients/generate.ts
+            clients/generator
+            clients/model
+            protocol
+          )
+          c_prefix="openkache-client-c-${RELEASE_VERSION}"
+          c_archive="${release_root}/${c_prefix}.tar.gz"
+          git archive --format=tar --prefix="${c_prefix}/" "${SOURCE_SHA}" \
+            clients/c "${support_paths[@]}" | gzip -n > "${c_archive}"
+          cpp_prefix="openkache-client-cpp-${RELEASE_VERSION}"
+          cpp_archive="${release_root}/${cpp_prefix}.tar.gz"
+          git archive --format=tar --prefix="${cpp_prefix}/" "${SOURCE_SHA}" \
+            clients/c clients/cpp "${support_paths[@]}" | gzip -n > "${cpp_archive}"
+          for archive in "${c_archive}" "${cpp_archive}"; do
+            [[ -s "${archive}" ]] || {
+              echo "Archive was empty: ${archive}" >&2
+              exit 1
+            }
+            tar -tzf "${archive}" | grep -F "CMakeLists.txt"
+            tar -tzf "${archive}" | grep -F "clients/generate.ts"
+            if tar -tzf "${archive}" | grep -Eq '(^|/)\.git(/|$)'; then
+              echo "Archive contains repository metadata." >&2
+              exit 1
+            fi
+          done
+          printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\narchive_set=c-and-cpp-cmake\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
+            > "${release_root}/RELEASE-METADATA"
+          (
+            cd "${release_root}"
+            sha256sum openkache-client-*.tar.gz > SHA256SUMS
+          )
+
+      - name: Upload CMake archives and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-cmake-archives
+          path: ${{ runner.temp }}/openkache-cmake-release
+          if-no-files-found: error
+          retention-days: 90
