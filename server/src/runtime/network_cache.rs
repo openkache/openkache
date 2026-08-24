@@ -131,7 +131,7 @@ impl NetworkWorkerCache {
 
     pub(crate) fn storage_key_for_item_id(
         &self,
-        item_id: openkache_protocol::ItemId,
+        item_id: crate::openkache_protocol::ItemId,
     ) -> StorageKey {
         self.cache.storage_key_for_item_id(item_id)
     }

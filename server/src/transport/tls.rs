@@ -13,7 +13,7 @@ use super::ServerTlsConfig;
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
 
 /// The one ALPN identifier implemented by the v1 wire profile.
-pub(crate) const ALPN: &[u8] = openkache_protocol::ALPN;
+pub(crate) const ALPN: &[u8] = crate::openkache_protocol::ALPN;
 
 /// The required TLS 1.3 hybrid key-exchange group.
 pub(crate) const PQ_GROUP: rustls::NamedGroup = rustls::NamedGroup::X25519MLKEM768;

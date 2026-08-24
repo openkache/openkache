@@ -81,7 +81,7 @@ impl OperationFieldEnvelope<'_> {
         if self.encoded_width != 0 && self.bytes.len() != self.encoded_width {
             return Err(b"field does not match its declared fixed width");
         }
-        openkache_protocol::codec::validate_field_codecs_with_nested_widths(
+        crate::openkache_protocol::codec::validate_field_codecs_with_nested_widths(
             self.bytes,
             self.codecs,
             self.nested_codecs,
@@ -100,8 +100,8 @@ impl OperationFieldEnvelope<'_> {
     pub(super) fn list_cursor(
         &self,
         max_entries: usize,
-    ) -> Result<openkache_protocol::codec::ListCursor<'_>, &'static [u8]> {
-        openkache_protocol::codec::ListCursor::new(self.bytes, max_entries)
+    ) -> Result<crate::openkache_protocol::codec::ListCursor<'_>, &'static [u8]> {
+        crate::openkache_protocol::codec::ListCursor::new(self.bytes, max_entries)
             .map_err(|error| error.message())
     }
 
@@ -110,16 +110,16 @@ impl OperationFieldEnvelope<'_> {
     pub(super) fn map_cursor(
         &self,
         max_entries: usize,
-    ) -> Result<openkache_protocol::codec::MapCursor<'_>, &'static [u8]> {
-        openkache_protocol::codec::MapCursor::new(self.bytes, max_entries)
+    ) -> Result<crate::openkache_protocol::codec::MapCursor<'_>, &'static [u8]> {
+        crate::openkache_protocol::codec::MapCursor::new(self.bytes, max_entries)
             .map_err(|error| error.message())
     }
 
     /// Returns a validated union view borrowed from the field bytes.
     pub(super) fn union_view(
         &self,
-    ) -> Result<openkache_protocol::codec::UnionView<'_>, &'static [u8]> {
-        openkache_protocol::codec::UnionView::new(self.bytes, self.union_tags)
+    ) -> Result<crate::openkache_protocol::codec::UnionView<'_>, &'static [u8]> {
+        crate::openkache_protocol::codec::UnionView::new(self.bytes, self.union_tags)
             .map_err(|error| error.message())
     }
 }

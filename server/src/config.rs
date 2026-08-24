@@ -265,12 +265,12 @@ impl Config {
         }
         if self.max_item_bytes == 0
             || self.max_item_bytes > self.large_value_capacity
-            || self.max_item_bytes > openkache_protocol::MAX_VALUE_BYTES
+            || self.max_item_bytes > crate::openkache_protocol::MAX_VALUE_BYTES
         {
             return Err(KvError::InvalidConfig(format!(
                 "maximum item size must be between 1 byte and {} bytes",
                 self.large_value_capacity
-                    .min(openkache_protocol::MAX_VALUE_BYTES)
+                    .min(crate::openkache_protocol::MAX_VALUE_BYTES)
             )));
         }
         if self
@@ -1023,13 +1023,13 @@ impl AppConfig {
                 .storage
                 .max_item_size_mib
                 .checked_mul(1024 * 1024)
-                .is_none_or(|bytes| bytes > openkache_protocol::MAX_VALUE_BYTES)
+                .is_none_or(|bytes| bytes > crate::openkache_protocol::MAX_VALUE_BYTES)
         {
             return Err(KvError::InvalidConfig(format!(
                 "storage.max_item_size_mib must be between 1 and {}",
                 self.storage
                     .large_value_capacity_mib_per_thread
-                    .min(openkache_protocol::MAX_VALUE_BYTES / (1024 * 1024))
+                    .min(crate::openkache_protocol::MAX_VALUE_BYTES / (1024 * 1024))
             )));
         }
         if self.network.max_inflight_value_mib < self.storage.max_item_size_mib {

@@ -47,6 +47,16 @@ alias(
 )
 
 alias(
+    name = "server_wire_crossbeam_queue",
+    actual = "@crates//crossbeam-queue",
+)
+
+alias(
+    name = "server_wire_vu128",
+    actual = "@crates//vu128",
+)
+
+alias(
     name = "server_optional_comnoq",
     actual = "@crates//comnoq",
 )
@@ -185,7 +195,8 @@ rust_library(
         ":openkache_server_build_script",
         ":server_optional_event_listener",
         ":server_optional_kanal",
-        "//protocol:openkache_protocol",
+        ":server_wire_crossbeam_queue",
+        ":server_wire_vu128",
     ] + cargo_deps("server"),
 )
 
@@ -217,7 +228,6 @@ rust_binary(
     edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
     deps = dedupe_labels([
-        "//protocol:openkache_protocol",
         ":openkache_server",
     ] + cargo_deps("server")),
 )

@@ -5,7 +5,7 @@
 //! constants; keeping those imports here prevents generic handlers and the
 //! transport-neutral executor from depending on that closed vocabulary.
 
-pub(super) use openkache_protocol::compat_v1::{
+pub(super) use crate::openkache_protocol::compat_v1::{
     POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED,
     POLICY_EXPIRATION_OVERRIDE, POLICY_FIXED_TTL, POLICY_FLAGS_BYTES, POLICY_NO_EXPIRY,
     POLICY_RESERVED_MASK, SET_CONDITION_ANY_BITS, SET_CONDITION_MASK, SET_EVICTABLE_BITS,

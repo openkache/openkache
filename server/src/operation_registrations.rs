@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use openkache_protocol::Opcode;
+use crate::openkache_protocol::Opcode;
 
 use super::operation_composition::ServerComposition;
 use super::operation_contract::{self as contract, OperationId, operation_id_for_opcode};

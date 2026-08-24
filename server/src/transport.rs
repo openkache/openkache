@@ -15,8 +15,8 @@ use crate::QuicBackend;
 use crate::network_runtime;
 use crate::protocol::RequestFrame as ProtocolRequestFrame;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-use openkache_protocol::ResponseSegment;
-use openkache_protocol::{RequestFrameHeader, ResponseParts};
+use crate::openkache_protocol::ResponseSegment;
+use crate::openkache_protocol::{RequestFrameHeader, ResponseParts};
 
 #[path = "transport/tls.rs"]
 mod tls;
@@ -229,7 +229,7 @@ pub(super) enum StreamReadError {
     #[error("request exceeds the protocol limit")]
     TooLarge,
     #[error(transparent)]
-    Malformed(#[from] openkache_protocol::ProtocolError),
+    Malformed(#[from] crate::openkache_protocol::ProtocolError),
     #[error(transparent)]
     Transport(#[from] TransportError),
 }
@@ -559,7 +559,7 @@ async fn read_request_header<S: RequestByteStream>(
         let additional = ProtocolRequestFrame::header_bytes_needed(&frame)?;
         if additional == 0 {
             let header = ProtocolRequestFrame::decode_header(&frame)?.ok_or(
-                openkache_protocol::ProtocolError::InvalidFieldSequence(
+                crate::openkache_protocol::ProtocolError::InvalidFieldSequence(
                     "header sizing completed before header decode",
                 ),
             )?;
@@ -571,7 +571,7 @@ async fn read_request_header<S: RequestByteStream>(
         let expected = frame
             .len()
             .checked_add(additional)
-            .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
+            .ok_or(crate::openkache_protocol::ProtocolError::FrameLengthOverflow)?;
         let was_empty = frame.is_empty();
         let actual = frame.len();
         let previous_len = frame.len();
@@ -636,13 +636,13 @@ async fn discard_body<S: RequestByteStream>(
                 let read = next
                     .len()
                     .checked_sub(previous_len)
-                    .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
+                    .ok_or(crate::openkache_protocol::ProtocolError::FrameLengthOverflow)?;
                 if read > 0 {
                     progress.store(true, Ordering::Relaxed);
                 }
                 remaining = remaining
                     .checked_sub(read)
-                    .ok_or(openkache_protocol::ProtocolError::FrameLengthOverflow)?;
+                    .ok_or(crate::openkache_protocol::ProtocolError::FrameLengthOverflow)?;
                 scratch = next;
                 scratch.clear();
             }
@@ -665,7 +665,7 @@ fn remaining_request_timeout(deadline: Instant) -> Result<Duration, StreamReadEr
 }
 
 fn truncated_frame_error(actual: usize, expected: usize) -> StreamReadError {
-    StreamReadError::Malformed(openkache_protocol::ProtocolError::FrameTooShort {
+    StreamReadError::Malformed(crate::openkache_protocol::ProtocolError::FrameTooShort {
         expected,
         actual,
     })

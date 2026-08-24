@@ -84,5 +84,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !status.success() {
         return Err(format!("server operation-contract generation failed with {status}").into());
     }
+    normalize_protocol_paths(&output)?;
+    Ok(())
+}
+
+/// Rewrites the generated adapter's historical protocol-crate paths to the
+/// package-local wire module. The canonical renderer is shared with clients,
+/// so keeping this normalization at the server build boundary avoids a
+/// server-only fork of the Smithy renderer.
+fn normalize_protocol_paths(output: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let source = std::fs::read_to_string(output)?;
+    let normalized = source.replace("openkache_protocol::", "crate::openkache_protocol::");
+    if normalized != source {
+        std::fs::write(output, normalized)?;
+    }
     Ok(())
 }

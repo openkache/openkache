@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use super::operation_contract::OperationStatus;
 use super::storage_port::{StorageReadBytes, StorageReadValue};
-use openkache_protocol::{OwnedRange, ResponseSegment};
+use crate::openkache_protocol::{OwnedRange, ResponseSegment};
 
 /// An owned wire value returned by a modeled server operation.
 ///

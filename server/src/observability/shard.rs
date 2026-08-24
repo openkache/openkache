@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use openkache_protocol::Status;
+use crate::openkache_protocol::Status;
 
 use super::service::{ObservabilityState, Operation};
 

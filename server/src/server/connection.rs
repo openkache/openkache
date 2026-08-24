@@ -338,11 +338,11 @@ fn response_write_failure_outcome(unknown_on_write: bool) -> LaneOutcome {
 enum LaneRequest {
     Frame(RequestFrame),
     Rejected {
-        header: openkache_protocol::RequestFrameHeader,
+        header: crate::openkache_protocol::RequestFrameHeader,
         rejection: operation_dispatch::HeaderAdmissionRejection,
     },
     Overloaded {
-        header: openkache_protocol::RequestFrameHeader,
+        header: crate::openkache_protocol::RequestFrameHeader,
         timed_out: bool,
     },
 }
@@ -787,10 +787,10 @@ async fn write_response<S: SendStream>(
     send.write_response(parts, request_timeout).await.is_ok()
 }
 
-fn wire_protocol_error_response(error: openkache_protocol::ProtocolError) -> Response {
+fn wire_protocol_error_response(error: crate::openkache_protocol::ProtocolError) -> Response {
     let status = match error {
-        openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
-        openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
+        crate::openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
+        crate::openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
         _ => Status::InvalidRequest,
     };
     response_display(status, error)
@@ -798,7 +798,7 @@ fn wire_protocol_error_response(error: openkache_protocol::ProtocolError) -> Res
 
 fn response_display(status: Status, value: impl std::fmt::Display) -> Response {
     let mut payload = String::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES + openkache_protocol::MAX_VARUINT_BYTES + 64,
+        crate::openkache_protocol::RESPONSE_FIXED_BYTES + crate::openkache_protocol::MAX_VARUINT_BYTES + 64,
     );
     write!(payload, "{value}").expect("writing to a String cannot fail");
     response(status, payload.into_bytes())

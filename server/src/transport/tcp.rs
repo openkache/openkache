@@ -20,7 +20,7 @@ use crate::transport::{
     TransportError,
 };
 use futures_util::lock::Mutex;
-use openkache_protocol::ResponseParts;
+use crate::openkache_protocol::ResponseParts;
 
 /// TLS record payloads are limited to 2^14 bytes by TLS 1.3. The extra
 /// allowance covers the record header and AEAD expansion without accepting an
@@ -90,7 +90,7 @@ pub(crate) enum TcpTransportError {
     #[error("request frame exceeded the protocol limit")]
     FrameTooLarge,
     #[error("request frame is not valid: {0}")]
-    Protocol(#[from] openkache_protocol::ProtocolError),
+    Protocol(#[from] crate::openkache_protocol::ProtocolError),
     #[error("request data arrived after TLS close_notify")]
     PipelinedRequest,
     #[error("TLS close_notify arrived in the middle of a request frame")]
@@ -228,7 +228,7 @@ impl ReceiveStream for TlsTcpReceiveStream {
         budget: &RequestBudget,
         progress: &AtomicBool,
         admit: impl FnOnce(
-            openkache_protocol::RequestFrameHeader,
+            crate::openkache_protocol::RequestFrameHeader,
             &[u8],
         ) -> Result<(), T>,
     ) -> impl Future<Output = Result<RequestRead<T>, StreamReadError>> {
@@ -298,7 +298,7 @@ impl ReceiveStream for TlsTcpReceiveStream {
                             }
                             let header =
                                 ProtocolRequestFrame::decode_header(&frame)?.ok_or(
-                                    openkache_protocol::ProtocolError::FrameTooShort {
+                                    crate::openkache_protocol::ProtocolError::FrameTooShort {
                                         expected: 1,
                                         actual: frame.len(),
                                     },
@@ -306,7 +306,7 @@ impl ReceiveStream for TlsTcpReceiveStream {
                             let frame_len = header.frame_len()?;
                             if frame_len != frame.len() {
                                 return Err(StreamReadError::Malformed(
-                                    openkache_protocol::ProtocolError::FrameLength {
+                                    crate::openkache_protocol::ProtocolError::FrameLength {
                                         expected: frame_len,
                                         actual: frame.len(),
                                     },
@@ -384,7 +384,7 @@ impl SendStream for TlsTcpSendStream {
                     length.checked_add(segment.as_slice().len())
                 });
                 if response_len
-                    .map(|length| length > openkache_protocol::MAX_RESPONSE_FRAME_BYTES)
+                    .map(|length| length > crate::openkache_protocol::MAX_RESPONSE_FRAME_BYTES)
                     .unwrap_or(true)
                 {
                     state.connection.state = LaneState::Unclean;
@@ -711,7 +711,7 @@ impl OneLaneConnection {
         {
             return Err(TcpTransportError::Closed);
         }
-        if response.len() > openkache_protocol::MAX_RESPONSE_FRAME_BYTES {
+        if response.len() > crate::openkache_protocol::MAX_RESPONSE_FRAME_BYTES {
             self.state = LaneState::Unclean;
             return Err(TcpTransportError::FrameTooLarge);
         }
@@ -777,7 +777,7 @@ impl OneLaneConnection {
                 return Ok(ReceiveEvent::NeedMore);
             }
             let header = ProtocolRequestFrame::decode_header(&self.plaintext)?.ok_or(
-                openkache_protocol::ProtocolError::FrameTooShort {
+                crate::openkache_protocol::ProtocolError::FrameTooShort {
                     expected: 1,
                     actual: self.plaintext.len(),
                 },

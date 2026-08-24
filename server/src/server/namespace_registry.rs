@@ -5,7 +5,7 @@ use super::{NamespaceDescriptor, NamespacePolicy};
 use crate::runtime::derive_scoped_storage_key;
 use crate::types::StorageKey;
 use futures_util::lock::Mutex as AsyncMutex;
-use openkache_protocol::OwnedRange;
+use crate::openkache_protocol::OwnedRange;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};

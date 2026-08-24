@@ -6,10 +6,10 @@
 use super::super::operation_compatibility_contract::POLICY_FLAGS_BYTES;
 
 use super::{ProtocolError, Result, policy_codec};
-use openkache_protocol::{NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES};
+use crate::openkache_protocol::{NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES};
 
 pub(super) const MAX_POLICY_BYTES: usize =
-    POLICY_FLAGS_BYTES + openkache_protocol::MAX_VARUINT_BYTES;
+    POLICY_FLAGS_BYTES + crate::openkache_protocol::MAX_VARUINT_BYTES;
 
 /// Condition applied atomically by a `SET` request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

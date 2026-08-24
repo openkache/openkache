@@ -45,10 +45,10 @@ pub(crate) fn encode_policy(policy: NamespacePolicy) -> io::Result<Vec<u8>> {
         flags |= POLICY_EVICTION_OVERRIDE;
     }
 
-    let mut encoded = Vec::with_capacity(1 + openkache_protocol::MAX_VARUINT_BYTES);
+    let mut encoded = Vec::with_capacity(1 + crate::openkache_protocol::MAX_VARUINT_BYTES);
     encoded.push(flags);
     if let Some(ttl_ms) = ttl_ms {
-        let (encoded_ttl, encoded_ttl_len) = openkache_protocol::encode_vu128(ttl_ms);
+        let (encoded_ttl, encoded_ttl_len) = crate::openkache_protocol::encode_vu128(ttl_ms);
         encoded.extend_from_slice(&encoded_ttl[..encoded_ttl_len]);
     }
     Ok(encoded)
@@ -75,7 +75,7 @@ fn decode_current_policy(input: &[u8]) -> io::Result<Option<(NamespacePolicy, us
         (ExpirationDefault::NoExpiry, 1)
     } else {
         let Some((ttl_ms, encoded_len)) =
-            openkache_protocol::decode_vu128(&input[1..], "namespace metadata TTL")
+            crate::openkache_protocol::decode_vu128(&input[1..], "namespace metadata TTL")
                 .map_err(|error| invalid(error.to_string()))?
         else {
             return Ok(None);

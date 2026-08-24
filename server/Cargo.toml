@@ -72,6 +72,7 @@ clap = { version = "*", features = ["derive"] }
 comnoq = { version = "*", default-features = false, features = ["ring"], optional = true }
 compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "polling", "runtime", "signal", "time"], optional = true }
 compio-quic = { version = "*", features = ["ring"], optional = true }
+crossbeam-queue = "*"
 crc32fast = "*"
 crossfire = { version = "*", optional = true }
 event-listener = { version = "*", optional = true }
@@ -84,7 +85,6 @@ glommio = { version = "*", optional = true }
 mimalloc = { version = "*", optional = true }
 monoio = { version = "*", default-features = false, features = ["async-cancel", "iouring", "sync"], optional = true }
 miette = { version = "*", features = ["fancy"] }
-openkache-protocol = { version = "*", path = "../protocol" }
 opentelemetry = { version = "*", optional = true, default-features = false, features = ["metrics"] }
 opentelemetry-otlp = { version = "*", optional = true, default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client"] }
 opentelemetry_sdk = { version = "*", optional = true, default-features = false, features = ["metrics"] }
@@ -108,3 +108,4 @@ time = "*"
 toml = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", default-features = false, features = ["ansi", "env-filter", "fmt", "json"] }
+vu128 = "*"

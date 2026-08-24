@@ -1,10 +1,10 @@
 // Generated from the OpenKache Smithy operation contract. Do not edit.
 
-use openkache_protocol::{Opcode, Status};
+use crate::openkache_protocol::{Opcode, Status};
 // The server consumes only the canonical wire projection. Client-result/retry
 // and execution-scope metadata belongs to the respective
 // adapters; it is intentionally absent from this server contract surface.
-pub use openkache_protocol::operation::{
+pub use crate::openkache_protocol::operation::{
     operation_registry, operation_wire_spec, wire_codec_kind,
     MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS,
     request_fields,
@@ -13,7 +13,7 @@ pub use openkache_protocol::operation::{
     WireCodecLengthEncoding, WireCodecWidth, WIRE_CODEC_DESCRIPTORS,
     WIRE_CODEC_NAMES,
 };
-pub use openkache_protocol::{
+pub use crate::openkache_protocol::{
     MAX_REQUEST_FRAME_BYTES, RequestFrameLayout as WireRequestLayout,
     RequestFrameStep as WireRequestStep, wire_request_layout,
 };
