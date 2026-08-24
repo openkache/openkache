@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "OpenKache v1 Gate 0 interoperability fixtures",
+  "title": "OpenKache v1-gate0 interoperability fixtures",
   "type": "object",
   "additionalProperties": false,
   "required": ["spec", "spec_revision", "vectors"],

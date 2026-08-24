@@ -2,21 +2,27 @@
 
 > **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
 
-This document defines the language-independent value model used by every
-maintained client's `get` and `set`. It is intentionally separate from the
-cache value envelope: the envelope carries payload bytes, while this
-specification defines what those bytes mean to clients.
+This document defines the language-independent value model used by
+OpenKache-maintained clients when they exchange structured values. It is
+intentionally separate from the cache value envelope: the envelope carries
+payload bytes, while this specification defines what those bytes mean to
+clients.
 
-Gate 0 exposes lossless model values by default. Package documentation may
-choose different wrapper names, but it must preserve the same tags and
-distinctions. The concrete profile identifier and selector assignment are
-normative in [`../VALUE_FORMAT.md`](../VALUE_FORMAT.md).
+Package documentation exposes the logical model and native mappings. The
+concrete profile identifier and selector assignment are normative in
+[`../VALUE_FORMAT.md`](../VALUE_FORMAT.md). The complete codec/profile sections
+below remain protocol references even when the Gate 0 facade hides a selector.
 
-`StructuredValue-CBOR-v1` is the only Gate 0 payload profile. The model owns
-logical semantics; the profile owns its CBOR bytes. A future profile may use
-another codec only after a new selector and contract revision are published.
-An implementation MUST NOT claim Gate 0 conformance until it satisfies the
-model, profile, validation, and native-conversion rules in this document.
+The first structured-value profile uses CBOR as its codec. The Value Model v1
+defined here owns logical semantics; `StructuredValue-CBOR-v1` is the only
+Gate 0 payload profile for that model. A future profile may use another
+self-describing codec, or a schema-bound codec such as protobuf, while
+retaining a separate compatibility contract.
+
+This document is the frozen target specification. The shared implementation and
+language adapters may temporarily lag while migration is completed. An
+implementation MUST NOT claim Gate 0 conformance until it satisfies the model,
+profile, validation, and native-conversion rules in this document.
 
 The normative terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**,
 **SHOULD NOT**, and **MAY** are to be interpreted as described by
@@ -52,27 +58,20 @@ The public model is codec-independent:
 
 ```text
 Value =
-    Undefined
-  | Null
+    Null
+  | Undefined
   | Boolean(value)
-  | Integer(arbitrary_precision_signed_value)
-  | Float16(raw_bits)
-  | Float32(raw_bits)
-  | Float64(raw_bits)
+  | Integer(value)
+  | Float(width, raw_bits)
   | ByteString(bytes)
-  | TextString(valid_utf8)
-  | Array<Value>
-  | Map<(Value, Value)>[]
+  | TextString(utf8)
+  | Array(values)
+  | Map(entries)
 ```
 
 `Undefined` is distinct from `Null`. A binding that has no native undefined
 value MUST expose it through its lossless value representation or report a
 conversion error in strict native mode.
-
-`Float16`, `Float32`, and `Float64` are separate model kinds, not one native
-language float with an inferred width. Each stores the raw IEEE-754 bits for
-that width. `Integer` is arbitrary precision even though the key contract
-uses signed `i64`.
 
 `Map` is an ordered sequence of key/value entries in the generic model:
 
@@ -102,17 +101,19 @@ otherwise change the integer.
 
 ### 2.2 Floating-point values
 
-The three floating-point kinds contain their IEEE-754 width and raw bits:
+`Float` contains its IEEE-754 width and the raw bits available from the source
+representation:
 
 ```text
-Float16(raw_bits)
-Float32(raw_bits)
-Float64(raw_bits)
+Float(width=16, raw_bits)
+Float(width=32, raw_bits)
+Float(width=64, raw_bits)
 ```
 
-The model distinguishes `Integer(1)` from `Float64(1.0)`, and distinguishes
-positive and negative zero. Float width and raw bits MUST be preserved by the
-generic value representation and by an encoder that receives those bits.
+The model distinguishes `Integer(1)` from
+`Float(width=64, raw_bits=0x3ff0000000000000)`, and distinguishes positive and
+negative zero. Float width and raw bits MUST be preserved by the generic value
+representation and by an encoder that receives those bits.
 
 An encoder receiving one of these model variants MUST preserve its width and
 raw bits exactly.
@@ -123,10 +124,10 @@ from its `number` value and MUST NOT intentionally normalize a representation
 that the runtime exposes. Applications that require a particular NaN payload or
 original float width MUST use the generic model returned by `lossless`.
 
-Native decoding MAY map Float16 and Float32 to the language's ordinary
-binary64 floating-point type. Such a conversion preserves the numeric value
-but not the original width in the native object; the generic representation
-remains available when width or raw bits matter.
+Native decoding MAY map `Float(width=16)` and `Float(width=32)` to the
+language's ordinary binary64 floating-point type. Such a conversion preserves
+the numeric value but not the original width in the native object; the generic
+representation remains available when width or raw bits matter.
 
 ### 2.3 Strings and bytes
 
@@ -155,8 +156,7 @@ The model defines structural equality for duplicate-key detection:
 Only scalar values MAY be map keys:
 
 ```text
-MapKey = Null | Undefined | Boolean | Integer
-       | Float16 | Float32 | Float64
+MapKey = Null | Undefined | Boolean | Integer | Float
        | ByteString | TextString
 ```
 
@@ -184,14 +184,15 @@ in Python.
 | `None` | `Null` |
 | `bool` | `Boolean` |
 | `int` | `Integer` |
-| `float` | `Float64` |
+| `float` | `Float(width=64, raw_bits)` |
 | `bytes`, `bytearray`, or documented byte buffer | `ByteString` |
 | `str` | `TextString` |
 | `list` or `tuple` | `Array` |
 | `dict` | `Map` |
 
 Python `int` is encoded as an exact `Integer` regardless of magnitude. Python
-`float` is encoded as `Float64`, including `-0.0`, infinities, and NaN.
+`float` is encoded as `Float(width=64, raw_bits)`, including `-0.0`,
+infinities, and NaN.
 Python `list` and `tuple` both map to `Array`; a same-language round trip
 preserves element order and values but does not preserve list-versus-tuple
 identity. Python `dict` maps to `Map` in insertion order. Its keys MUST be
@@ -220,7 +221,7 @@ whether a number happens to be integral and change its model type.
 | `null` | `Null` |
 | `undefined` | `Undefined` |
 | `boolean` | `Boolean` |
-| `number` | `Float64` |
+| `number` | `Float(width=64, raw_bits)` |
 | `bigint` | `Integer` |
 | `string` | `TextString` |
 | `Uint8Array` or documented byte buffer | `ByteString` |
@@ -231,10 +232,10 @@ whether a number happens to be integral and change its model type.
 Consequently:
 
 ```text
-1       -> Float64(+1.0)
+1       -> Float(width=64, +1.0)
 1n      -> Integer(1)
-1.5     -> Float64(1.5)
--0      -> Float64(-0.0)
+1.5     -> Float(width=64, 1.5)
+-0      -> Float(width=64, -0.0)
 ```
 
 An adapter MUST NOT silently convert an unsafe `number` into an integer
@@ -257,7 +258,7 @@ On decode, maintained JavaScript clients return:
 
 ```text
 Integer -> bigint
-Float   -> number
+Float(width=16/32/64, raw_bits) -> number
 ```
 
 An explicit convenience option MAY request safe integers as `number`, but it
@@ -270,7 +271,8 @@ and `bigint`.
 Native arbitrary-precision integer types map to `Integer`. Fixed-width
 integer types also map to `Integer`; the width is a local type constraint and
 is restored only by a checked typed decode. Native `f32`/`float` and
-`f64`/`double` types map to Float32 and Float64 respectively. Platform-width
+`f64`/`double` types map to `Float(width=64)`; `f32`/`float` map to
+`Float(width=32)`. Platform-width
 types such as `isize`, `usize`, `int`, and `uint` MUST NOT become wire-level
 types.
 
@@ -285,7 +287,7 @@ collection and generic-entry types they return; they MUST not claim to
 preserve source-only container classes that the model does not represent.
 
 Each maintained package MUST document the native type returned for `Integer`,
-the behavior of Float16/Float32 decoding, and any value that cannot be
+the behavior of Float(width=16/32) decoding, and any value that cannot be
 returned in its ordinary native representation. A same-language round trip
 guarantees model values and observable entry order, not source-only container
 identity such as Python tuple versus list or a JavaScript plain object versus
@@ -293,16 +295,17 @@ identity such as Python tuple versus list or a JavaScript plain object versus
 
 ## 4. Representation options
 
-The client API SHOULD expose one `get` operation with a representation option
-rather than forcing callers to learn separate method names. Language syntax
-may differ, but the semantics are shared:
+Profiles beyond Gate 0 SHOULD expose one `get` operation with a representation
+option rather than forcing callers to learn separate method names. Language
+syntax may differ, but the semantics are shared:
 
 ```text
 get(key, representation="lossless")
 get(key, representation="native")
 ```
 
-`lossless` SHOULD be the default for dynamic maintained bindings.
+Gate 0 always returns `lossless` values from `get`; profiles beyond Gate 0
+SHOULD keep `lossless` as the default for dynamic bindings.
 
 Encoding SHOULD accept every value expressible by the binding's documented
 native mapping. Decoding into a different language's native representation
@@ -364,7 +367,7 @@ The maintained default native projections are:
 | `Undefined` | conversion error | `undefined` |
 | `Boolean` | `bool` | `boolean` |
 | `Integer` | `int` | `bigint` |
-| `Float16`/`Float32`/`Float64` | documented float wrapper/`float` | documented float wrapper/`number` |
+| `Float(width=16/32/64, raw_bits)` | documented float wrapper/`float` | documented float wrapper/`number` |
 | `ByteString` | `bytes` | `Uint8Array` |
 | `TextString` | `str` | `string` |
 | `Array` | `list` | `Array` |
@@ -376,10 +379,11 @@ changing a map's order. A binding MAY provide a separate checked convenience
 conversion, such as JavaScript safe `Integer` values to `number`, only when it
 rejects values outside the exact target range.
 
-Gate 0 has no opaque-byte representation or raw/Exact Item ID operation.
-Byte-exact forwarding is a future feature, not a representation option on
-structured-value `get`; callers MUST NOT decode and re-encode a structured
-value when exact envelope bytes are required.
+Opaque byte operations bypass this model and return the exact application
+bytes directly. They are not a representation option on structured-value
+`get`; Gate 0 has no raw or Exact Item ID API. A future low-level profile that
+needs byte-exact forwarding MUST keep it separate rather than decoding and
+re-encoding a structured value.
 
 The structured-value API guarantees semantic round trips, not byte identity.
 Reading with `lossless` and writing again MAY produce different codec bytes
@@ -403,7 +407,7 @@ The profile accepts exactly the following CBOR values:
 | `undefined` | `Undefined` | MUST be accepted. |
 | Major type 0 or 1 | `Integer` | MUST represent the mathematical value exactly. Preferred and valid non-preferred integer encodings MAY both be accepted; encoders MUST emit preferred serialization. |
 | Tag 2 or 3 over a definite byte string | `Integer` | MUST use a minimal, non-empty big-endian magnitude. The sign is selected by the tag. Values representable as ordinary CBOR integers MUST still be decoded as the same `Integer`; encoders MUST prefer ordinary integers. |
-| Half-, single-, or double-precision float | `Float16`/`Float32`/`Float64` | Width and raw bits MUST be retained by the generic representation. |
+| Half-, single-, or double-precision float | `Float(width, raw_bits)` | Width and raw bits MUST be retained by the generic representation. |
 | Definite byte string | `ByteString` | Bytes are uninterpreted. |
 | Definite, valid UTF-8 text string | `TextString` | Invalid UTF-8 MUST be rejected. |
 | Definite array | `Array` | Elements are decoded recursively. |
@@ -433,9 +437,7 @@ apply lower local structural budgets and MUST report a local resource
 rejection without returning a partially decoded value.
 
 The profile's parser MUST apply the common payload limits supplied by the
-enclosing client value format. Gate 0 does not provide a raw/opaque or
-caller-owned-v0 structured operation; those are unsupported client features,
-even though the model can be used by a future profile.
+enclosing client value format.
 
 ## 6. Standards delegation and future profiles
 
@@ -461,11 +463,17 @@ unknown-field semantics.
 
 ## 7. Implementation boundary
 
-Maintained bindings may share a value implementation, but the public Gate 0
-facade owns the lossless model and `StructuredValue-CBOR-v1` profile described
-here. The client value envelope prefixes the payload with version `1` and
-selector `0x10` and performs no value-level compression or protection in Gate
-0. The server continues to treat the complete envelope as opaque bytes.
+The Rust implementation is currently published under `clients/value/` as the
+`openkache-value` package. It provides the owned `Value` algebra and the
+bounded `StructuredValue-CBOR-v1` payload codec described by this document.
+Cross-language adapters and final profile-conformance claims remain migration
+work; the logical model and its conformance rules remain one specification.
+
+The OpenKache client core uses this package to produce structured payload
+bytes. The client value envelope then applies compression, cryptographic
+protection, key selection, and storage binding as specified by
+[`../VALUE_FORMAT.md`](../VALUE_FORMAT.md). The server continues to treat the
+complete envelope as opaque bytes.
 
 This specification is deliberately independent of Item ID derivation and
 formatted-key behavior, which remain defined by
@@ -478,11 +486,11 @@ The following mappings are normative:
 | Source value | Logical model |
 |---|---|
 | Python `1` | `Integer(1)` |
-| JavaScript `1` | `Float64(+1.0)` |
+| JavaScript `1` | `Float(width=64, +1.0)` |
 | JavaScript `1n` | `Integer(1)` |
-| Python or JavaScript `-0.0`/`-0` | `Float64(-0.0)` |
+| Python or JavaScript `-0.0`/`-0` | `Float(width=64, -0.0)` |
 | `TextString("x")` | distinct from `ByteString(78)` |
-| `Integer(1)` map key | distinct from `Boolean(true)` and `Float64(1.0)` |
+| `Integer(1)` map key | distinct from `Boolean(true)` and `Float(width=64, 1.0)` |
 | `Array([Integer(1)])` as a map key | Reject as a non-scalar map key |
 
 A map containing keys that are distinct in the model but collide in a native
@@ -495,9 +503,9 @@ The following initial codec vectors are normative:
 |---|---|---|
 | `Integer(1)` | `01` | Decode as `Integer(1)`. |
 | `Integer(2^64)` | `c2 49 01 00 00 00 00 00 00 00 00` | Decode as `Integer(18446744073709551616)`. |
-| `Float16(+1.0)` | `f9 3c 00` | Preserve width 16 and raw bits `0x3c00`. |
-| `Float32(+1.0)` | `fa 3f 80 00 00` | Preserve width 32 and raw bits `0x3f800000`. |
-| `Float64(-0.0)` | `fb 80 00 00 00 00 00 00 00` | Preserve the negative-zero bit pattern. |
+| `Float(width=16, +1.0)` | `f9 3c 00` | Preserve width 16 and raw bits `0x3c00`. |
+| `Float(width=32, +1.0)` | `fa 3f 80 00 00` | Preserve width 32 and raw bits `0x3f800000`. |
+| `Float(width=64, -0.0)` | `fb 80 00 00 00 00 00 00 00` | Preserve the negative-zero bit pattern. |
 | `TextString("x")` | `61 78` | Distinct from `ByteString([78])`. |
 | `ByteString([78])` | `41 78` | Distinct from `TextString("x")`. |
 | `Map([(Integer(1), Null)])` | `a1 01 f6` | Decode as one map entry. |

@@ -36,9 +36,14 @@
       "intermediate": {
         "tls_version": "1.3",
         "alpn": "openkache/1",
+        "key_agreement": "X25519MLKEM768",
         "certificate_verification": false,
         "client_certificate_required": false,
-        "plaintext_fallback": false
+        "plaintext_fallback": false,
+        "key_profile": "NamespaceHash",
+        "namespace_id": 1,
+        "value_profile": "StructuredValue-CBOR-v1",
+        "selector_hex": "10"
       },
       "output": {
         "warning": "development only - do not use this trust profile in production"
@@ -211,14 +216,22 @@
           "caller_owned_v0",
           "conditional_writes",
           "ttl",
+          "eviction",
           "namespace_management",
           "experimental_operations",
           "public_cancellation",
+          "retry_policy_controls",
+          "transport_specific_operations",
+          "protocol_downgrade",
           "plaintext_transport",
           "custom_trust_roots",
+          "certificate_file",
+          "hostname_verification_configuration",
           "mtls",
           "caller_compression",
-          "caller_value_protection"
+          "caller_value_protection",
+          "value_key_rotation",
+          "payload_format_selectors"
         ]
       },
       "intermediate": {},
