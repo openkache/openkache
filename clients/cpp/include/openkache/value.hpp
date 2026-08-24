@@ -135,7 +135,13 @@ public:
   }
 
 #if defined(__SIZEOF_INT128__)
-  static Integer from_u128(unsigned __int128 value) {
+  // Keep the optional 128-bit convenience constructors available on
+  // compilers that provide them without exposing a non-standard type spelling
+  // to strict `-Wpedantic -Werror` consumers.
+  __extension__ using unsigned_int128 = unsigned __int128;
+  __extension__ using signed_int128 = __int128;
+
+  static Integer from_u128(unsigned_int128 value) {
     Integer result;
     if (value == 0) {
       return result;
@@ -151,13 +157,13 @@ public:
     return result;
   }
 
-  static Integer from_i128(__int128 value) {
+  static Integer from_i128(signed_int128 value) {
     if (value >= 0) {
-      return from_u128(static_cast<unsigned __int128>(value));
+      return from_u128(static_cast<unsigned_int128>(value));
     }
     // Converting through unsigned arithmetic avoids overflowing for the
     // minimum representable signed value.
-    const auto magnitude = static_cast<unsigned __int128>(-(value + 1)) + 1u;
+    const auto magnitude = static_cast<unsigned_int128>(-(value + 1)) + 1u;
     auto result = from_u128(magnitude);
     result.negative_ = !result.magnitude_.empty();
     return result;

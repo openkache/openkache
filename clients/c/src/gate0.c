@@ -1,4 +1,5 @@
 #include "../../core/include/openkache/client_abi.h"
+#include "../include/openkache/client_abi.h"
 
 #include <stdint.h>
 
@@ -8,6 +9,43 @@
  * maintained Gate 0 declarations from clients/c/include.
  */
 #include <openkache/smithy_contract.h>
+
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_ERROR ==
+                   OPENKACHE_SMITHY_FFI_RESULT_ERROR,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_VALUE ==
+                   OPENKACHE_SMITHY_FFI_RESULT_VALUE,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_NOT_FOUND ==
+                   OPENKACHE_SMITHY_FFI_RESULT_NOT_FOUND,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_CREATED ==
+                   OPENKACHE_SMITHY_FFI_RESULT_CREATED,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_REPLACED ==
+                   OPENKACHE_SMITHY_FFI_RESULT_REPLACED,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_DELETED ==
+                   OPENKACHE_SMITHY_FFI_RESULT_DELETED,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_NOT_DELETED ==
+                   OPENKACHE_SMITHY_FFI_RESULT_NOT_DELETED,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_CONNECTED ==
+                   OPENKACHE_SMITHY_FFI_RESULT_CONNECTED,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_UNKNOWN_MUTATION ==
+                   OPENKACHE_SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_KEY_TEXT ==
+                   OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT,
+               "Gate 0 key constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_KEY_BYTES ==
+                   OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+               "Gate 0 key constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_KEY_INTEGER ==
+                   OPENKACHE_SMITHY_FFI_KEY_SPEC_INTEGER,
+               "Gate 0 key constants drifted from Smithy");
 
 static const uint8_t GATE0_ITEM_ID_ROOT[32] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,

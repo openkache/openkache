@@ -253,6 +253,7 @@ if(TARGET OpenKache::ClientCoreShared)
   target_link_libraries(
     openkache_client_c_shared
     INTERFACE
+      openkache_client_gate0
       OpenKache::ClientCoreShared
   )
 endif()
@@ -269,6 +270,7 @@ if(TARGET OpenKache::ClientCoreStatic)
   target_link_libraries(
     openkache_client_c_static
     INTERFACE
+      openkache_client_gate0
       OpenKache::ClientCoreStatic
   )
 endif()

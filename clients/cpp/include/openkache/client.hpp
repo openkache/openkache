@@ -101,13 +101,13 @@ public:
   std::uint32_t key_spec() const noexcept {
     switch (kind()) {
     case Key_Kind::Integer:
-      return OPENKACHE_CLIENT_KEY_INTEGER;
+      return OPENKACHE_CLIENT_GATE0_KEY_INTEGER;
     case Key_Kind::Text:
-      return OPENKACHE_CLIENT_KEY_TEXT;
+      return OPENKACHE_CLIENT_GATE0_KEY_TEXT;
     case Key_Kind::Bytes:
-      return OPENKACHE_CLIENT_KEY_BYTES;
+      return OPENKACHE_CLIENT_GATE0_KEY_BYTES;
     }
-    return OPENKACHE_CLIENT_KEY_BYTES;
+    return OPENKACHE_CLIENT_GATE0_KEY_BYTES;
   }
 
   /// Returns the logical bytes used by the typed delete ABI.
@@ -291,10 +291,10 @@ public:
     const auto canonical = canonical_key_bytes(key);
     auto result = take_result(openkache_client_gate0_get(
         checked_client(), canonical.data(), canonical.size()));
-    if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_FOUND) {
+    if (result.kind == OPENKACHE_CLIENT_GATE0_RESULT_NOT_FOUND) {
       return Get_Result::missing();
     }
-    if (result.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
+    if (result.kind != OPENKACHE_CLIENT_GATE0_RESULT_VALUE) {
       throw_result_error(result, "GET");
     }
     try {
@@ -310,10 +310,10 @@ public:
     const auto result = take_result(openkache_client_gate0_set(
         checked_client(), canonical.data(), canonical.size(), payload.data(),
         payload.size()));
-    if (result.kind == OPENKACHE_CLIENT_RESULT_CREATED) {
+    if (result.kind == OPENKACHE_CLIENT_GATE0_RESULT_CREATED) {
       return Set_Outcome::Created;
     }
-    if (result.kind == OPENKACHE_CLIENT_RESULT_REPLACED) {
+    if (result.kind == OPENKACHE_CLIENT_GATE0_RESULT_REPLACED) {
       return Set_Outcome::Replaced;
     }
     throw_result_error(result, "SET");
@@ -324,11 +324,11 @@ public:
     const auto logical = key.logical_bytes();
     const auto result = take_result(openkache_client_gate0_delete_value(
         checked_client(), key.key_spec(), logical.data(), logical.size()));
-    if (result.kind == OPENKACHE_CLIENT_RESULT_DELETED) {
+    if (result.kind == OPENKACHE_CLIENT_GATE0_RESULT_DELETED) {
       return Delete_Outcome::Deleted;
     }
-    if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_DELETED ||
-        result.kind == OPENKACHE_CLIENT_RESULT_NOT_FOUND) {
+    if (result.kind == OPENKACHE_CLIENT_GATE0_RESULT_NOT_DELETED ||
+        result.kind == OPENKACHE_CLIENT_GATE0_RESULT_NOT_FOUND) {
       return Delete_Outcome::NotFound;
     }
     throw_result_error(result, "DELETE");
@@ -373,9 +373,9 @@ public:
 
 private:
   struct Native_Result {
-    std::uint32_t kind = OPENKACHE_CLIENT_RESULT_ERROR;
-    std::uint32_t status = OPENKACHE_CLIENT_STATUS_ERROR;
-    std::uint32_t error_category = OPENKACHE_CLIENT_ERROR_INTERNAL;
+    std::uint32_t kind = OPENKACHE_CLIENT_GATE0_RESULT_ERROR;
+    std::uint32_t status = OPENKACHE_CLIENT_GATE0_STATUS_ERROR;
+    std::uint32_t error_category = OPENKACHE_CLIENT_GATE0_ERROR_INTERNAL;
     Bytes payload;
   };
 
@@ -384,7 +384,7 @@ private:
       throw Error("OpenKache connect returned a null result");
     }
     const auto kind = openkache_client_gate0_result_kind(result);
-    if (kind != OPENKACHE_CLIENT_RESULT_CONNECTED) {
+    if (kind != OPENKACHE_CLIENT_GATE0_RESULT_CONNECTED) {
       const auto message = result_message(result);
       openkache_client_gate0_result_free(result);
       throw Error(message.empty() ? "OpenKache connection failed" : message);
@@ -443,8 +443,9 @@ private:
             ? std::string("OpenKache ") + operation + " failed"
             : std::string(reinterpret_cast<const char *>(result.payload.data()),
                           result.payload.size());
-    if (result.kind == OPENKACHE_CLIENT_RESULT_UNKNOWN_MUTATION ||
-        result.error_category == OPENKACHE_CLIENT_ERROR_UNKNOWN_MUTATION) {
+    if (result.kind == OPENKACHE_CLIENT_GATE0_RESULT_UNKNOWN_MUTATION ||
+        result.error_category ==
+            OPENKACHE_CLIENT_GATE0_ERROR_UNKNOWN_MUTATION) {
       throw Unknown_Mutation_Error(message);
     }
     throw Error(message);
