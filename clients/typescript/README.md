@@ -2,9 +2,9 @@
 
 `@openkache/client` is the Promise-based TypeScript and JavaScript SDK for
 Node.js, Bun, and Deno. A packaged Node-API adapter delegates networking,
-retries, compression, value protection, and the common
-`StructuredValue-CBOR-v1` value format to the shared Rust core; applications
-need no helper process or runtime dependencies.
+retries, compression, value protection, and the common structured value format
+to the shared Rust core; applications need no helper process or runtime
+dependencies.
 
 ## Install
 
@@ -42,7 +42,7 @@ const client = await OpenKache_Client.connect({
 try {
   await client.ping()
 
-  // The primary API uses the common StructuredValue-CBOR-v1 format.
+  // The primary API uses the common structured value format.
   const outcome = await client.set("profile", {
     name: "Kim",
     visits: 42,
@@ -72,11 +72,12 @@ require a trusted certificate and normally a client identity.
 
 ## Primary value API: `set` / `get`
 
-Mapped `set` and `get` are the normal application API. Both use payload format
-selector `1`, `StructuredValue-CBOR-v1`, from the shared
-[`VALUE_FORMAT.md`](../VALUE_FORMAT.md) and
-[`value/SPEC.md`](../value/SPEC.md). They do not use the former TypeScript-only
-`{ encoding, type_name, payload }` metadata envelope.
+Mapped `set` and `get` are the normal application API. Both use the common
+structured value contract described by the shared
+[`VALUE_FORMAT.md`](../VALUE_FORMAT.md) and [`value/SPEC.md`](../value/SPEC.md).
+The concrete payload profile and selector are chosen by the shared core; they
+are not part of the TypeScript application API. `set` and `get` do not use the
+former TypeScript-only `{ encoding, type_name, payload }` metadata envelope.
 
 The native JavaScript mapping is intentionally explicit:
 
@@ -99,13 +100,13 @@ float width, raw bits, or exact model wrappers are part of the contract.
 
 Values that cannot be represented by the common model—such as functions,
 classes, cyclic objects, and sparse arrays—are rejected. `NaN` and infinities
-are valid `Float64` values in the structured format; the advanced JSON helper
+are valid structured values; the advanced JSON helper
 rejects them because JSON has no representation for them.
 
 The runtime-neutral structured-value model is available without loading native
 networking from `@openkache/client/value-codec`. JavaScript `number` always
-encodes as a binary64 float even when integral, while `bigint` encodes exactly
-as an integer. `decode_structured_value` and
+uses the model's binary64 representation even when integral, while `bigint`
+is an exact integer. `decode_structured_value` and
 `get_structured(key)` preserve those distinctions with model wrappers;
 `get_structured(key, "native")` projects integers to `bigint`, floats to
 `number`, bytes to `Uint8Array`, and maps to `Map`.
@@ -135,12 +136,12 @@ example is also a `Map`, with the nested `id` value returned as `bigint`.
 Because both a missing key and a root `Undefined` project to JavaScript
 `undefined`, use `get_structured` when those two states must be distinguished.
 
-`get_structured(key)` is an advanced lossless view of the same selector-1
+`get_structured(key)` is an advanced lossless view of the same structured
 value. It returns model wrappers such as `Map_Value`, `Integer_Value`, and
 `Float_Value`; `get_structured(key, "native")` applies the same strict native
 projection as `get`.
 
-For local encoding or browser use, the codec subpath performs no I/O:
+For local conversion or browser use, the value-codec subpath performs no I/O:
 
 ```typescript
 import {
@@ -175,10 +176,20 @@ import {
 } from "@openkache/client/value-codec"
 
 test("structured model preserves exact JavaScript type identity", (): void => {
-  assert.deepEqual([...encode_structured_value(1)], [
-    0xfb, 0x3f, 0xf0, 0, 0, 0, 0, 0, 0,
-  ])
-  assert.deepEqual([...encode_structured_value(1n)], [0x01])
+  assert.equal(
+    model_equal(
+      decode_structured_value(encode_structured_value(1)),
+      to_value(1),
+    ),
+    true,
+  )
+  assert.equal(
+    model_equal(
+      decode_structured_value(encode_structured_value(1n)),
+      to_value(1n),
+    ),
+    true,
+  )
 })
 
 test("ordered maps keep scalar key identity", (): void => {
@@ -246,7 +257,7 @@ Mapped operations infer one typed key per call:
 - `bigint`: signed-i64 range.
 
 Empty and NUL-containing keys are valid. The adapter converts each mapped key
-to deterministic CBOR bytes before deriving an item ID. The deprecated
+to canonical bytes before deriving an item ID. The deprecated
 `key_spec` option remains accepted only for source compatibility and does not
 change per-operation inference.
 
@@ -303,7 +314,7 @@ closing reject.
 | `OpenKache_Error` | `"openkache_error"` | Validation, configuration, transport, server, decoding, or other generic failure |
 | `OpenKache_Unknown_Mutation_Error` | `"unknown_mutation"` | A mutation may have reached the server, but its outcome is not known |
 | `OpenKache_Cancelled_Error` | `"cancelled"` | Work was cancelled before a definitive result |
-| `Structured_Value_Error` | See below | Local structured-value conversion or CBOR parsing failed |
+| `Structured_Value_Error` | See below | Local structured-value conversion or payload parsing failed |
 
 Structured-value errors expose these stable categories:
 
@@ -313,7 +324,7 @@ Structured-value errors expose these stable categories:
 | `"resource_limit"` | Bytes, depth, items, or integer bytes exceeded the configured budget |
 | `"truncated"` | The payload ended before completing a value |
 | `"trailing_bytes"` | Extra bytes followed one complete root value |
-| `"invalid_encoding"` | CBOR tags, lengths, or floating-point forms are not allowed by the contract |
+| `"invalid_encoding"` | Payload tags, lengths, or floating-point forms are not allowed by the contract |
 | `"unsupported_type"` | A runtime value cannot be converted to the structured model |
 | `"invalid_utf8"` | Text contains unpaired surrogates or malformed UTF-8 |
 | `"invalid_integer"` | An integer form violates the contract |
@@ -368,12 +379,12 @@ contract.
 
 | Method | Signature | Value contract |
 |---|---|---|
-| `get` | `get<Value = Native_Value>(key: Client_Key): Promise<Value \| undefined>` | Reads selector-1 `StructuredValue-CBOR-v1` and returns the strict native JavaScript projection |
-| `set` | `set(key: Client_Key, value: unknown, options?: Set_Options): Promise<Set_Outcome>` | Writes selector-1 `StructuredValue-CBOR-v1` from the documented native value mapping |
-| `get_structured` | `get_structured(key: Client_Key, representation?: "lossless" \| "native"): Promise<unknown \| undefined>` | Advanced selector-1 read; lossless mode returns model wrappers |
-| `set_structured` | `set_structured(key: Client_Key, value: unknown, options?: Set_Options): Promise<Set_Outcome>` | Advanced selector-1 write from native/model values |
-| `get_json` | `get_json(key: Client_Key): Promise<Json_Value \| undefined>` | Advanced selector-0 canonical JSON compatibility read |
-| `set_json` | `set_json(key: Client_Key, value: Json_Value, options?: Set_Options): Promise<Set_Outcome>` | Advanced selector-0 canonical JSON compatibility write |
+| `get` | `get<Value = Native_Value>(key: Client_Key): Promise<Value \| undefined>` | Reads the common structured value and returns the strict native JavaScript projection |
+| `set` | `set(key: Client_Key, value: unknown, options?: Set_Options): Promise<Set_Outcome>` | Writes the common structured value from the documented native value mapping |
+| `get_structured` | `get_structured(key: Client_Key, representation?: "lossless" \| "native"): Promise<unknown \| undefined>` | Advanced structured-value read; lossless mode returns model wrappers |
+| `set_structured` | `set_structured(key: Client_Key, value: unknown, options?: Set_Options): Promise<Set_Outcome>` | Advanced structured-value write from native/model values |
+| `get_json` | `get_json(key: Client_Key): Promise<Json_Value \| undefined>` | Advanced JSON compatibility read |
+| `set_json` | `set_json(key: Client_Key, value: Json_Value, options?: Set_Options): Promise<Set_Outcome>` | Advanced JSON compatibility write |
 | `get_raw` | `get_raw(key: Client_Key): Promise<Uint8Array \| undefined>` | Reads exact application bytes after core decompression/decryption |
 | `set_raw` | `set_raw(key: Client_Key, value: Uint8Array, options?: Set_Options): Promise<Set_Outcome>` | Stores application bytes as an opaque payload |
 | `get_v0` | `get_v0(key: Client_Key): Promise<Uint8Array \| undefined>` | Advanced caller-owned version-0 envelope read |
@@ -400,14 +411,14 @@ available from the main entry point:
 |---|---|---|
 | `Json_Value`, `Json_Object` | Type | Canonical JSON value model accepted by JSON helpers |
 | `assert_json_value` | Function | Narrows unknown data and rejects unsupported JSON constructs |
-| `Structured_Value_Error` | Class | Local codec error with a stable `kind` |
+| `Structured_Value_Error` | Class | Local structured-value error with a stable `kind` |
 | `Value_Limits` | Type | Bounds for encode and decode budgets |
 | `Undefined_Value` through `Map_Value` | Class | Lossless model wrappers preserving exact type identity and order |
 | `Structured_Value` | Type | Complete lossless model union |
 | `UNDEFINED_VALUE` | Constant | Shared model representation of `undefined` |
 | `to_value` | Function | Converts supported native/model data to lossless model form |
 | `model_equal` | Function | Compares models structurally, including float width and raw bits |
-| `encode_structured_value` | Function | Encodes one bounded `StructuredValue-CBOR-v1` payload |
+| `encode_structured_value` | Function | Encodes one bounded structured-value payload |
 | `decode_structured_value` | Function | Decodes exactly one bounded payload to lossless model form |
 | `to_native` | Function | Projects a model to native JavaScript values with optional safe-integer checking |
 | `decode_native_value` | Function | Decodes payload bytes directly to native projection |
@@ -453,7 +464,7 @@ unreachable.
 
 ## Runtime and compatibility
 
-`set` / `get` are the common selector-1 structured-value API. They are not
+`set` / `get` are the common structured-value API. They are not
 backward-compatible with values written by the former TypeScript-only metadata
 envelope. Use the explicit `set_json` / `get_json`, `set_raw` / `get_raw`, or
 `set_v0` / `get_v0` helpers only when the stored value was written with that

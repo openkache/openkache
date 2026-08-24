@@ -429,11 +429,11 @@ export class OpenKache_Client {
   }
 
   /**
-   * Retrieves and decodes one shared `StructuredValue-CBOR-v1` value.
+   * Retrieves and decodes one value from the common structured value model.
    *
-   * This is the primary mapped-value API. The wire payload uses the common
-   * value format's structured selector; the result uses the documented native
-   * JavaScript projection (`bigint`, `number`, `Uint8Array`, arrays, and maps).
+   * This is the primary mapped-value API. The shared core owns the wire
+   * representation; the result uses the documented native JavaScript
+   * projection (`bigint`, `number`, `Uint8Array`, arrays, and maps).
    *
    * @typeParam Value - Optional caller-provided result shape.
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
@@ -463,11 +463,11 @@ export class OpenKache_Client {
   }
 
   /**
-   * Encodes and stores one `StructuredValue-CBOR-v1` value.
+   * Encodes and stores one value from the common structured value model.
    *
    * This is the primary mapped-value API. It accepts the native values defined
-   * by the common value model and writes selector `1`; it does not use JSON,
-   * Raw, or the former package-local metadata envelope.
+   * by the common value model; it does not use JSON, Raw, or the former
+   * package-local metadata envelope.
    *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @param value - Runtime value accepted by `encode_structured_value`.
@@ -505,7 +505,7 @@ export class OpenKache_Client {
   }
 
   /**
-   * Retrieves one StructuredValue-CBOR-v1 payload.
+   * Retrieves one value from the common structured value model.
    *
    * The default lossless representation retains integer/float distinctions,
    * undefined, scalar map-key identity, and map order.  Native projection
@@ -557,10 +557,10 @@ export class OpenKache_Client {
   }
 
   /**
-   * Encodes and stores one StructuredValue-CBOR-v1 payload.
+   * Encodes and stores one value from the common structured value model.
    *
    * This method never routes through legacy JSON or Raw operations; the
-   * generated native adapter owns the structured selector directly.
+   * generated native adapter owns the structured representation directly.
    *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @param value - A runtime value accepted by `encode_structured_value`.
@@ -696,8 +696,8 @@ export class OpenKache_Client {
   /**
    * Retrieves a value encoded by the shared core's canonical JSON format.
    *
-   * This is an advanced selector-0 compatibility helper. The primary `get`
-   * method reads the common `StructuredValue-CBOR-v1` selector instead.
+   * This is an advanced JSON compatibility helper. The primary `get` method
+   * reads the common structured value instead.
    *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @returns The canonical JSON value, or `undefined` when absent.
@@ -724,8 +724,8 @@ export class OpenKache_Client {
   /**
    * Stores a value through the shared core's canonical JSON format.
    *
-   * This is an advanced selector-0 compatibility helper. The primary `set`
-   * method writes the common `StructuredValue-CBOR-v1` selector instead.
+   * This is an advanced JSON compatibility helper. The primary `set` method
+   * writes the common structured value instead.
    *
    * @param key - A UTF-8 string, Uint8Array, or signed-i64 integer inferred per operation.
    * @param value - Dense, finite JSON value.
@@ -922,9 +922,9 @@ export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
   get_json(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
   /** Stores canonical JSON UTF-8 bytes at an exact Item ID. */
   set_json(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
-  /** Reads StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  /** Reads structured-value bytes at an exact Item ID. */
   get_structured(input: Smithy_Get_Input): Promise<Smithy_Get_Output>
-  /** Stores StructuredValue-CBOR-v1 bytes at an exact Item ID. */
+  /** Stores structured-value bytes at an exact Item ID. */
   set_structured(input: Smithy_Set_Input): Promise<Smithy_Set_Output>
   /** Reads a caller-owned version-0 envelope at an exact Item ID. */
   get_v0(input: Smithy_Get_Input): Promise<Smithy_Get_Output>

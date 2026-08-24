@@ -1,5 +1,5 @@
 /**
- * Runtime-neutral StructuredValue-CBOR-v1 codec and JSON validation helpers.
+ * Runtime-neutral structured-value codec and JSON validation helpers.
  */
 
 const MAX_JSON_DEPTH = 128
@@ -149,7 +149,7 @@ function describe_value(value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// StructuredValue-CBOR-v1
+// Structured value model
 // ---------------------------------------------------------------------------
 
 /** Stable local value-codec error categories. */
@@ -165,7 +165,7 @@ export type Structured_Value_Error_Kind =
   | "non_scalar_key"
   | "duplicate_key"
 
-/** Error raised by native conversion or StructuredValue-CBOR-v1 parsing. */
+/** Error raised by native conversion or structured-value parsing. */
 export class Structured_Value_Error extends Error {
   readonly kind: Structured_Value_Error_Kind
 
@@ -532,7 +532,7 @@ function bytes_equal(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index): boolean => byte === right[index])
 }
 
-/** Encodes one complete native/model value as StructuredValue-CBOR-v1. */
+/** Encodes one complete native/model value as a structured-value payload. */
 export function encode_structured_value(
   value: unknown,
   limits: Value_Limits = {},
@@ -655,7 +655,7 @@ function bigint_bytes(value: bigint, width: number): number[] {
   return bytes
 }
 
-/** Decodes exactly one StructuredValue-CBOR-v1 value to its lossless model. */
+/** Decodes exactly one structured-value payload to its lossless model. */
 export function decode_structured_value(
   input: Uint8Array,
   limits: Value_Limits = {},
