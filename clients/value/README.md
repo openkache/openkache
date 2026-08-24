@@ -18,7 +18,7 @@ The private monorepo owns conformance tests and broader validation; no tests or
 test dependencies are shipped in this public repository.
 
 The crate exposes an owned [`Value`](https://docs.rs/openkache-value/latest/openkache_value/enum.Value.html)
-algebra and the `StructuredValue-CBOR-v1` codec:
+algebra and its bounded structured-value payload codec:
 
 ```rust
 use openkache_value::{decode, encode, Value};

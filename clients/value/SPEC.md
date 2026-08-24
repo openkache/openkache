@@ -8,6 +8,10 @@ intentionally separate from the cache value envelope: the envelope carries
 payload bytes, while this specification defines what those bytes mean to
 clients.
 
+Package documentation exposes the logical model and native mappings, not the
+concrete profile identifier or selector assignment. The profile section below
+is retained as a protocol reference for interoperability implementations.
+
 The first structured-value profile uses CBOR as its internal codec. CBOR is an
 implementation profile, not the public value API. The Value Model v1 defined
 here owns logical semantics; `StructuredValue-CBOR-v1` is the first payload
