@@ -1,6 +1,6 @@
-# OpenKache Client Value Encoding Profile v1 (Draft)
+# OpenKache Client Value Encoding Profile v1 — Gate 0
 
-> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
+> **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
 
 > **Audience:** This is a protocol and interoperability reference, not a
 > package-level application API. Maintained package documentation describes the
@@ -14,10 +14,12 @@ interpret payload formats, compression, or cryptographic protection.
 Cryptographic behavior is defined only in the
 [Security Model](../SECURITY_MODEL.md).
 
-This is the target contract for the pre-freeze draft. Client implementations
-may temporarily lag while the draft is being completed, but an implementation
-MUST NOT claim conformance to this profile until it implements the complete
-grammar, key schedule, and validation rules.
+This is the complete v1 envelope contract. Client implementations may
+temporarily lag while the migration is completed, but an implementation MUST
+NOT claim conformance until it implements the complete grammar, key schedule,
+and validation rules. Gate 0 fixes one safe development selection for the
+maintained five-operation facade; it does not delete the other normative
+profiles or their rejection rules.
 
 The legacy TypeScript metadata envelope and generated `serializationJson`
 constants are compatibility metadata, not the structured payload profile
@@ -26,12 +28,12 @@ selector is never a generic alias for the legacy envelope. Canonical JSON
 helpers use the `OpaqueBytes` payload profile unless a binding documents a
 separate structured operation.
 
-The current shared FFI's `set_json` / `get_json` helpers parse or serialize a
-JSON-compatible view while carrying canonical UTF-8 JSON as selector-0
-`OpaqueBytes`. `set_structured` / `get_structured` expose the full structured
-model through selector 1. In current-status documentation, `Legacy JSON
-container` names this compatibility logical view, not a selector or payload
-format.
+Future compatibility APIs may parse or serialize a JSON-compatible view while
+carrying canonical UTF-8 JSON as selector-0 `OpaqueBytes`. A future structured
+operation exposes the full model through selector 1. In current-status
+documentation, `Legacy JSON container` names this compatibility logical view,
+not a selector or payload format. Gate 0 MUST NOT expose JSON helpers or any
+legacy envelope through `get` or `set`.
 
 The shared implementation and local policies used by OpenKache-maintained
 language bindings are described by the
@@ -70,7 +72,7 @@ Structured values use the codec-neutral model and initial profile in
 [`value/SPEC.md`](value/SPEC.md). This envelope document does not redefine
 language-native numeric conversion, map equality, or lossless value views.
 
-Addressing and value representation are independent:
+The complete core keeps addressing and value representation independent:
 
 | Axis | Choices | Meaning |
 |---|---|---|
@@ -80,6 +82,30 @@ Addressing and value representation are independent:
 Every address choice can be combined with every value choice. `Exact` bypasses
 only key mapping. `Raw` bypasses only value encoding and decoding. The server
 stores every choice as opaque bytes.
+
+## Gate 0 facade binding
+
+Every successful maintained Gate 0 `get` and `set` uses exactly:
+
+```text
+value_envelope_version = 1
+payload_format         = StructuredValue-CBOR-v1 (ID 1)
+compression            = Uncompressed (ID 0)
+protection             = Unprotected (ID 0)
+selector               = 0x10
+```
+
+The selector is protocol metadata, not an application-level argument. The
+facade selects it internally and callers MUST NOT provide a selector,
+compression mode, value-key ID, protection profile, raw bytes, Exact Item ID,
+or caller-owned version-0 envelope. Gate 0 values are unprotected inside the
+envelope but remain encrypted in transit by the fixed TLS profile.
+
+The complete envelope grammar, `OpaqueBytes`, version-0 pass-through,
+compression, protected profiles, key selection, AAD, KDF, limits, and decoder
+rejections below remain normative for the shared core and future profiles.
+Unsupported by the Gate 0 facade means unavailable through its five operation
+names; it does not make those bytes valid to reinterpret or silently accept.
 
 ## 2. Processing model
 
@@ -94,8 +120,9 @@ source value
 
 `OpaqueBytes` preserves the supplied payload before optional compression and
 protection. `StructuredValue-CBOR-v1` accepts one item defined by
-[`value/SPEC.md`](value/SPEC.md). The caller selects the payload format; the
-encoder does not infer it from the bytes.
+[`value/SPEC.md`](value/SPEC.md). A profile that exposes multiple payload
+formats selects one explicitly; the encoder does not infer it from the bytes.
+Gate 0 always selects `StructuredValue-CBOR-v1`.
 
 ## 3. Envelope grammar
 
@@ -142,8 +169,8 @@ encoding is at most nine bytes.
 `value_envelope_version = 0` is an opaque application-envelope escape hatch,
 not a second OpenKache value grammar. OpenKache does not define or interpret
 its body grammar, selectors, transform order, authentication inputs, or
-application limits. Maintained clients expose it only through an explicit
-caller-owned v0 representation.
+application limits. Profiles beyond Gate 0 may expose it only through an
+explicit caller-owned v0 representation.
 
 The client passes complete version-0 bytes through as caller-owned data. It
 MUST validate that the first canonical version field is exactly `0`, but MUST
@@ -176,6 +203,13 @@ selector_byte =
 Encoders MUST emit only supported selector values and zero bits 6..7. Decoders
 MUST reject any unsupported selector value or nonzero bit 6 or 7. They MUST
 NOT guess an unknown selector.
+
+Gate 0's maintained facade accepts only selector `0x10`
+(`Unprotected | Uncompressed | StructuredValue-CBOR-v1`). Selectors `0x00`
+(`OpaqueBytes`), protected selectors, compressed selectors, and any reserved
+bits remain validly specified profile assignments where applicable to the
+complete core, but MUST be rejected by the Gate 0 facade as unsupported rather
+than reinterpreted.
 
 ### 4.1 Protection profiles
 
@@ -272,9 +306,10 @@ during decompression and verify the exact produced size and frame boundary
 afterward.
 
 Whether and when an encoder chooses Zstandard is client policy defined by the
-[Client Implementation Guide](CLIENT.md#64-compression-policy) for maintained
-bindings, not an envelope validity rule. An encoder MUST accurately identify
-the emitted body as either `Uncompressed` or `Zstandard`.
+[Client Implementation Guide](CLIENT.md#64-compression-policy) for profiles
+beyond Gate 0, not an envelope validity rule. An encoder MUST accurately
+identify the emitted body as either `Uncompressed` or `Zstandard`. Gate 0
+always emits and accepts `Uncompressed`.
 
 When secret data is compressed together with attacker-influenced data,
 compression SHOULD be disabled or the components SHOULD be stored separately.
@@ -341,6 +376,11 @@ A decoder MUST:
 10. Decode exactly one structured-value item using the selected profile, or
     return the exact `OpaqueBytes` payload.
 
+The Gate 0 facade applies the same validation ordering but permits only version
+`1`, selector `0x10`, and the structured-value decoder. It rejects version `0`,
+opaque payloads, protected/compressed selectors, and caller-owned profile
+arguments as unsupported before returning a value.
+
 Unknown versions other than caller-owned version `0`, selector values,
 value-key IDs, compression profiles, payload formats, malformed payloads, and
 disallowed trailing bytes MUST be rejected. The decoder MUST NOT probe other
@@ -359,8 +399,9 @@ MAX_ZSTD_WINDOW_BYTES = 67,108,864
 These are per-value limits. Implementations MUST also configure one aggregate
 in-flight byte budget for concurrent network, protection, decompression, and
 codec operations; that operational budget is not part of the wire format.
-OpenKache-maintained clients expose and enforce that shared budget as specified
-in [`CLIENT.md`](CLIENT.md#67-resource-budget).
+The shared core enforces that budget as specified in
+[`CLIENT.md`](CLIENT.md#67-resource-budget); Gate 0 does not expose a budget
+override.
 
 `MAX_VALUE_ENVELOPE_BYTES` applies to the complete byte string stored and
 returned opaquely by the server, including version, selector, value-key ID,

@@ -1,7 +1,7 @@
 {
   "$schema": "./schema.json",
   "spec": "openkache/wire-protocol",
-  "spec_revision": "draft-2026-08-19.4",
+  "spec_revision": "v1-gate0",
   "vectors": [
     {
       "kind": "positive",

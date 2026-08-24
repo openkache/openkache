@@ -1,0 +1,244 @@
+{
+  "$schema": "./schema.json",
+  "spec": "openkache/maintained-client-contract",
+  "spec_revision": "v1-gate0",
+  "vectors": [
+    {
+      "kind": "positive",
+      "name": "public_operations_are_exactly_five",
+      "input": {
+        "operation_names": [
+          "connect",
+          "get",
+          "set",
+          "delete",
+          "close"
+        ]
+      },
+      "intermediate": {},
+      "output": {
+        "operation_names": [
+          "connect",
+          "get",
+          "set",
+          "delete",
+          "close"
+        ]
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "development_tls_trust_profile",
+      "input": {
+        "profile": "DevelopmentTrust"
+      },
+      "intermediate": {
+        "tls_version": "1.3",
+        "alpn": "openkache/1",
+        "key_agreement": "X25519MLKEM768",
+        "certificate_verification": false,
+        "client_certificate_required": false,
+        "plaintext_fallback": false,
+        "key_profile": "NamespaceHash",
+        "namespace_id": 1,
+        "value_profile": "StructuredValue-CBOR-v1",
+        "selector_hex": "10"
+      },
+      "output": {
+        "warning": "development only - do not use this trust profile in production"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "close_is_idempotent",
+      "input": {
+        "calls": [
+          "close",
+          "close"
+        ]
+      },
+      "intermediate": {
+        "accepted_work": "drain_or_complete_before_release"
+      },
+      "output": {
+        "results": [
+          "Completed",
+          "Completed"
+        ]
+      },
+      "error": null
+    },
+    {
+      "kind": "boundary",
+      "name": "get_missing_is_tagged",
+      "input": {
+        "operation": "get",
+        "key": {
+          "type": "Text",
+          "value_utf8": "missing"
+        },
+        "stored_state": "absent"
+      },
+      "intermediate": {},
+      "output": {
+        "result": "Missing",
+        "value": null
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "get_found_null",
+      "input": {
+        "operation": "get",
+        "stored_value": "Null"
+      },
+      "intermediate": {},
+      "output": {
+        "result": "Found",
+        "value": "Null"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "get_found_undefined",
+      "input": {
+        "operation": "get",
+        "stored_value": "Undefined"
+      },
+      "intermediate": {},
+      "output": {
+        "result": "Found",
+        "value": "Undefined"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "set_created",
+      "input": {
+        "operation": "set",
+        "prior_state": "absent",
+        "value": "TextString(Ada)"
+      },
+      "intermediate": {
+        "conditional": false
+      },
+      "output": {
+        "outcome": "Created"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "set_replaced",
+      "input": {
+        "operation": "set",
+        "prior_state": "live",
+        "value": "TextString(Grace)"
+      },
+      "intermediate": {
+        "conditional": false
+      },
+      "output": {
+        "outcome": "Replaced"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "delete_deleted",
+      "input": {
+        "operation": "delete",
+        "prior_state": "live"
+      },
+      "intermediate": {},
+      "output": {
+        "outcome": "Deleted"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "delete_not_found",
+      "input": {
+        "operation": "delete",
+        "prior_state": "absent"
+      },
+      "intermediate": {},
+      "output": {
+        "outcome": "NotFound"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "mutation_response_loss_is_unknown",
+      "input": {
+        "operation": "set",
+        "request_may_have_been_admitted": true,
+        "response_received": false
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "unknown_mutation",
+        "automatic_replay": false
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "conditional_not_stored_is_not_public",
+      "input": {
+        "operation": "set",
+        "server_outcome": "NotStored"
+      },
+      "intermediate": {
+        "conditional_api": "unsupported"
+      },
+      "output": null,
+      "error": {
+        "category": "incompatible_server_outcome"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "unsupported_features",
+      "input": {
+        "features": [
+          "get_json",
+          "set_json",
+          "raw_values",
+          "exact_item_ids",
+          "caller_owned_v0",
+          "conditional_writes",
+          "ttl",
+          "eviction",
+          "namespace_management",
+          "experimental_operations",
+          "public_cancellation",
+          "retry_policy_controls",
+          "transport_specific_operations",
+          "protocol_downgrade",
+          "plaintext_transport",
+          "custom_trust_roots",
+          "certificate_file",
+          "hostname_verification_configuration",
+          "mtls",
+          "caller_compression",
+          "caller_value_protection",
+          "value_key_rotation",
+          "payload_format_selectors"
+        ]
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "unsupported_feature"
+      }
+    }
+  ]
+}

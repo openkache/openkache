@@ -1,7 +1,7 @@
 {
   "$schema": "./schema.json",
   "spec": "openkache/client-value-format",
-  "spec_revision": "draft-2026-08-19.4",
+  "spec_revision": "v1-gate0",
   "vectors": [
     {
       "kind": "positive",
@@ -151,6 +151,146 @@
       "output": null,
       "error": {
         "category": "authentication_failed"
+      }
+    },
+    {
+      "kind": "positive",
+      "name": "gate0_null",
+      "input": {
+        "representation": "StructuredValue-CBOR-v1",
+        "logical": "Null"
+      },
+      "intermediate": {
+        "version_hex": "01",
+        "selector_hex": "10",
+        "payload_format_id": 1,
+        "compression_id": 0,
+        "protection_id": 0
+      },
+      "output": {
+        "envelope_hex": "0110f6"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "gate0_undefined",
+      "input": {
+        "representation": "StructuredValue-CBOR-v1",
+        "logical": "Undefined"
+      },
+      "intermediate": {
+        "version_hex": "01",
+        "selector_hex": "10"
+      },
+      "output": {
+        "envelope_hex": "0110f7"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "gate0_text_x",
+      "input": {
+        "representation": "StructuredValue-CBOR-v1",
+        "logical": "TextString(x)"
+      },
+      "intermediate": {
+        "version_hex": "01",
+        "selector_hex": "10"
+      },
+      "output": {
+        "envelope_hex": "01106178"
+      },
+      "error": null
+    },
+    {
+      "kind": "positive",
+      "name": "gate0_nested_value",
+      "input": {
+        "representation": "StructuredValue-CBOR-v1",
+        "logical": "Array([Integer(1), Null, Array([])])"
+      },
+      "intermediate": {
+        "version_hex": "01",
+        "selector_hex": "10"
+      },
+      "output": {
+        "envelope_hex": "01108301f680"
+      },
+      "error": null
+    },
+    {
+      "kind": "negative",
+      "name": "opaque_payload_selector_unsupported",
+      "input": {
+        "envelope_hex": "0100"
+      },
+      "intermediate": {
+        "selector_hex": "00",
+        "payload_format_id": 0
+      },
+      "output": null,
+      "error": {
+        "category": "unsupported_selector"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "compressed_structured_selector_unsupported",
+      "input": {
+        "envelope_hex": "0114"
+      },
+      "intermediate": {
+        "selector_hex": "14",
+        "compression_id": 1,
+        "payload_format_id": 1
+      },
+      "output": null,
+      "error": {
+        "category": "unsupported_selector"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "protected_structured_selector_unsupported",
+      "input": {
+        "envelope_hex": "0111"
+      },
+      "intermediate": {
+        "selector_hex": "11",
+        "protection_id": 1,
+        "payload_format_id": 1
+      },
+      "output": null,
+      "error": {
+        "category": "unsupported_selector"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "caller_owned_v0_unsupported",
+      "input": {
+        "envelope_hex": "006170706c69636174696f6e"
+      },
+      "intermediate": {
+        "version_hex": "00"
+      },
+      "output": null,
+      "error": {
+        "category": "unsupported_version"
+      }
+    },
+    {
+      "kind": "negative",
+      "name": "gate0_trailing_bytes_rejected",
+      "input": {
+        "envelope_hex": "0110f600"
+      },
+      "intermediate": {},
+      "output": null,
+      "error": {
+        "category": "trailing_bytes"
       }
     }
   ]

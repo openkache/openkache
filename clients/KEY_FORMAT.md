@@ -1,21 +1,22 @@
-# OpenKache Client Key Contract — Version 1 Draft
+# OpenKache Client Key Contract — Version 1 Gate 0
 
-> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
+> **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
 >
 > This document specifies client-owned key validation and Item ID mapping. It
-> is not a server-required key encoding, and it may change before finalization.
+> is not a server-required key encoding. The complete mapping profiles remain
+> normative even where the Gate 0 facade fixes one profile and hides the
+> profile-selection option.
 
-This is the target contract for the pre-freeze draft. Client implementations
-may temporarily lag while the draft is being completed, but an implementation
-MUST NOT claim conformance until it follows this complete mapping contract.
+An implementation MUST NOT claim Gate 0 conformance until it follows this
+complete mapping contract and the fixed facade rules below.
 
 The shared implementation used by OpenKache-maintained language bindings is
 described by the [Client Implementation Guide](CLIENT.md).
 
 For item identity, the wire protocol carries only an opaque Item ID of
-`0..=32` bytes. An application MAY invoke the Exact Item ID API to supply that
-identifier directly. That API is separate from the key-mapping profiles
-specified below.
+`0..=32` bytes. The complete client core may expose an Exact Item ID API to
+supply that identifier directly; it is separate from the key-mapping profiles
+specified below and is not a Gate 0 operation.
 
 All lengths in this document are measured in bytes. A byte is exactly 8 bits;
 text lengths count UTF-8 bytes, not characters.
@@ -50,10 +51,10 @@ and the initial value codec profile are specified separately in
 An **Item ID mapping profile** selects the algorithm that converts canonical
 key bytes into the final Item ID. The initial profiles are `NamespaceHash` and
 `PublicKeyOrHash`. A mapping profile is client-local configuration, not a
-wire-visible field or a server-enforced namespace policy. A client may select a
-profile per operation, so one namespace may contain Item IDs produced by
-different profiles. The same logical item remains addressable only when later
-operations select the same profile and identity settings.
+wire-visible field or a server-enforced namespace policy. Profiles beyond Gate
+0 may select a profile per operation, so one namespace may contain Item IDs
+produced by different profiles. The same logical item remains addressable only
+when later operations select the same profile and identity settings.
 
 `KeyType` is the language-neutral name of the inferred `TypedKey` variant:
 `Integer`, `Text`, or `Bytes`. A language adapter MUST infer this variant from
@@ -62,7 +63,8 @@ inputs that cannot be represented by one of these variants rather than
 stringifying or coercing them. `KeyType` is not a namespace setting, schema,
 or wire-protocol field.
 
-The specification defines three distinct client-side conversion paths:
+The complete specification defines three distinct client-side conversion
+paths:
 
 ```text
 application key (typed input)
@@ -84,13 +86,40 @@ exact Item ID
   -> wire
 ```
 
-Both formatted profiles use the same typed key and canonical encoding.
+Both formatted profiles use the same typed key and canonical encoding. Gate 0
+uses only `NamespaceHash` with the fixed development root and namespace
+documented in `CLIENT.md`; callers cannot select another profile, root, or
+namespace through the five-operation facade.
 `NamespaceHash` always produces a root- and namespace-bound 32-byte Item ID.
 `PublicKeyOrHash` exposes short canonical key bytes directly and uses an
 unkeyed hash only when the encoding does not fit. It is intended for
 applications that trust the server and do not require client-side key
 confidentiality or profile isolation. The selected mapping profile is part of
 item identity.
+
+## Gate 0 key facade
+
+The five-operation Gate 0 facade accepts exactly one `TypedKey` per operation
+and maps it with:
+
+```text
+profile       = NamespaceHash
+namespace_id  = 1
+root_key      = 000102030405060708090a0b0c0d0e0f
+                101112131415161718191a1b1c1d1e1f
+```
+
+The root and namespace are shared public development fixtures so bindings
+address the same item. The root is an identity setting, not a value-key or
+transport secret. Gate 0 does not expose `PublicKeyOrHash`, Exact Item IDs,
+legacy mapping paths, canonical-byte arguments, or per-operation identity
+overrides. Those capabilities remain fully specified below for the shared core
+and a future facade revision.
+
+Gate 0 treats JavaScript `number` as ambiguous and rejects it even when it is
+an integral safe integer; JavaScript callers use `bigint` within signed `i64`
+for `Integer`. The complete profile's optional safe-integer normalization in
+§2.2 is not a Gate 0 API.
 
 ## 2. Typed key
 
@@ -168,8 +197,10 @@ JavaScript `bigint` values outside that range MUST be rejected. A binding MAY
 offer a narrower convenience API, but it MUST NOT accept values that another
 conforming binding cannot represent.
 
-The maintained-client default mapping profile is `NamespaceHash`.
-`PublicKeyOrHash` MUST be selected explicitly. It is suitable for
+The complete-profile default mapping profile is `NamespaceHash`, and
+`PublicKeyOrHash` MUST be selected explicitly in profiles that expose it. Gate
+0 fixes `NamespaceHash` and exposes no mapping selector. `PublicKeyOrHash` is
+suited for
 benchmarks and for applications that fully trust the server and accept public,
 cross-client key identity. Value protection is independent: either mapping
 profile may carry protected or unprotected values.
@@ -269,7 +300,7 @@ The following are rejected:
 
 ```text
 18 01                         // overlong Integer(1)
-fa 3f 80 00 00                // binary32 Float(1.0)
+fa 3f 80 00 00                // binary32 Float(width=32, 1.0)
 80                            // array
 f4                            // boolean
 f6                            // null
@@ -441,8 +472,9 @@ requires non-public Item IDs.
 `item_id_derivation_key`. Changing either has no effect on its Item IDs.
 
 Profile persistence and mismatch detection remain intentionally unspecified in
-v1. APIs MUST make per-operation profile selection explicit when it differs
-from the client default; a mismatch may still appear as a miss.
+v1. Profiles beyond Gate 0 MUST make per-operation profile selection explicit
+when it differs from the client default; a mismatch may still appear as a
+miss. Gate 0 has no profile-selection argument.
 
 ### 5.3 Mapping algorithm and profile compatibility
 

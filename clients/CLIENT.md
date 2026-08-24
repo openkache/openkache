@@ -1,33 +1,28 @@
-# OpenKache Maintained Client Implementation Guide — Version 1 Draft
+# OpenKache Maintained Client Contract — Version 1 Gate 0
 
-> **Status:** Draft `draft-2026-08-19.4`; not released or finalized.
+> **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
 >
-> This guide describes the target implementation for OpenKache-maintained
-> client SDKs. Implementations may temporarily lag during migration.
+> This document freezes the first maintained facade. The complete protocol,
+> key, value-envelope, security, and implementation rules below remain
+> normative even where the Gate 0 facade does not expose a caller option yet.
 
-This guide explains how the maintained language bindings share one
-language-independent client implementation. It does not redefine the
+This guide explains how maintained language bindings share one
+language-independent client implementation. It does not replace the
 [Wire Protocol](../protocol/SPEC.md), the [Client Key Format](KEY_FORMAT.md),
-or the [Client Value Format](VALUE_FORMAT.md) and
-[Security Model](../SECURITY_MODEL.md). Those documents are the sources
-of truth for interoperable bytes, identity, formatted values, and protection.
+the [Client Value Format](VALUE_FORMAT.md), or the
+[Security Model](../SECURITY_MODEL.md). Those documents remain the sources of
+truth for interoperable bytes, identity, formatted values, and protection.
 
-Third-party clients do not have to copy the local API design, retry defaults,
-compression policy, runtime integration, or shared-core architecture described
-here. A client that claims compatibility with a wire, key, or value profile
-must still implement that profile exactly.
+Gate 0 deliberately exposes only a small data-plane facade. A binding MUST NOT
+claim Gate 0 compatibility while it disagrees with this document or the
+cross-referenced specifications. Later profiles may expose additional
+transport, identity, value, and policy choices, but they require an explicit
+contract revision.
 
-The format specifications in this draft describe the target contract. The
-key and Item ID boundary is implemented in `clients/core`; the generated value
-model and envelope remain transitional until their respective migrations land.
-
-Package READMEs may expose those generated/core artifacts for compatibility, but
-they must label legacy fixed-width-ID assumptions and legacy JSON envelopes as
-current transitional behavior. Threshold-based compression is no longer a
-maintained default; callers that need it may still select explicit
-per-operation settings. A package that does not implement both maintained
-transport profiles must identify itself as a scaffold or transitional
-limitation rather than claim full maintained support.
+The shared core and package implementations may temporarily lag this contract.
+A package that has not implemented all five operations and the lossless
+structured-value path MUST identify itself as a scaffold or transitional
+limitation rather than claim maintained v1 support.
 
 The normative terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
 **MAY** apply only to OpenKache-maintained clients in this guide.
@@ -57,6 +52,165 @@ restated here:
 | Cross-language logical values, native mappings, representations, and the initial structured-value codec profile | [Client Value Model](value/SPEC.md) |
 | Rust core APIs, features, commands, and source layout | [Client core README](core/README.md) |
 | Native API names, package configuration, and platform requirements | Each language package's README |
+
+## Gate 0 maintained facade (`v1-gate0`)
+
+Every maintained binding exposes exactly these five operation names. The
+binding may project them as synchronous methods, futures, promises,
+coroutines, or callbacks, but the projection MUST preserve the same inputs,
+results, and error categories.
+
+| Operation | Input | Successful result |
+|---|---|---|
+| `connect` | endpoint and the fixed development profile | an open client |
+| `get` | one [`TypedKey`](KEY_FORMAT.md) | `GetResult<Value>` |
+| `set` | one `TypedKey` and one `Value` | `Created` or `Replaced` |
+| `delete` | one [`TypedKey`](KEY_FORMAT.md) | `Deleted` or `NotFound` |
+| `close` | an open client | completion with no value |
+
+`connect` MUST complete the TLS 1.3 handshake before returning a usable
+client. A failed connection returns an error and never a partially usable
+client. `get`, `set`, and `delete` MUST use the mapped `NamespaceHash` key path
+and `StructuredValue-CBOR-v1` value profile described below. A binding MAY
+provide checked constructors and accessors for these types, but MUST NOT give
+one of the five operation names a second wire or value meaning.
+
+`close` is idempotent. The first call stops new admission, drains or completes
+already admitted work according to the binding's normal lifetime, and releases
+the transport. Later calls complete successfully. Gate 0 has no public
+cancellation handle or cancellation operation; callers wait for an accepted
+operation or close the client.
+
+### Lookup and mutation outcomes
+
+`get` returns a tagged result, never a nullable sentinel:
+
+```text
+GetResult<T> = Missing | Found(T)
+```
+
+An absent item returns `Missing`. A stored `Null` returns `Found(Null)`, and a
+stored `Undefined` returns `Found(Undefined)`. Bindings MUST preserve these
+three states; Python MUST NOT use `None` as the missing marker and
+TypeScript/JavaScript MUST NOT use `undefined` as the missing marker.
+
+An unconditional `set` returns `Created` when the item was absent and
+`Replaced` when a live item was overwritten. `delete` returns `Deleted` when
+an item was removed and `NotFound` when it was already absent. Conditional
+writes, `NotStored`, TTL, and expiration options are not Gate 0 outcomes.
+
+If a mutation may have crossed admission but its response is lost, the binding
+MUST surface a distinct `UnknownMutation` error/result and MUST NOT
+automatically replay the mutation. A transport failure known to occur before
+admission remains a normal transport error. This distinction is required even
+when a language maps errors to exceptions or rejected promises.
+
+### Fixed development profile
+
+Gate 0 examples and maintained bindings use one interoperable development
+profile:
+
+```text
+transport       = QUIC-over-TLS 1.3 or TLS 1.3 over TCP (v1 frames)
+ALPN            = openkache/1
+key agreement   = X25519MLKEM768
+server trust    = DevelopmentTrust (certificate verification disabled)
+client identity = none (the server does not require a client certificate)
+key profile     = NamespaceHash
+namespace ID    = 1
+Item-ID root    = 000102030405060708090a0b0c0d0e0f
+                  101112131415161718191a1b1c1d1e1f
+value profile   = StructuredValue-CBOR-v1
+selector        = 0x10 (uncompressed, unprotected, payload format 1)
+```
+
+The server still presents a certificate and TLS still encrypts traffic.
+`DevelopmentTrust` deliberately disables client-side chain and hostname
+verification, so it provides passive confidentiality but no active
+man-in-the-middle protection. Every example using it MUST say
+**development only — do not use this trust profile in production**. Plaintext
+fallback is never permitted.
+
+The root and namespace are public development fixtures, not production
+secrets. The Item-ID root is an identity setting, not a value-protection key.
+Production trust roots, certificate verification, client certificates, and
+other transport or identity profiles are future profiles rather than hidden
+Gate 0 configuration switches.
+
+### Typed keys
+
+The only Gate 0 mapped key type is:
+
+```text
+TypedKey =
+    Integer(signed i64)
+  | Text(valid UTF-8)
+  | Bytes(byte sequence)
+```
+
+`Integer` accepts exactly `-2^63..=2^63-1`. `Text` is length-delimited UTF-8
+and may be empty or contain U+0000. `Bytes` preserves every byte, including
+empty and zero bytes. Adapters MUST infer one unambiguous variant or require
+an explicit typed-key constructor; booleans, floating-point values, null,
+collections, arbitrary objects, invalid UTF-8, and out-of-range integers MUST
+be rejected. Stringification and lossy numeric coercion are forbidden.
+Canonical bytes and Item-ID derivation are normative in [`KEY_FORMAT.md`](KEY_FORMAT.md).
+In JavaScript/TypeScript, Gate 0 rejects `number` keys (including integral
+safe numbers) as ambiguous; callers use signed-`i64` `bigint` keys.
+
+### Structured values
+
+Every successful Gate 0 `get` and `set` uses
+`StructuredValue-CBOR-v1`. The complete lossless model is:
+
+```text
+Value =
+    Null
+  | Undefined
+  | Boolean(value)
+  | Integer(value)
+  | Float(width, raw_bits)
+  | ByteString(bytes)
+  | TextString(utf8)
+  | Array(values)
+  | Map(entries)
+```
+
+`Float` width and raw bits (16, 32, or 64), arbitrary integer magnitude,
+bytes/text distinction, ordered array/map entries, and `Undefined` MUST be
+representable without semantic loss. Only scalar model values may be map keys;
+arrays and maps are not keys. Duplicate keys are rejected using model
+equality, so `Integer(1)`, `Boolean(true)`, and
+`Float(width=64, raw_bits=0x3ff0000000000000)` remain distinct. Cycles,
+functions, classes, and arbitrary object graphs are not model values.
+[`value/SPEC.md`](value/SPEC.md) and [`VALUE_FORMAT.md`](VALUE_FORMAT.md)
+define the codec and validation details.
+
+### Deliberately unsupported Gate 0 features
+
+The following MUST NOT be advertised as maintained v1 operations, defaults, or
+caller-selectable options:
+
+- `get_json`, `set_json`, JSON auto-detection, legacy metadata envelopes,
+  raw-byte operations, Exact Item ID operations, and caller-owned v0 envelopes;
+- conditional writes, TTL/expiration or eviction options, namespace
+  creation/lookup/update/deletion, and other control-plane operations;
+- `EXPERIMENTAL_STATS`, `EXPERIMENTAL_SYNC`, and other experimental operations;
+- caller-visible retry-policy, timeout, lane, concurrency, or cancellation
+  controls;
+- plaintext transport, transport-specific public operation variants, protocol
+  downgrade, custom trust roots, certificate-file options, hostname-verification
+  switches, and mTLS configuration; and
+- caller-selected compression, value protection, value-key rotation, or
+  payload-format/selector arguments.
+
+The full envelope, protection, compression, transport, key-selection, AAD,
+KDF, and resource-limit specifications remain normative for the shared core
+and future profiles. "Unsupported by the Gate 0 facade" means only that a
+caller cannot select or invoke the feature through these five operations; it
+does not remove the grammar, security rules, rejection behavior, or canonical
+vectors from this repository. Unknown or legacy stored formats MUST produce a
+format error and MUST NOT be guessed as JSON, raw bytes, or structured values.
 
 ## 2. Shared implementation architecture
 
@@ -219,9 +373,10 @@ operation explicitly, but that is not a continuation or deduplicated retry of
 the first request. Unknown outcome is a distinct public result category, not a
 generic transport error.
 
-Adapters MAY expose retry count, backoff, and deadline controls. An override
-changes only the selected operation or client instance; it does not change the
-wire protocol or the definition of an unknown outcome.
+Profiles beyond Gate 0 MAY expose retry count, backoff, and deadline controls.
+An override changes only the selected operation or client instance; it does not
+change the wire protocol or the definition of an unknown outcome. Gate 0 does
+not expose those controls to callers.
 
 ### 4.3 Language error mapping
 
@@ -260,7 +415,8 @@ Server statuses have separate retry meaning:
 
 ### 5.1 Operation families
 
-Address and value representation are independent API axes:
+The shared core keeps address and value representation as independent
+capability axes:
 
 | Address | Value representation | Client behavior |
 |---|---|---|
@@ -273,6 +429,11 @@ Address and value representation are independent API axes:
 An adapter MAY use overloads, options, or distinct method names, but its
 documentation MUST identify both axes. `exact` means only “bypass key mapping”;
 `raw` means only “bypass value encoding and decoding.”
+
+The table describes the complete core/profile boundary, not additional Gate 0
+operation names. Gate 0 exposes only the mapped/Formatted-v1 row through
+`get`/`set`; Exact, Raw, and caller-owned-v0 rows are reserved for a later
+facade revision.
 
 Maintained high-level Exact APIs reject an empty Item ID unless the caller
 explicitly enables it. Low-level wire-operation APIs accept the complete
@@ -349,12 +510,12 @@ unsupported cross-language decode. A package MAY instead use one generic
 method with a typed input parameter when its language can express that
 contract without weakening type checking.
 
-A binding MAY offer JSON helpers as language API convenience. JSON has no v1
-payload selector: a target `set_json`/`get_json` helper serializes canonical
-UTF-8 JSON and carries it as `OpaqueBytes`, with its JSON interpretation
-documented by that binding. `StructuredValue-CBOR-v1` is a separate target
-operation family; a binding must not silently substitute the legacy JSON
-envelope or Raw bytes when exposing structured operations.
+Future profiles MAY offer JSON helpers as language API convenience. JSON has no
+v1 payload selector: a future `set_json`/`get_json` helper would serialize
+canonical UTF-8 JSON and carry it as `OpaqueBytes`, with its JSON interpretation
+documented by that binding. Gate 0 MUST NOT expose those helpers, and it MUST
+not silently substitute the legacy JSON envelope or Raw bytes for
+`StructuredValue-CBOR-v1`.
 
 ### 5.4 Runtime shape
 
@@ -365,6 +526,13 @@ Those shapes do not change request semantics, retry classification, or value
 conversion rules.
 
 ## 6. Configuration and maintained-client policies
+
+This section retains the complete configuration and policy boundary required
+by the shared core and future production profiles. Gate 0 fixes the
+development profile in the earlier section and does not expose these settings
+as public constructor, operation, or retry arguments. Implementations may keep
+internal builders needed for the full profile, but unsupported options MUST
+fail rather than silently change the Gate 0 profile.
 
 ### 6.1 Configuration boundaries
 
@@ -401,9 +569,11 @@ server and do not need client-side key confidentiality, namespace binding, or
 root-key isolation. It is also useful for direct-key benchmarks. It remains
 independent of value protection and ignores any Item ID root key.
 
-Server certificate and identity verification is enabled by default using
-system trust or configured trust roots. Disabling it requires an explicit
-insecure option and never occurs as transport or version fallback.
+Production profiles enable server certificate and identity verification by
+default using system trust or configured trust roots. Disabling it requires an
+explicit insecure option and never occurs as transport or version fallback.
+Gate 0 is the documented development exception: it uses `DevelopmentTrust`
+with verification disabled and exposes no trust-policy switch.
 
 The security properties of representative configurations are:
 
@@ -420,23 +590,26 @@ The following design points remain outside the stable v1 data contract:
 - **Profile metadata:** the key format currently leaves profile discovery and
   mismatch handling to client policy. A future revision may define an optional
   client-local record or opaque server metadata; it MUST NOT turn `KeyType`
-  into a server-enforced namespace schema. Until then, clients expose an
-  explicit per-operation profile override when mixing profiles.
+  into a server-enforced namespace schema. Profiles beyond Gate 0 may expose
+  an explicit per-operation profile override when mixing profiles; Gate 0 uses
+  only the fixed `NamespaceHash` profile.
 - **Namespace lifecycle:** stable v1 consumes server-assigned namespace IDs.
   The assignment and lifecycle interface remains in the
   [namespace WIP draft](../protocol/NAMESPACE.md).
 
 ### 6.3 Transport and server-authentication policy
 
-Maintained clients support both protocol v1 transport bindings:
+The complete maintained transport profile supports both protocol v1 bindings:
 
 - QUIC over TLS 1.3, with one client-initiated bidirectional stream per lane;
 - TLS 1.3 over TCP, with one TLS connection per lane.
 
 Both bindings use the same `openkache/1` ALPN and exactly the same request and
-response frame bytes. The maintained client may try its configured transport
+response frame bytes. The shared core may try its configured transport
 fallback order, but it MUST NOT invent a transport or lane identifier in a
-frame. TCP plaintext is not a conforming transport.
+frame. TCP plaintext is not a conforming transport. Gate 0 accepts either
+supported v1 binding through the fixed development profile and exposes no
+transport-specific operation variant or transport-selection argument.
 
 The TLS 1.3 handshake MUST negotiate an approved post-quantum/traditional
 hybrid key agreement. The current maintained profile requires
@@ -449,26 +622,28 @@ clients implement both transports and may use configured fallback. A
 third-party implementation may conform to one transport profile without
 implementing the other.
 
-Server certificate presentation is always part of the TLS handshake. Whether
-the client verifies the certificate chain and server identity is
-client-configurable and enabled by default. Disabling verification requires an
-explicit insecure option. It still provides passive
-eavesdropping protection and encryption, but it does not provide active
-MITM protection; such a connection MUST NOT be treated as an authenticated
-server endpoint. Requiring a user-supplied certificate file is not a
+Server certificate presentation is always part of the TLS handshake. In
+production profiles, the client verifies the certificate chain and server
+identity by default, and disabling verification requires an explicit insecure
+option. DevelopmentTrust deliberately disables those checks while still
+providing passive eavesdropping protection and encryption; it does not provide
+active MITM protection and MUST NOT be treated as an authenticated server
+endpoint. Requiring a user-supplied certificate file is not a general
 maintained-client requirement; system trust, generated development identities,
-or another configured trust policy may be used.
+or another configured trust policy may be used by a future profile. Gate 0
+exposes none of these choices.
 
-Client certificate authentication (mTLS) is optional and server-configured.
-It is not required for ordinary data operations. A server MAY require it
-for administrative or privileged operations. When mTLS is enabled, server
-authentication is also required. Omitting mTLS never disables TLS 1.3 or the
-hybrid key agreement.
+Client certificate authentication (mTLS) is optional and server-configured in
+the complete profile. It is not required for ordinary data operations. A
+server MAY require it for administrative or privileged operations. When mTLS
+is enabled, server authentication is also required. Omitting mTLS never
+disables TLS 1.3 or the hybrid key agreement. Gate 0 has no mTLS option and
+the development server does not require a client certificate.
 
 ### 6.4 Compression policy
 
-Automatic compression is enabled by default for formatted writes in the
-OpenKache-maintained clients. The maintained default policy is:
+The complete maintained profile supports automatic compression for formatted
+writes. Its policy is:
 
 ```text
 compression_mode = Automatic
@@ -487,16 +662,16 @@ Otherwise it emits the uncompressed form. This is a maintained-client policy,
 not a value-format validity or interoperability requirement. Third-party
 clients may use another selection policy while emitting valid value envelopes.
 
-All maintained bindings inherit this default from the shared core and
-generated client contract; a binding MUST NOT select a language-specific
-default. Bindings expose an explicit opt-out. V1 Automatic has no input-size or
-minimum-savings threshold. Compression applies to Formatted v1 for either
-address type. Raw and caller-owned v0 values are never compressed by the
-client.
+Bindings beyond Gate 0 inherit this policy from the shared core and generated
+client contract; a binding MUST NOT select a language-specific default. V1
+Automatic has no input-size or minimum-savings threshold. Compression applies
+to Formatted v1 for either address type. Raw and caller-owned v0 values are
+never compressed by the client. Gate 0 instead fixes `Uncompressed` and does
+not expose an opt-out or caller compression selector.
 
 ### 6.5 Protection policy
 
-Write and read policies are separate:
+The complete profile has separate write and read policies:
 
 - with no value keys, writes and reads allow only `Unprotected`;
 - with an active key ID, writes default to `AES-256-GCM-SIV`;
@@ -512,7 +687,8 @@ configured; callers must opt in for an individual operation or client.
 
 An authenticated write without an active key fails locally. A protected read
 selects only the key ID carried by the envelope and never probes another key or
-downgrades.
+downgrades. Gate 0 fixes `Unprotected` and does not expose value keys,
+protection selection, or key rotation to callers.
 
 ### 6.6 Value-key rotation
 
