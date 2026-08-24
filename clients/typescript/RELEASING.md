@@ -24,14 +24,14 @@ all three outputs under `target/native/` before the release verification is
 run. `release:check` performs the host build first; `release:verify` is the
 artifact-only check used after a multi-platform build has been assembled.
 
-## First release: `0.0.1`
+## First release: `0.1.0`
 
 Run these commands from `clients/typescript` after the public source change has
 merged:
 
 ```bash
 bun install --frozen-lockfile
-bun pm pkg set version=0.0.1
+bun pm pkg set version=0.1.0
 bun run typecheck
 bun run release:dry-run
 ```
@@ -65,8 +65,8 @@ After a successful publication, verify the registry metadata and install the
 published package from a clean consumer project:
 
 ```bash
-bun pm view openkache@0.0.1
-bun add openkache@0.0.1
+bun pm view openkache@0.1.0
+bun add openkache@0.1.0
 ```
 
 The package cannot be republished at the same version. If publication fails

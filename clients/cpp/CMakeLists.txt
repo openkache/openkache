@@ -91,6 +91,12 @@ install(
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 install(
+  FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE"
+    "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
+)
+install(
   EXPORT openkache_client_cpp_targets
   FILE OpenKacheClientCppTargets.cmake
   NAMESPACE OpenKache::
