@@ -8,6 +8,12 @@ import {
   encode_structured_value,
   type Structured_Value,
 } from "./value-codec.js"
+import {
+  SET_OUTCOME_CREATED,
+  SET_OUTCOME_NOT_STORED,
+  SET_OUTCOME_REPLACED,
+  type Gate0_Set_Outcome,
+} from "./gate0-contract.js"
 
 export type {
   Structured_Value,
@@ -77,7 +83,7 @@ export class Found_Result<Value> {
 export const MISSING = new Missing_Result()
 
 /** Public set outcomes for unconditional Gate 0 writes. */
-export type Set_Outcome = "created" | "replaced"
+export type Set_Outcome = Gate0_Set_Outcome
 
 /** Public delete outcomes for Gate 0 deletes. */
 export type Delete_Outcome = "deleted" | "not_found"
@@ -243,10 +249,10 @@ export class OpenKache_Client {
       throw as_openkache_error(error)
     }
     switch (outcome) {
-      case "created":
-      case "replaced":
+      case SET_OUTCOME_CREATED:
+      case SET_OUTCOME_REPLACED:
         return outcome
-      case "not_stored":
+      case SET_OUTCOME_NOT_STORED:
         throw new OpenKache_Error(
           "server returned unsupported conditional SET outcome not_stored",
           undefined,
