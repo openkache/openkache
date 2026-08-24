@@ -90,7 +90,7 @@ not treat generated Smithy metadata as a stable opcode or status registry.
 | Public Item ID root + protected value | Zero/public root may be paired with a separate value keyring | Explicit keyring builders and the ABI v1 keyring entry point accept a public zero root; the base ABI v1 path keeps its coupled semantics | Implemented |
 | Key API shape | Exact Item ID accepts `0..=32` bytes; mapped profiles choose the output length | Core and maintained adapters accept the complete `0..=32` Item ID range | Implemented |
 | Structured values | Common cross-language value model | Maintained mapped `set`/`get` use `StructuredValue-CBOR-v1` | Implemented |
-| Maintained compression | Automatic level-1 Zstandard; use a completed frame only when it is smaller | All maintained bindings enable automatic compression by default; explicit opt-out remains available | Implemented |
+| Maintained compression | Gate 0 fixes `Uncompressed` (`gate0Compression: 0`); internal and compatibility adapters use automatic level-1 Zstandard | Gate 0 packages emit selector `0x10` (`Uncompressed`, `Unprotected`, `StructuredValue-CBOR-v1`) with no compression option; compatibility adapters retain explicit compression controls | Implemented |
 | Value-format `maxVu128Bytes` | Unsigned 64-bit values, at most 9 bytes | Smithy client model/generator emits 9-byte metadata | Implemented |
 
 The frozen specifications are the source of truth for the v1 contract.
