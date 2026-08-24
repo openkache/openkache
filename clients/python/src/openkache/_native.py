@@ -11,7 +11,7 @@ import ctypes
 import os
 import sys
 from pathlib import Path
-from threading import Condition, Lock
+from threading import Condition
 from collections.abc import Sequence
 
 from ._generated.smithy_contract import (
