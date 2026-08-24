@@ -157,7 +157,6 @@ mod maintained {
                 core::DataProtectionKey::from_bytes(core::contract::GATE0_ITEM_ID_ROOT),
             )
             .server_trust(core::ServerTrust::Insecure)
-            .namespace_id(core::contract::GATE0_NAMESPACE_ID)
             .compression(Compression::Disabled)
             .encryption(Encryption::Unprotected)
             .connect()

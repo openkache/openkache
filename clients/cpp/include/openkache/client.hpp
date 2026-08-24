@@ -178,7 +178,7 @@ inline Bytes canonical_key_bytes(const Typed_Key &key) {
     return Value::undefined();
   }();
   Value_Limits limits;
-  limits.max_bytes = 1u << 20;
+  limits.max_bytes = OPENKACHE_SMITHY_MAX_CANONICAL_KEY_BYTES;
   const auto encoded = encode_structured_value(value, limits);
   if (encoded.empty() || encoded.size() > limits.max_bytes) {
     throw Error("canonical key exceeds the 1 MiB limit");

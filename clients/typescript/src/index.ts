@@ -14,6 +14,7 @@ import {
   SET_OUTCOME_REPLACED,
   type Gate0_Set_Outcome,
 } from "./gate0-contract.js"
+import { SMITHY_MAX_CANONICAL_KEY_BYTES } from "./generated_local/smithy-api.js"
 
 export type {
   Structured_Value,
@@ -40,7 +41,6 @@ export {
 } from "./value-codec.js"
 
 const TEXT_ENCODER = new TextEncoder()
-const MAX_CANONICAL_KEY_BYTES = 1_048_576
 const INCOMPATIBLE_OUTCOME_PREFIX =
   "openkache:error:incompatible_server_outcome:"
 
@@ -388,9 +388,9 @@ function encode_cbor_bytes_or_text(
 ): Uint8Array {
   const header = encode_cbor_argument(major, bytes.byteLength)
   const total_length = header.byteLength + bytes.byteLength
-  if (total_length > MAX_CANONICAL_KEY_BYTES) {
+  if (total_length > SMITHY_MAX_CANONICAL_KEY_BYTES) {
     throw new OpenKache_Error(
-      `canonical key exceeds ${MAX_CANONICAL_KEY_BYTES} bytes`,
+      `canonical key exceeds ${SMITHY_MAX_CANONICAL_KEY_BYTES} bytes`,
     )
   }
   const output = new Uint8Array(total_length)

@@ -15,7 +15,7 @@ pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 /// Bytes in the client root key.
 pub const CLIENT_ROOT_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 /// Maximum canonical key bytes accepted by every conforming SDK.
-pub const MAX_CANONICAL_KEY_BYTES: usize = 1_048_576;
+pub use crate::contract::MAX_CANONICAL_KEY_BYTES;
 /// Maximum application key input bytes accepted by the transitional API.
 ///
 /// This alias is retained for source compatibility.  Validation is performed

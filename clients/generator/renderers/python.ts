@@ -892,6 +892,7 @@ SMITHY_POLICY_EVICTION_OVERRIDE = ${contract.v1.policy_eviction_override_flag}
 SMITHY_POLICY_RESERVED_MASK = ${contract.v1.policy_reserved_mask}
 SMITHY_ERROR_STATUS_MINIMUM = ${contract.v1.error_status_minimum}
 SMITHY_DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight}
+SMITHY_MAX_CANONICAL_KEY_BYTES = ${defaults.max_canonical_key_bytes}
 SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}
 SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}
 SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS = ${defaults.retry_max_attempts}

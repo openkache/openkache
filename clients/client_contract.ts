@@ -90,6 +90,8 @@ export interface Client_Defaults_Contract {
   readonly server_name: string
   readonly certificate_pem_type: string
   readonly minimum_positive_value: number
+  /** Maximum complete canonical CBOR key item accepted by every SDK. */
+  readonly max_canonical_key_bytes: number
 }
 
 /** Native binding ABI identifiers shared by language-neutral adapters. */
@@ -1586,6 +1588,12 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
     )
   }
   const defaults = {
+    max_canonical_key_bytes: integer_member(
+      contract,
+      "maxCanonicalKeyBytes",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
     max_in_flight: integer_member(
       contract,
       "maxInFlight",

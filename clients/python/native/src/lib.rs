@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use openkache_client_core::contract::{
     CLIENT_GATE0_ALPN_VERSION, CLIENT_GATE0_COMPRESSION, CLIENT_GATE0_ENCRYPTION,
-    CLIENT_GATE0_ITEM_ID_ROOT, CLIENT_GATE0_NAMESPACE_ID, CLIENT_GATE0_VALUE_SELECTOR,
+    CLIENT_GATE0_ITEM_ID_ROOT, CLIENT_GATE0_VALUE_SELECTOR,
     FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
     FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_REPLACED,
     FFI_RESULT_UNKNOWN_MUTATION, FFI_RESULT_VALUE, VALUE_FORMAT_COMPRESSION_NONE,
@@ -130,7 +130,6 @@ fn connect_gate0(address: String) -> Gate0Result {
             AlpnPolicy::from_versions(vec![CLIENT_GATE0_ALPN_VERSION], CLIENT_GATE0_ALPN_VERSION)
                 .expect("the generated Gate 0 ALPN profile must be valid"),
         )
-        .namespace_id(CLIENT_GATE0_NAMESPACE_ID)
         .server_trust(ServerTrust::Insecure)
         .compression(gate0_compression())
         .encryption(gate0_encryption())
