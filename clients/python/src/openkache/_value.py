@@ -468,13 +468,18 @@ def _append_head(major: int, length: int, output: bytearray, budget: ValueLimits
 
 def _encode_integer(value: int, output: bytearray, budget: ValueLimits) -> None:
     negative = value < 0
+    model_magnitude = -value if negative else value
+    model_magnitude_bytes = (model_magnitude.bit_length() + 7) // 8
+    # The budget covers the mathematical magnitude, not the transformed
+    # ``-1-n`` argument used by CBOR major type 1.  A negative power of two
+    # can therefore have one more model byte than its native CBOR argument.
+    if model_magnitude_bytes > budget.max_integer_bytes:
+        _resource("integer bytes", budget.max_integer_bytes, model_magnitude_bytes)
     transformed = -value - 1 if negative else value
     if transformed <= 0xFFFF_FFFF_FFFF_FFFF:
         _append_head(1 if negative else 0, transformed, output, budget)
         return
     magnitude = transformed.to_bytes(max(1, (transformed.bit_length() + 7) // 8), "big")
-    if len(magnitude) > budget.max_integer_bytes:
-        _resource("integer bytes", budget.max_integer_bytes, len(magnitude))
     _append_head(6, 3 if negative else 2, output, budget)
     _append_head(2, len(magnitude), output, budget)
     _append(output, magnitude, budget)
@@ -531,9 +536,11 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
         ai, length_or_value = argument[0], argument[2]
         if major in (0, 1):
             number = length_or_value
+            magnitude = number if major == 0 else number + 1
+            magnitude_bytes = (magnitude.bit_length() + 7) // 8
+            if magnitude_bytes > budget.max_integer_bytes:
+                _resource("integer bytes", budget.max_integer_bytes, magnitude_bytes)
             value = IntegerValue(number if major == 0 else -number - 1)
-            if isinstance(value, IntegerValue) and value.value.bit_length() > budget.max_integer_bytes * 8:
-                _resource("integer bytes", budget.max_integer_bytes, (value.value.bit_length() + 7) // 8)
             accept(value)
         elif major in (2, 3):
             length = length_or_value
@@ -597,6 +604,14 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
             cursor += length
             if magnitude[0] == 0:
                 raise StructuredValueError("bignum magnitude is not minimal", ValueErrorKind.INVALID_INTEGER)
+            if (
+                tag == 3
+                and length == budget.max_integer_bytes
+                and all(byte == 0xFF for byte in magnitude)
+            ):
+                # Tag 3 stores ``-1-n``.  Adding one to an all-FF payload
+                # carries into a new model-magnitude byte.
+                _resource("integer bytes", budget.max_integer_bytes, length + 1)
             number = int.from_bytes(magnitude, "big")
             value = IntegerValue(number if tag == 2 else -number - 1)
             accept(value)
