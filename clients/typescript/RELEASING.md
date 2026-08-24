@@ -78,11 +78,14 @@ investigate the registry state before choosing a new version.
 The checked-in
 [`publish-npm.yml`](../../.github/workflows/publish-npm.yml) workflow is
 intentionally disabled. It remains as the complete release definition, but it
-has no tag trigger and every job is guarded off, so neither a tag push nor a
-manual dispatch consumes a runner or publishes to npm.
+has no automatic event trigger and every job requires the
+`OPENKACHE_NPM_RELEASE_ENABLED=true` repository variable. Repository Actions is
+currently disabled, so no event consumes a runner or publishes to npm.
 
 Before enabling the workflow, assign it to an approved customer runner and
 configure the `NPM_TOKEN` repository secret. Then restore the
-`typescript-v<version>` tag trigger and remove the disabled job guards. The
-enabled workflow must publish only from a committed public `main` snapshot;
-a manually selected branch must not be used for a production publication.
+`typescript-v<version>` tag trigger, set the release variable to `true`, and
+remove the disabled job guard only if the runner and credential policy allows
+it. The enabled workflow must publish only from a committed public `main`
+snapshot; a manually selected branch must not be used for a production
+publication.

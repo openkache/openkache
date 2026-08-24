@@ -1,8 +1,9 @@
 name: Publish TypeScript package
 
-# Keep the complete release definition in-tree without executing it on
-# GitHub-hosted runners. Enable this only after an approved customer runner
-# and the required npm credentials are provisioned.
+# Keep the complete release definition in-tree without an automatic event
+# trigger. Repository Actions is disabled; the manual definition remains for
+# later enablement after an approved customer runner and npm credentials are
+# provisioned.
 on:
   workflow_dispatch:
 
@@ -16,7 +17,7 @@ concurrency:
 jobs:
   build-linux:
     name: Build Linux native adapters
-    if: ${{ false }}
+    if: ${{ vars.OPENKACHE_NPM_RELEASE_ENABLED == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,7 +62,7 @@ jobs:
 
   build-darwin:
     name: Build Apple Silicon native adapter
-    if: ${{ false }}
+    if: ${{ vars.OPENKACHE_NPM_RELEASE_ENABLED == 'true' }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,7 +99,7 @@ jobs:
 
   publish:
     name: Publish @openkache/client
-    if: ${{ false }}
+    if: ${{ vars.OPENKACHE_NPM_RELEASE_ENABLED == 'true' }}
     needs: [build-linux, build-darwin]
     runs-on: ubuntu-24.04
     env:
