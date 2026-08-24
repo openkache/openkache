@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::ptr;
 use std::slice;
 use std::str;
+use std::sync::{Mutex, MutexGuard};
 
 use openkache_client_core::contract::{
     CLIENT_GATE0_ALPN_VERSION, CLIENT_GATE0_COMPRESSION, CLIENT_GATE0_ENCRYPTION,
@@ -27,9 +28,17 @@ use openkache_client_core::{
 };
 use tokio::runtime::Runtime;
 
-/// One long-lived Gate 0 client.  The runtime is kept beside the client so
-/// every synchronous ctypes call uses the same TLS-over-TCP executor.
+/// One long-lived Gate 0 client.
+///
+/// The mutex serializes access to the current-thread Tokio runtime and the
+/// underlying core client.  ctypes releases Python's GIL around foreign
+/// calls, so relying on the GIL here would allow concurrent callers to alias
+/// the raw handle and enter `Runtime::block_on` at the same time.
 pub struct Gate0Client {
+    inner: Mutex<Gate0ClientInner>,
+}
+
+struct Gate0ClientInner {
     runtime: Runtime,
     client: TlsTcpProtectedClient,
 }
@@ -129,7 +138,9 @@ fn connect_gate0(address: String) -> Gate0Result {
     );
     match client {
         Ok(client) => {
-            let gate0 = Box::new(Gate0Client { runtime, client });
+            let gate0 = Box::new(Gate0Client {
+                inner: Mutex::new(Gate0ClientInner { runtime, client }),
+            });
             let mut result = Gate0Result::success(FFI_RESULT_CONNECTED, []);
             result.client = Box::into_raw(gate0);
             result
@@ -138,11 +149,20 @@ fn connect_gate0(address: String) -> Gate0Result {
     }
 }
 
-unsafe fn as_client<'a>(pointer: *mut Gate0Client) -> Result<&'a mut Gate0Client, Gate0Result> {
+unsafe fn as_client<'a>(pointer: *mut Gate0Client) -> Result<&'a Gate0Client, Gate0Result> {
     if pointer.is_null() {
         return Err(Gate0Result::error("client pointer must not be null"));
     }
-    Ok(unsafe { &mut *pointer })
+    Ok(unsafe { &*pointer })
+}
+
+fn lock_client<'a>(
+    client: &'a Gate0Client,
+) -> Result<MutexGuard<'a, Gate0ClientInner>, Gate0Result> {
+    client
+        .inner
+        .lock()
+        .map_err(|_| Gate0Result::error("native client mutex is poisoned"))
 }
 
 unsafe fn run_get(client: *mut Gate0Client, key: *const u8, key_length: usize) -> Gate0Result {
@@ -151,6 +171,10 @@ unsafe fn run_get(client: *mut Gate0Client, key: *const u8, key_length: usize) -
         Err(error) => return Gate0Result::error(error),
     };
     let client = match unsafe { as_client(client) } {
+        Ok(client) => client,
+        Err(error) => return error,
+    };
+    let client = match lock_client(client) {
         Ok(client) => client,
         Err(error) => return error,
     };
@@ -183,6 +207,10 @@ unsafe fn run_set(
         Ok(client) => client,
         Err(error) => return error,
     };
+    let client = match lock_client(client) {
+        Ok(client) => client,
+        Err(error) => return error,
+    };
     match client
         .runtime
         .block_on(
@@ -203,6 +231,10 @@ unsafe fn run_delete(client: *mut Gate0Client, key: *const u8, key_length: usize
         Err(error) => return Gate0Result::error(error),
     };
     let client = match unsafe { as_client(client) } {
+        Ok(client) => client,
+        Err(error) => return error,
+    };
+    let client = match lock_client(client) {
         Ok(client) => client,
         Err(error) => return error,
     };
