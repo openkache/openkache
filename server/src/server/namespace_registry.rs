@@ -176,7 +176,7 @@ impl NamespaceRegistry {
         };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        registry.decode_metadata(&bytes, &storage_domain_key)?;
+        registry.decode_metadata(&bytes)?;
         let journal_path = registry
             .metadata_path
             .as_ref()
@@ -747,21 +747,13 @@ impl NamespaceRegistry {
         write_result
     }
 
-    fn decode_metadata(
-        &mut self,
-        bytes: &[u8],
-        storage_domain_key: &[u8; 32],
-    ) -> std::io::Result<()> {
+    fn decode_metadata(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut cursor = MetadataCursor::new(bytes);
         if cursor.take(namespace_metadata::MAGIC.len())? != namespace_metadata::MAGIC {
             return Err(cursor.invalid("namespace metadata magic is invalid"));
         }
         let metadata_version = cursor.u32()?;
-        if metadata_version != namespace_metadata::VERSION
-            && metadata_version != namespace_metadata::LEGACY_V2_VERSION
-            && metadata_version != namespace_metadata::LEGACY_V1_VERSION
-            && metadata_version != namespace_metadata::LEGACY_V3_VERSION
-        {
+        if metadata_version != namespace_metadata::VERSION {
             return Err(cursor.invalid("namespace metadata version is unsupported"));
         }
         let next_id = cursor.u64()?;
@@ -791,14 +783,7 @@ impl NamespaceRegistry {
             if used != policy_len {
                 return Err(cursor.invalid("namespace metadata policy has trailing bytes"));
             }
-            let item_width = if metadata_version == namespace_metadata::VERSION {
-                STORAGE_KEY_BYTES
-            } else {
-                // Legacy snapshots used the protocol's fixed Item ID width.
-                // It currently matches the storage width, but keep the
-                // migration boundary explicit.
-                openkache_protocol::ITEM_ID_BYTES
-            };
+            let item_width = STORAGE_KEY_BYTES;
             let item_count = cursor.u64()?;
             if item_count > NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY
                 || item_count > (cursor.remaining() / item_width) as u64
@@ -809,27 +794,20 @@ impl NamespaceRegistry {
             for _ in 0..item_count {
                 let item_bytes = cursor.take(item_width)?;
                 let item_bytes = item_bytes.try_into().expect("storage key width is fixed");
-                let storage_key = if metadata_version == namespace_metadata::VERSION {
-                    StorageKey::new(item_bytes)
-                } else {
-                    let scope = namespace_id.to_be_bytes();
-                    derive_scoped_storage_key(storage_domain_key, &scope, &item_bytes)
-                };
+                let storage_key = StorageKey::new(item_bytes);
                 items.insert(storage_key);
             }
             let mut dirty_workers = HashSet::new();
-            if metadata_version >= namespace_metadata::LEGACY_V2_VERSION {
-                let dirty_worker_count = cursor.u64()?;
-                if dirty_worker_count > NAMESPACE_METADATA_MAX_DIRTY_WORKERS {
-                    return Err(cursor.invalid("namespace metadata dirty-worker list is invalid"));
-                }
-                for _ in 0..dirty_worker_count {
-                    let route = StorageRoute::from_persisted(cursor.u64()?);
-                    if !dirty_workers.insert(route) {
-                        return Err(
-                            cursor.invalid("namespace metadata contains duplicate dirty workers")
-                        );
-                    }
+            let dirty_worker_count = cursor.u64()?;
+            if dirty_worker_count > NAMESPACE_METADATA_MAX_DIRTY_WORKERS {
+                return Err(cursor.invalid("namespace metadata dirty-worker list is invalid"));
+            }
+            for _ in 0..dirty_worker_count {
+                let route = StorageRoute::from_persisted(cursor.u64()?);
+                if !dirty_workers.insert(route) {
+                    return Err(
+                        cursor.invalid("namespace metadata contains duplicate dirty workers")
+                    );
                 }
             }
             if self.by_id.contains_key(&namespace_id) || self.by_name.contains_key(name.as_slice())

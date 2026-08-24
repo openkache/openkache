@@ -75,7 +75,7 @@ coordinate exact revision `draft-2026-08-19.4` out of band as described in
 them; the revision is not negotiated on the wire. Transport and validation
 failures throw `openkache::Error`. Logical `std::span` and `std::string_view`
 keys cross the ABI with their generated `Bytes` or `Text` discriminator; the
-shared core performs canonical key encoding. ABI v6 requests use the
+shared core performs canonical key encoding. ABI v1 requests use the
 `poll`/`wait`/`free` request lifecycle and preserve
 `Unknown_Mutation_Error` or `Canceled_Error` categories. Complete raw SET
 policy flags and namespace/scoped operations have no request-handle entry

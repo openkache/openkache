@@ -1359,7 +1359,7 @@ public actor OpenKacheRawClient {
                 }
             }
         }
-        // ABI v6 has no raw request handle for complete SET policy flags.
+        // ABI v1 has no raw request handle for complete SET policy flags.
         // A detached synchronous call is the documented safe completion boundary
         // for this operation shape.
         return try await perform { handle in

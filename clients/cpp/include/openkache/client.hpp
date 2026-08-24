@@ -911,7 +911,7 @@ private:
                     ttl_enabled,
                     legacy_ttl));
             }
-            // ABI v6 has no raw request handle for the complete policy flags.
+            // ABI v1 has no raw request handle for the complete policy flags.
             // This synchronous call is the safe completion boundary.
             return take_result(openkache_client_execute_raw_with_options(
                 client_,
