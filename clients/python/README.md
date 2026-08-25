@@ -82,9 +82,7 @@ Reads one value as a native Python value by default.
   connection or server failures.
 
 ```python
-value = client.get("greeting")
-if value is not None:
-    print(value)  # -> "hello"
+print(client.get("greeting"))  # -> "hello"
 ```
 
 Use `representation="lossless"` when the exact value model matters:
