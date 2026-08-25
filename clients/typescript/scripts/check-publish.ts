@@ -207,7 +207,7 @@ function require_trusted_publishing_oidc(): void {
   ) {
     fail(
       "GitHub Actions OIDC authentication is unavailable.\n" +
-        "Why: npm Trusted Publishing requires an OIDC token minted with the publish job's id-token: write permission.\n" +
+        "Why: Trusted Publishing requires an OIDC token minted with the publish job's id-token: write permission.\n" +
         "Fix: grant id-token: write to this publish job and run it on a GitHub-hosted runner.",
     )
   }
