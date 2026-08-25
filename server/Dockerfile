@@ -31,7 +31,9 @@ COPY .cargo/config.toml .cargo/config.toml
 COPY protocol/Cargo.toml protocol/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
 COPY clients/core/Cargo.toml clients/core/Cargo.toml
+COPY clients/value/Cargo.toml clients/value/Cargo.toml
 COPY clients/rust/Cargo.toml clients/rust/Cargo.toml
+COPY clients/cli/Cargo.toml clients/cli/Cargo.toml
 COPY clients/typescript/native/Cargo.toml clients/typescript/native/Cargo.toml
 
 # Cargo validates that every workspace member has a target before it can fetch
@@ -43,13 +45,17 @@ RUN mkdir -p \
       protocol/src \
       server/src/bin \
       clients/core/src \
+      clients/value/src \
       clients/rust/src \
+      clients/cli/src \
       clients/typescript/native/src \
     && touch \
       protocol/src/lib.rs \
       server/src/bin/openkache_server.rs \
       clients/core/src/lib.rs \
+      clients/value/src/lib.rs \
       clients/rust/src/lib.rs \
+      clients/cli/src/main.rs \
       clients/typescript/native/src/lib.rs
 
 RUN --mount=type=cache,id=openkache-cargo-registry,target=/root/.cargo/registry,sharing=locked \
