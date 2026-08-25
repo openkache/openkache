@@ -83,12 +83,22 @@ pub const CLIENT_GATE0_ITEM_ID_ROOT: [u8; 32] = [0x00, 0x01, 0x02, 0x03, 0x04, 0
 pub const CLIENT_GATE0_NAMESPACE_ID: u64 = 1;
 /// Gate 0's fixed value-format selector byte.
 pub const CLIENT_GATE0_VALUE_SELECTOR: u8 = 0x10;
-/// Gate 0 namespace ID retained under the original Rust facade name.
+/// Gate 0 ALPN protocol version selected by maintained facades.
+pub const GATE0_ALPN_VERSION: usize = 1;
+/// Gate 0 compression identifier.
+pub const GATE0_COMPRESSION: u8 = 0x00;
+/// Gate 0 value-protection identifier.
+pub const GATE0_ENCRYPTION: u8 = 0x00;
+/// Gate 0 public development Item-ID root key.
+pub const GATE0_ITEM_ID_ROOT_KEY: [u8; 32] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f];
+/// Gate 0 namespace identity.
 pub const GATE0_NAMESPACE_ID: u64 = CLIENT_GATE0_NAMESPACE_ID;
 /// Gate 0 Item-ID root retained under the original Rust facade name.
 pub const GATE0_ITEM_ID_ROOT: [u8; 32] = CLIENT_GATE0_ITEM_ID_ROOT;
 /// Gate 0 value-format selector retained under the original Rust facade name.
 pub const GATE0_VALUE_FORMAT_SELECTOR: u8 = CLIENT_GATE0_VALUE_SELECTOR;
+/// Gate 0 value selector retained under the maintained native facade name.
+pub const GATE0_VALUE_SELECTOR: u8 = CLIENT_GATE0_VALUE_SELECTOR;
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = 1;

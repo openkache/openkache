@@ -28,6 +28,9 @@ jobs:
 
       - uses: ./.github/actions/setup-smithy-codegen
 
+      - name: Check Rust contract snapshots
+        run: OPENKACHE_GENERATION_TARGET=rust-snapshots OPENKACHE_GENERATION_CHECK=1 ./clients/generate.ts
+
       - name: Install Clang/LLVM toolchain
         run: |
           sudo apt-get update
