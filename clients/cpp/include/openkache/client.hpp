@@ -396,7 +396,9 @@ public:
     try {
       return Get_Result::found(decode_structured_value(result.payload));
     } catch (const Value_Error &error) {
-      throw Error(std::string("GET value decoding failed: ") + error.what());
+      throw Value_Error(std::string("GET value decoding failed: ") + error.what(),
+                        error.kind(), error.resource(), error.limit(),
+                        error.actual());
     }
   }
 
