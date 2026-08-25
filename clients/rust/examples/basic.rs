@@ -17,6 +17,7 @@ async fn main() -> openkache::Result<()> {
         client.get("greeting").await?,
         GetResult::Found(Value::text("hello"))
     );
+
     assert!(client.delete("greeting").await?);
     assert_eq!(client.get("greeting").await?, GetResult::Missing);
 

@@ -2,112 +2,39 @@
 name = "openkache-server"
 version = "0.1.0"
 edition.workspace = true
-description = "SSD-first OpenKache cache server with TLS 1.3 transports"
+description = "SSD-backed cache server with RESP/TCP and native OpenKache/QUIC frontends"
 license = "AGPL-3.0-or-later"
-license-file = "../LICENSE"
 readme = "README.md"
 repository = "https://github.com/openkache/openkache"
 homepage = "https://openkache.com"
-documentation = "https://docs.rs/openkache-server"
-keywords = ["cache", "server", "quic", "tls", "openkache"]
+keywords = ["cache", "server", "quic", "resp", "openkache"]
 categories = ["database", "network-programming"]
 rust-version = "1.85"
-include = [
-    "Cargo.toml",
-    "../LICENSE",
-    "README.md",
-    "build.rs",
-    "examples/**/*.rs",
-    "src/**/*.rs",
-]
-
-# Keep the established library crate name so existing server integrations can
-# adopt the registry package without changing their Rust imports.
-[lib]
-name = "openkache"
-path = "src/lib.rs"
-
-[features]
-default = [
-    "allocator-jemalloc",
-    "channel-kanal",
-    "network-runtime-compio",
-    "quic-noq",
-    "storage-runtime-compio",
-]
-# Forces the portable lookup paths for cross-architecture benchmarking.
-force-scalar = []
-allocator-system = []
-allocator-mimalloc = ["dep:mimalloc"]
-allocator-jemalloc = ["dep:tikv-jemallocator"]
-allocator-snmalloc = ["dep:snmalloc-rs"]
-opentelemetry = [
-    "dep:opentelemetry",
-    "dep:opentelemetry-otlp",
-    "dep:opentelemetry_sdk",
-]
-channel-crossfire = ["dep:crossfire"]
-channel-flume = ["dep:flume"]
-channel-kanal = ["dep:event-listener", "dep:kanal"]
-storage-runtime-compio = ["dep:compio"]
-storage-runtime-kimojio = ["dep:kimojio"]
-storage-runtime-monoio = ["dep:monoio"]
-storage-runtime-simulated = ["dep:compio"]
-network-runtime-compio = ["dep:compio"]
-network-runtime-monoio = ["dep:monoio", "dep:signal-hook"]
-network-runtime-glommio = ["dep:glommio", "dep:signal-hook"]
-network-runtime-kimojio = ["dep:kimojio", "dep:rustix", "dep:signal-hook"]
-quic-quinn = ["dep:compio-quic"]
-quic-noq = ["dep:comnoq"]
-quic-quiche = ["dep:boring", "dep:quiche", "boring/pq-experimental"]
+publish = false
 
 [[bin]]
 name = "openkache-server"
-path = "src/bin/openkache_server.rs"
+path = "src/main.rs"
+
+[features]
+default = []
+alloc-mimalloc = ["dep:mimalloc"]
+alloc-jemalloc = ["dep:tikv-jemallocator"]
+uring-single-issuer = []
+uring-coop-taskrun = []
+uring-defer-taskrun = []
 
 [dependencies]
-anstream = "*"
 blake3 = "*"
-# Both crates must resolve to one BoringSSL binding version.
-boring = { version = "*", optional = true }
-clap = { version = "*", features = ["derive"] }
-comnoq = { version = "*", default-features = false, features = ["ring"], optional = true }
-compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "polling", "runtime", "signal", "time"], optional = true }
-compio-quic = { version = "*", features = ["ring"], optional = true }
-crossbeam-queue = "*"
-crc32fast = "*"
-crossfire = { version = "*", optional = true }
-event-listener = { version = "*", optional = true }
-flume = { version = "*", optional = true }
-futures-util = "*"
-kanal = { version = "*", optional = true }
-kimojio = { version = "*", default-features = false, optional = true }
+compio = { version = "*", features = ["fs"] }
+# Cargo.lock retains the tested release that provides the required registration API.
+io-uring = "*"
 libc = "*"
-glommio = { version = "*", optional = true }
 mimalloc = { version = "*", optional = true }
-monoio = { version = "*", default-features = false, features = ["async-cancel", "iouring", "sync"], optional = true }
-miette = { version = "*", features = ["fancy"] }
-opentelemetry = { version = "*", optional = true, default-features = false, features = ["metrics"] }
-opentelemetry-otlp = { version = "*", optional = true, default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client"] }
-opentelemetry_sdk = { version = "*", optional = true, default-features = false, features = ["metrics"] }
-owo-colors = "*"
-quiche = { version = "*", default-features = false, features = ["boringssl-boring-crate"], optional = true }
-rand = "*"
-rcgen = { version = "*", features = ["x509-parser"] }
-# The transport security profile requires the AWS-LC provider so every TLS
-# handshake can require the X25519MLKEM768 hybrid key exchange.
+openkache-protocol = { version = "*", path = "../protocol" }
+quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
-rustix = { version = "*", default-features = false, features = ["io_uring"], optional = true }
-serde = { version = "*", features = ["derive"] }
-sha2 = "*"
-signal-hook = { version = "*", optional = true }
-smallvec = { version = "*", features = ["const_new"] }
-snmalloc-rs = { version = "*", optional = true, default-features = false, features = ["build_cc", "usewait-on-address"] }
-socket2 = { version = "*", features = ["all"] }
-thiserror = "*"
+slab = "*"
 tikv-jemallocator = { version = "*", optional = true }
-time = "*"
-toml = "*"
-tracing = "*"
-tracing-subscriber = { version = "*", default-features = false, features = ["ansi", "env-filter", "fmt", "json"] }
-vu128 = "*"
+tokio = { version = "*", features = ["io-util", "net", "rt", "time"] }

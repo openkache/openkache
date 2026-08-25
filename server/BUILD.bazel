@@ -1,233 +1,41 @@
-"""Bazel targets for the public server crate and binaries."""
+"""Bazel target for the public OpenKache server binary."""
 
-load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
 load(
     "//bazel:openkache_defs.bzl",
     "RUST_EDITION",
     "cargo_deps",
     "crate_aliases",
-    "dedupe_labels",
     "rust_metadata",
 )
 
 package(default_visibility = ["//visibility:public"])
 
-SERVER_DEFAULT_FEATURES = [
-    "allocator-jemalloc",
-    "channel-kanal",
-    "network-runtime-compio",
-    "quic-noq",
-    "storage-runtime-compio",
-]
-
 filegroup(
     name = "server_source_tree",
-    srcs = glob(["src/**/*.rs"]),
-)
-
-filegroup(
-    name = "server_library_sources",
-    srcs = glob(
-        ["src/**/*.rs"],
-        exclude = ["src/bin/**"],
-    ),
-)
-
-filegroup(
-    name = "server_binary_sources",
-    srcs = glob(["src/bin/openkache_server/**/*.rs"]) + [
-        "src/bin/openkache_server.rs",
-    ],
-)
-
-alias(
-    name = "server_optional_boring",
-    actual = "@crates//boring",
-)
-
-alias(
-    name = "server_wire_crossbeam_queue",
-    actual = "@crates//crossbeam-queue",
-)
-
-alias(
-    name = "server_wire_vu128",
-    actual = "@crates//vu128",
-)
-
-alias(
-    name = "server_optional_comnoq",
-    actual = "@crates//comnoq",
-)
-
-alias(
-    name = "server_optional_compio_quic",
-    actual = "@crates//compio-quic",
-)
-
-alias(
-    name = "server_optional_crossfire",
-    actual = "@crates//crossfire",
-)
-
-alias(
-    name = "server_optional_event_listener",
-    actual = "@crates//event-listener",
-)
-
-alias(
-    name = "server_optional_flume",
-    actual = "@crates//flume",
-)
-
-alias(
-    name = "server_optional_jemallocator",
-    actual = "@crates//tikv-jemallocator",
-)
-
-alias(
-    name = "server_optional_kanal",
-    actual = "@crates//kanal",
-)
-
-alias(
-    name = "server_optional_kimojio",
-    actual = "@crates//kimojio",
-)
-
-alias(
-    name = "server_optional_glommio",
-    actual = "@crates//glommio",
-)
-
-alias(
-    name = "server_optional_mimalloc",
-    actual = "@crates//mimalloc",
-)
-
-alias(
-    name = "server_optional_monoio",
-    actual = "@crates//monoio",
-)
-
-alias(
-    name = "server_optional_quiche",
-    actual = "@crates//quiche",
-)
-
-alias(
-    name = "server_optional_rustix",
-    actual = "@crates//rustix",
-)
-
-alias(
-    name = "server_optional_signal_hook",
-    actual = "@crates//signal-hook",
-)
-
-alias(
-    name = "server_optional_snmalloc_rs",
-    actual = "@crates//snmalloc-rs",
-)
-
-alias(
-    name = "server_optional_opentelemetry",
-    actual = "@crates//opentelemetry",
-)
-
-alias(
-    name = "server_optional_opentelemetry_otlp",
-    actual = "@crates//opentelemetry-otlp",
-)
-
-alias(
-    name = "server_optional_opentelemetry_sdk",
-    actual = "@crates//opentelemetry_sdk",
+    srcs = [
+        "Cargo.toml",
+        "README.md",
+    ] + glob(["src/**/*.rs"]),
 )
 
 filegroup(
     name = "runtime_sources",
-    srcs = [
-        "BUILD.bazel",
-        "Cargo.toml",
-        "build.rs",
-    ] + glob(["src/**"]),
-)
-
-filegroup(
-    name = "server_contract_inputs",
-    srcs = ["//protocol:generator_inputs"],
-)
-
-cargo_build_script(
-    name = "openkache_server_build_script",
-    srcs = ["build.rs"],
-    build_script_env = {
-        "OPENKACHE_BUN_EXECUTABLE": "$(execpath //bazel:bun)",
-        "OPENKACHE_SMITHY_EXECUTABLE": "$(execpath //bazel:smithy)",
-        "OPENKACHE_SMITHY_USE_SHELL": "1",
-    },
-    crate_name = "openkache_server_build_script",
-    crate_root = "build.rs",
-    data = [":server_contract_inputs"],
-    edition = RUST_EDITION,
-    tools = [
-        "//bazel:bun",
-        "//bazel:smithy",
-        "//bazel:smithy_tree",
-    ],
-)
-
-rust_library(
-    name = "openkache_server",
-    srcs = glob(
-        ["src/**/*.rs"],
-        exclude = ["src/bin/**"],
-    ),
-    aliases = crate_aliases("server"),
-    crate_features = SERVER_DEFAULT_FEATURES,
-    crate_name = "openkache",
-    crate_root = "src/lib.rs",
-    edition = RUST_EDITION,
-    rustc_env = rust_metadata("openkache"),
-    deps = [
-        ":openkache_server_build_script",
-        ":server_optional_event_listener",
-        ":server_optional_kanal",
-        ":server_wire_crossbeam_queue",
-        ":server_wire_vu128",
-    ] + cargo_deps("server"),
+    srcs = [":server_source_tree"],
 )
 
 rust_binary(
     name = "openkache_server_bin",
-    srcs = glob(["src/bin/openkache_server/**/*.rs"]) + [
-        "src/bin/openkache_server.rs",
-    ],
+    srcs = glob(["src/**/*.rs"]),
     aliases = crate_aliases("server"),
-    crate_features = SERVER_DEFAULT_FEATURES,
     crate_name = "openkache_server",
-    crate_root = "src/bin/openkache_server.rs",
+    crate_root = "src/main.rs",
     edition = RUST_EDITION,
-    rustc_env = rust_metadata("openkache"),
-    deps = dedupe_labels([
-        ":openkache_server",
-        ":server_optional_event_listener",
-        ":server_optional_jemallocator",
-        ":server_optional_kanal",
-    ] + cargo_deps("server")),
+    rustc_env = rust_metadata("openkache-server"),
+    deps = ["//protocol:openkache_protocol"] + cargo_deps("server"),
 )
 
-rust_binary(
-    name = "kvkache_v1_bin",
-    srcs = ["src/bin/kvkache_v1.rs"],
-    aliases = crate_aliases("server"),
-    crate_name = "kvkache_v1",
-    crate_root = "src/bin/kvkache_v1.rs",
-    edition = RUST_EDITION,
-    rustc_env = rust_metadata("openkache"),
-    deps = dedupe_labels([
-        ":openkache_server",
-    ] + cargo_deps("server")),
+alias(
+    name = "openkache_server",
+    actual = ":openkache_server_bin",
 )
