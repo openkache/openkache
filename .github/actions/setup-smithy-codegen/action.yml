@@ -14,23 +14,53 @@ runs:
     - name: Install Smithy CLI
       shell: bash
       env:
-        SMITHY_ARCHIVE_SHA256: ee6e6d24416b53624ba7f323628b2ca8aa67a349fbe3b2e92e98172c3f3d6a45
         SMITHY_VERSION: 1.68.0
       run: |
         set -euo pipefail
+        case "${RUNNER_OS}:${RUNNER_ARCH}" in
+          Linux:X64)
+            smithy_platform="linux-x86_64"
+            smithy_archive_sha256="ee6e6d24416b53624ba7f323628b2ca8aa67a349fbe3b2e92e98172c3f3d6a45"
+            ;;
+          Linux:ARM64)
+            smithy_platform="linux-aarch64"
+            smithy_archive_sha256="2bbed6177b0c4fc2f75c4266a5cf72571ca35ce66da8800a90d4cf03c6bb2d42"
+            ;;
+          macOS:X64)
+            smithy_platform="darwin-x86_64"
+            smithy_archive_sha256="55b5e397fd42fea407326e512daf9bcd38819c03534e1243e4a0fc71a9ec5ded"
+            ;;
+          macOS:ARM64)
+            smithy_platform="darwin-aarch64"
+            smithy_archive_sha256="e836bb468eb117f05597fa263864681728950e32c10a85592eb4dd643cfdee88"
+            ;;
+          *)
+            echo "Unsupported Smithy runner platform: ${RUNNER_OS}:${RUNNER_ARCH}" >&2
+            exit 1
+            ;;
+        esac
+        archive_name="smithy-cli-${smithy_platform}.zip"
         archive="${RUNNER_TEMP}/smithy-cli.zip"
         destination="${RUNNER_TEMP}/smithy-cli"
         curl --fail --location --silent --show-error \
-          "https://github.com/smithy-lang/smithy/releases/download/${SMITHY_VERSION}/smithy-cli-linux-x86_64.zip" \
+          "https://github.com/smithy-lang/smithy/releases/download/${SMITHY_VERSION}/${archive_name}" \
           --output "${archive}"
-        printf '%s  %s\n' "${SMITHY_ARCHIVE_SHA256}" "${archive}" | sha256sum --check
+        if [[ "${RUNNER_OS}" == "macOS" ]]; then
+          printf '%s  %s\n' "${smithy_archive_sha256}" "${archive}" | shasum -a 256 -c -
+        else
+          printf '%s  %s\n' "${smithy_archive_sha256}" "${archive}" | sha256sum --check
+        fi
         mkdir -p "${destination}"
         (
           cd "${destination}"
           jar xf "${archive}"
         )
-        find "${destination}/smithy-cli-linux-x86_64/bin" \
-          -maxdepth 1 -type f -exec chmod +x {} +
-        printf '%s\n' "${destination}/smithy-cli-linux-x86_64/bin" >> "${GITHUB_PATH}"
+        smithy_root="${destination}/smithy-cli-${smithy_platform}"
+        for executable in "${smithy_root}/bin"/*; do
+          if [[ -f "${executable}" ]]; then
+            chmod +x "${executable}"
+          fi
+        done
+        printf '%s\n' "${smithy_root}/bin" >> "${GITHUB_PATH}"
         printf 'OPENKACHE_SMITHY_EXECUTABLE=%s\n' \
-          "${destination}/smithy-cli-linux-x86_64/bin/smithy" >> "${GITHUB_ENV}"
+          "${smithy_root}/bin/smithy" >> "${GITHUB_ENV}"
