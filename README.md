@@ -10,6 +10,9 @@ Open-source · Rust · QUIC/TLS-over-TCP · SIMD-accelerated · SSD-first
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/openkache/openkache/actions)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://www.rust-lang.org/)
 [![SIMD](https://img.shields.io/badge/simd-AVX2%20|%20AVX--512%20|%20NEON%20|%20SVE2-blueviolet)](#index-simd-accelerated-bcf53-breadcrumb-filter)
+[![npm](https://img.shields.io/npm/v/openkache?logo=npm)](https://www.npmjs.com/package/openkache)
+[![crates.io](https://img.shields.io/crates/v/openkache?logo=rust)](https://crates.io/crates/openkache)
+[![PyPI](https://img.shields.io/pypi/v/openkache?logo=pypi)](https://pypi.org/project/openkache/)
 
 </div>
 
@@ -102,12 +105,13 @@ guide](clients/CLIENT.md).
 
 ### 📚 Multi-language SDKs
 
-Implemented client libraries are available for Rust, TypeScript and JavaScript
-on Node.js, Bun, and Deno, .NET, Python, Go, C, C++, Swift, and the
-Bash-friendly `openkache-cli` binary. These packages are transitional where
-noted in the [client status table](./clients/README.md); they share the
-low-level client core so transport, compression, and protection behavior stay
-aligned. Java, Kotlin, and Dart currently remain package scaffolds.
+Maintained registry packages are available for
+[Rust](https://crates.io/crates/openkache),
+[TypeScript and JavaScript](https://www.npmjs.com/package/openkache), and
+[Python](https://pypi.org/project/openkache/). Each exposes the same five
+Gate 0 operations: `connect`, `get`, `set`, `delete`, and `close`. The
+[client status table](./clients/README.md) lists the compatibility adapters and
+scaffolds separately.
 
 ### 📦 Single binary distribution
 
@@ -149,6 +153,69 @@ required to extend that behavior to an explicitly selected non-loopback
 address. Production non-loopback startup requires a stable server certificate
 and private key, a client CA for mTLS, and an administrator certificate
 allowlist. See the [production TLS guide](#production-tls).
+
+### Try a maintained client
+
+The three maintained packages use the local development TLS profile. It
+disables certificate verification, so use these examples only against a local
+development server; do not reuse this trust profile for production traffic.
+
+| Package | Install | Documentation |
+|---|---|---|
+| TypeScript / JavaScript | `npm install openkache` or `bun add openkache` | [npm](https://www.npmjs.com/package/openkache) · [README](clients/typescript/README.md) |
+| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [README](clients/python/README.md) |
+| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [README](clients/rust/README.md) |
+
+All three clients can connect to the default local endpoint:
+`127.0.0.1:4433`.
+
+TypeScript / JavaScript:
+
+```typescript
+import { OpenKache_Client } from "openkache"
+
+const client = await OpenKache_Client.connect("127.0.0.1:4433")
+try {
+  console.log(await client.set("hello", { from: "javascript" }))
+  console.log(await client.get("hello"))
+  console.log(await client.delete("hello"))
+} finally {
+  await client.close()
+}
+```
+
+Python:
+
+```python
+from openkache import Client
+
+client = Client.connect("127.0.0.1:4433")
+try:
+    print(client.set("hello", {"from": "python"}))
+    print(client.get("hello"))
+    print(client.delete("hello"))
+finally:
+    client.close()
+```
+
+Rust:
+
+```rust
+use openkache::{Client, Value};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client.set("hello", Value::text("from rust")).await?;
+    println!("{:?}", client.get("hello").await?);
+    client.delete("hello").await?;
+    client.close().await?;
+    Ok(())
+}
+```
+
+Each package README contains a complete runnable example, result semantics,
+supported key/value types, and package-specific build requirements.
 
 ### Container image
 
@@ -439,7 +506,7 @@ the languages listed below; package status details live in
 | QUIC client (Rust) | 🚧 Preview | Shared Rust core, binary protocol v1, secure value codec |
 | Command-line client | 🚧 Preview | `openkache-cli` for Bash scripts and interactive shell use |
 | QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
-| Python client | 🚧 Preview | Async shared-core SDK with generated Smithy operations |
+| Python client | 🚧 Preview | Synchronous five-operation Gate 0 facade |
 | Go client | 🚧 Preview | Context-aware shared-core native ABI binding |
 | C client | 🚧 Preview | C17 shared-core ABI |
 | C++ client | 🚧 Preview | C++20 adapter over the C ABI |
