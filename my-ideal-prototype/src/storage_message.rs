@@ -1,7 +1,3 @@
-/*
-지금은 무조건 순서대로이니 sequence 가 필요 없지만 샤딩 -> sequence 필요!
-*/
-
 use std::sync::Arc;
 
 pub(crate) const STORAGE_QUEUE_SLOTS: usize = 4096;
@@ -11,6 +7,7 @@ pub(crate) struct ClientId(pub(crate) usize);
 
 pub(crate) struct StorageRequest {
     pub client_id: ClientId,
+    pub sequence: u64,
     pub command: Command,
 }
 
@@ -21,6 +18,7 @@ pub(crate) enum Command {
 
 pub(crate) struct StorageResponse {
     pub client_id: ClientId,
+    pub sequence: u64,
     pub reply: Reply,
 }
 
