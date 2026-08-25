@@ -48,15 +48,6 @@ mod maintained {
         Replaced,
     }
 
-    /// Result of an idempotent `delete`.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum DeleteOutcome {
-        /// An existing item was removed.
-        Deleted,
-        /// No item existed for the supplied key.
-        NotFound,
-    }
-
     /// A mutation whose response was lost after admission.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Mutation {
@@ -199,17 +190,16 @@ mod maintained {
                 })
         }
 
-        /// Deletes one key. Repeating the operation is safe and returns
-        /// [`DeleteOutcome::NotFound`].
-        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
+        /// Deletes one key and reports whether an item was removed.
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
             self.gate0_client()
                 .await?
                 .delete(key)
                 .await
                 .map_err(map_core_error)
                 .map(|outcome| match outcome {
-                    core::DeleteOutcome::Deleted => DeleteOutcome::Deleted,
-                    core::DeleteOutcome::NotFound => DeleteOutcome::NotFound,
+                    core::DeleteOutcome::Deleted => true,
+                    core::DeleteOutcome::NotFound => false,
                 })
         }
 

@@ -128,28 +128,22 @@ def _set_outcome(kind: object) -> SetOutcome:
         raise OpenKacheError(f"SET returned unexpected native result {kind!r}") from error
 
 
-class DeleteOutcome(StrEnum):
-    """The server's definitive DELETE result."""
+def _delete_result(kind: object) -> bool:
+    """Map the native DELETE result to whether an item was removed."""
 
-    DELETED = "deleted"
-    NOT_FOUND = "not_found"
-
-
-def _delete_outcome(kind: object) -> DeleteOutcome:
-    if isinstance(kind, DeleteOutcome):
+    if isinstance(kind, bool):
         return kind
     if isinstance(kind, str):
-        try:
-            return DeleteOutcome(kind)
-        except ValueError as error:
-            raise OpenKacheError(
-                f"DELETE returned unexpected native result {kind!r}"
-            ) from error
+        if kind == "deleted":
+            return True
+        if kind in {"not_deleted", "not_found"}:
+            return False
+        raise OpenKacheError(f"DELETE returned unexpected native result {kind!r}")
     try:
         if int(kind) == SMITHY_FFI_RESULT_DELETED:
-            return DeleteOutcome.DELETED
+            return True
         if int(kind) == SMITHY_FFI_RESULT_NOT_DELETED:
-            return DeleteOutcome.NOT_FOUND
+            return False
     except (TypeError, ValueError):
         pass
     raise OpenKacheError(f"DELETE returned unexpected native result {kind!r}")
@@ -250,8 +244,8 @@ class OpenKacheClient:
         kind, _ = _read_result(result, operation_name="SET")
         return _set_outcome(kind)
 
-    def delete(self, key: str | int | bytes | bytearray | memoryview) -> DeleteOutcome:
-        """Delete one mapped key and return its tagged server outcome."""
+    def delete(self, key: str | int | bytes | bytearray | memoryview) -> bool:
+        """Delete one mapped key and return whether an item was removed."""
 
         self._assert_open()
         try:
@@ -265,7 +259,7 @@ class OpenKacheClient:
         except NativeError as error:
             _raise_native_error(error)
         kind, _ = _read_result(result, operation_name="DELETE")
-        return _delete_outcome(kind)
+        return _delete_result(kind)
 
     def close(self) -> None:
         """Release the native connection; repeated calls are harmless."""
@@ -412,7 +406,6 @@ __all__ = [
     "Client",
     "Found",
     "GetResult",
-    "DeleteOutcome",
     "Missing",
     "MISSING",
     "OpenKacheClient",

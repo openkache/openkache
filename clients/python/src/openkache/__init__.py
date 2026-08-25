@@ -2,7 +2,6 @@
 
 from ._client import (
     Client,
-    DeleteOutcome,
     Found,
     GetResult,
     MISSING,
@@ -47,7 +46,6 @@ __all__ = [
     "ByteString",
     "ByteStringValue",
     "Client",
-    "DeleteOutcome",
     "Float",
     "FloatValue",
     "Found",

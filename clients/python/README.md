@@ -43,12 +43,13 @@ from openkache import Client
 client = Client.connect("127.0.0.1:4433")
 print(client.set("greeting", "hello"))  # created
 print(client.get("greeting"))           # Found(value='hello')
-print(client.delete("greeting"))        # deleted
+print(client.delete("greeting"))        # True
 client.close()
 ```
 
 `set` returns `SetOutcome.CREATED` for a new key,
-`get` returns `Found(value)`, and `delete` returns `DeleteOutcome.DELETED`.
+`get` returns `Found(value)`, and `delete` returns `True` when a value was
+removed.
 
 > The example uses the local development TLS profile, which does not verify
 > the server certificate. Use it only with a local development server.
@@ -112,13 +113,15 @@ outcome = client.set("greeting", "hello")
 Deletes one key. Deleting a missing key is safe.
 
 - **Input:** a key accepted by `get`.
-- **Returns:** `DeleteOutcome.DELETED` when a value was removed, or
-  `DeleteOutcome.NOT_FOUND` when no value existed.
+- **Returns:** `True` when a value was removed, or `False` when no value
+  existed.
 - **Raises:** `OpenKacheValueError` for an invalid key and
   `OpenKacheError` for connection or server failures.
 
 ```python
-outcome = client.delete("greeting")
+removed = client.delete("greeting")
+if removed:
+    print("deleted")
 ```
 
 ### `client.close()`

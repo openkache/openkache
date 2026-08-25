@@ -104,13 +104,16 @@ let outcome = client.set("greeting", Value::text("hello")).await?;
 Deletes one key. Repeating the operation is safe.
 
 - **Input:** a `TypedKey`-convertible key.
-- **Returns:** `Ok(DeleteOutcome::Deleted)` when a value was removed, or
-  `Ok(DeleteOutcome::NotFound)` when no value existed.
+- **Returns:** `Ok(true)` when a value was removed, or `Ok(false)` when no
+  value existed.
 - **Errors:** `Error::UnknownMutation` when the result of an admitted delete
   was not confirmed.
 
 ```rust
-let outcome = client.delete("greeting").await?;
+let removed = client.delete("greeting").await?;
+if removed {
+    println!("deleted");
+}
 ```
 
 ### `client.close()`
@@ -181,7 +184,7 @@ use `ValueError::kind()` for its stable category.
 
 - `GetResult<T>` is `Missing` or `Found(T)`.
 - `SetOutcome` is `Created` or `Replaced`.
-- `DeleteOutcome` is `Deleted` or `NotFound`.
+- `delete` returns `true` when an item existed and `false` otherwise.
 - `Error::UnknownMutation` means a `set` or `delete` may have reached the
   server without a confirmed result. Its `Mutation` identifies the operation;
   do not replay it automatically.

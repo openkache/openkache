@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from openkache import Client, DeleteOutcome, Found, Missing
+from openkache import Client, Found, Missing
 
 
 def main() -> None:
@@ -28,9 +28,9 @@ def main() -> None:
         elif isinstance(result, Missing):
             print("GET value: missing")
         delete = client.delete("example:profile")
-        print(f"DELETE outcome: {delete.value}")
-        if delete is not DeleteOutcome.DELETED:
-            raise RuntimeError(f"unexpected DELETE outcome: {delete!r}")
+        print(f"DELETE removed: {delete}")
+        if not delete:
+            raise RuntimeError("unexpected DELETE result: key was missing")
         if isinstance(client.get("example:profile"), Missing):
             print("GET after DELETE: missing")
     finally:

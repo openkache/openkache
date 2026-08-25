@@ -114,12 +114,15 @@ const outcome = await client.set("greeting", "hello")
 Deletes one key. Repeating the operation is safe.
 
 - **Input:** a `ClientKey`.
-- **Returns:** `"deleted"` when a value was removed, or `"not_found"` when no
-  value existed.
+- **Returns:** `true` when a value was removed, or `false` when no value
+  existed.
 - **Throws:** `OpenKacheError` when validation, transport, or storage fails.
 
 ```javascript
-const outcome = await client.delete("greeting")
+const removed = await client.delete("greeting")
+if (removed) {
+  console.log("deleted")
+}
 ```
 
 ### `client.close()`
@@ -210,7 +213,7 @@ JavaScript value would lose their distinctions.
   failure. Its `kind` property identifies the category.
 
 The public type aliases are `ClientKey`, `NativeValue`, `GetResult`,
-`SetOutcome`, `DeleteOutcome`, `StructuredValue`, and `OpenKacheErrorKind`.
+`SetOutcome`, `StructuredValue`, and `OpenKacheErrorKind`.
 The result classes are `FoundResult` and `MissingResult`.
 
 ## More information

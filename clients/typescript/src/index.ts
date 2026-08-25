@@ -131,12 +131,6 @@ export type SetOutcome = Gate0_Set_Outcome
 /** Compatibility spelling retained for existing callers. */
 export type Set_Outcome = SetOutcome
 
-/** Public delete outcomes for deletes. */
-export type DeleteOutcome = "deleted" | "not_found"
-
-/** Compatibility spelling retained for existing callers. */
-export type Delete_Outcome = DeleteOutcome
-
 /** Stable categories for failures surfaced by the client. */
 export type OpenKacheErrorKind =
   | "openkache_error"
@@ -330,15 +324,13 @@ export class OpenKacheClient {
    *
    * @param key - UTF-8 text, exact bytes, a safe integer number, or a
    * signed-i64 bigint key.
-   * @returns `deleted` when an item existed, otherwise `not_found`.
+   * @returns `true` when an item existed, otherwise `false`.
    * @throws {OpenKacheError} When validation, transport, or storage fails.
    */
-  async delete(key: ClientKey): Promise<DeleteOutcome> {
+  async delete(key: ClientKey): Promise<boolean> {
     this.#assert_open()
     try {
-      return (await this.#native_client.delete(owned_key_bytes(key)))
-        ? "deleted"
-        : "not_found"
+      return await this.#native_client.delete(owned_key_bytes(key))
     } catch (error) {
       throw as_openkache_error(error)
     }
