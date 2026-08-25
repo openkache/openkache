@@ -96,9 +96,9 @@ adapter matrix, verifies each artifact checksum and source commit, then waits
 for the protected `npm-release` environment before calling
 `release:publish`.
 
-Configure the `NPM_TOKEN` repository secret only in that environment. A failed
-preflight does not publish. npm versions are immutable; if npm accepts a
-version, treat it as consumed and publish a corrected higher version rather
-than attempting a republish. The repository-wide
+The environment protects the OIDC-backed publish job. A failed preflight does
+not publish. npm versions are immutable; if npm accepts a version, treat it as
+consumed and publish a corrected higher version rather than attempting a
+republish. The repository-wide
 [release guide](../../RELEASING.md) documents the other package workflows,
 operator inputs, provenance files, and rollback limits.
