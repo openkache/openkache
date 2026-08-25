@@ -156,11 +156,6 @@ jobs:
             native_library: openkache_client_python_native.dll
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
-    env:
-      SOURCE_ROOT: ${{ runner.temp }}/openkache-python-source
-      WHEEL_ROOT: ${{ runner.temp }}/openkache-python-wheel
-      SDIST_ROOT: ${{ runner.temp }}/openkache-python-sdist
-      OPENKACHE_CLIENT_NATIVE: ${{ runner.temp }}/openkache-python-source/native/target/release/${{ matrix.native_library }}
     steps:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,7 +168,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: openkache-python-sdist
-          path: ${{ env.SDIST_ROOT }}
+          path: ${{ runner.temp }}/openkache-python-sdist
 
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
@@ -184,6 +179,9 @@ jobs:
           toolchain: stable
 
       - name: Extract source distribution
+        env:
+          SOURCE_ROOT: ${{ runner.temp }}/openkache-python-source
+          SDIST_ROOT: ${{ runner.temp }}/openkache-python-sdist
         run: >-
           python -c
           'import os,pathlib,shutil,tarfile;
@@ -199,15 +197,18 @@ jobs:
           r.rmdir()'
 
       - name: Build native adapter
-        working-directory: ${{ env.SOURCE_ROOT }}
+        working-directory: ${{ runner.temp }}/openkache-python-source
         run: cargo build --locked --release --manifest-path native/Cargo.toml
 
       - name: Install package builders
         run: python -m pip install --disable-pip-version-check --upgrade build twine
 
       - name: Build and inspect wheel
-        working-directory: ${{ env.SOURCE_ROOT }}
+        working-directory: ${{ runner.temp }}/openkache-python-source
         env:
+          SOURCE_ROOT: ${{ runner.temp }}/openkache-python-source
+          WHEEL_ROOT: ${{ runner.temp }}/openkache-python-wheel
+          OPENKACHE_CLIENT_NATIVE: ${{ runner.temp }}/openkache-python-source/native/target/release/${{ matrix.native_library }}
           EXPECTED_PLATFORM_TAG: ${{ matrix.platform_tag }}
         run: >-
           python -c
@@ -227,7 +228,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openkache-python-wheel-${{ matrix.name }}
-          path: ${{ env.WHEEL_ROOT }}/*.whl
+          path: ${{ runner.temp }}/openkache-python-wheel/*.whl
           if-no-files-found: error
           retention-days: 14
 
@@ -237,7 +238,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      DIST_ROOT: ${{ runner.temp }}/openkache-python-dist
       EXPECTED_WHEEL_COUNT: 6
     steps:
       - name: Check out the release tag
@@ -255,10 +255,12 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: openkache-python-*
-          path: ${{ env.DIST_ROOT }}
+          path: ${{ runner.temp }}/openkache-python-dist
           merge-multiple: true
 
       - name: Validate complete distribution set
+        env:
+          DIST_ROOT: ${{ runner.temp }}/openkache-python-dist
         run: |
           set -euo pipefail
           sdist_count="$(find "${DIST_ROOT}" -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}.tar.gz" | wc -l)"
@@ -273,6 +275,7 @@ jobs:
 
       - name: Record provenance and checksums
         env:
+          DIST_ROOT: ${{ runner.temp }}/openkache-python-dist
           SOURCE_SHA: ${{ github.sha }}
           SOURCE_REF_NAME: ${{ github.ref_name }}
         run: |
@@ -289,7 +292,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openkache-python-distributions
-          path: ${{ env.DIST_ROOT }}
+          path: ${{ runner.temp }}/openkache-python-dist
           if-no-files-found: error
           retention-days: 14
 
