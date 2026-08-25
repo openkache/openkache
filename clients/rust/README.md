@@ -19,11 +19,19 @@ cargo add openkache
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-The client uses Tokio internally, so an active Tokio runtime is required.
+The default `quic-quinn` client uses Tokio internally, so an active Tokio
+runtime is required for `Client`.
 `openkache` already brings Tokio into the dependency graph; add Tokio directly
 only when your application needs the `#[tokio::main]` macro. If the application
-already uses Tokio, skip the second command. Tokio is the supported runtime for
-this client.
+already uses Tokio, skip the second command. `CompioClient` uses the optional
+Compio runtime instead.
+To use Compio instead of Tokio, disable the default feature and select
+`quic-compio`:
+
+```bash
+cargo add openkache --no-default-features --features quic-compio
+cargo add compio --no-default-features --features net,runtime,time
+```
 
 ## Quick start
 
@@ -46,6 +54,21 @@ async fn main() -> openkache::Result<()> {
 
 The local development TLS profile does not verify the server certificate. Use
 this example only with a local development server.
+
+When Tokio is not part of an application, enable `quic-compio` and use the
+equivalent `CompioClient` facade:
+
+```rust
+use compio::runtime::Runtime;
+use openkache::{CompioClient, Value};
+
+let runtime = Runtime::new()?;
+runtime.block_on(async {
+    let client = CompioClient::connect("127.0.0.1:4433").await?;
+    client.set("hello", Value::text("from compio")).await?;
+    client.close().await
+})?;
+```
 
 Values use the lossless `StructuredValue-CBOR-v1` format shared by the
 OpenKache clients.

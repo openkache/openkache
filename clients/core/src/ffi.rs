@@ -1,8 +1,9 @@
 //! Stable C ABI shared by native language bindings.
 //!
-//! The ABI owns one Compio runtime and one protected client per native handle.  C, C++, and
-//! other native bindings only marshal buffers and interpret result discriminators; connection
-//! management, retries, protocol framing, and value protection remain in this crate.
+//! The ABI owns one completion-based runtime and one protected client per native handle.
+//! C, C++, Python, and other native bindings only marshal buffers and interpret result
+//! discriminators; connection management, retries, protocol framing, and value protection
+//! remain in this crate.
 
 use std::future::Future;
 use std::io::{self, Write};
@@ -1054,12 +1055,6 @@ fn run_quic_worker(
             return;
         }
     };
-    if !runtime.driver_type().is_iouring() {
-        let _ = ready.send(Err(
-            "OpenKache native client requires the Compio io_uring driver".to_owned(),
-        ));
-        return;
-    }
     let verify_server = match transport {
         TransportSelection::Quic { verify_server } => verify_server,
         TransportSelection::TlsTcp { .. } => unreachable!("transport dispatch selected QUIC"),
