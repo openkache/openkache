@@ -221,6 +221,10 @@ impl OneLaneConnection {
 }
 
 impl ReceiveStream for TlsTcpReceiveStream {
+    fn supports_concurrent_read(&self) -> bool {
+        false
+    }
+
     fn read_request<T>(
         &mut self,
         maximum: usize,
