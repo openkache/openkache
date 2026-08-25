@@ -126,10 +126,11 @@ pub enum OutputFormat {
 pub enum ConnectionProfile {
     /// The fixed Rust Gate 0 profile used by local development clients.
     ///
-    /// This profile uses the public Gate 0 Item-ID root, namespace `1`,
-    /// `StructuredValue-CBOR-v1`, and the explicit development TLS trust
-    /// policy. It is the default so the CLI can talk to the Rust client and
-    /// the RESP-backed prototype without additional flags.
+    /// This profile uses the public Gate 0 Item-ID root, lazily opens the
+    /// server-assigned default namespace, and validates that its ID is `1`.
+    /// It also uses `StructuredValue-CBOR-v1` and the explicit development
+    /// TLS trust policy. It is the default so the CLI can talk to the Rust
+    /// client and the RESP-backed prototype without additional flags.
     #[default]
     Gate0,
     /// Configurable compatibility profile for certificates, value keys, and
