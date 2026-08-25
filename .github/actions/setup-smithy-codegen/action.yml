@@ -29,4 +29,14 @@ runs:
           cd "${destination}"
           jar xf "${archive}"
         )
-        printf '%s\n' "${destination}/smithy-cli-linux-x86_64/bin" >> "${GITHUB_PATH}"
+        chmod +x \
+          "${destination}/smithy-cli-linux-x86_64/bin/java" \
+          "${destination}/smithy-cli-linux-x86_64/bin/keytool" \
+          "${destination}/smithy-cli-linux-x86_64/bin/smithy"
+        smithy_executable="${destination}/smithy-cli-linux-x86_64/bin/smithy"
+        if [[ ! -x "${smithy_executable}" ]]; then
+          echo "Smithy CLI was not unpacked at ${smithy_executable}; source generation cannot run." >&2
+          exit 1
+        fi
+        printf '%s\n' "$(dirname "${smithy_executable}")" >> "${GITHUB_PATH}"
+        printf 'OPENKACHE_SMITHY_EXECUTABLE=%s\n' "${smithy_executable}" >> "${GITHUB_ENV}"
