@@ -16,7 +16,7 @@ server-build = [
   "--locked",
   "--release",
   "--package",
-  "openkache",
+  "openkache-server",
   "--bin",
   "openkache-server",
 ]
