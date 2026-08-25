@@ -1,107 +1,61 @@
-# Getting Started
+# Getting started
 
-## Prerequisites
+## Requirements
 
-- Linux x86_64/aarch64 or Apple Silicon macOS
-- Rust toolchain (if building from source)
-- NVMe SSD recommended for production (the server warns but does not reject other
-  storage)
+- Linux with `io_uring`
+- two distinct CPUs available to the process
+- Rust and the native build tools required by the workspace dependencies
 
-The server runtime contract is limited to Linux x86_64/aarch64 and Apple
-Silicon macOS. On Linux, the selected native network runtime must provide
-`io_uring`; the required `io_uring_setup`, `io_uring_enter`, and
-`io_uring_register` syscalls must be available to the process. If a container
-seccomp profile denies them, startup fails with a diagnostic that points to the
-profile and `/proc/sys/kernel/io_uring_disabled`.
+## Run the server
 
-## Install
-
-### From source
+From the repository root:
 
 ```bash
-git clone https://github.com/openkache/openkache
-cd openkache
-cargo build --release
+cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-## Quickstart
+The default command binds `127.0.0.1:4433`, pins networking to CPU 0, and pins
+storage to CPU 1. TCP accepts RESP commands while UDP accepts the OpenKache
+Gate 0 protocol over QUIC.
 
-### Run the QUIC and TLS-over-TCP preview server
+Choose another address and CPU pair with positional arguments:
 
 ```bash
-cargo run --manifest-path server/Cargo.toml --bin openkache-server
+cargo run --locked --package openkache-server --bin openkache-server -- \
+  0.0.0.0:4433 2 3
 ```
 
-The server listens on `127.0.0.1:4433` for QUIC over UDP and TLS-over-TCP over
-TCP, stores shard files under `target/kvkache-v1`, and writes its generated
-certificate to `target/openkache-local/certificate.local.der`. It automatically
-sizes itself from the CPUs available to the process, host-available or
-cgroup-limited RAM, and available filesystem space. Use `--port <port>` only to
-override the default port, or `--config <path>` to load an explicit TOML cache
-configuration.
-This is the current public preview entry point. The target storage layout and
-committed-data restart recovery remain design work; the preview does not yet
-promise that target recovery behavior.
+The process creates a fixed 16 GiB `openkache.data` file in its working
+directory. The current preview truncates that file on every start.
 
-To inspect the automatic result and optionally override individual inputs, run:
-
-```bash
-cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
-  --cpus 4 \
-  --memory-gib 32 \
-  --storage-gb 2500 \
-  --profile balanced \
-  --directory ./openkache-data \
-  --plan
-```
-
-`balanced` is the default and models 1 KiB encoded values. `light` models
-100-byte inline values, while `heavy` models 2 KiB Blob values. Every sizing
-argument is optional. Remove `--plan` to open the storage files and start
-serving with the calculated configuration.
-
-The calculated limits are advisory. The planner detects standard Linux cgroup
-memory limits or macOS host memory pressure plus filesystem availability, but
-not filesystem quotas, SSD type, or device throughput. After storage workers
-open their data files, OpenKache best-effort checks those opened files and
-emits a non-fatal warning when any device is non-NVMe or cannot be identified.
-NVMe is recommended for the intended latency and throughput profile, but it is
-not a hard requirement. Its memory estimate covers the packed Table rather than
-whole-process peak RSS. `--cpus` selects
-worker threads but does not impose a process CPU quota. `light` and `balanced`
-accept individual encoded items up to their 1 MiB Blob Segment size; `heavy`
-uses a 64 MiB Blob Segment but caps one encoded item at 16 MiB. Existing
-storage must be reopened with the same worker count and Segment layout. A
-format-v1 store may use a supported increase in bucket choice count; decreases
-or other geometry changes require cache recreation.
-
-### Use the SDK (Rust)
+## Use the Rust client
 
 ```rust
-use openkache_client::value::{Compression, ZstandardOptions};
-use openkache_client::{Certificate, Client, DataProtectionKey, Endpoint};
+use openkache::{Client, GetResult, Value};
 
-let certificate = std::fs::read(
-    "target/openkache-local/certificate.local.der",
-)?;
-let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
-let certificate = Certificate::from_der(certificate)?;
-let protection_key = DataProtectionKey::from_base64(configured_base64_secret)?;
-let client = Client::builder(endpoint, protection_key)
-    .trust_certificate(certificate)
-    .compression(Compression::Zstandard(ZstandardOptions::default()))
-    .connect()
-    .await?;
-client.set(b"mykey", b"myvalue").await?;
-let value = client.get(b"mykey").await?;
+# async fn example() -> openkache::Result<()> {
+let client = Client::connect("127.0.0.1:4433").await?;
+client.set("greeting", Value::text("hello")).await?;
+assert_eq!(
+    client.get("greeting").await?,
+    GetResult::Found(Value::text("hello")),
+);
+client.delete("greeting").await?;
+client.close().await?;
+# Ok(())
+# }
 ```
 
-## Next steps
+The Gate 0 profile is for local development and deliberately skips server
+certificate verification. The current server also accepts plaintext RESP on
+the TCP port.
 
-- See [Architecture](architecture.md) for how OpenKache works
-- See the client status and binding architecture in `clients/README.md`
-- See the low-level shared client core under `clients/core/`
-- See the Rust client SDK under `clients/rust/`
-- See the Bash-friendly CLI under `clients/cli/`
-- See the TypeScript client SDK under `clients/typescript/`
-- See the .NET client SDK under `clients/dotnet/`
+## Verify
+
+```bash
+cargo check --locked
+cargo test --locked --package openkache-server
+```
+
+See [the server README](../server/README.md) for the implemented operation
+subset and [the client status](../clients/README.md) for language packages.

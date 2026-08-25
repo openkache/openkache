@@ -43,7 +43,7 @@ COPY clients/typescript/native/Cargo.toml clients/typescript/native/Cargo.toml
 # none of these files reaches the runtime image.
 RUN mkdir -p \
       protocol/src \
-      server/src/bin \
+      server/src \
       clients/core/src \
       clients/value/src \
       clients/rust/src \
@@ -51,7 +51,7 @@ RUN mkdir -p \
       clients/typescript/native/src \
     && touch \
       protocol/src/lib.rs \
-      server/src/bin/openkache_server.rs \
+      server/src/main.rs \
       clients/core/src/lib.rs \
       clients/value/src/lib.rs \
       clients/rust/src/lib.rs \
@@ -95,7 +95,7 @@ ARG VCS_REF=unknown
 # Canonical OCI product identity. The publication workflow preserves these
 # values and adds only release-specific labels such as revision and version.
 LABEL org.opencontainers.image.title="OpenKache server" \
-      org.opencontainers.image.description="SSD-first QUIC cache server" \
+      org.opencontainers.image.description="SSD-backed RESP and QUIC cache server" \
       org.opencontainers.image.documentation="https://github.com/openkache/openkache/blob/main/docs/container-image.md" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.source="https://github.com/openkache/openkache" \
@@ -106,6 +106,7 @@ LABEL org.opencontainers.image.title="OpenKache server" \
 COPY --from=builder --chown=65532:65532 /out/openkache-server /usr/local/bin/openkache-server
 COPY --from=builder --chown=65532:65532 /out/var/lib/openkache /var/lib/openkache
 
+WORKDIR /var/lib/openkache
 VOLUME ["/var/lib/openkache"]
 EXPOSE 4433/udp
 EXPOSE 4433/tcp
@@ -113,6 +114,4 @@ STOPSIGNAL SIGTERM
 USER 65532:65532
 
 ENTRYPOINT ["/usr/local/bin/openkache-server"]
-# Production defaults require a mounted PKI bundle. For an intentionally
-# isolated local test, replace this CMD with --insecure-development.
-CMD ["--listen", "0.0.0.0:4433", "--pki-directory", "/etc/openkache/pki", "--directory", "/var/lib/openkache"]
+CMD ["0.0.0.0:4433", "0", "1"]

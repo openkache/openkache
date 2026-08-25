@@ -1,110 +1,91 @@
 # OpenKache
 
-A next-generation Rust SSD cache server — 10× cheaper and faster than Redis.
+OpenKache is an experimental Rust SSD-backed cache server for Linux. Unless a
+section is explicitly marked as a target or draft, repository documentation
+describes the current public preview. Protocol, client-format, security, and
+storage design documents are target contracts and may lead the implementation
+during migration.
 
-OpenKache uses SSD as primary storage instead of DRAM, reducing storage costs from ~$3-5/GB to ~$0.05-0.10/GB. It achieves competitive latency through SIMD-accelerated BCF53 breadcrumb filtering, QUIC multiplexed transport, and end-to-end encryption by default.
+## Current server
 
-## Features
+- RESP `GET`, `SET`, and `DEL` over TCP.
+- Gate 0 `PING`, `GET`, `SET`, and `DELETE` over QUIC/UDP.
+- One network thread and one storage thread pinned to distinct CPUs.
+- A fixed 16 GiB `openkache.data` file accessed with Linux `io_uring`.
+- The same numeric listen address for TCP and UDP; default `127.0.0.1:4433`.
 
-- **SSD-first architecture** — SSD as primary storage, not a secondary tier
-- **SIMD-accelerated BCF53 filter** — 32+ million ops/sec per core, runtime SIMD dispatch (AVX-512, AVX2, SVE2, NEON)
-- **QUIC transport** — Multiplexed streams, TLS 1.3 baked in, no head-of-line blocking
-- **E2E encryption** — Zero-trust by default, configurable algorithm
-- **Transparent compression** — zstd for large values
-- **Multi-language SDKs** — Rust, TypeScript and JavaScript on Node.js, Bun, and Deno, and .NET; additional language packages are scaffolded for future Rust-backed bindings
+The server is not production-ready. It truncates the cache file on every
+startup, generates an ephemeral self-signed certificate, and does not
+authenticate clients. Restart recovery, clustering, namespace administration,
+statistics, synchronization, TTL overrides, and conditional writes are not
+implemented by the current server.
 
-## Getting Started
+## Build and run
 
-### Prerequisites
-
-- Linux x86_64 or aarch64
-- Rust toolchain
-- NVMe SSD recommended
-
-### Build
-
-```bash
-git clone https://github.com/openkache/openkache
-cd openkache
-cargo build --release
-```
-
-### Run benchmark
+Requirements are Linux with `io_uring`, two distinct CPUs, Rust, and the native
+toolchain used by workspace dependencies.
 
 ```bash
-cargo run --package openkache --bin breadcrumb --release
+cargo check --locked
+cargo test --locked --package openkache-server
+cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-### Use the Rust SDK
+The default arguments listen on `127.0.0.1:4433`, pin networking to CPU 0, and
+pin storage to CPU 1. Override them with positional arguments:
+
+```bash
+cargo run --locked --package openkache-server --bin openkache-server -- \
+  0.0.0.0:4433 2 3
+```
+
+## Container
+
+```bash
+docker build --file server/Dockerfile --tag localhost/openkache:dev .
+docker run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  --volume openkache-data:/var/lib/openkache \
+  localhost/openkache:dev
+```
+
+The default image command uses CPUs 0 and 1. Override the command when those
+CPU IDs are unavailable to the container.
+
+## Rust client
 
 ```rust
-use openkache::prelude::*;
+use openkache::{Client, GetResult, Value};
 
-let client = OpenKacheClient::new("localhost:9000").await?;
-client.set("mykey", b"myvalue").await?;
-let value = client.get("mykey").await?;
+# async fn example() -> openkache::Result<()> {
+let client = Client::connect("127.0.0.1:4433").await?;
+client.set("greeting", Value::text("hello")).await?;
+assert_eq!(
+    client.get("greeting").await?,
+    GetResult::Found(Value::text("hello")),
+);
+client.close().await?;
+# Ok(())
+# }
 ```
 
-## Architecture
+The Gate 0 client uses TLS 1.3 over QUIC but intentionally accepts the preview
+server's ephemeral certificate. It does not fall back to plaintext.
 
-```
-┌──────────────┐         QUIC (UDP, TLS 1.3)         ┌──────────────────────┐
-│  openkache-  │ ──────────────────────────────────▶ │     OpenKache        │
-│  client      │   Multiplexed streams, 0-RTT        │  (single binary)     │
-│  (Rust/.NET) │                                     │                      │
-└──────────────┘                                     │  ┌────────────────┐  │
-                                                     │  │ BCF53 Filter   │  │
-┌──────────────┐                                     │  │ (SIMD, AVX2)   │  │
-│  Any QUIC    │                                     │  ├────────────────┤  │
-│  client      │                                     │  │ Compacting Slab│  │
-└──────────────┘                                     │  │ (Hugepage/NUMA)│  │
-                                                     │  ├────────────────┤  │
-                                                     │  │ KV Engine      │  │
-                                                     │  │ (SHA-256 keys) │  │
-                                                     │  ├────────────────┤  │
-                                                     │  │ SSD Engine     │  │
-                                                     │  └────────────────┘  │
-                                                     └──────────────────────┘
-```
+## Repository layout
 
-## Comparison
+- `server/`: current SSD cache server and container definition.
+- `protocol/`: shared wire model, generated contracts, and codecs.
+- `clients/`: client SDKs and native adapters.
+- `docs/`: current guides and explicitly identified target documents.
 
-| | Redis | OpenKache |
-|---|---|---|
-| **Cost per GB** | DRAM (~$3–5/GB) | SSD (~$0.05–0.10/GB) |
-| **P99 latency** | <1 ms | <1 ms |
-| **Throughput** | ~100K ops/s (single node) | 1M+ ops/s (single node) |
-| **Transport** | TCP (HOL blocking) | QUIC (TLS 1.3, multiplexed, 0-RTT) |
-| **Security** | TLS optional, no E2E | E2E encrypted by default, zero trust |
-
-## AI coding agents
-
-OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.txt) for LLM-friendly documentation.
-
-## Project status
-
-| Component | Status |
-|---|---|
-| Memory allocators | Stable |
-| Breadcrumb filter (BCF53) | Stable |
-| QUIC client (Rust) | Stable |
-| QUIC server | Preview — SSD-backed worker shards over multiplexed streams |
-| .NET client | Stable |
-| Clustering | Not started |
-
-## Project structure
-
-| Path | Contents |
-|---|---|
-| `server/` | Core cache server (BCF53, allocators, types) |
-| `clients/` | Implemented SDKs and thin-binding package scaffolds |
-| `clients/rust/` | Rust client SDK over QUIC |
-| `clients/typescript/` | TypeScript client backed by Rust through Node-API |
-| `clients/dotnet/` | .NET / C# client SDK |
+See `README.md`, `server/README.md`, and `docs/getting-started.md` for the
+maintained entry points.
 
 ## License
 
-Except where otherwise noted, OpenKache is licensed under
-AGPL-3.0-or-later. Client SDKs under `clients/` and the shared protocol under
-`protocol/` are licensed under Apache-2.0. See the `LICENSE` file in each
-directory.
+Except where otherwise noted, OpenKache is AGPL-3.0-or-later. Client SDKs under
+`clients/` and the shared protocol under `protocol/` are Apache-2.0 as described
+in their package directories.

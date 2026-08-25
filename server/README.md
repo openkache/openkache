@@ -1,122 +1,62 @@
 # OpenKache server
 
-`openkache-server` is the production cache-server package for OpenKache. It
-stores cache data on SSD-backed shards and exposes the versioned OpenKache
-protocol over QUIC and TLS-over-TCP. Every connection on those production
-profiles uses TLS 1.3 and the required `X25519MLKEM768` hybrid key exchange;
-this package change adds no plaintext transport. The existing loopback-only
-RESP development profile remains separate from the production protocol.
+The current OpenKache server is an SSD-backed cache preview for Linux. One
+process exposes Redis-compatible `GET`, `SET`, and `DEL` over RESP/TCP and the
+same operations through the OpenKache Gate 0 protocol over QUIC/UDP.
 
-The package publishes the `openkache-server` binary and keeps the established
-`openkache` library crate name for applications that embed the server runtime.
-The package build uses the checked-in operation-contract snapshot when the
-repository-level protocol generator is unavailable, so `cargo install`,
-docs.rs, and other isolated builds do not require Bun or Smithy.
+The preview is intended for development and performance work. It generates an
+ephemeral self-signed certificate, does not authenticate clients, and recreates
+its cache file on every start.
 
-## Usage
+## Requirements
 
-Build or install the server:
+- Linux with `io_uring`
+- Two distinct CPUs available to the process
+- Rust and the C toolchain required by the workspace dependencies
 
-```bash
-# From an OpenKache checkout
-cargo build --manifest-path server/Cargo.toml --bin openkache-server
+## Commands
 
-# From crates.io
-cargo install openkache-server
-```
-
-Start a local server:
+Build the server from the repository root:
 
 ```bash
-cargo run --manifest-path server/Cargo.toml --bin openkache-server
+cargo server-build
 ```
 
-The default loopback endpoint is `127.0.0.1:4433`. It creates an ephemeral
-server certificate and writes its DER form to
-`target/openkache-local/certificate.local.der`. The connection remains
-encrypted with TLS 1.3, but local development does not require a client
-certificate or a trusted server certificate.
-
-### Certificate-free client-authentication development
-
-The following is an explicitly labeled development mode. It omits client
-certificates while retaining TLS 1.3 encryption and the mandatory hybrid key
-exchange:
+Run it on the default address with the network thread on CPU 0 and the storage
+thread on CPU 1:
 
 ```bash
-cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
-  --insecure-development \
-  --listen 127.0.0.1:4433
+cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-`--insecure-development` is required before binding this mode to a
-non-loopback address. It disables peer authentication and grants administrative
-operations to every connected peer, so use it only on an isolated development
-network. It never enables plaintext sockets.
-
-For a deployable endpoint, provide a server certificate and private key. Client
-certificate authentication is optional for ordinary operations:
-
-```toml
-[tls]
-certificate_chain = "/etc/openkache/tls/server-chain.pem"
-private_key = "/etc/openkache/tls/server-key.pem"
-
-# Optional mTLS and administrative authorization:
-client_ca = "/etc/openkache/tls/client-ca-bundle.pem"
-admin_client_certificates = [
-  "/etc/openkache/tls/operators/admin-2026.pem",
-]
-```
-
-When `client_ca` is omitted, the server still requires its own certificate and
-key but does not request client certificates. Supplying `client_ca` enables
-mTLS; administrative operations additionally require the client's exact leaf
-certificate to appear in `admin_client_certificates`. A configured administrator
-allowlist must have a matching `client_ca`.
-
-The `pki` subcommands can create a small internal CA and a deployable mTLS
-bundle without OpenSSL:
+Select a different address and CPU pair with positional arguments:
 
 ```bash
-openkache-server pki init
-openkache-server pki issue-server --dns cache.example.com --ip 10.0.0.10
-openkache-server pki issue-client application-01
-openkache-server pki issue-admin operator-01
-openkache-server --pki-directory /etc/openkache/pki
+cargo run --locked --package openkache-server --bin openkache-server -- \
+  0.0.0.0:4433 2 3
 ```
 
-## Configuration
+Verify the crate:
 
-Pass `--config <path>` to load a TOML cache configuration. Without a file, the
-server derives worker, memory, and storage sizing from process limits and the
-selected storage directory. `--cpus`, `--memory-gib`, `--storage-gb`,
-`--directory`, and `--plan` provide explicit sizing or a plan-only preview.
+```bash
+cargo test --locked --package openkache-server
+```
 
-The QUIC backend is selected by the compiled feature set or
-`--quic-backend`. The TLS-over-TCP listener reuses the QUIC address unless
-`[tcp].listen` sets another address. Both profiles share the same TLS 1.3
-security boundary and application protocol.
+## Runtime behavior
+
+TCP and UDP use the same numeric address. TCP accepts RESP while UDP accepts
+the native OpenKache QUIC protocol. The native adapter currently supports
+`PING`, `GET`, `SET`, `DELETE`, and the synthetic Gate 0 namespace descriptor.
+TTL overrides, conditional writes, namespace administration, statistics, and
+sync operations are not implemented.
+
+The server creates `openkache.data` in its current working directory. The file
+is fixed at 16 GiB and is truncated on startup, so this preview does not provide
+restart recovery.
 
 ## Components
 
-- `src/lib.rs` exposes the server library and compile-time runtime selections.
-- `src/server/` owns lifecycle, authorization, namespace control, and worker
-  composition.
-- `src/transport/` adapts the QUIC backends and TLS-over-TCP lanes.
-- `src/bin/openkache_server.rs` contains the `openkache-server` CLI, sizing,
-  diagnostics, and development PKI commands.
-- `src/contract_snapshot/` stores the generated server-visible wire contract
-  used by isolated package builds; checkout builds regenerate it from the
-  canonical protocol model.
-
-## Verification
-
-The public package intentionally contains production code only. Run the
-repository's private validation before publishing changes:
-
-```bash
-cargo fmt --check
-cargo check --manifest-path server/Cargo.toml --all-features
-cargo test --manifest-path server/Cargo.toml --all-features
-```
+- `network.rs`: RESP/TCP connection handling on `io_uring`
+- `resp_proxy/`: OpenKache/QUIC-to-RESP compatibility frontend
+- `storage.rs`: SSD segment-group and lookup runtime
+- `spsc.rs`: queues between the network and storage threads
