@@ -307,6 +307,15 @@ enum ConnectedClient {
 }
 
 impl ConnectedClient {
+    fn profile(&self) -> ConnectionProfile {
+        match self {
+            #[cfg(feature = "quic-compio")]
+            Self::Compio(_, profile) => *profile,
+            #[cfg(feature = "quic-quinn")]
+            Self::Quinn(_, profile) => *profile,
+        }
+    }
+
     async fn ping(&self) -> openkache_client_core::Result<()> {
         match self {
             #[cfg(feature = "quic-compio")]
@@ -603,6 +612,7 @@ fn client_identity_from_arguments(arguments: &Arguments) -> Result<Option<Client
 }
 
 async fn execute_command(client: &ConnectedClient, command: Command) -> Result<()> {
+    validate_command(client.profile(), &command)?;
     match command {
         Command::Ping => {
             client.ping().await?;
