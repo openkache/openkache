@@ -59,6 +59,15 @@ _Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_CONNECTED ==
 _Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_UNKNOWN_MUTATION ==
                    OPENKACHE_SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
                "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_RESOURCE_EXHAUSTED ==
+                   OPENKACHE_SMITHY_FFI_RESULT_RESOURCE_EXHAUSTED,
+               "Gate 0 resource result constant drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_STATUS_RESOURCE_EXHAUSTED ==
+                   OPENKACHE_SMITHY_FFI_STATUS_CATEGORY_RESOURCE_EXHAUSTED,
+               "Gate 0 resource status constant drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_ERROR_RESOURCE_EXHAUSTED ==
+                   OPENKACHE_SMITHY_FFI_ERROR_CATEGORY_RESOURCE_EXHAUSTED,
+               "Gate 0 resource error constant drifted from Smithy");
 _Static_assert(OPENKACHE_CLIENT_GATE0_KEY_TEXT ==
                    OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT,
                "Gate 0 key constants drifted from Smithy");

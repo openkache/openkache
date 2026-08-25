@@ -49,6 +49,11 @@ cmake --build target/build
 cmake --install target/build --prefix /path/to/prefix
 ```
 
+The native core library is required at configure time; CMake rejects a
+header-only or otherwise link-incomplete Gate 0 package. The installed package
+includes the selected native library and forwards its transitive system
+libraries through the exported target.
+
 The configure/build pair is the C17 package smoke check.  It regenerates the
 Smithy projection, compiles the forwarding library, and validates the imported
 C target; the generated projection is copied into the install tree so the

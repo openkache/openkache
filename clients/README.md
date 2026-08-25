@@ -143,10 +143,15 @@ Each package README documents its language-facing API and platform integration.
 Run each command from the listed package directory. These commands validate
 package structure and buildability.
 
+The C and C++ commands require an `openkache-client-core` native library built
+with the `ffi` feature; pass its static or shared path through
+`OPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC` or
+`OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED` as shown in the package READMEs.
+
 | Package | Validation command | Reserved package surface |
 |---|---|---|
-| C | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.h` |
-| C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
+| C | `cmake -S . -B target/build -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC=/path/to/libopenkache_client_core.a && cmake --build target/build` | `include/openkache/client.h` |
+| C++ | `cmake -S . -B target/build -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC=/path/to/libopenkache_client_core.a && cmake --build target/build` | `include/openkache/client.hpp` |
 | Dart | `dart analyze` | `lib/openkache.dart` |
 | Go | `go generate && go vet ./... && go build ./...` | Context-aware protected client and generated Smithy API |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |

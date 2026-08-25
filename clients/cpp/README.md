@@ -17,6 +17,7 @@ duplicate-key, and resource-limited inputs throw `openkache::Value_Error`.
 cannot be confused with a missing item.
 
 Native failures retain the shared FFI category through `Native_Error::category()`;
+resource exhaustion is reported as `Error_Category::Resource_Exhausted`;
 an admitted SET or DELETE whose response is lost raises
 `Unknown_Mutation_Error`, and callers must not replay it automatically.
 
@@ -39,6 +40,11 @@ cmake -S . -B target/build \
   -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC=/path/to/libopenkache_client_core.a
 cmake --build target/build
 ```
+
+The native core library is required at configure time; CMake rejects a
+header-only or otherwise link-incomplete Gate 0 package. The installed package
+includes the selected native library and the exported target carries its
+transitive system libraries.
 
 The configure/build pair is the package smoke check: it regenerates the C
 contract, compiles the C++20 headers, and validates the imported CMake target.
