@@ -1,6 +1,9 @@
 //! 4KiB Bucket의 저장 형식과 Bucket 안에서 수행하는 연산이다.
 
 use super::StorageKey;
+use std::mem::MaybeUninit;
+
+use compio::buf::{IoBuf, IoBufMut, SetLen};
 
 pub(crate) const BUCKET_BYTES: usize = 4 * 1024;
 
@@ -353,6 +356,26 @@ impl Bucket {
 impl Default for Bucket {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl IoBuf for Bucket {
+    fn as_init(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl IoBufMut for Bucket {
+    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        let bytes = self.as_bytes_mut();
+        // SAFETY: u8와 MaybeUninit<u8>는 크기와 정렬이 같고 Bucket 전체가 쓰기 가능하다.
+        unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast(), bytes.len()) }
+    }
+}
+
+impl SetLen for Bucket {
+    unsafe fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= BUCKET_BYTES);
     }
 }
 

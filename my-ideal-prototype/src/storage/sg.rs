@@ -109,7 +109,11 @@ impl MutableSg {
     }
 
     /// StorageKey와 hash choice로 이 SG 안의 Bucket index를 계산한다.
-    fn bucket_index_for_choice(&self, storage_key: &StorageKey, bucket_choice: u8) -> usize {
+    pub(crate) fn bucket_index_for_choice(
+        &self,
+        storage_key: &StorageKey,
+        bucket_choice: u8,
+    ) -> usize {
         let key = storage_key.as_bytes();
         let first = u64::from_le_bytes(key[16..24].try_into().unwrap());
         let second = u64::from_le_bytes(key[24..32].try_into().unwrap());

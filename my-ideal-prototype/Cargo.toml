@@ -13,6 +13,7 @@ uring-defer-taskrun = []
 
 [dependencies]
 blake3 = "*"
+compio = { version = "0.19.1", features = ["fs"] }
 io-uring = "*"
 libc = "*"
 slab = "*"

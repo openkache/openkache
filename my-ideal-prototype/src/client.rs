@@ -4,13 +4,15 @@
 
 use crate::resp::{ResponseToWrite, StatefulRespParser};
 use crate::storage_message::Command;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::TcpStream;
 
 pub(super) const WRITE_IOVEC_CAPACITY: usize = 128 * 3;
 
 pub(super) struct WriteState {
     pub(super) pending: VecDeque<ResponseToWrite>, // 아직 완전히 전송되지 않은 RESP 응답들
+    pub(super) completed_out_of_order: BTreeMap<u64, ResponseToWrite>,
+    pub(super) next_response_sequence: u64,
     pub(super) front_bytes_sent: usize,            // pending.front()에서 이미 전송된 바이트 수
     pub(super) in_flight: bool, // 현재 Send SQE를 제출했고 아직 CQE를 받지 않은 상태
     pub(super) in_flight_iovecs: Vec<libc::iovec>,
@@ -22,6 +24,7 @@ pub(super) struct ReadState {
     pub(super) submission_queued: bool,
     pub(super) recv_in_flight: bool,
     pub(super) is_closed: bool,
+    pub(super) next_request_sequence: u64,
 }
 
 pub(super) struct Client {
@@ -40,9 +43,12 @@ impl Client {
                 submission_queued: false,
                 recv_in_flight: false,
                 is_closed: false,
+                next_request_sequence: 0,
             },
             write_state: WriteState {
                 pending: VecDeque::new(),
+                completed_out_of_order: BTreeMap::new(),
+                next_response_sequence: 0,
                 front_bytes_sent: 0,
                 in_flight: false,
                 in_flight_iovecs: Vec::with_capacity(WRITE_IOVEC_CAPACITY),

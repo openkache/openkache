@@ -308,6 +308,7 @@ async fn execute_request(
     request: StorageRequest,
 ) -> io::Result<StorageResponse> {
     let client_id = request.client_id;
+    let sequence = request.sequence;
     let reply = match request.command {
         Command::Get { key } => {
             execute_get(worker, file, StorageKey::from_key(&key)).await?
@@ -318,7 +319,11 @@ async fn execute_request(
         }
     };
 
-    Ok(StorageResponse { client_id, reply })
+    Ok(StorageResponse {
+        client_id,
+        sequence,
+        reply,
+    })
 }
 
 fn run_storage_worker(
