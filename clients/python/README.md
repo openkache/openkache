@@ -31,9 +31,9 @@ pipenv install openkache
 ```
 
 Published wheels support Linux x86_64/ARM64, macOS x86_64/ARM64, and Windows
-x86_64. Linux wheels use the `manylinux_2_38` policy tag; macOS and Windows
-tags come from their native Python packaging toolchain. Windows ARM64 and
-other Rust-supported targets can install from the source distribution.
+x86_64/ARM64. Linux wheels use the `manylinux_2_38` policy tag; macOS and
+Windows tags come from their native Python packaging toolchain. Other
+Rust-supported targets can install from the source distribution.
 
 The native Rust adapter supports Linux, macOS, and Windows on Rust-supported
 host architectures, including ARM64. Building from source requires Python,

@@ -150,6 +150,10 @@ jobs:
             runner: windows-2022
             platform_tag: win_amd64
             native_library: openkache_client_python_native.dll
+          - name: windows-arm64
+            runner: windows-11-arm
+            platform_tag: win_arm64
+            native_library: openkache_client_python_native.dll
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     env:
@@ -234,7 +238,7 @@ jobs:
     timeout-minutes: 15
     env:
       DIST_ROOT: ${{ runner.temp }}/openkache-python-dist
-      EXPECTED_WHEEL_COUNT: 5
+      EXPECTED_WHEEL_COUNT: 6
     steps:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -335,8 +339,8 @@ jobs:
                 -name "openkache-${RELEASE_VERSION}-py3-none-*.whl" \
                 | wc -l
             )"
-            [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 5 ]] || {
-              echo "Expected one sdist and five platform wheels." >&2
+            [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 6 ]] || {
+              echo "Expected one sdist and six platform wheels." >&2
               exit 1
             }
           )
