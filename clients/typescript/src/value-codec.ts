@@ -152,7 +152,8 @@ export class Array_Value {
           "conversion",
         )
       }
-      converted.push(to_value(values[index]))
+      const value = values[index]
+      converted.push(is_model_value(value) ? value : to_value(value))
     }
     this.values = converted
   }
@@ -203,8 +204,8 @@ export class Map_Value {
           "conversion",
         )
       }
-      const key = to_value(entry[0])
-      const value = to_value(entry[1])
+      const key = is_model_value(entry[0]) ? entry[0] : to_value(entry[0])
+      const value = is_model_value(entry[1]) ? entry[1] : to_value(entry[1])
       validate_map_key(key, index, key_identities)
       converted.push([key, value])
     }
@@ -259,6 +260,20 @@ export type Structured_Value =
   | Array_Value
   | Map_Value
 
+function is_model_value(value: unknown): value is Structured_Value {
+  return (
+    value === null ||
+    typeof value === "boolean" ||
+    value instanceof Undefined_Value ||
+    value instanceof Integer_Value ||
+    value instanceof Float_Value ||
+    value instanceof ByteString_Value ||
+    value instanceof TextString_Value ||
+    value instanceof Array_Value ||
+    value instanceof Map_Value
+  )
+}
+
 /** Singleton helper for constructing the model's undefined value. */
 export const UNDEFINED_VALUE = new Undefined_Value()
 
@@ -294,6 +309,7 @@ function convert_value(
 ): Structured_Value {
   if (value instanceof Undefined_Value) {
     consume_items(state, budget, 1)
+    consume_bytes(state, budget, 1)
     return value
   }
   if (value instanceof Integer_Value) {
@@ -366,10 +382,12 @@ function convert_value(
   }
   if (typeof value === "undefined") {
     consume_items(state, budget, 1)
+    consume_bytes(state, budget, 1)
     return UNDEFINED_VALUE
   }
   if (value === null || typeof value === "boolean") {
     consume_items(state, budget, 1)
+    consume_bytes(state, budget, 1)
     return value
   }
   if (typeof value === "number") {
@@ -958,7 +976,13 @@ function read_head(input: Uint8Array, cursor: number): Cbor_Head {
   if (ai < 24) return { major, ai, value: BigInt(ai), next: cursor }
   if (ai === 31) throw new Structured_Value_Error("indefinite-length item", "invalid_encoding")
   const width = ai === 24 ? 1 : ai === 25 ? 2 : ai === 26 ? 4 : ai === 27 ? 8 : 0
-  if (width === 0 || cursor + width > input.length) {
+  if (width === 0) {
+    throw new Structured_Value_Error(
+      "invalid CBOR additional information",
+      "invalid_encoding",
+    )
+  }
+  if (cursor + width > input.length) {
     throw new Structured_Value_Error("CBOR head is truncated", "truncated")
   }
   let value = 0n
