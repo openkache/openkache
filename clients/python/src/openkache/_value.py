@@ -238,7 +238,18 @@ class ValueLimits:
                 self.max_integer_bytes,
             )
         ):
-            raise StructuredValueError("value limits must be positive integers")
+            raise StructuredValueError(
+                "value limits must be positive integers",
+                ValueErrorKind.RESOURCE_LIMIT,
+            )
+        if self.max_depth > MAX_ALLOWED_VALUE_DEPTH:
+            raise StructuredValueError(
+                "value depth limit exceeds the implementation maximum",
+                ValueErrorKind.RESOURCE_LIMIT,
+            )
+
+
+MAX_ALLOWED_VALUE_DEPTH = 1_024
 
 
 def to_value(value: object, *, limits: ValueLimits | None = None) -> Value:
@@ -250,12 +261,116 @@ def to_value(value: object, *, limits: ValueLimits | None = None) -> Value:
 
     budget = limits or ValueLimits()
     try:
-        return _convert(value, set(), 0, budget.max_depth)
+        model = _convert(value, set(), 0, budget.max_depth)
+        _validate_model_limits(model, budget)
+        return model
     except RecursionError as error:
         raise StructuredValueError(
             f"depth limit {budget.max_depth} exceeded",
             ValueErrorKind.RESOURCE_LIMIT,
         ) from error
+
+
+def _validate_model_limits(model: Value, budget: ValueLimits) -> None:
+    """Checks every model node against the complete conversion budget."""
+
+    tasks: list[tuple[Value, int]] = [(model, 0)]
+    item_count = 0
+    encoded_bytes = 0
+
+    def consume_bytes(count: int) -> None:
+        nonlocal encoded_bytes
+        encoded_bytes += count
+        if encoded_bytes > budget.max_bytes:
+            _resource("bytes", budget.max_bytes, encoded_bytes)
+
+    while tasks:
+        current, depth = tasks.pop()
+        item_count += 1
+        if item_count > budget.max_items:
+            _resource("items", budget.max_items, item_count)
+        if isinstance(current, UndefinedValue) or current is None or isinstance(
+            current, bool
+        ):
+            consume_bytes(1)
+        elif isinstance(current, IntegerValue):
+            model_magnitude = abs(current.value)
+            model_magnitude_bytes = (model_magnitude.bit_length() + 7) // 8
+            if model_magnitude_bytes > budget.max_integer_bytes:
+                _resource(
+                    "integer bytes",
+                    budget.max_integer_bytes,
+                    model_magnitude_bytes,
+                )
+            transformed = -current.value - 1 if current.value < 0 else current.value
+            if transformed <= 0xFFFF_FFFF_FFFF_FFFF:
+                consume_bytes(_head_size(transformed))
+            else:
+                magnitude_bytes = max(
+                    1, (transformed.bit_length() + 7) // 8
+                )
+                consume_bytes(_head_size(2))
+                consume_bytes(_head_size(magnitude_bytes))
+                consume_bytes(magnitude_bytes)
+        elif isinstance(current, FloatValue):
+            consume_bytes({16: 3, 32: 5, 64: 9}[current.width])
+        elif isinstance(current, TextStringValue):
+            payload_length = len(current.value.encode("utf-8"))
+            consume_bytes(_head_size(payload_length))
+            consume_bytes(payload_length)
+        elif isinstance(current, ByteStringValue):
+            consume_bytes(_head_size(len(current.value)))
+            consume_bytes(len(current.value))
+        elif isinstance(current, ArrayValue):
+            if depth >= budget.max_depth:
+                _resource("depth", budget.max_depth, depth + 1)
+            consume_bytes(_head_size(len(current.values)))
+            if item_count + len(current.values) > budget.max_items:
+                _resource(
+                    "items",
+                    budget.max_items,
+                    item_count + len(current.values),
+                )
+            tasks.extend(
+                (child, depth + 1) for child in reversed(current.values)
+            )
+        elif isinstance(current, MapValue):
+            if depth >= budget.max_depth:
+                _resource("depth", budget.max_depth, depth + 1)
+            consume_bytes(_head_size(len(current.entries)))
+            child_count = 2 * len(current.entries)
+            if item_count + child_count > budget.max_items:
+                _resource(
+                    "items",
+                    budget.max_items,
+                    item_count + child_count,
+                )
+            prior_entries: list[tuple[Value, Value]] = []
+            for index, (key, child) in enumerate(current.entries):
+                _validate_map_key(key, index, prior_entries)
+                prior_entries.append((key, child))
+            for key, child in reversed(current.entries):
+                tasks.append((child, depth + 1))
+                tasks.append((key, depth + 1))
+        else:  # pragma: no cover - all values pass through _convert
+            raise StructuredValueError("unsupported model value")
+
+
+def _head_size(length: int) -> int:
+    if length < 24:
+        return 1
+    if length <= 0xFF:
+        return 2
+    if length <= 0xFFFF:
+        return 3
+    if length <= 0xFFFF_FFFF:
+        return 5
+    if length <= 0xFFFF_FFFF_FFFF_FFFF:
+        return 9
+    raise StructuredValueError(
+        "CBOR argument exceeds uint64",
+        ValueErrorKind.RESOURCE_LIMIT,
+    )
 
 
 def _convert(
@@ -509,6 +624,11 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
     """Decodes exactly one complete StructuredValue-CBOR-v1 item."""
 
     budget = limits or ValueLimits()
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise StructuredValueError(
+            "structured value input must be bytes-like",
+            ValueErrorKind.CONVERSION,
+        )
     source = bytes(data)
     if len(source) > budget.max_bytes:
         _resource("bytes", budget.max_bytes, len(source))
