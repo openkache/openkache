@@ -47,6 +47,10 @@ async fn main() -> openkache::Result<()> {
 The local development TLS profile does not verify the server certificate. Use
 this example only with a local development server.
 
+Values use the lossless `StructuredValue-CBOR-v1` format shared by the
+maintained clients. The Gate 0 facade has no JSON/raw-byte, cancellation,
+caller-selected protection, compression, or certificate options.
+
 ## Reference
 
 ### `Client::connect(endpoint)`

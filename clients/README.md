@@ -19,7 +19,7 @@ All three packages use the same logical operations:
 
 | Operation | Python | Rust | TypeScript / JavaScript |
 | --- | --- | --- | --- |
-| Connect | `Client.connect(address)` | `Client::connect(endpoint)` | `OpenKache_Client.connect(endpoint)` |
+| Connect | `Client.connect(address)` | `Client::connect(endpoint)` | `OpenKacheClient.connect(endpoint)` |
 | Read | `client.get(key)` | `client.get(key).await` | `client.get(key)` |
 | Write | `client.set(key, value)` | `client.set(key, value).await` | `client.set(key, value)` |
 | Delete | `client.delete(key)` | `client.delete(key).await` | `client.delete(key)` |
@@ -32,6 +32,12 @@ preserve structured values such as nulls, booleans, integers, floats, text,
 bytes, arrays, and maps. Each language maps these values to native types while
 also exposing lossless value classes for applications that need exact
 representation.
+
+The maintained clients encode values as `StructuredValue-CBOR-v1`, so a value
+written by one language can be read losslessly by the others. The Gate 0
+facade intentionally supports only `connect`, `get`, `set`, `delete`, and
+`close`; it does not expose JSON/raw-byte operations, caller-selected
+cancellation, protection, compression, or certificate configuration.
 
 The package README is the source for language-facing behavior. Shared formats
 and interoperability rules are documented separately:

@@ -40,6 +40,7 @@ enum class Error_Category : std::uint32_t {
   Value = OPENKACHE_CLIENT_GATE0_ERROR_VALUE,
   Key = OPENKACHE_CLIENT_GATE0_ERROR_KEY,
   Unknown_Mutation = OPENKACHE_CLIENT_GATE0_ERROR_UNKNOWN_MUTATION,
+  Resource_Exhausted = OPENKACHE_CLIENT_GATE0_ERROR_RESOURCE_EXHAUSTED,
   Closed = OPENKACHE_CLIENT_GATE0_ERROR_CLOSED,
   Internal = OPENKACHE_CLIENT_GATE0_ERROR_INTERNAL,
 };
@@ -395,7 +396,9 @@ public:
     try {
       return Get_Result::found(decode_structured_value(result.payload));
     } catch (const Value_Error &error) {
-      throw Error(std::string("GET value decoding failed: ") + error.what());
+      throw Value_Error(std::string("GET value decoding failed: ") + error.what(),
+                        error.kind(), error.resource(), error.limit(),
+                        error.actual());
     }
   }
 

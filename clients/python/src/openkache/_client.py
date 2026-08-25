@@ -22,6 +22,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_NOT_FOUND,
     SMITHY_FFI_RESULT_NOT_STORED,
     SMITHY_FFI_RESULT_REPLACED,
+    SMITHY_FFI_RESULT_RESOURCE_EXHAUSTED,
     SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_RESULT_VALUE,
     SMITHY_OPCODE_DELETE,
@@ -41,6 +42,12 @@ class OpenKacheError(RuntimeError):
 
 class OpenKacheValueError(OpenKacheError, ValueError):
     """Invalid key, value, or local value-codec input."""
+
+
+class OpenKacheResourceLimitError(OpenKacheError):
+    """A native operation exceeded a stable OpenKache resource limit."""
+
+    kind = "resource_limit"
 
 
 class OpenKacheUnknownMutationError(OpenKacheError):
@@ -307,6 +314,8 @@ def _read_result(result: object, *, operation_name: str) -> tuple[object, bytes]
 def _raise_native_error(error: NativeError) -> NoReturn:
     if error.result_kind == SMITHY_FFI_RESULT_UNKNOWN_MUTATION:
         raise OpenKacheUnknownMutationError(str(error)) from error
+    if error.result_kind == SMITHY_FFI_RESULT_RESOURCE_EXHAUSTED:
+        raise OpenKacheResourceLimitError(str(error)) from error
     raise OpenKacheError(str(error)) from error
 
 
@@ -409,6 +418,7 @@ __all__ = [
     "OpenKacheClient",
     "OpenKacheError",
     "OpenKacheIncompatibleServerError",
+    "OpenKacheResourceLimitError",
     "OpenKacheUnknownMutationError",
     "OpenKacheValueError",
     "SetOutcome",

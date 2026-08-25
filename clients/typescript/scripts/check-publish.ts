@@ -118,7 +118,7 @@ function require_stable_version(version: string): void {
     fail(
       `Version "${version}" is not a stable SemVer release.\n` +
         "Why: this workflow reserves the latest dist-tag for complete stable packages.\n" +
-        "Fix: set package.json version to a three-part version such as 0.1.0.",
+        "Fix: set package.json version to the next unused three-part release.",
     )
   }
 }

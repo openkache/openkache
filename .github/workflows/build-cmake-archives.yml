@@ -98,17 +98,31 @@ jobs:
 
       - uses: ./.github/actions/setup-smithy-codegen
 
+      - name: Install Clang/LLVM toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang llvm
+
+      - name: Build the native core used by the CMake packages
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path Cargo.toml \
+            -p openkache-client-core --no-default-features --features ffi \
+            --release --locked
+          test -s "${GITHUB_WORKSPACE}/target/release/libopenkache_client_core.a"
+
       - name: Run C and C++ CMake configure/build smoke checks
         run: |
           set -euo pipefail
           smoke_root="${RUNNER_TEMP}/openkache-cmake-smoke"
           mkdir -p "${smoke_root}"
-          ar rcs "${smoke_root}/libopenkache_client_core.a"
+          native_core="${GITHUB_WORKSPACE}/target/release/libopenkache_client_core.a"
           cmake -S clients/c -B "${smoke_root}/c-build" \
-            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${smoke_root}/libopenkache_client_core.a"
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}"
           cmake --build "${smoke_root}/c-build"
           cmake -S clients/cpp -B "${smoke_root}/cpp-build" \
-            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${smoke_root}/libopenkache_client_core.a"
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}"
           cmake --build "${smoke_root}/cpp-build"
           install_root="${smoke_root}/install"
           cmake --install "${smoke_root}/cpp-build" --prefix "${install_root}"
@@ -129,7 +143,17 @@ jobs:
           #include <openkache/client.hpp>
 
           int main() {
-            return 0;
+            using Native_Connect = openkache_client_result_t * (*)(
+                const std::uint8_t *, std::size_t);
+            const Native_Connect native_connect =
+                &openkache_client_gate0_connect;
+            using Cpp_Connect = openkache::Client (*)(std::string_view);
+            const Cpp_Connect cpp_connect = &openkache::Client::connect;
+            static_assert(
+                static_cast<std::uint32_t>(
+                    openkache::Error_Category::Resource_Exhausted) ==
+                OPENKACHE_CLIENT_GATE0_ERROR_RESOURCE_EXHAUSTED);
+            return native_connect == nullptr || cpp_connect == nullptr;
           }
           CPP
           cmake -S "${consumer_root}" -B "${smoke_root}/consumer-build" \
@@ -150,6 +174,20 @@ jobs:
             clients/generate.ts
             clients/generator
             clients/model
+            clients/api_shape_renderers.ts
+            clients/client_contract.ts
+            clients/compatibility_ffi_adapters.ts
+            clients/compatibility_request_adapters.ts
+            clients/compatibility_response_adapters.ts
+            clients/compatibility_result_projections.ts
+            clients/generator_names.ts
+            clients/generator_values.ts
+            clients/native_abi_renderers.ts
+            clients/operation_client_projection.ts
+            clients/operation_models.ts
+            clients/operation_plans.ts
+            clients/operation_results.ts
+            clients/core/include
             protocol
           )
           c_prefix="openkache-client-c-${RELEASE_VERSION}"
@@ -172,6 +210,26 @@ jobs:
               exit 1
             fi
           done
+          extract_root="${RUNNER_TEMP}/openkache-cmake-archive-extract"
+          mkdir -p "${extract_root}"
+          native_core="${GITHUB_WORKSPACE}/target/release/libopenkache_client_core.a"
+          tar -xzf "${c_archive}" --directory "${extract_root}"
+          cmake -S "${extract_root}/${c_prefix}/clients/c" \
+            -B "${extract_root}/c-build" \
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}"
+          cmake --build "${extract_root}/c-build"
+          tar -xzf "${cpp_archive}" --directory "${extract_root}"
+          cmake -S "${extract_root}/${cpp_prefix}/clients/cpp" \
+            -B "${extract_root}/cpp-build" \
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}"
+          cmake --build "${extract_root}/cpp-build"
+          extracted_install="${extract_root}/cpp-install"
+          cmake --install "${extract_root}/cpp-build" \
+            --prefix "${extracted_install}"
+          cmake -S "${RUNNER_TEMP}/openkache-cmake-smoke/consumer" \
+            -B "${extract_root}/consumer-build" \
+            -DCMAKE_PREFIX_PATH="${extracted_install}"
+          cmake --build "${extract_root}/consumer-build"
           printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\narchive_set=c-and-cpp-cmake\n' \
             "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
             > "${release_root}/RELEASE-METADATA"

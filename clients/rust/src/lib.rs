@@ -1,5 +1,5 @@
 #![doc = include_str!("../README.md")]
-#![doc(html_root_url = "https://docs.rs/openkache/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/openkache/0.1.1")]
 
 #[path = "internal/core/lib.rs"]
 #[allow(

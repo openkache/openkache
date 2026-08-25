@@ -250,6 +250,7 @@ class ValueLimits:
 
 
 MAX_ALLOWED_VALUE_DEPTH = 1_024
+_DEFAULT_VALUE_LIMITS = ValueLimits()
 
 
 def to_value(value: object, *, limits: ValueLimits | None = None) -> Value:
@@ -377,8 +378,11 @@ def _convert(
     value: object,
     ancestors: set[int],
     depth: int = 0,
-    max_depth: int = ValueLimits.max_depth,
+    max_depth: int | None = None,
 ) -> Value:
+    depth_limit = (
+        _DEFAULT_VALUE_LIMITS.max_depth if max_depth is None else max_depth
+    )
     if isinstance(
         value,
         (
@@ -403,8 +407,8 @@ def _convert(
     if isinstance(value, str):
         return TextStringValue(value)
     if isinstance(value, (list, tuple)):
-        if depth >= max_depth:
-            _resource("depth", max_depth, depth + 1)
+        if depth >= depth_limit:
+            _resource("depth", depth_limit, depth + 1)
         identity = id(value)
         if identity in ancestors:
             raise StructuredValueError(
@@ -414,13 +418,13 @@ def _convert(
         ancestors.add(identity)
         try:
             return ArrayValue._from_values(
-                _convert(child, ancestors, depth + 1, max_depth) for child in value
+                _convert(child, ancestors, depth + 1, depth_limit) for child in value
             )
         finally:
             ancestors.remove(identity)
     if isinstance(value, Mapping):
-        if depth >= max_depth:
-            _resource("depth", max_depth, depth + 1)
+        if depth >= depth_limit:
+            _resource("depth", depth_limit, depth + 1)
         identity = id(value)
         if identity in ancestors:
             raise StructuredValueError(
@@ -431,8 +435,8 @@ def _convert(
         try:
             entries: list[tuple[Value, Value]] = []
             for key, child in value.items():
-                model_key = _convert(key, ancestors, depth + 1, max_depth)
-                model_child = _convert(child, ancestors, depth + 1, max_depth)
+                model_key = _convert(key, ancestors, depth + 1, depth_limit)
+                model_child = _convert(child, ancestors, depth + 1, depth_limit)
                 _validate_map_key(model_key, len(entries), entries)
                 entries.append((model_key, model_child))
             return MapValue._from_entries(entries)
@@ -448,7 +452,9 @@ def _convert_sequence(values: Iterable[object]) -> tuple[Value, ...]:
     ancestors: set[int] = set()
     converted: list[Value] = []
     for value in values:
-        converted.append(_convert(value, ancestors, 0, ValueLimits.max_depth))
+        converted.append(
+            _convert(value, ancestors, 1, _DEFAULT_VALUE_LIMITS.max_depth)
+        )
     return tuple(converted)
 
 
@@ -463,8 +469,8 @@ def _convert_entries(
                 f"map entry {index} must be a two-item pair",
                 ValueErrorKind.CONVERSION,
             )
-        key = _convert(pair[0], ancestors, 0, ValueLimits.max_depth)
-        value = _convert(pair[1], ancestors, 0, ValueLimits.max_depth)
+        key = _convert(pair[0], ancestors, 1, _DEFAULT_VALUE_LIMITS.max_depth)
+        value = _convert(pair[1], ancestors, 1, _DEFAULT_VALUE_LIMITS.max_depth)
         _validate_map_key(key, index, converted)
         converted.append((key, value))
     return tuple(converted)
