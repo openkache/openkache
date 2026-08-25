@@ -38,6 +38,51 @@ using Byte = std::uint8_t;
 using Bytes = std::vector<Byte>;
 using Text = std::string;
 
+namespace detail {
+
+template <typename T>
+struct unsigned_integer {
+  using type = std::make_unsigned_t<std::remove_cvref_t<T>>;
+};
+
+#if defined(__SIZEOF_INT128__)
+template <>
+struct unsigned_integer<__int128> {
+  using type = unsigned __int128;
+};
+
+template <>
+struct unsigned_integer<unsigned __int128> {
+  using type = unsigned __int128;
+};
+#endif
+
+template <typename T>
+using unsigned_integer_t =
+    typename unsigned_integer<std::remove_cvref_t<T>>::type;
+
+template <typename T>
+inline constexpr bool is_integer_v =
+    std::is_integral_v<std::remove_cvref_t<T>>
+#if defined(__SIZEOF_INT128__)
+    || std::is_same_v<std::remove_cvref_t<T>, __int128> ||
+    std::is_same_v<std::remove_cvref_t<T>, unsigned __int128>
+#endif
+    ;
+
+template <typename T>
+inline constexpr bool is_signed_integer_v =
+    std::is_signed_v<std::remove_cvref_t<T>>
+#if defined(__SIZEOF_INT128__)
+    || std::is_same_v<std::remove_cvref_t<T>, __int128>
+#endif
+    ;
+
+template <typename T, typename U>
+U checked_unsigned_bits(T value, const char *name);
+
+} // namespace detail
+
 enum class Value_Error_Kind {
   Resource_Limit,
   Truncated,
@@ -123,6 +168,14 @@ struct Null_Value final {};
 class Integer {
 public:
   Integer() = default;
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  explicit Integer(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  explicit Integer(T) = delete;
 
   explicit Integer(std::int64_t value) {
     if (value < 0) {
@@ -385,11 +438,65 @@ struct Float_Value final {
   std::uint8_t width = 64;
   std::uint64_t raw_bits = 0;
 
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Float_Value float16(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Float_Value float16(T) = delete;
+
   static Float_Value float16(std::uint16_t bits) noexcept { return {16, bits}; }
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint16_t>)
+  static Float_Value float16(T bits) {
+    return float16(detail::checked_unsigned_bits<T, std::uint16_t>(
+        bits, "Float16"));
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Float_Value float32(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Float_Value float32(T) = delete;
 
   static Float_Value float32(std::uint32_t bits) noexcept { return {32, bits}; }
 
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint32_t>)
+  static Float_Value float32(T bits) {
+    return float32(detail::checked_unsigned_bits<T, std::uint32_t>(
+        bits, "Float32"));
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Float_Value float64(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Float_Value float64(T) = delete;
+
   static Float_Value float64(std::uint64_t bits) noexcept { return {64, bits}; }
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint64_t>)
+  static Float_Value float64(T bits) {
+    return float64(detail::checked_unsigned_bits<T, std::uint64_t>(
+        bits, "Float64"));
+  }
 
   void validate() const {
     if (width != 16 && width != 32 && width != 64) {
@@ -441,6 +548,16 @@ public:
   Value() : storage_(Undefined_Value{}) {}
   Value(Undefined_Value) : storage_(Undefined_Value{}) {}
   Value(Null_Value) : storage_(Null_Value{}) {}
+
+  template <typename T>
+    requires(detail::is_integer_v<T> &&
+             !std::is_same_v<std::remove_cvref_t<T>, bool>)
+  explicit Value(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  explicit Value(T) = delete;
+
   explicit Value(bool value) : storage_(value) {}
   explicit Value(::openkache::Integer value) : storage_(std::move(value)) {}
   explicit Value(Float_Value value) : storage_(value) { value.validate(); }
@@ -465,6 +582,14 @@ public:
     return Value(std::move(value));
   }
 
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value integer(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value integer(T) = delete;
+
   static Value integer(std::int64_t value) {
     return Value(::openkache::Integer(value));
   }
@@ -485,6 +610,7 @@ public:
 
   template <typename T>
     requires(std::is_integral_v<T> &&
+             !std::is_same_v<std::remove_cv_t<T>, bool> &&
              !std::is_same_v<std::remove_cv_t<T>, std::int64_t>)
   static Value integer(T value) {
     if constexpr (std::is_unsigned_v<T>) {
@@ -501,6 +627,14 @@ public:
 
   static Value Integer(std::int64_t value) { return integer(value); }
 
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value Integer(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value Integer(T) = delete;
+
 #if defined(__SIZEOF_INT128__)
   static Value Integer(::openkache::Integer::unsigned_int128 value) {
     return integer(value);
@@ -513,6 +647,7 @@ public:
 
   template <typename T>
     requires(std::is_integral_v<T> &&
+             !std::is_same_v<std::remove_cv_t<T>, bool> &&
              !std::is_same_v<std::remove_cv_t<T>, std::int64_t>)
   static Value Integer(T value) {
     return integer(value);
@@ -528,23 +663,125 @@ public:
     return integer(decimal);
   }
 
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value float16(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value float16(T) = delete;
+
   static Value float16(std::uint16_t bits) {
     return Value(Float_Value::float16(bits));
   }
 
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint16_t>)
+  static Value float16(T bits) {
+    return Value(Float_Value::float16(bits));
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value Float16(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value Float16(T) = delete;
+
   static Value Float16(std::uint16_t bits) { return float16(bits); }
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint16_t>)
+  static Value Float16(T bits) {
+    return float16(bits);
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value float32(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value float32(T) = delete;
 
   static Value float32(std::uint32_t bits) {
     return Value(Float_Value::float32(bits));
   }
 
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint32_t>)
+  static Value float32(T bits) {
+    return Value(Float_Value::float32(bits));
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value Float32(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value Float32(T) = delete;
+
   static Value Float32(std::uint32_t bits) { return float32(bits); }
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint32_t>)
+  static Value Float32(T bits) {
+    return float32(bits);
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value float64(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value float64(T) = delete;
 
   static Value float64(std::uint64_t bits) {
     return Value(Float_Value::float64(bits));
   }
 
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint64_t>)
+  static Value float64(T bits) {
+    return Value(Float_Value::float64(bits));
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Value Float64(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Value Float64(T) = delete;
+
   static Value Float64(std::uint64_t bits) { return float64(bits); }
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::uint64_t>)
+  static Value Float64(T bits) {
+    return float64(bits);
+  }
 
   static Value bytes(Bytes value) { return Value(std::move(value)); }
 
@@ -918,6 +1155,31 @@ inline void ensure_utf8(std::string_view value) {
                         Value_Error_Kind::Invalid_Utf8);
     }
   }
+}
+
+template <typename T, typename U>
+U checked_unsigned_bits(T value, const char *name) {
+  using Source = std::remove_cvref_t<T>;
+  static_assert(is_integer_v<Source>);
+  static_assert(!std::is_same_v<Source, bool>);
+  static_assert(std::is_unsigned_v<U>);
+
+  if constexpr (is_signed_integer_v<Source>) {
+    if (value < 0) {
+      throw Value_Error(std::string(name) + " raw bits must be non-negative",
+                        Value_Error_Kind::Invalid_Encoding);
+    }
+  }
+  using Unsigned_Source = unsigned_integer_t<Source>;
+  if constexpr (std::numeric_limits<Unsigned_Source>::digits >
+                std::numeric_limits<U>::digits) {
+    if (static_cast<Unsigned_Source>(value) >
+        static_cast<Unsigned_Source>(std::numeric_limits<U>::max())) {
+      throw Value_Error(std::string(name) + " raw bits exceed its width",
+                        Value_Error_Kind::Invalid_Encoding);
+    }
+  }
+  return static_cast<U>(value);
 }
 
 inline void validate_limits(const Value_Limits &limits) {

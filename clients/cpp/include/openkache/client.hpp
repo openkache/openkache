@@ -2,11 +2,13 @@
 #define OPENKACHE_CLIENT_HPP
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -63,10 +65,52 @@ enum class Key_Kind {
   Bytes,
 };
 
+namespace detail {
+
+template <typename T>
+std::int64_t checked_i64_key(T value) {
+  using Source = std::remove_cvref_t<T>;
+  static_assert(detail::is_integer_v<Source>);
+  static_assert(!std::is_same_v<Source, bool>);
+
+  if constexpr (detail::is_signed_integer_v<Source>) {
+    if constexpr (std::numeric_limits<Source>::digits >
+                  std::numeric_limits<std::int64_t>::digits) {
+      if (value < static_cast<Source>(std::numeric_limits<std::int64_t>::min()) ||
+          value > static_cast<Source>(std::numeric_limits<std::int64_t>::max())) {
+        throw Error("integer key is outside the signed i64 range");
+      }
+    }
+  } else if constexpr (std::numeric_limits<Source>::digits >
+                       std::numeric_limits<std::int64_t>::digits) {
+    if (value > static_cast<Source>(std::numeric_limits<std::int64_t>::max())) {
+      throw Error("integer key is outside the signed i64 range");
+    }
+  }
+  return static_cast<std::int64_t>(value);
+}
+
+} // namespace detail
+
 /// One Gate 0 typed application key.
 class Typed_Key {
 public:
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  explicit Typed_Key(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  explicit Typed_Key(T) = delete;
+
   explicit Typed_Key(std::int64_t value) : value_(value) {}
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::int64_t>)
+  explicit Typed_Key(T value) : Typed_Key(detail::checked_i64_key(value)) {}
   explicit Typed_Key(const char *value)
       : Typed_Key(value == nullptr ? std::string_view{}
                                    : std::string_view(value)) {
@@ -85,6 +129,23 @@ public:
       : value_(Bytes(value.begin(), value.end())) {}
 
   static Typed_Key integer(std::int64_t value) { return Typed_Key(value); }
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::int64_t>)
+  static Typed_Key integer(T value) {
+    return Typed_Key(value);
+  }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  static Typed_Key integer(T) = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  static Typed_Key integer(T) = delete;
 
   static Typed_Key text(std::string_view value) { return Typed_Key(value); }
 
@@ -365,7 +426,24 @@ public:
     return Delete_Outcome::NotFound;
   }
 
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  Get_Result get(T) const = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  Get_Result get(T) const = delete;
+
   Get_Result get(std::int64_t key) const {
+    return get(Typed_Key::integer(key));
+  }
+
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::int64_t>)
+  Get_Result get(T key) const {
     return get(Typed_Key::integer(key));
   }
 
@@ -381,6 +459,15 @@ public:
     return set(Typed_Key::integer(key), value);
   }
 
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::int64_t>)
+  Set_Outcome set(T key, const Value &value) const {
+    return set(Typed_Key::integer(key), value);
+  }
+
   Set_Outcome set(std::string_view key, const Value &value) const {
     return set(Typed_Key::text(key), value);
   }
@@ -393,6 +480,15 @@ public:
     return remove(Typed_Key::integer(key));
   }
 
+  template <typename T>
+    requires(
+        detail::is_integer_v<T> &&
+        !std::is_same_v<std::remove_cvref_t<T>, bool> &&
+        !std::is_same_v<std::remove_cvref_t<T>, std::int64_t>)
+  Delete_Outcome remove(T key) const {
+    return remove(Typed_Key::integer(key));
+  }
+
   Delete_Outcome remove(std::string_view key) const {
     return remove(Typed_Key::text(key));
   }
@@ -400,6 +496,22 @@ public:
   Delete_Outcome remove(std::span<const Byte> key) const {
     return remove(Typed_Key::bytes(key));
   }
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  Set_Outcome set(T, const Value &) const = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  Set_Outcome set(T, const Value &) const = delete;
+
+  template <typename T>
+    requires(std::is_same_v<std::remove_cvref_t<T>, bool>)
+  Delete_Outcome remove(T) const = delete;
+
+  template <typename T>
+    requires(std::is_floating_point_v<std::remove_cvref_t<T>>)
+  Delete_Outcome remove(T) const = delete;
 
 private:
   struct Native_Result {
