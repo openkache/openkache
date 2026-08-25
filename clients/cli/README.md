@@ -30,7 +30,6 @@ From the public repository root:
 
 ```bash
 cargo build --release -p openkache-cli
-cargo test -p openkache-cli
 cargo run -p openkache-cli -- --help
 ```
 
