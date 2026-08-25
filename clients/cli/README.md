@@ -24,6 +24,11 @@ That fixed profile is also the native QUIC contract exposed by
 storage path. A CLI `set` can therefore be read by the Rust client, and vice
 versa, when both use the default profile.
 
+The `configured` profile retains the compatibility path for existing CLI
+data: text keys use the legacy byte-key mapping and values use the raw-value
+codec. Select it when preserving that data matters or when a server requires
+custom TLS, value protection, conditional writes, or expiration.
+
 ## Commands
 
 From the public repository root:
@@ -114,9 +119,9 @@ traffic.
 ## Configuration
 
 Use `--profile configured` for production trust roots, mutual TLS, client-side
-value protection, or the extended write options. Its data-protection key may
-come from an environment variable or a file so secrets do not appear in the
-process list:
+value protection, legacy CLI data, or the extended write options. Its
+data-protection key may come from an environment variable or a file so secrets
+do not appear in the process list:
 
 ```bash
 export OPENKACHE_PROFILE=configured

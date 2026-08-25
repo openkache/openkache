@@ -341,7 +341,7 @@ impl ConnectedClient {
             }
             #[cfg(feature = "quic-compio")]
             Self::Compio(client, ConnectionProfile::Configured) => {
-                match client.get(application_key).await? {
+                match client.get(application_key.as_bytes()).await? {
                     GetOutcome::Found(value) => Ok(GetOutcome::Found(ClientValue::Raw(value))),
                     GetOutcome::NotFound => Ok(GetOutcome::NotFound),
                 }
@@ -357,7 +357,7 @@ impl ConnectedClient {
             }
             #[cfg(feature = "quic-quinn")]
             Self::Quinn(client, ConnectionProfile::Configured) => {
-                match client.get(application_key).await? {
+                match client.get(application_key.as_bytes()).await? {
                     GetOutcome::Found(value) => Ok(GetOutcome::Found(ClientValue::Raw(value))),
                     GetOutcome::NotFound => Ok(GetOutcome::NotFound),
                 }
@@ -381,7 +381,7 @@ impl ConnectedClient {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client, ConnectionProfile::Configured) => {
                 client
-                    .set(application_key, value.into_bytes(), options)
+                    .set(application_key.as_bytes(), value.into_bytes(), options)
                     .await
             }
             #[cfg(feature = "quic-quinn")]
@@ -393,7 +393,7 @@ impl ConnectedClient {
             #[cfg(feature = "quic-quinn")]
             Self::Quinn(client, ConnectionProfile::Configured) => {
                 client
-                    .set(application_key, value.into_bytes(), options)
+                    .set(application_key.as_bytes(), value.into_bytes(), options)
                     .await
             }
         }
@@ -402,9 +402,17 @@ impl ConnectedClient {
     async fn delete(&self, application_key: &str) -> openkache_client_core::Result<DeleteOutcome> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client, _) => client.delete(application_key).await,
+            Self::Compio(client, ConnectionProfile::Gate0) => client.delete(application_key).await,
+            #[cfg(feature = "quic-compio")]
+            Self::Compio(client, ConnectionProfile::Configured) => {
+                client.delete(application_key.as_bytes()).await
+            }
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client, _) => client.delete(application_key).await,
+            Self::Quinn(client, ConnectionProfile::Gate0) => client.delete(application_key).await,
+            #[cfg(feature = "quic-quinn")]
+            Self::Quinn(client, ConnectionProfile::Configured) => {
+                client.delete(application_key.as_bytes()).await
+            }
         }
     }
 
