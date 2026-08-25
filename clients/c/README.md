@@ -27,6 +27,11 @@ wire representation across native adapters.  A mutating timeout after worker
 admission is returned with the generated `UNKNOWN_MUTATION` result and
 error-category discriminators; callers must not replay that operation.
 
+Before each operation, the forwarding layer lazily opens the empty default
+namespace and checks its descriptor against the generated Gate 0 namespace
+identity.  An unexpected server-assigned ID is rejected before any
+StructuredValue key is converted into an Item ID.
+
 ## Build and install
 
 Build the native core with the `ffi` feature and pass either an explicit static
