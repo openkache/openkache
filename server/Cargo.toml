@@ -27,8 +27,8 @@ uring-defer-taskrun = []
 [dependencies]
 blake3 = "*"
 compio = { version = "*", features = ["fs"] }
-# The provided-buffer ring uses the 0.7 registration API.
-io-uring = "0.7"
+# Cargo.lock retains the tested release that provides the required registration API.
+io-uring = "*"
 libc = "*"
 mimalloc = { version = "*", optional = true }
 openkache-protocol = { version = "*", path = "../protocol" }

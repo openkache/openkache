@@ -223,6 +223,7 @@ Protocol details live in [protocol/README.md](./protocol/README.md).
 ## License
 
 Except where otherwise noted, OpenKache is licensed under the
-[GNU Affero General Public License v3.0 or later](./LICENSE). Client SDKs under
-`clients/` and the shared protocol under `protocol/` use the Apache License 2.0
-as documented in their package directories.
+[GNU Affero General Public License v3.0 or later](./LICENSE). Client SDKs
+under [`clients/`](./clients/) and the shared protocol under
+[`protocol/`](./protocol/) are licensed under the Apache License 2.0; see
+the `LICENSE` file in each directory.

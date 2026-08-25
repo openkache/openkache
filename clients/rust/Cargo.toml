@@ -28,24 +28,24 @@ quic-quinn = ["dep:quinn", "dep:tokio"]
 aes = { version = "=0.9.1", features = ["zeroize"] }
 aes-gcm-siv = { version = "=0.12.0-rc.3", features = ["zeroize"] }
 aes-siv = { version = "=0.8.0-rc.3", features = ["zeroize"] }
-base64 = "=0.22.1"
-blake3 = { version = "=1.8.5", features = ["zeroize"] }
+base64 = "*"
+blake3 = { version = "*", features = ["zeroize"] }
 cmac = { version = "=0.8.0", features = ["zeroize"] }
-crossbeam-queue = "=0.3.13"
-crossfire = "=3.1.19"
-futures-util = "=0.3.33"
+crossbeam-queue = "*"
+crossfire = "*"
+futures-util = "*"
 getrandom = "0.3"
-http = "=1.5.0"
+http = "*"
 polyval = { version = "=0.7.3", features = ["zeroize"] }
-quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
-rustls = { version = "=0.23.43", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
-rustls-native-certs = "=0.8.4"
-serde = "=1.0.229"
-serde_json = "=1.0.151"
-serde_json_canonicalizer = "=0.3.2"
-smallvec = { version = "=1.15.2", features = ["const_new"] }
-thiserror = "=2.0.19"
-tokio = { version = "=1.53.1", features = ["io-util", "net", "rt", "time", "macros", "rt-multi-thread"], optional = true }
-vu128 = "=1.1.0"
-zeroize = { version = "=1.9.0", features = ["derive"] }
-zstd-pure-rs = "=0.1.2"
+quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
+rustls-native-certs = "*"
+serde = "*"
+serde_json = "*"
+serde_json_canonicalizer = "*"
+smallvec = { version = "*", features = ["const_new"] }
+thiserror = "*"
+tokio = { version = "*", features = ["io-util", "net", "rt", "time", "macros", "rt-multi-thread"], optional = true }
+vu128 = "*"
+zeroize = { version = "*", features = ["derive"] }
+zstd-pure-rs = "*"

@@ -86,6 +86,7 @@ maintained entry points.
 
 ## License
 
-Except where otherwise noted, OpenKache is AGPL-3.0-or-later. Client SDKs under
-`clients/` and the shared protocol under `protocol/` are Apache-2.0 as described
-in their package directories.
+Except where otherwise noted, OpenKache is licensed under
+AGPL-3.0-or-later. Client SDKs under `clients/` and the shared protocol under
+`protocol/` are licensed under Apache-2.0. See the `LICENSE` file in each
+directory.
