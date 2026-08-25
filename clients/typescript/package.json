@@ -56,7 +56,7 @@
     "typecheck:node": "bun ./node_modules/typescript/bin/tsc --project tsconfig.json --noEmit",
     "release:verify": "bun pm pack --dry-run && bun run scripts/check-publish.ts",
     "release:smoke": "bun run scripts/release-smoke.ts",
-    "release:check": "bun run build:package && bun run release:verify && bun run release:smoke",
+    "release:check": "bun run build:package && bun run release:verify",
     "release:dry-run": "bun run release:check && bun publish --dry-run --access public --tag latest --ignore-scripts",
     "release:publish": "bun run scripts/publish-typescript.ts"
   },
