@@ -27,6 +27,14 @@ All three packages use the same logical operations:
 | Delete | `client.delete(key)` | `client.delete(key).await` | `client.delete(key)` |
 | Close | `client.close()` | `client.close().await` | `client.close()` |
 
+The source-built [CLI](cli/README.md) provides the same Gate 0 key and
+structured-value profile by default for Bash scripts and interactive use.
+Select its `configured` profile when certificate roots, mTLS, client-side value
+protection, TTL, conditional writes, or legacy CLI data are required. That
+profile retains the legacy byte-key/raw-value mapping; its maintenance
+commands remain available only against a full OpenKache server with the
+matching experimental API policy. The prototype does not implement them.
+
 ## Values and keys
 
 These packages accept typed keys (text, bytes, and integers) and
@@ -63,7 +71,7 @@ language support. Their package README is the source for the current status.
 | C# / .NET | [dotnet/](dotnet/) | Compatibility adapter |
 | Go | [go/](go/) | Compatibility adapter |
 | Swift | [swift/](swift/) | Compatibility adapter |
-| CLI | [cli/](cli/) | Command-line client |
+| CLI | [cli/](cli/) | Gate 0 command-line client with a configurable compatibility profile |
 | Java | `java/` | Scaffold |
 | Kotlin | `kotlin/` | Scaffold |
 | Dart | `dart/` | Scaffold |
