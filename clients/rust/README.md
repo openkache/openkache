@@ -133,7 +133,7 @@ The client also accepts common Rust conversions directly:
 
 ```rust
 client.get("text-key").await?;
-client.get(b"bytes-key".as_slice()).await?;
+client.get(b"bytes-key").await?;
 client.get(42_i64).await?;
 ```
 
