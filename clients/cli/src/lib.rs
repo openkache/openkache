@@ -329,6 +329,7 @@ impl ConnectedClient {
         &self,
         application_key: &str,
     ) -> openkache_client_core::Result<GetOutcome<ClientValue>> {
+        self.ensure_gate0_namespace().await?;
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client, ConnectionProfile::Gate0) => {
@@ -371,6 +372,7 @@ impl ConnectedClient {
         value: InputValue,
         options: SetOptions,
     ) -> openkache_client_core::Result<SetOutcome> {
+        self.ensure_gate0_namespace().await?;
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client, ConnectionProfile::Gate0) => {
@@ -400,6 +402,7 @@ impl ConnectedClient {
     }
 
     async fn delete(&self, application_key: &str) -> openkache_client_core::Result<DeleteOutcome> {
+        self.ensure_gate0_namespace().await?;
         match self {
             #[cfg(feature = "quic-compio")]
             Self::Compio(client, ConnectionProfile::Gate0) => client.delete(application_key).await,
@@ -414,6 +417,30 @@ impl ConnectedClient {
                 client.delete(application_key.as_bytes()).await
             }
         }
+    }
+
+    async fn ensure_gate0_namespace(&self) -> openkache_client_core::Result<()> {
+        let namespace_id = match self {
+            #[cfg(feature = "quic-compio")]
+            Self::Compio(client, ConnectionProfile::Gate0) => {
+                client.raw().ensure_namespace_id().await?
+            }
+            #[cfg(feature = "quic-quinn")]
+            Self::Quinn(client, ConnectionProfile::Gate0) => {
+                client.raw().ensure_namespace_id().await?
+            }
+            _ => return Ok(()),
+        };
+        if namespace_id == contract::GATE0_NAMESPACE_ID {
+            return Ok(());
+        }
+        Err(openkache_client_core::Error::Configuration {
+            field: "namespace",
+            message: format!(
+                "server selected namespace {namespace_id}, expected Gate 0 namespace {}",
+                contract::GATE0_NAMESPACE_ID
+            ),
+        })
     }
 
     async fn experimental_stats(&self) -> openkache_client_core::Result<String> {
@@ -461,8 +488,7 @@ async fn connect(arguments: &Arguments, profile: ConnectionProfile) -> Result<Co
             )
             .server_trust(trust)
             .compression(Compression::Disabled)
-            .encryption(Encryption::Unprotected)
-            .namespace_id(contract::GATE0_NAMESPACE_ID),
+            .encryption(Encryption::Unprotected),
             ConnectionProfile::Configured => match data_protection_key {
                 Some(key) => LocalClient::builder(endpoint, key).server_trust(trust),
                 None => LocalClient::builder_unprotected(endpoint).server_trust(trust),
@@ -487,8 +513,7 @@ async fn connect(arguments: &Arguments, profile: ConnectionProfile) -> Result<Co
             )
             .server_trust(trust)
             .compression(Compression::Disabled)
-            .encryption(Encryption::Unprotected)
-            .namespace_id(contract::GATE0_NAMESPACE_ID),
+            .encryption(Encryption::Unprotected),
             ConnectionProfile::Configured => match data_protection_key {
                 Some(key) => Client::builder(endpoint, key).server_trust(trust),
                 None => Client::builder_unprotected(endpoint).server_trust(trust),

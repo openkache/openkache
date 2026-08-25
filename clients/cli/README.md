@@ -15,7 +15,8 @@ stdin, and Base64 or raw output.
 The default `gate0` profile is deliberately the same profile as the
 maintained Rust client:
 
-- `NamespaceHash` Item IDs with the public Gate 0 root and namespace `1`;
+- `NamespaceHash` Item IDs with the public Gate 0 root and the server-assigned
+  default namespace `1` (resolved lazily, like the Rust client);
 - `StructuredValue-CBOR-v1` values, uncompressed and unprotected inside TLS;
 - `openkache/1` over QUIC with the local development TLS trust policy.
 
