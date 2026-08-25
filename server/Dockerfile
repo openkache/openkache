@@ -3,8 +3,8 @@
 # The builder is pinned by digest and contains the complete Nix installation.
 # Users only need Docker or Podman; Nix is never required on the host.
 # Keep this stage on the target platform (the default): `container.nix` uses
-# that platform's native static musl compiler. The CI workflow registers QEMU
-# so the arm64 target can evaluate and build on its amd64 runner.
+# that platform's native static musl compiler. CI schedules one native runner
+# per published architecture, so no emulation is needed.
 FROM nixos/nix:2.35.1@sha256:377d4887aca98f0dfa12971c1ea6d6a625a435d8b610d4c95a436843da6fbfd1 AS builder
 
 ARG TARGETARCH
