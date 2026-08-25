@@ -3,6 +3,8 @@
 OpenKache is a super-fast open-source SSD cache server.
 
 Use a client library to connect to OpenKache and store, read, or delete values.
+The Rust client uses Tokio/Quinn by default; applications using another
+executor can enable the optional Compio/QUIC feature and use `CompioClient`.
 
 ## Packages
 
@@ -24,6 +26,14 @@ All three packages use the same logical operations:
 | Write | `client.set(key, value)` | `client.set(key, value).await` | `client.set(key, value)` |
 | Delete | `client.delete(key)` | `client.delete(key).await` | `client.delete(key)` |
 | Close | `client.close()` | `client.close().await` | `client.close()` |
+
+The source-built [CLI](cli/README.md) provides the same Gate 0 key and
+structured-value profile by default for Bash scripts and interactive use.
+Select its `configured` profile when certificate roots, mTLS, client-side value
+protection, TTL, conditional writes, or legacy CLI data are required. That
+profile retains the legacy byte-key/raw-value mapping; its maintenance
+commands remain available only against a full OpenKache server with the
+matching experimental API policy. The prototype does not implement them.
 
 ## Values and keys
 
@@ -61,7 +71,7 @@ language support. Their package README is the source for the current status.
 | C# / .NET | [dotnet/](dotnet/) | Compatibility adapter |
 | Go | [go/](go/) | Compatibility adapter |
 | Swift | [swift/](swift/) | Compatibility adapter |
-| CLI | [cli/](cli/) | Command-line client |
+| CLI | [cli/](cli/) | Gate 0 command-line client with a configurable compatibility profile |
 | Java | `java/` | Scaffold |
 | Kotlin | `kotlin/` | Scaffold |
 | Dart | `dart/` | Scaffold |

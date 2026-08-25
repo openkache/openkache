@@ -130,6 +130,8 @@ mod maintained {
         }
     }
 
+    #[cfg(feature = "quic-compio")]
+    use core::LocalProtectedClient;
     #[cfg(feature = "quic-quinn")]
     use core::ProtectedClient;
 
@@ -267,6 +269,108 @@ mod maintained {
             self.inner.close().await.map_err(map_core_error)
         }
     }
+
+    /// A connected Gate 0 client running on Compio.
+    ///
+    /// `CompioClient` has the same operation and value contract as [`Client`],
+    /// but it does not create or require a Tokio runtime. Call it from an
+    /// active Compio runtime, for example one created with
+    /// `compio::runtime::Runtime::new()`.
+    #[cfg(feature = "quic-compio")]
+    #[derive(Clone)]
+    pub struct CompioClient {
+        inner: LocalProtectedClient,
+    }
+
+    #[cfg(feature = "quic-compio")]
+    impl CompioClient {
+        async fn gate0_client(&self) -> Result<&LocalProtectedClient> {
+            let namespace_id = self
+                .inner
+                .raw()
+                .ensure_namespace_id()
+                .await
+                .map_err(map_core_error)?;
+            if namespace_id != core::contract::GATE0_NAMESPACE_ID {
+                return Err(Error::Core(format!(
+                    "server selected namespace {namespace_id}, expected Gate 0 namespace {}",
+                    core::contract::GATE0_NAMESPACE_ID,
+                )));
+            }
+            Ok(&self.inner)
+        }
+
+        /// Connects using the fixed Gate 0 development profile on Compio.
+        ///
+        /// The profile intentionally disables certificate verification for
+        /// local development. It still requires a TLS 1.3 handshake and never
+        /// falls back to plaintext. Do not use this trust profile in production.
+        pub async fn connect(endpoint: impl AsRef<str>) -> Result<Self> {
+            let endpoint = endpoint.as_ref().parse().map_err(map_core_error)?;
+            let inner = LocalProtectedClient::builder(
+                endpoint,
+                core::DataProtectionKey::from_bytes(core::contract::GATE0_ITEM_ID_ROOT),
+            )
+            .server_trust(core::ServerTrust::Insecure)
+            .compression(Compression::Disabled)
+            .encryption(Encryption::Unprotected)
+            .connect()
+            .await
+            .map_err(map_core_error)?;
+            Ok(Self { inner })
+        }
+
+        /// Retrieves one lossless structured value.
+        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetResult<Value>> {
+            self.gate0_client()
+                .await?
+                .get_structured(key)
+                .await
+                .map(|outcome| match outcome {
+                    CoreGetOutcome::Found(value) => GetResult::Found(value),
+                    CoreGetOutcome::NotFound => GetResult::Missing,
+                })
+                .map_err(map_core_error)
+        }
+
+        /// Stores one lossless structured value using an unconditional write.
+        pub async fn set(&self, key: impl Into<TypedKey>, value: Value) -> Result<SetOutcome> {
+            self.gate0_client()
+                .await?
+                .set_structured(key, value, core::SetOptions::new())
+                .await
+                .map_err(map_core_error)
+                .and_then(|outcome| match outcome {
+                    CoreSetOutcome::Created => Ok(SetOutcome::Created),
+                    CoreSetOutcome::Replaced => Ok(SetOutcome::Replaced),
+                    CoreSetOutcome::NotStored => Err(Error::UnsupportedSetOutcome),
+                })
+        }
+
+        /// Deletes one key and reports whether an item was removed.
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
+            self.gate0_client()
+                .await?
+                .delete(key)
+                .await
+                .map_err(map_core_error)
+                .map(|outcome| match outcome {
+                    core::DeleteOutcome::Deleted => true,
+                    core::DeleteOutcome::NotFound => false,
+                })
+        }
+
+        /// Idempotently closes the client and waits for admitted work to
+        /// settle before releasing the transport.
+        pub async fn close(&self) -> Result<()> {
+            self.inner.close().await.map_err(map_core_error)
+        }
+    }
+
+    /// Compatibility name for callers that use the core's local-runtime
+    /// terminology. Prefer [`CompioClient`] in new code.
+    #[cfg(feature = "quic-compio")]
+    pub type LocalClient = CompioClient;
 }
 
 pub use maintained::*;
