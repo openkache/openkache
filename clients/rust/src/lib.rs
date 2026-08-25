@@ -1,11 +1,4 @@
-//! The maintained OpenKache Rust client.
-//!
-//! The published facade intentionally has one small surface: [`Client::connect`],
-//! [`Client::get`], [`Client::set`], [`Client::delete`], and [`Client::close`].
-//! Gate 0 fixes the development transport profile, NamespaceHash key mapping,
-//! and `StructuredValue-CBOR-v1`; callers cannot select certificates,
-//! protection, compression, retries, or cancellation.
-
+#![doc = include_str!("../README.md")]
 #![doc(html_root_url = "https://docs.rs/openkache/0.1.1")]
 
 #[path = "internal/core/lib.rs"]
@@ -55,15 +48,6 @@ mod maintained {
         Replaced,
     }
 
-    /// Result of an idempotent `delete`.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum DeleteOutcome {
-        /// An existing item was removed.
-        Deleted,
-        /// No item existed for the supplied key.
-        NotFound,
-    }
-
     /// A mutation whose response was lost after admission.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Mutation {
@@ -73,7 +57,7 @@ mod maintained {
         Delete,
     }
 
-    /// Errors returned by the maintained facade.
+    /// Errors returned by the client.
     #[derive(Debug, thiserror::Error)]
     pub enum Error {
         /// A mutation may have taken effect, but the response could not be
@@ -87,13 +71,13 @@ mod maintained {
         /// implementation.
         #[error("client operation failed: {0}")]
         Core(String),
-        /// The server returned a conditional-set status even though Gate 0
-        /// never sends conditional options.
+        /// The server returned a conditional-set status even though this
+        /// client uses unconditional writes.
         #[error("server returned an unsupported set outcome")]
         UnsupportedSetOutcome,
     }
 
-    /// Result alias for the maintained facade.
+    /// Result alias for client operations.
     pub type Result<T> = std::result::Result<T, Error>;
 
     impl<T> GetResult<T> {
@@ -131,12 +115,10 @@ mod maintained {
     #[cfg(feature = "quic-quinn")]
     use core::ProtectedClient;
 
-    /// A connected Gate 0 client.
+    /// A connected OpenKache client.
     ///
-    /// The only supported operations are [`Client::get`], [`Client::set`],
-    /// [`Client::delete`], and [`Client::close`]. Values are always
-    /// `StructuredValue-CBOR-v1`; the fixed profile is uncompressed and
-    /// unprotected inside TLS.
+    /// Values use the OpenKache structured value format. Connections use the
+    /// local development TLS profile described in [`Client::connect`].
     #[cfg(feature = "quic-quinn")]
     #[derive(Clone)]
     pub struct Client {
@@ -161,7 +143,7 @@ mod maintained {
             Ok(&self.inner)
         }
 
-        /// Connects using the fixed Gate 0 development profile.
+        /// Connects to an OpenKache server using the local development profile.
         ///
         /// The profile intentionally disables certificate verification for
         /// local development. It still requires a TLS 1.3 handshake and never
@@ -208,17 +190,16 @@ mod maintained {
                 })
         }
 
-        /// Deletes one key. Repeating the operation is safe and returns
-        /// [`DeleteOutcome::NotFound`].
-        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
+        /// Deletes one key and reports whether an item was removed.
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
             self.gate0_client()
                 .await?
                 .delete(key)
                 .await
                 .map_err(map_core_error)
                 .map(|outcome| match outcome {
-                    core::DeleteOutcome::Deleted => DeleteOutcome::Deleted,
-                    core::DeleteOutcome::NotFound => DeleteOutcome::NotFound,
+                    core::DeleteOutcome::Deleted => true,
+                    core::DeleteOutcome::NotFound => false,
                 })
         }
 

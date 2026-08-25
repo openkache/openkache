@@ -7,6 +7,8 @@ import {
   decode_structured_value,
   encode_structured_value,
   type Structured_Value,
+  type Structured_Value_Error_Kind,
+  type Value_Limits,
 } from "./value-codec.js"
 import {
   SET_OUTCOME_CREATED,
@@ -23,41 +25,65 @@ export type {
 } from "./value-codec.js"
 export {
   Array_Value,
+  Array_Value as ArrayValue,
   ByteString_Value,
+  ByteString_Value as ByteStringValue,
   Float_Value,
+  Float_Value as FloatValue,
   Integer_Value,
+  Integer_Value as IntegerValue,
   Map_Value,
+  Map_Value as MapValue,
   Structured_Value_Error,
+  Structured_Value_Error as StructuredValueError,
   TextString_Value,
+  TextString_Value as TextStringValue,
   UNDEFINED_VALUE,
   Undefined_Value,
+  Undefined_Value as UndefinedValue,
   decode_native_value,
+  decode_native_value as decodeNativeValue,
   decode_structured_value,
+  decode_structured_value as decodeStructuredValue,
   encode_structured_value,
+  encode_structured_value as encodeStructuredValue,
   model_equal,
+  model_equal as modelEqual,
   to_native,
+  to_native as toNative,
   to_plain_object,
+  to_plain_object as toPlainObject,
   to_value,
+  to_value as toValue,
 } from "./value-codec.js"
+export type StructuredValue = Structured_Value
+export type StructuredValueErrorKind = Structured_Value_Error_Kind
+export type ValueLimits = Value_Limits
 
 const TEXT_ENCODER = new TextEncoder()
 const INCOMPATIBLE_OUTCOME_PREFIX =
   "openkache:error:incompatible_server_outcome:"
 
 /**
- * A Gate 0 mapped key: UTF-8 text, exact bytes, a safe integer number, or a
+ * A mapped cache key: UTF-8 text, exact bytes, a safe integer number, or a
  * signed i64 bigint.
  */
-export type Client_Key = string | Uint8Array | number | bigint
+export type ClientKey = string | Uint8Array | number | bigint
 
-/** The only accepted Gate 0 connection shape. */
-export interface Client_Options {
+/** Compatibility spelling retained for existing callers. */
+export type Client_Key = ClientKey
+
+/** Connection options accepted by the client. */
+export interface ClientOptions {
   /** Server endpoint, for example `127.0.0.1:4433`. */
   readonly address: string
 }
 
+/** Compatibility spelling retained for existing callers. */
+export type Client_Options = ClientOptions
+
 /** Native values accepted by `set` after conversion to the lossless model. */
-export type Native_Value =
+export type NativeValue =
   | undefined
   | null
   | boolean
@@ -65,43 +91,58 @@ export type Native_Value =
   | number
   | string
   | Uint8Array
-  | readonly Native_Value[]
-  | ReadonlyMap<Native_Value, Native_Value>
-  | { readonly [key: string]: Native_Value }
+  | readonly NativeValue[]
+  | ReadonlyMap<NativeValue, NativeValue>
+  | { readonly [key: string]: NativeValue }
+
+/** Compatibility spelling retained for existing callers. */
+export type Native_Value = NativeValue
 
 /** A tagged result for a lookup that may be absent. */
-export type Get_Result<Value> = Missing_Result | Found_Result<Value>
+export type GetResult<Value> = MissingResult | FoundResult<Value>
+
+/** Compatibility spelling retained for existing callers. */
+export type Get_Result<Value> = GetResult<Value>
 
 /** Explicit missing lookup result; it is distinct from a stored `Undefined`. */
-export class Missing_Result {
+export class MissingResult {
   readonly kind = "missing" as const
 }
 
+/** Compatibility spelling retained for existing callers. */
+export { MissingResult as Missing_Result }
+
 /** Explicit found lookup result, including a stored `Undefined` value. */
-export class Found_Result<Value> {
+export class FoundResult<Value> {
   readonly kind = "found" as const
 
   constructor(readonly value: Value) {}
 }
 
+/** Compatibility spelling retained for existing callers. */
+export { FoundResult as Found_Result }
+
 /** Stable singleton for callers that need to compare missing results by identity. */
-export const MISSING = new Missing_Result()
+export const MISSING = new MissingResult()
 
-/** Public set outcomes for unconditional Gate 0 writes. */
-export type Set_Outcome = Gate0_Set_Outcome
+/** Public set outcomes for unconditional writes. */
+export type SetOutcome = Gate0_Set_Outcome
 
-/** Public delete outcomes for Gate 0 deletes. */
-export type Delete_Outcome = "deleted" | "not_found"
+/** Compatibility spelling retained for existing callers. */
+export type Set_Outcome = SetOutcome
 
-/** Stable categories for failures surfaced by the maintained facade. */
-export type OpenKache_Error_Kind =
+/** Stable categories for failures surfaced by the client. */
+export type OpenKacheErrorKind =
   | "openkache_error"
   | "unknown_mutation"
   | "incompatible_server_outcome"
 
+/** Compatibility spelling retained for existing callers. */
+export type OpenKache_Error_Kind = OpenKacheErrorKind
+
 /** Error raised by validation, transport, server, or value conversion. */
-export class OpenKache_Error extends Error {
-  readonly kind: OpenKache_Error_Kind
+export class OpenKacheError extends Error {
+  readonly kind: OpenKacheErrorKind
 
   /**
    * Creates a stable client error.
@@ -113,21 +154,27 @@ export class OpenKache_Error extends Error {
   constructor(
     message: string,
     cause?: unknown,
-    kind: OpenKache_Error_Kind = "openkache_error",
+    kind: OpenKacheErrorKind = "openkache_error",
   ) {
     super(message, cause === undefined ? undefined : { cause })
-    this.name = "OpenKache_Error"
+    this.name = "OpenKacheError"
     this.kind = kind
   }
 }
 
+/** Compatibility spelling retained for existing callers. */
+export { OpenKacheError as OpenKache_Error }
+
 /** A mutation may have crossed admission but did not return a definitive result. */
-export class OpenKache_Unknown_Mutation_Error extends OpenKache_Error {
+export class OpenKacheUnknownMutationError extends OpenKacheError {
   constructor(message: string, cause?: unknown) {
     super(message, cause, "unknown_mutation")
-    this.name = "OpenKache_Unknown_Mutation_Error"
+    this.name = "OpenKacheUnknownMutationError"
   }
 }
+
+/** Compatibility spelling retained for existing callers. */
+export { OpenKacheUnknownMutationError as OpenKache_Unknown_Mutation_Error }
 
 interface Client_Lifecycle {
   closed: boolean
@@ -145,14 +192,14 @@ const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
 )
 
 /**
- * Promise-based OpenKache Gate 0 client.
+ * Promise-based OpenKache client.
  *
  * The public cache surface is deliberately limited to `connect`, `get`, `set`,
  * `delete`, and `close`. The development profile uses TLS 1.3 with server
  * certificate verification disabled; this is development only — do not use
  * this trust profile in production.
  */
-export class OpenKache_Client {
+export class OpenKacheClient {
   readonly #native_client: Native_Client
   readonly #lifecycle: Client_Lifecycle
 
@@ -166,7 +213,7 @@ export class OpenKache_Client {
   }
 
   /**
-   * Opens a connection using the fixed Gate 0 development profile.
+   * Opens a connection using the local development profile.
    *
    * The server certificate is deliberately not verified. TLS 1.3 still
    * encrypts traffic, but this profile has no active MITM protection and is
@@ -174,16 +221,16 @@ export class OpenKache_Client {
    *
    * @param endpoint - Server endpoint string or the `{ address }` shape.
    * @returns A connected client.
-   * @throws {OpenKache_Error} When the endpoint or native connection is invalid.
+   * @throws {OpenKacheError} When the endpoint or native connection is invalid.
    */
   static async connect(
-    endpoint: string | Client_Options,
-  ): Promise<OpenKache_Client> {
+    endpoint: string | ClientOptions,
+  ): Promise<OpenKacheClient> {
     const address = parse_endpoint(endpoint)
     const native_options: Native_Client_Options = { address }
     try {
       const native_client = await load_native_module().connect(native_options)
-      return new OpenKache_Client(native_client, { closed: false })
+      return new OpenKacheClient(native_client, { closed: false })
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -192,16 +239,16 @@ export class OpenKache_Client {
   /**
    * Retrieves one lossless StructuredValue-CBOR-v1 value.
    *
-   * `Missing_Result` is returned when no live item exists. A stored `Null` or
-   * `Undefined_Value` is always wrapped in `Found_Result`, so JavaScript
+   * `MissingResult` is returned when no live item exists. A stored `Null` or
+   * `UndefinedValue` is always wrapped in `FoundResult`, so JavaScript
    * `undefined` is never used as the missing marker.
    *
    * @param key - UTF-8 text, exact bytes, a safe integer number, or a
    * signed-i64 bigint key.
    * @returns A tagged missing/found result.
-   * @throws {OpenKache_Error} When validation, transport, or decoding fails.
+   * @throws {OpenKacheError} When validation, transport, or decoding fails.
    */
-  async get(key: Client_Key): Promise<Get_Result<Structured_Value>> {
+  async get(key: ClientKey): Promise<GetResult<StructuredValue>> {
     this.#assert_open()
     let payload: Uint8Array | null
     try {
@@ -211,9 +258,9 @@ export class OpenKache_Client {
     }
     if (payload === null) return MISSING
     try {
-      return new Found_Result(decode_structured_value(payload))
+      return new FoundResult(decode_structured_value(payload))
     } catch (error) {
-      throw new OpenKache_Error(
+      throw new OpenKacheError(
         `structured value decoding failed: ${error_message(error)}`,
         error,
       )
@@ -230,18 +277,18 @@ export class OpenKache_Client {
    * signed-i64 bigint key.
    * @param value - Native or lossless structured value.
    * @returns The created/replaced outcome.
-   * @throws {OpenKache_Error} When validation, encoding, transport, or storage fails.
+   * @throws {OpenKacheError} When validation, encoding, transport, or storage fails.
    */
   async set(
-    key: Client_Key,
-    value: Native_Value | Structured_Value,
-  ): Promise<Set_Outcome> {
+    key: ClientKey,
+    value: NativeValue | StructuredValue,
+  ): Promise<SetOutcome> {
     this.#assert_open()
     let payload: Uint8Array
     try {
       payload = encode_structured_value(value)
     } catch (error) {
-      throw new OpenKache_Error(
+      throw new OpenKacheError(
         `structured value encoding failed: ${error_message(error)}`,
         error,
       )
@@ -260,13 +307,13 @@ export class OpenKache_Client {
       case SET_OUTCOME_REPLACED:
         return outcome
       case SET_OUTCOME_NOT_STORED:
-        throw new OpenKache_Error(
+        throw new OpenKacheError(
           "server returned unsupported conditional SET outcome not_stored",
           undefined,
           "incompatible_server_outcome",
         )
       default:
-        throw new OpenKache_Error(
+        throw new OpenKacheError(
           `SET returned unexpected native outcome ${outcome}`,
         )
     }
@@ -277,15 +324,13 @@ export class OpenKache_Client {
    *
    * @param key - UTF-8 text, exact bytes, a safe integer number, or a
    * signed-i64 bigint key.
-   * @returns `deleted` when an item existed, otherwise `not_found`.
-   * @throws {OpenKache_Error} When validation, transport, or storage fails.
+   * @returns `true` when an item existed, otherwise `false`.
+   * @throws {OpenKacheError} When validation, transport, or storage fails.
    */
-  async delete(key: Client_Key): Promise<Delete_Outcome> {
+  async delete(key: ClientKey): Promise<boolean> {
     this.#assert_open()
     try {
-      return (await this.#native_client.delete(owned_key_bytes(key)))
-        ? "deleted"
-        : "not_found"
+      return await this.#native_client.delete(owned_key_bytes(key))
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -322,15 +367,18 @@ export class OpenKache_Client {
 
   #assert_open(): void {
     if (this.#lifecycle.closed || this.#lifecycle.close_promise !== undefined) {
-      throw new OpenKache_Error("client is closed")
+      throw new OpenKacheError("client is closed")
     }
   }
 }
 
-function parse_endpoint(endpoint: string | Client_Options): string {
+/** Compatibility spelling retained for existing callers. */
+export { OpenKacheClient as OpenKache_Client }
+
+function parse_endpoint(endpoint: string | ClientOptions): string {
   if (typeof endpoint === "string") {
     if (endpoint.length === 0) {
-      throw new OpenKache_Error("endpoint must be a non-empty string")
+      throw new OpenKacheError("endpoint must be a non-empty string")
     }
     return endpoint
   }
@@ -342,29 +390,29 @@ function parse_endpoint(endpoint: string | Client_Options): string {
       (Object.getPrototypeOf(endpoint) !== Object.prototype &&
         Object.getPrototypeOf(endpoint) !== null)
     ) {
-      throw new OpenKache_Error("connect expects an endpoint string or { address }")
+      throw new OpenKacheError("connect expects an endpoint string or { address }")
     }
     const keys = Reflect.ownKeys(endpoint)
     if (keys.length !== 1 || keys[0] !== "address") {
-      throw new OpenKache_Error(
-        "Gate 0 connect accepts only the address field; trust and certificate options are unsupported",
+      throw new OpenKacheError(
+        "connect accepts only the address field; trust and certificate options are unsupported",
       )
     }
     const address = endpoint.address
     if (typeof address !== "string" || address.length === 0) {
-      throw new OpenKache_Error("address must be a non-empty string")
+      throw new OpenKacheError("address must be a non-empty string")
     }
     return address
   } catch (error) {
-    if (error instanceof OpenKache_Error) throw error
-    throw new OpenKache_Error(
+    if (error instanceof OpenKacheError) throw error
+    throw new OpenKacheError(
       "connect expects an endpoint string or { address }",
       error,
     )
   }
 }
 
-function owned_key_bytes(key: Client_Key): Uint8Array {
+function owned_key_bytes(key: ClientKey): Uint8Array {
   if (typeof key === "string") {
     assert_valid_unicode_string(key)
     return encode_cbor_bytes_or_text(3, TEXT_ENCODER.encode(key))
@@ -374,7 +422,7 @@ function owned_key_bytes(key: Client_Key): Uint8Array {
   }
   if (typeof key === "number") {
     if (!Number.isSafeInteger(key) || Object.is(key, -0)) {
-      throw new OpenKache_Error(
+      throw new OpenKacheError(
         "number keys must be finite safe integers and must not be negative zero",
       )
     }
@@ -382,11 +430,11 @@ function owned_key_bytes(key: Client_Key): Uint8Array {
   }
   if (typeof key === "bigint") {
     if (key < -(1n << 63n) || key > (1n << 63n) - 1n) {
-      throw new OpenKache_Error("integer keys must fit the signed 64-bit range")
+      throw new OpenKacheError("integer keys must fit the signed 64-bit range")
     }
     return encode_cbor_integer(key)
   }
-  throw new OpenKache_Error(
+  throw new OpenKacheError(
     "key must be a UTF-8 string, Uint8Array, a safe integer number, or " +
       "signed-i64 bigint",
   )
@@ -399,7 +447,7 @@ function encode_cbor_bytes_or_text(
   const header = encode_cbor_argument(major, bytes.byteLength)
   const total_length = header.byteLength + bytes.byteLength
   if (total_length > SMITHY_MAX_CANONICAL_KEY_BYTES) {
-    throw new OpenKache_Error(
+    throw new OpenKacheError(
       `canonical key exceeds ${SMITHY_MAX_CANONICAL_KEY_BYTES} bytes`,
     )
   }
@@ -417,7 +465,7 @@ function encode_cbor_integer(value: bigint): Uint8Array {
 
 function encode_cbor_argument(major: number, value: number): Uint8Array {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new OpenKache_Error("CBOR argument is outside the supported range")
+    throw new OpenKacheError("CBOR argument is outside the supported range")
   }
   const prefix = major << 5
   if (value <= 23) return Uint8Array.of(prefix | value)
@@ -446,7 +494,7 @@ function encode_cbor_argument(major: number, value: number): Uint8Array {
 
 function encode_cbor_bigint_argument(major: number, value: bigint): Uint8Array {
   if (value < 0n || value > 0xffff_ffff_ffff_ffffn) {
-    throw new OpenKache_Error("CBOR integer argument is outside the supported range")
+    throw new OpenKacheError("CBOR integer argument is outside the supported range")
   }
   if (value <= 23n) return Uint8Array.of((major << 5) | Number(value))
   if (value <= 0xffn) return Uint8Array.of((major << 5) | 24, Number(value))
@@ -486,32 +534,32 @@ function assert_valid_unicode_string(value: string): void {
         next_code_unit < 0xdc00 ||
         next_code_unit > 0xdfff
       ) {
-        throw new OpenKache_Error("text keys must not contain unpaired surrogates")
+        throw new OpenKacheError("text keys must not contain unpaired surrogates")
       }
       index += 1
     } else if (code_unit >= 0xdc00 && code_unit <= 0xdfff) {
-      throw new OpenKache_Error("text keys must not contain unpaired surrogates")
+      throw new OpenKacheError("text keys must not contain unpaired surrogates")
     }
   }
 }
 
-function as_openkache_error(error: unknown): OpenKache_Error {
-  if (error instanceof OpenKache_Error) return error
+function as_openkache_error(error: unknown): OpenKacheError {
+  if (error instanceof OpenKacheError) return error
   const message = error_message(error)
   if (message.startsWith(INCOMPATIBLE_OUTCOME_PREFIX)) {
-    return new OpenKache_Error(
+    return new OpenKacheError(
       message.slice(INCOMPATIBLE_OUTCOME_PREFIX.length),
       error,
       "incompatible_server_outcome",
     )
   }
   if (message.startsWith("openkache:error:unknown_mutation:")) {
-    return new OpenKache_Unknown_Mutation_Error(
+    return new OpenKacheUnknownMutationError(
       message.slice("openkache:error:unknown_mutation:".length),
       error,
     )
   }
-  return new OpenKache_Error(message, error)
+  return new OpenKacheError(message, error)
 }
 
 function error_message(error: unknown): string {

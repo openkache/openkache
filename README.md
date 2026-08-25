@@ -2,7 +2,7 @@
 
 # OpenKache ⚡
 
-**An experimental Rust SSD-first cache server.**
+**A super-fast, open-source SSD cache server.**
 
 Open-source · Rust · QUIC/TLS-over-TCP · SIMD-accelerated · SSD-first
 
@@ -99,12 +99,14 @@ for the complete envelope and future-profile rules.
 
 ### 📚 Multi-language SDKs
 
-Maintained registry packages are available for
+Registry packages are available for
 [Rust](https://crates.io/crates/openkache),
 [TypeScript and JavaScript](https://www.npmjs.com/package/openkache), and
-[Python](https://pypi.org/project/openkache/). Each exposes the same five
-Gate 0 operations: `connect`, `get`, `set`, `delete`, and `close`. The
-[client status table](./clients/README.md) lists the compatibility adapters and
+[Python](https://pypi.org/project/openkache/). They all provide the same
+basic workflow: connect, get, set, delete, and close. Choose the package for
+your language; each client README contains installation options, a complete
+example, and a public API reference. The [client package
+index](./clients/README.md) lists compatibility adapters and language
 scaffolds separately.
 
 ### 📦 Single binary distribution
@@ -148,68 +150,21 @@ address. Production non-loopback startup requires a stable server certificate
 and private key, a client CA for mTLS, and an administrator certificate
 allowlist. See the [production TLS guide](#production-tls).
 
-### Try a maintained client
+### Try a client
 
-The three maintained packages use the local development TLS profile. It
-disables certificate verification, so use these examples only against a local
-development server; do not reuse this trust profile for production traffic.
+The examples in the client READMEs use the local development TLS profile. It
+does not verify the server certificate, so use it only with a local development
+server; do not reuse this trust profile for production traffic.
 
-| Package | Install | Documentation |
-|---|---|---|
-| TypeScript / JavaScript | `npm install openkache` or `bun add openkache` | [npm](https://www.npmjs.com/package/openkache) · [README](clients/typescript/README.md) |
-| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [README](clients/python/README.md) |
-| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [README](clients/rust/README.md) |
+| Package | Install | Documentation | Source |
+|---|---|---|---|
+| TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [client README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
+| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
+| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [client README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
 
-All three clients can connect to the default local endpoint:
-`127.0.0.1:4433`.
-
-TypeScript / JavaScript:
-
-```typescript
-import { OpenKache_Client } from "openkache"
-
-const client = await OpenKache_Client.connect("127.0.0.1:4433")
-try {
-  console.log(await client.set("hello", { from: "javascript" }))
-  console.log(await client.get("hello"))
-  console.log(await client.delete("hello"))
-} finally {
-  await client.close()
-}
-```
-
-Python:
-
-```python
-from openkache import Client
-
-client = Client.connect("127.0.0.1:4433")
-try:
-    print(client.set("hello", {"from": "python"}))
-    print(client.get("hello"))
-    print(client.delete("hello"))
-finally:
-    client.close()
-```
-
-Rust:
-
-```rust
-use openkache::{Client, Value};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::connect("127.0.0.1:4433").await?;
-    client.set("hello", Value::text("from rust")).await?;
-    println!("{:?}", client.get("hello").await?);
-    client.delete("hello").await?;
-    client.close().await?;
-    Ok(())
-}
-```
-
-Each package README contains a complete runnable example, result semantics,
-supported key/value types, and package-specific build requirements.
+All three client guides use `127.0.0.1:4433` as the default local endpoint.
+They also list alternative package managers and the complete public API for
+their language.
 
 ### Container image
 
@@ -489,18 +444,18 @@ cargo check --locked
 ## 📊 Project status
 
 OpenKache is in **active development**. Core components are stable, the server
-protocol layer is being built out, and maintained client SDKs are available in
-the languages listed below; package status details live in
+protocol layer is being built out, and client packages are available in the
+languages listed below; package status details live in
 [`clients/README.md`](./clients/README.md).
 
 | Component | Status | Notes |
 |---|---|---|
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with runtime SIMD dispatch |
-| QUIC client (Rust) | 🚧 Preview | Shared Rust core, binary protocol v1, secure value codec |
+| Rust client | 🚧 Preview | Async client package |
 | Command-line client | 🚧 Preview | `openkache-cli` for Bash scripts and interactive shell use |
-| QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
-| Python client | 🚧 Preview | Synchronous five-operation Gate 0 facade |
+| TypeScript / JavaScript client | 🚧 Preview | Node.js, Bun, and Deno package |
+| Python client | 🚧 Preview | Python package |
 | Go client | 🚧 Preview | Context-aware shared-core native ABI binding |
 | C client | 🚧 Preview | C17 shared-core ABI |
 | C++ client | 🚧 Preview | C++20 adapter over the C ABI |

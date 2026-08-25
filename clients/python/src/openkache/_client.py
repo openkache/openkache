@@ -1,10 +1,7 @@
-"""Small synchronous facade for the maintained OpenKache v1 client.
+"""Small synchronous client for the OpenKache cache server.
 
-Gate 0 intentionally keeps the Python surface narrow.  The five public
-operations are ``connect``, ``get``, ``set``, ``delete``, and ``close``.
-Mapped keys are encoded by the shared key contract and values always travel
-through ``StructuredValue-CBOR-v1``; per-request policy controls are not part
-of this facade.
+Mapped keys use the shared key contract and values travel through
+``StructuredValue-CBOR-v1``.
 """
 
 from __future__ import annotations
@@ -37,7 +34,7 @@ _T = TypeVar("_T")
 
 
 class OpenKacheError(RuntimeError):
-    """Base exception raised by the maintained client."""
+    """Base exception raised by the client."""
 
 
 class OpenKacheValueError(OpenKacheError, ValueError):
@@ -57,13 +54,13 @@ class OpenKacheUnknownMutationError(OpenKacheError):
 
 
 class OpenKacheIncompatibleServerError(OpenKacheError):
-    """The server returned an outcome outside the maintained Gate 0 contract."""
+    """The server returned an outcome outside the supported client API."""
 
     kind = "incompatible_server_outcome"
 
 
 # This spelling existed in the preview package. Keep it importable for code that
-# only catches the error; Gate 0 never exposes cancellation controls.
+# only catches the error; the client never exposes cancellation controls.
 UnknownMutationError = OpenKacheUnknownMutationError
 
 
@@ -128,28 +125,22 @@ def _set_outcome(kind: object) -> SetOutcome:
         raise OpenKacheError(f"SET returned unexpected native result {kind!r}") from error
 
 
-class DeleteOutcome(StrEnum):
-    """The server's definitive DELETE result."""
+def _delete_result(kind: object) -> bool:
+    """Map the native DELETE result to whether an item was removed."""
 
-    DELETED = "deleted"
-    NOT_FOUND = "not_found"
-
-
-def _delete_outcome(kind: object) -> DeleteOutcome:
-    if isinstance(kind, DeleteOutcome):
+    if isinstance(kind, bool):
         return kind
     if isinstance(kind, str):
-        try:
-            return DeleteOutcome(kind)
-        except ValueError as error:
-            raise OpenKacheError(
-                f"DELETE returned unexpected native result {kind!r}"
-            ) from error
+        if kind == "deleted":
+            return True
+        if kind in {"not_deleted", "not_found"}:
+            return False
+        raise OpenKacheError(f"DELETE returned unexpected native result {kind!r}")
     try:
         if int(kind) == SMITHY_FFI_RESULT_DELETED:
-            return DeleteOutcome.DELETED
+            return True
         if int(kind) == SMITHY_FFI_RESULT_NOT_DELETED:
-            return DeleteOutcome.NOT_FOUND
+            return False
     except (TypeError, ValueError):
         pass
     raise OpenKacheError(f"DELETE returned unexpected native result {kind!r}")
@@ -166,13 +157,10 @@ class OpenKacheClient:
     def connect(cls, address: str) -> OpenKacheClient:
         """Open one development QUIC-over-TLS 1.3 connection.
 
-        Gate 0 intentionally has no certificate, retry, timeout, TTL, or
-        transport arguments.  The private native adapter fixes the
-        verification-disabled DevelopmentTrust profile, ``openkache/1`` ALPN,
-        the server-assigned namespace, the development Item-ID root, and the
-        uncompressed, unprotected StructuredValue-CBOR-v1 selector.  Production
-        authentication configuration is deferred to a later maintained-client
-        gate.
+        The local development profile disables certificate verification and
+        uses a fixed local-development namespace and structured-value format.
+        Production authentication configuration is not available in this
+        client yet.
         """
 
         native_address = _resolve_address(address)
@@ -250,8 +238,8 @@ class OpenKacheClient:
         kind, _ = _read_result(result, operation_name="SET")
         return _set_outcome(kind)
 
-    def delete(self, key: str | int | bytes | bytearray | memoryview) -> DeleteOutcome:
-        """Delete one mapped key and return its tagged server outcome."""
+    def delete(self, key: str | int | bytes | bytearray | memoryview) -> bool:
+        """Delete one mapped key and return whether an item was removed."""
 
         self._assert_open()
         try:
@@ -265,7 +253,7 @@ class OpenKacheClient:
         except NativeError as error:
             _raise_native_error(error)
         kind, _ = _read_result(result, operation_name="DELETE")
-        return _delete_outcome(kind)
+        return _delete_result(kind)
 
     def close(self) -> None:
         """Release the native connection; repeated calls are harmless."""
@@ -412,7 +400,6 @@ __all__ = [
     "Client",
     "Found",
     "GetResult",
-    "DeleteOutcome",
     "Missing",
     "MISSING",
     "OpenKacheClient",

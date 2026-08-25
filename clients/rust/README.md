@@ -1,147 +1,198 @@
 # OpenKache Rust client
 
-`openkache` is the maintained Rust binding for the OpenKache v1 Gate 0
-(`v1-gate0`) client contract. It is one publishable crate; the transport,
-protocol, key, and value implementation crates are private workspace
-implementation details. The server is released separately as the
-[`openkache-server`](../../server/) package. Release this crate from a
-reviewed `client-v<version>` tag through the public
-`Release OpenKache Rust crate` workflow with `package=client`; the workflow
-packages only `clients/rust/Cargo.toml` and never publishes internal workspace
-crates.
+OpenKache is a super-fast open-source SSD cache server. Use this async Rust
+client to store, read, and delete values in a few lines.
 
-Published package: [crates.io/crates/openkache](https://crates.io/crates/openkache).
-The facade requires Rust 1.85 or newer and a native C linker because the
-default TLS backend builds AWS-LC.
+[crates.io package](https://crates.io/crates/openkache) ·
+[docs.rs API reference](https://docs.rs/openkache/latest/openkache/) ·
+[GitHub source](https://github.com/openkache/openkache/tree/main/clients/rust)
 
 ## Install
 
-```toml
-[dependencies]
-openkache = "0.1"
-```
-
-For a new application, the equivalent commands are:
+Rust 1.85 or newer and a native C linker are required.
 
 ```bash
+# OpenKache client
 cargo add openkache
+
+# Tokio, for the standalone example's #[tokio::main]
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-On a Nix-only environment, include a C compiler when building the dependency:
-
-```bash
-nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc
-```
-
-The facade exposes exactly five operations:
-
-- `Client::connect(endpoint)` establishes the fixed development TLS profile.
-- `Client::get(key)` returns `GetResult::Missing` or `GetResult::Found(Value)`.
-- `Client::set(key, value)` returns `SetOutcome::Created` or `Replaced`.
-- `Client::delete(key)` returns `DeleteOutcome::Deleted` or `NotFound`.
-- `Client::close()` is idempotent and waits for admitted operations to settle
-  before releasing the transport.
-
-`Value` is the lossless cross-language model encoded as
-`StructuredValue-CBOR-v1`. It preserves undefined versus null, arbitrary
-integer magnitude, float width and raw bits, byte/text identity, ordered
-containers, and scalar map-key equality. `TypedKey` accepts only signed `i64`,
-UTF-8 text, or exact bytes.
-
-Gate 0 fixes NamespaceHash mapping, resolves the server-assigned default
-namespace lazily (ID `1` on a fresh server), selector `0x10` (uncompressed,
-unprotected, StructuredValue-CBOR-v1), ALPN `openkache/1`, and the development
-trust profile. The development profile disables certificate verification while
-retaining TLS encryption; **development only — do not use this trust profile
-in production**.
-The facade has no certificate, cancellation, retry, timeout, compression,
-protection, raw-byte, Exact Item ID, conditional-write, or policy options.
+The client uses Tokio internally, so an active Tokio runtime is required.
+`openkache` already brings Tokio into the dependency graph; add Tokio directly
+only when your application needs the `#[tokio::main]` macro. If the application
+already uses Tokio, skip the second command. Tokio is the supported runtime for
+this client.
 
 ## Quick start
 
-```rust
-use openkache::{Client, DeleteOutcome, GetResult, SetOutcome, Value};
-
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-assert_eq!(client.set("profile", Value::text("OpenKache")).await?, SetOutcome::Created);
-assert_eq!(
-    client.get("profile").await?,
-    GetResult::Found(Value::text("OpenKache")),
-);
-assert_eq!(client.delete("profile").await?, DeleteOutcome::Deleted);
-client.close().await?;
-# Ok(())
-# }
-```
-
-The following is a complete `src/main.rs` example. It accepts an optional
-`host:port` argument and exercises the full CRUD lifecycle:
+The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 
 ```rust
-use openkache::{Client, DeleteOutcome, GetResult, SetOutcome, Value};
+use openkache::{Client, Value};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:4433".to_owned());
-    let client = Client::connect(endpoint).await?;
+async fn main() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
 
-    let key = "hello";
-    assert_eq!(
-        client.set(key, Value::text("from rust")).await?,
-        SetOutcome::Created
-    );
-    assert!(matches!(
-        client.get(key).await?,
-        GetResult::Found(Value::TextString(_))
-    ));
-    assert_eq!(
-        client.delete(key).await?,
-        DeleteOutcome::Deleted
-    );
-    assert!(matches!(client.get(key).await?, GetResult::Missing));
-
+    client.set("greeting", Value::text("hello")).await?;
+    println!("{:?}", client.get("greeting").await?);
+    client.delete("greeting").await?;
     client.close().await?;
-    println!("Rust OpenKache CRUD smoke test passed");
     Ok(())
 }
 ```
 
-Run it from the application directory after adding the two dependencies:
+The local development TLS profile does not verify the server certificate. Use
+this example only with a local development server.
 
-```bash
-env -u CARGO_BUILD_TARGET cargo run -- 127.0.0.1:4433
+Values use the lossless `StructuredValue-CBOR-v1` format shared by the
+OpenKache clients.
+
+## Reference
+
+### `Client::connect(endpoint)`
+
+Opens a connection and returns a `Client`.
+
+- **Input:** a `host:port` endpoint. IPv6 endpoints use `[host]:port`.
+- **Returns:** an async `Result<Client>`.
+- **Errors:** `Error::Core` when the endpoint, TLS handshake, or protocol
+  setup fails.
+
+```rust
+let client = Client::connect("127.0.0.1:4433").await?;
 ```
 
-The `CARGO_BUILD_TARGET` override is only needed when an enclosing Nix
-development shell forces a musl target that is not installed in the temporary
-application environment.
+### `client.get(key)`
 
-If a mutation crosses admission but its response is lost, the client returns
-`Error::UnknownMutation` and never replays it.
+Reads one structured value.
 
-## Commands
+- **Input:** anything that converts into `TypedKey`: text, bytes, or a signed
+  64-bit integer.
+- **Returns:** `Ok(GetResult::Found(value))` when the key exists, or
+  `Ok(GetResult::Missing)` when it does not. A stored `Value::Null` or
+  `Value::Undefined` is still `Found`.
+- **Errors:** `Error::Core` for connection, protocol, key, or value failures.
 
-Check the facade and run its package-local build, test, and documentation commands:
-
-```bash
-cargo check --locked
-cargo test --locked
-cargo doc --locked --no-deps
-cargo package --locked
+```rust
+match client.get("greeting").await? {
+    GetResult::Found(value) => println!("{value:?}"),
+    GetResult::Missing => println!("missing"),
+}
 ```
 
-The same commands are the package-local dry run used before creating a
-`client-v<version>` release tag. `cargo package` verifies that the publishable
-archive builds and includes the documented crate entry points. The immutable
-publication workflow rebuilds and checksums the exact tagged archive before
-asking the protected `crates-io-release` environment for approval.
+### `client.set(key, value)`
 
-Run the checked-in example against a local development server:
+Stores one value with an unconditional write.
 
-```bash
-env -u CARGO_BUILD_TARGET cargo run --example basic -- 127.0.0.1:4433
+- **Input:** a `TypedKey`-convertible key and a `Value`.
+- **Returns:** `Ok(SetOutcome::Created)` for a new key or
+  `Ok(SetOutcome::Replaced)` for an existing key.
+- **Errors:** `Error::UnknownMutation` when admission happened but the result
+  was not confirmed; do not replay that mutation. Other failures are returned
+  as `Error::Core`.
+
+```rust
+let outcome = client.set("greeting", Value::text("hello")).await?;
 ```
+
+### `client.delete(key)`
+
+Deletes one key. Repeating the operation is safe.
+
+- **Input:** a `TypedKey`-convertible key.
+- **Returns:** `Ok(true)` when a value was removed, or `Ok(false)` when no
+  value existed.
+- **Errors:** `Error::UnknownMutation` when the result of an admitted delete
+  was not confirmed.
+
+```rust
+let removed = client.delete("greeting").await?;
+if removed {
+    println!("deleted");
+}
+```
+
+### `client.close()`
+
+Closes the connection after admitted operations settle. Repeated calls are
+safe.
+
+- **Returns:** `Result<()>`.
+
+```rust
+client.close().await?;
+```
+
+### Keys
+
+Use `TypedKey` constructors when you want to make the key type explicit:
+
+- `TypedKey::text(value)` creates a UTF-8 text key.
+- `TypedKey::bytes(value)` creates an exact byte key.
+- `TypedKey::integer(value)` creates a signed 64-bit integer key.
+- `TypedKey::canonical_bytes()` returns the encoded key.
+
+The client also accepts common Rust conversions directly:
+
+```rust
+client.get("text-key").await?;
+client.get(b"bytes-key").await?;
+client.get(42_i64).await?;
+```
+
+`KeyError` describes invalid or out-of-range keys.
+
+### Values
+
+`Value` is the lossless value type accepted by `set` and returned by `get`:
+
+```text
+Undefined | Null | Boolean | Integer | Float | TextString | Bytes | Array | Map
+```
+
+Construct values with:
+
+- `Value::integer(value)` for an exact integer.
+- `Value::float16(bits)`, `Value::float32(bits)`, or `Value::float64(bits)`
+  for exact IEEE-754 bits.
+- `Value::text(value)` for UTF-8 text.
+- `Value::bytes(value)` for exact bytes.
+- `Value::array(values)` for an ordered array.
+- `Value::map(entries)` for an ordered map with scalar, unique keys.
+- `Value::to_cbor()` and `Value::from_cbor(bytes)` to encode or decode one
+  complete structured value.
+
+```rust
+let value = Value::map(vec![
+    (Value::text("count"), Value::integer(1_i128)),
+])?;
+client.set("stats", value).await?;
+```
+
+For exact integer and float construction, use `Integer`, `Sign`,
+`Float`, and `FloatWidth`. `ValueLimits` bounds bytes, depth, item count, and
+integer magnitude. `ValueError` reports value validation and encoding errors;
+use `ValueError::kind()` for its stable category.
+
+`Result<T>` is the result alias returned by client methods.
+
+### Results and errors
+
+- `GetResult<T>` is `Missing` or `Found(T)`.
+- `SetOutcome` is `Created` or `Replaced`.
+- `delete` returns `true` when an item existed and `false` otherwise.
+- `Error::UnknownMutation` means a `set` or `delete` may have reached the
+  server without a confirmed result. Its `Mutation` identifies the operation;
+  do not replay it automatically.
+- `Error::Core` reports connection, protocol, key, value, or server failures.
+- `Error::UnsupportedSetOutcome` reports a server result outside the
+  unconditional-write API.
+
+## More information
+
+- [OpenKache on crates.io](https://crates.io/crates/openkache)
+- [Rust API reference](https://docs.rs/openkache/latest/openkache/)
+- [OpenKache repository](https://github.com/openkache/openkache)

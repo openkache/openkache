@@ -1,258 +1,222 @@
 # OpenKache TypeScript client
 
-`openkache` is the maintained Promise-based TypeScript and JavaScript
-client for Node.js, Bun, and Deno. Gate 0 keeps the application surface small:
-`connect`, `get`, `set`, `delete`, and `close`. The package delegates transport,
-key mapping, and `StructuredValue-CBOR-v1` envelope handling to the shared Rust
-core.
+OpenKache is a super-fast open-source SSD cache server. Use this TypeScript
+or JavaScript client to store, read, and delete values in a few lines. It runs
+on Node.js, Bun, and Deno; it is not a browser client.
 
-Published package: [npmjs.com/package/openkache](https://www.npmjs.com/package/openkache).
+[npm package](https://www.npmjs.com/package/openkache) ·
+[GitHub source](https://github.com/openkache/openkache/tree/main/clients/typescript)
 
 ## Install
 
 ```bash
+# npm
 npm install openkache
-# or
+
+# pnpm
+pnpm add openkache
+
+# Yarn
+yarn add openkache
+
+# Bun
 bun add openkache
+
+# Deno
+deno add npm:openkache
 ```
 
-The package contains generated declarations and platform Node-API adapters. It
-has no runtime JavaScript dependencies. Deno uses its Node compatibility layer
-with `--allow-ffi`. The published native adapters support Linux x64/ARM64 and
-Apple Silicon macOS; Node.js 20 or newer is required.
-
-## Quick smoke test
-
-Start a local preview server on `127.0.0.1:4433`, then run this from a
-temporary directory:
-
-```bash
-cd "$(mktemp -d)"
-npm init -y
-npm install openkache
-node --input-type=module
-```
-
-For Bun, use `bun init -y && bun add openkache && bun repl` instead. For Deno,
-import the package through its npm compatibility layer and run with
-`--allow-ffi`. The client uses the development TLS profile described below;
-certificate verification is intentionally disabled and must not be used for
-production traffic.
-
-From this checkout, the maintained example can be run with:
-
-```bash
-bun install --frozen-lockfile
-bun run build:package
-OPENKACHE_ADDRESS=127.0.0.1:4433 bun run examples/basic.ts
-```
+Node.js users need Node.js 20 or newer. The published native adapters currently
+support Linux x64/ARM64 (glibc) and Apple Silicon macOS.
 
 ## Quick start
 
-Gate 0 uses a fixed TLS 1.3 development profile:
+The example below assumes a local OpenKache server at `127.0.0.1:4433`.
+Save it as `index.mjs`; the same code can be used from a TypeScript file.
 
-- QUIC-over-TLS 1.3 with `openkache/1` and `X25519MLKEM768`;
-- server certificate and hostname verification disabled (`DevelopmentTrust`);
-- the server-assigned default namespace (ID `1` on a fresh server), the public
-  `NamespaceHash` Item-ID root, and
-  uncompressed/unprotected `StructuredValue-CBOR-v1` values.
+```javascript
+import { OpenKacheClient } from "openkache"
 
-The server still presents a certificate and TLS encrypts traffic. This profile
-provides passive confidentiality but no active man-in-the-middle protection:
-**development only — do not use this trust profile in production**. The client
-does not accept certificate, trust-root, identity, transport, retry, timeout,
-TTL, compression, or value-protection options.
+const client = await OpenKacheClient.connect("127.0.0.1:4433")
 
-```typescript
-import { OpenKache_Client } from "openkache"
-
-const client = await OpenKache_Client.connect("127.0.0.1:4433")
-
-try {
-  console.log(await client.set("hello", { from: "typescript" }))
-
-  const result = await client.get("hello")
-  console.log(result.kind === "found" ? result.value : "missing")
-
-  console.log(await client.delete("hello"))
-} finally {
-  await client.close()
-}
+await client.set("greeting", "hello")
+const result = await client.get("greeting")
+console.log(result.kind === "found" ? result.value : "missing")
+await client.delete("greeting")
+await client.close()
 ```
 
-`set` resolves to `"created"` or `"replaced"`, `get` returns a tagged
-`Found_Result` or `Missing_Result`, and `delete` resolves to `"deleted"` or
-`"not_found"`. A stored `undefined` is a found value and is never confused
-with a missing key.
-
-`connect({ address: "127.0.0.1:4433" })` is accepted as an equivalent
-endpoint-only shape. DNS hostnames use the same `host:port` form as the shared
-Rust core, for example `cache.example.com:4433`; bracket IPv6 literals as
-`[2001:db8::10]:4433`. Any other connection field is rejected.
-
-## The five-operation facade
-
-The package intentionally exports exactly these cache operations:
-
-| Operation | TypeScript shape | Result |
-| --- | --- | --- |
-| `connect` | `OpenKache_Client.connect(endpoint)` | `Promise<OpenKache_Client>` |
-| `get` | `client.get(key)` | `Promise<Get_Result<Structured_Value>>` |
-| `set` | `client.set(key, value)` | `Promise<"created" \| "replaced">` |
-| `delete` | `client.delete(key)` | `Promise<"deleted" \| "not_found">` |
-| `close` | `client.close()` | `Promise<void>` |
-
-`close` is idempotent. It drains or completes accepted work before releasing
-the native connection; calls after close reject with `OpenKache_Error`. If
-native shutdown rejects, the failed promise is discarded and a later `close`
-call retries shutdown while cache operations remain closed.
-
-`get` never uses JavaScript `undefined` as a missing sentinel:
-
-```typescript
-type Get_Result<Value> = Missing_Result | Found_Result<Value>
-
-class Missing_Result {
-  readonly kind: "missing"
-}
-
-class Found_Result<Value> {
-  readonly kind: "found"
-  readonly value: Value
-}
-```
-
-`Missing_Result` means the item is absent. `Found_Result` wraps every stored
-value, including `null` and `Undefined_Value`. `MISSING` is a shared singleton
-for callers that want identity comparison.
-
-If a mutation may have crossed server admission but its response is lost, the
-promise rejects with `OpenKache_Unknown_Mutation_Error`. The client never
-automatically replays that mutation.
-
-## Keys
-
-Each operation infers one typed key independently:
-
-- `string` → valid UTF-8 `Text`; empty and NUL-containing strings are valid.
-- `Uint8Array` → exact `Bytes`, including empty and zero bytes.
-- `number` → `Integer` only when it is a finite safe integer other than
-  negative zero; the adapter converts it with `BigInt(number)`.
-- `bigint` → signed `i64` `Integer` (`-2^63..=2^63-1`).
-
-JavaScript fractional numbers, `-0`, `NaN`, infinities, unsafe numbers,
-booleans, `null`, arrays, objects, invalid UTF-16 surrogates, and out-of-range
-integers are rejected. The adapter canonicalizes each key and derives its Item
-ID with the fixed Gate 0 `NamespaceHash` profile. A safe integer `number` and
-the same-valued `bigint` produce the same canonical integer key.
-
-## Structured values
-
-`set` and `get` use `StructuredValue-CBOR-v1` exclusively. The lossless model
-contains:
-
-```text
-Null | Undefined | Boolean | Integer | Float16/32/64 |
-ByteString | TextString | Array | Map
-```
-
-Native JavaScript values accepted by `set` map to the lossless model as
-follows:
-
-| JavaScript value | Model value |
-| --- | --- |
-| `null` | `Null` |
-| `undefined` | `Undefined` |
-| `boolean` | `Boolean` |
-| `bigint` | arbitrary-precision `Integer` |
-| `number` | `Float64` (raw binary64 bits) |
-| `Uint8Array` | `ByteString` |
-| `string` | `TextString` |
-| `Array` | ordered `Array` |
-| `Map` or plain object | ordered scalar-key `Map` |
-
-Gate 0 `get` always returns the lossless model in `Found_Result`; it never
-applies a native projection. Use the lossless constructors when Float16/32
-width, raw bits, or a scalar map key must survive a round trip:
-
-```typescript
-import {
-  Float_Value,
-  Integer_Value,
-  Map_Value,
-  UNDEFINED_VALUE,
-} from "openkache"
-
-const value = new Map_Value([
-  ["ratio", new Float_Value(16, 0x3c00n)],
-  ["count", new Integer_Value(9007199254740993n)],
-  ["optional", UNDEFINED_VALUE],
-])
-await client.set("lossless", value)
-```
-
-Only scalar values may be map keys. Duplicate keys, arrays or maps as keys,
-cycles, sparse arrays, functions, classes, and arbitrary object graphs are
-rejected. Map order is retained for lossless forwarding; map equality is
-order-independent.
-
-The runtime-neutral codec helpers are also available from
-`openkache/value-codec` and perform no network I/O:
-
-```typescript
-import {
-  decode_structured_value,
-  encode_structured_value,
-} from "openkache/value-codec"
-
-const bytes = encode_structured_value(1n)
-const model = decode_structured_value(bytes)
-```
-
-`to_native` and `decode_native_value` are strict native projections. They map
-integers to `bigint`, bytes to copied `Uint8Array`, and maps to `Map`. They
-reject `Undefined_Value` and every `Float_Value` with
-`Structured_Value_Error`: JavaScript `undefined` would collapse the stored
-undefined/missing distinction, while `number` would discard float width and
-raw-bit distinctions. Keep the lossless result from `get` or use
-`decode_structured_value` when those values are present. The optional
-`{ safe_integer: true }` setting is a checked integer-only convenience that
-returns a JavaScript `number` only for values in the exact safe-integer range;
-it does not enable lossy undefined or float conversion.
-
-`to_plain_object` applies the same strict value rules and additionally rejects
-text-keyed maps when JavaScript object property ordering would differ from the
-lossless map entry order.
-
-## Errors
-
-All operation failures reject with `OpenKache_Error` or a subclass. The stable
-`kind` values are:
-
-| Error | `kind` | Meaning |
-| --- | --- | --- |
-| `OpenKache_Error` | `openkache_error` | Validation, transport, protocol, server, or value failure |
-| `OpenKache_Unknown_Mutation_Error` | `unknown_mutation` | A mutation may have reached the server without a definitive response |
-| `OpenKache_Error` | `incompatible_server_outcome` | A server returned a non-Gate-0 outcome such as conditional `NotStored` |
-| `Structured_Value_Error` | codec-specific | Local structured-value conversion or parsing failure |
-
-## Commands
-
-Run these commands from `openkache/clients/typescript` in the repository Nix
-development shell:
+Run it with Node.js or Bun:
 
 ```bash
-bun install --frozen-lockfile
-bun run build
-bun run typecheck
-bun run pack:check
+node index.mjs
+# or
+bun index.mjs
 ```
 
-`build` generates ignored Smithy contract sources for the package build but
-does not publish those internal operation selectors. The npm tarball contains
-only the maintained facade, runtime-neutral codec, private native loader, and
-platform adapters. `pack:check` builds the host Node-API adapter before
-checking package contents. The maintainer build requires Cargo, a C linker, and
-`cargo-zigbuild`; normal npm/Bun/Deno consumers only install the published
-artifact. Private integration tests live in the monorepo rather than this
-public package.
+For Deno, change the import to `from "npm:openkache"` and run:
+
+```bash
+deno run --allow-net --allow-ffi index.ts
+```
+
+The local development TLS profile does not verify the server certificate. Use
+this example only with a local development server.
+
+## Reference
+
+### `OpenKacheClient.connect(endpoint)`
+
+Opens a connection and returns a client.
+
+- **Input:** a non-empty `host:port` string or `{ address }`. IPv6 endpoints
+  use `[host]:port`.
+- **Returns:** `Promise<OpenKacheClient>`.
+- **Throws:** `OpenKacheError` when validation or connection setup fails.
+
+```javascript
+const client = await OpenKacheClient.connect("127.0.0.1:4433")
+```
+
+### `client.get(key)`
+
+Reads one structured value.
+
+- **Input:** a `ClientKey`.
+- **Returns:** `FoundResult` when the key exists, or `MissingResult` when it
+  does not. A stored `undefined` is still returned as `FoundResult`.
+- **Throws:** `OpenKacheError` when validation, transport, or decoding fails.
+
+```javascript
+const result = await client.get("greeting")
+if (result.kind === "found") {
+  console.log(result.value)
+}
+```
+
+`MISSING` is a shared `MissingResult` instance.
+
+### `client.set(key, value)`
+
+Stores one value with an unconditional write.
+
+- **Input:** a `ClientKey` and a native or lossless structured value.
+- **Returns:** `"created"` for a new key or `"replaced"` for an existing key.
+- **Throws:** `OpenKacheError` when validation, encoding, transport, or
+  storage fails.
+
+```javascript
+const outcome = await client.set("greeting", "hello")
+```
+
+### `client.delete(key)`
+
+Deletes one key. Repeating the operation is safe.
+
+- **Input:** a `ClientKey`.
+- **Returns:** `true` when a value was removed, or `false` when no value
+  existed.
+- **Throws:** `OpenKacheError` when validation, transport, or storage fails.
+
+```javascript
+const removed = await client.delete("greeting")
+if (removed) {
+  console.log("deleted")
+}
+```
+
+### `client.close()`
+
+Closes the connection. Repeated calls complete successfully.
+
+- **Returns:** `Promise<void>`.
+
+```javascript
+await client.close()
+```
+
+### Keys
+
+Each operation accepts one of these key types:
+
+- `string` — UTF-8 text, including empty strings.
+- `Uint8Array` — exact bytes, including empty bytes.
+- `number` — a finite safe integer other than `-0`.
+- `bigint` — a signed 64-bit integer.
+
+Fractions, `NaN`, infinities, unsafe numbers, objects, arrays, booleans, and
+strings containing unpaired UTF-16 surrogates are rejected.
+
+```javascript
+await client.get("text-key")
+await client.get(new Uint8Array([1, 2, 3]))
+await client.get(42)
+await client.get(42n)
+```
+
+### Values
+
+Native values accepted by `set` are converted as follows:
+
+- `null` becomes Null.
+- `undefined` becomes Undefined.
+- `boolean` becomes Boolean.
+- `bigint` becomes an exact Integer.
+- `number` becomes an IEEE-754 binary64 Float.
+- `string` becomes UTF-8 TextString.
+- `Uint8Array` becomes Bytes.
+- `Array` becomes an ordered Array.
+- `Map` and plain objects become ordered Maps with scalar keys.
+
+```javascript
+await client.set("profile", { name: "Ada", active: true })
+```
+
+Use the lossless model when float width, raw bits, or exact map keys matter:
+`UNDEFINED_VALUE`/`UndefinedValue`, `IntegerValue`, `FloatValue`,
+`ByteStringValue`, `TextStringValue`, `ArrayValue`, and `MapValue`.
+
+### Value helpers
+
+- `toValue(value)` converts a native value to the lossless model.
+- `encodeStructuredValue(value)` returns one encoded value as
+  `Uint8Array`.
+- `decodeStructuredValue(bytes)` decodes one complete value.
+- `modelEqual(left, right)` compares model values without native coercion.
+- `toNative(value)` projects safe lossless values to JavaScript values.
+- `decodeNativeValue(bytes)` decodes and projects in one step.
+- `toPlainObject(map)` converts a text-keyed lossless map to a
+  null-prototype object.
+- `ValueLimits` bounds bytes, depth, item count, and integer magnitude.
+
+```javascript
+import {
+  decodeStructuredValue,
+  encodeStructuredValue,
+} from "openkache/value-codec"
+
+const encoded = encodeStructuredValue({ count: 1n })
+const decoded = decodeStructuredValue(encoded)
+```
+
+`toNative` and `decodeNativeValue` preserve integers as `bigint` and bytes
+as `Uint8Array`, but reject `UndefinedValue` and `FloatValue` when a native
+JavaScript value would lose their distinctions.
+
+### Errors
+
+- `OpenKacheError` — validation, connection, protocol, server, or value
+  failure. Inspect its `kind` property for the stable category.
+- `OpenKacheUnknownMutationError` — a mutation may have reached the server
+  without a confirmed result; do not replay it automatically.
+- `StructuredValueError` — invalid structured-value input or a local codec
+  failure. Its `kind` property identifies the category.
+
+The public type aliases are `ClientKey`, `NativeValue`, `GetResult`,
+`SetOutcome`, `StructuredValue`, and `OpenKacheErrorKind`.
+The result classes are `FoundResult` and `MissingResult`.
+
+## More information
+
+- [OpenKache on npm](https://www.npmjs.com/package/openkache)
+- [OpenKache repository](https://github.com/openkache/openkache)
