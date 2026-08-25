@@ -30,6 +30,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_CANCELED,
     SMITHY_FFI_RESULT_CONNECTED,
     SMITHY_FFI_RESULT_ERROR,
+    SMITHY_FFI_RESULT_RESOURCE_EXHAUSTED,
     SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
     SMITHY_FFI_SET_CONDITION_ANY,
     SMITHY_OPCODE_DELETE,
@@ -455,7 +456,11 @@ class _NativeApi:
                 message or "native client operation failed",
                 result_kind=kind,
             )
-        if kind in (SMITHY_FFI_RESULT_UNKNOWN_MUTATION, SMITHY_FFI_RESULT_CANCELED):
+        if kind in (
+            SMITHY_FFI_RESULT_CANCELED,
+            SMITHY_FFI_RESULT_RESOURCE_EXHAUSTED,
+            SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
+        ):
             message = payload.decode("utf-8", errors="replace")
             raise NativeError(
                 message or "native client operation failed",
@@ -488,7 +493,11 @@ class _NativeApi:
             )
         finally:
             self.gate0_result_free(result)
-        if kind in (SMITHY_FFI_RESULT_ERROR, SMITHY_FFI_RESULT_UNKNOWN_MUTATION):
+        if kind in (
+            SMITHY_FFI_RESULT_ERROR,
+            SMITHY_FFI_RESULT_RESOURCE_EXHAUSTED,
+            SMITHY_FFI_RESULT_UNKNOWN_MUTATION,
+        ):
             message = payload.decode("utf-8", errors="replace")
             raise NativeError(
                 message or "native client operation failed",
