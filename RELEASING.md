@@ -7,6 +7,21 @@ literal `RELEASE` confirmation input and a protected environment approval; the
 release workflows in this guide do not run from a branch push, pull request,
 schedule, or development checkout.
 
+## Version and tag policy
+
+Registry versions are independent per package. npm and crates.io have already
+consumed `openkache` `0.1.0`, while the Python package has already consumed
+`0.1.1`; the next Rust and TypeScript client releases are therefore both
+`0.1.1`. Use the package-specific tags `client-v0.1.1` and
+`typescript-v0.1.1`; do not create a shared `v0.1.1` tag or reuse the
+existing `python-v0.1.1` tag.
+
+Before creating any package tag, confirm that its registry version is absent.
+Registry releases are immutable: if a version is present, even when a
+publication was incomplete or later yanked, choose the next unused patch
+version and update the package metadata and matching tag together. The
+workflow guards repeat this check immediately before publication.
+
 ## Operator inputs
 
 Dispatch the workflow from the matching tag and enter the version copied from

@@ -28,13 +28,13 @@ set(
   OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED
   ""
   CACHE FILEPATH
-  "Optional shared libopenkache-client-core library built with the ffi feature"
+  "Required shared libopenkache-client-core library built with the ffi feature"
 )
 set(
   OPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC
   ""
   CACHE FILEPATH
-  "Optional static libopenkache-client-core library built with the ffi feature"
+  "Required static libopenkache-client-core library built with the ffi feature"
 )
 set(
   OPENKACHE_CLIENT_NATIVE_LIBRARY_NAME
@@ -77,6 +77,19 @@ foreach(
     )
   endif()
 endforeach()
+
+if(
+  NOT OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED
+  AND NOT OPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC
+)
+  message(
+    FATAL_ERROR
+    "OpenKache Gate 0 requires a native core library. Set "
+    "OPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED or "
+    "OPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC to the libopenkache-client-core "
+    "library built with the ffi feature."
+  )
+endif()
 
 set(
   _openkache_client_generated_include_dir
