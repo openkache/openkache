@@ -1,118 +1,204 @@
 # OpenKache Python client
 
-Store, read, and delete values in an OpenKache server from Python.
+OpenKache is a super-fast, open-source SSD cache server. Use this Python client
+to store, read, and delete values in a few lines.
 
 [PyPI package](https://pypi.org/project/openkache/) ·
 [GitHub source](https://github.com/openkache/openkache/tree/main/clients/python)
 
 ## Install
 
-The package requires Python 3.11 or newer.
+Python 3.11 or newer is required.
 
-| Tool | Command |
-| --- | --- |
-| pip | `python -m pip install openkache` |
-| uv | `uv add openkache` |
-| Poetry | `poetry add openkache` |
-| PDM | `pdm add openkache` |
-| Pipenv | `pipenv install openkache` |
+```bash
+# pip
+python -m pip install openkache
 
-For an existing virtual environment managed by uv, use
-`uv pip install openkache`.
+# uv
+uv add openkache
 
-The current release publishes one Linux x86_64 wheel
-(`manylinux_2_38`) and one source distribution. Other platforms do not have
-published wheels; install from the source distribution only when a local Rust
-toolchain and C linker can build the native adapter.
+# Existing uv virtual environment:
+uv pip install openkache
+
+# Poetry
+poetry add openkache
+
+# PDM
+pdm add openkache
+
+# Pipenv
+pipenv install openkache
+```
+
+The published wheel currently supports Linux x86_64
+(`manylinux_2_38`).
 
 ## Quick start
 
 The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 
 ```python
-from openkache import Client, Found, Missing
+from openkache import Client
 
-with Client.connect("127.0.0.1:4433") as client:
-    print("SET:", client.set("greeting", {"message": "hello"}))
-
-    result = client.get("greeting")
-    print("GET:", result.value if isinstance(result, Found) else "missing")
-
-    print("DELETE:", client.delete("greeting"))
-
-    result = client.get("greeting")
-    if isinstance(result, Missing):
-        print("GET after DELETE: missing")
+client = Client.connect("127.0.0.1:4433")
+print(client.set("greeting", "hello"))  # created
+print(client.get("greeting"))           # Found(value='hello')
+print(client.delete("greeting"))        # deleted
+client.close()
 ```
 
-`Client` can also be closed explicitly with `client.close()`.
+`set` returns `SetOutcome.CREATED` for a new key,
+`get` returns `Found(value)`, and `delete` returns `DeleteOutcome.DELETED`.
 
 > The example uses the local development TLS profile, which does not verify
 > the server certificate. Use it only with a local development server.
 
 ## Reference
 
-### Client
+### `Client.connect(address)`
 
-| API | Description |
-| --- | --- |
-| `Client.connect(address)` | Connect to a `host:port` endpoint and return a client. IPv6 endpoints use `[host]:port`. |
-| `client.get(key)` | Return `Found(value)` when the key exists, or `Missing` otherwise. |
-| `client.set(key, value)` | Store a value and return `SetOutcome.CREATED` or `SetOutcome.REPLACED`. |
-| `client.delete(key)` | Delete a key and return `DeleteOutcome.DELETED` or `DeleteOutcome.NOT_FOUND`. |
-| `client.close()` | Close the connection. Repeated calls are safe. |
-| `with Client.connect(address)` | Close the client automatically when the block exits. |
+Opens a connection and returns a `Client`.
 
-`Client` and `OpenKacheClient` refer to the same client class.
+- **Input:** a non-empty `host:port` string. IPv6 endpoints use `[host]:port`.
+- **Returns:** `Client`.
+- **Raises:** `OpenKacheError` when the connection cannot be opened.
 
-Keys can be UTF-8 `str`, signed 64-bit `int`, or `bytes`-like values
-(`bytes`, `bytearray`, and `memoryview`).
+```python
+client = Client.connect("127.0.0.1:4433")
+```
 
-### Results
+`Client` and `OpenKacheClient` refer to the same class.
 
-- `Found(value)` contains the value returned by `get`.
-- `Missing` represents an absent key. `MISSING` is a shared instance.
-- `SetOutcome.CREATED` and `SetOutcome.REPLACED` describe `set`.
-- `DeleteOutcome.DELETED` and `DeleteOutcome.NOT_FOUND` describe `delete`.
-- `GetResult` is the `Found | Missing` result type.
+### `client.get(key)`
+
+Reads one value.
+
+- **Input:** a UTF-8 `str`, signed 64-bit `int`, or bytes-like value
+  (`bytes`, `bytearray`, or `memoryview`).
+- **Returns:** `Found(value)` when the key exists, or `Missing` when it does
+  not. A stored `None` or `UNDEFINED` is still returned as `Found`.
+- **Raises:** `OpenKacheValueError` for an invalid key and `OpenKacheError`
+  for connection or server failures.
+
+```python
+from openkache import Found
+
+result = client.get("greeting")
+if isinstance(result, Found):
+    print(result.value)
+```
+
+`MISSING` is a shared `Missing` instance. `GetResult` is the
+`Found | Missing` type alias.
+
+### `client.set(key, value)`
+
+Stores one value, replacing any existing value for the key.
+
+- **Input:** the same key types accepted by `get`, plus a native or lossless
+  structured value.
+- **Returns:** `SetOutcome.CREATED` for a new key or
+  `SetOutcome.REPLACED` for an existing key.
+- **Raises:** `OpenKacheValueError` for an invalid key or value and
+  `OpenKacheError` for connection or server failures.
+
+```python
+outcome = client.set("greeting", "hello")
+# outcome is SetOutcome.CREATED or SetOutcome.REPLACED
+```
+
+### `client.delete(key)`
+
+Deletes one key. Deleting a missing key is safe.
+
+- **Input:** a key accepted by `get`.
+- **Returns:** `DeleteOutcome.DELETED` when a value was removed, or
+  `DeleteOutcome.NOT_FOUND` when no value existed.
+- **Raises:** `OpenKacheValueError` for an invalid key and
+  `OpenKacheError` for connection or server failures.
+
+```python
+outcome = client.delete("greeting")
+```
+
+### `client.close()`
+
+Closes the connection and returns `None`. Calling it more than once is safe.
+
+```python
+client.close()
+```
+
+The client also supports `with Client.connect(address)`, which closes the
+connection automatically when the block exits.
+
+### Keys
+
+Keys are typed. Use:
+
+- `str` for UTF-8 text keys;
+- `int` for signed 64-bit integer keys;
+- `bytes`, `bytearray`, or `memoryview` for exact byte keys.
+
+```python
+client.get("text-key")
+client.get(42)
+client.get(b"bytes-key")
+```
 
 ### Values
 
-The normal Python values accepted by `set` are:
+The client converts common Python values to structured values:
 
-| Python value | Stored value |
-| --- | --- |
-| `None` | Null |
-| `bool` | Boolean |
-| `int` | Exact integer |
-| `float` | IEEE-754 float |
-| `str` | UTF-8 text |
-| `bytes`, `bytearray`, `memoryview` | Bytes |
-| `list`, `tuple` | Array |
-| `dict` | Map |
+- `None` becomes Null.
+- `bool` becomes Boolean.
+- `int` becomes an exact Integer.
+- `float` becomes an IEEE-754 binary64 Float.
+- `str` becomes UTF-8 TextString.
+- `bytes`, `bytearray`, and `memoryview` become Bytes.
+- `list` and `tuple` become Array.
+- `dict` becomes Map.
 
-Use the lossless model when the exact value representation matters:
+```python
+client.set("profile", {"name": "Ada", "active": True})
+```
 
-- `UNDEFINED` / `UndefinedValue`
-- `IntegerValue`
-- `FloatValue`
-- `ByteStringValue`
-- `TextStringValue`
-- `ArrayValue`
-- `MapValue`
+Use the lossless model when the exact representation matters:
+`UNDEFINED`/`UndefinedValue`, `IntegerValue`, `FloatValue`,
+`ByteStringValue`, `TextStringValue`, `ArrayValue`, and `MapValue`.
+The short names `Undefined`, `Integer`, `Float`, `ByteString`, `TextString`,
+`Array`, `Map`, and `Value` are compatibility aliases.
 
-The value helpers are `to_value`, `encode_value`, `decode_value`, and
-`model_equal`. `ValueLimits` controls the resource limits used by conversion
-encoding, and decoding, and `ValueErrorKind` identifies value-codec failures.
-`Array`, `ByteString`, `Float`, `Integer`, `Map`, `TextString`, `Undefined`,
-and `Value` are compatibility aliases for the model types.
+### Value helpers
+
+- `to_value(value, limits=None)` converts a native Python value to the
+  lossless model.
+- `encode_value(value, limits=None)` returns one encoded
+  `StructuredValue-CBOR-v1` item as `bytes`.
+- `decode_value(data, limits=None)` decodes one complete item from
+  `bytes`-like input.
+- `model_equal(left, right)` compares model values without treating
+  `True` and `1` as equal.
+- `ValueLimits` bounds encoded bytes, nesting depth, item count, and integer
+  magnitude.
+
+```python
+from openkache import decode_value, encode_value, model_equal, to_value
+
+encoded = encode_value({"count": 1})
+decoded = decode_value(encoded)
+assert model_equal(decoded, to_value({"count": 1}))
+```
+
+`StructuredValueError` reports conversion, encoding, decoding, and resource
+limit failures. Its `kind` property is a `ValueErrorKind`.
 
 ### Errors
 
 - `OpenKacheError` — connection, protocol, server, or operation failure.
 - `OpenKacheValueError` — invalid key or value supplied by the caller.
-- `OpenKacheUnknownMutationError` — a mutation may have reached the server,
-  but its result was not confirmed; do not replay it automatically.
+- `OpenKacheUnknownMutationError` — a mutation may have reached the server
+  without a confirmed result; do not replay it automatically.
 - `OpenKacheIncompatibleServerError` — the server returned an outcome that
   this client does not support.
 - `StructuredValueError` — invalid structured-value data or resource limits.

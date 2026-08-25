@@ -1,7 +1,8 @@
 # OpenKache client libraries
 
-Use an OpenKache client library to connect to a server and store, read, or
-delete values.
+OpenKache is a super-fast, open-source SSD cache server.
+
+Use a client library to connect to OpenKache and store, read, or delete values.
 
 ## Packages
 

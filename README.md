@@ -2,7 +2,7 @@
 
 # OpenKache ⚡
 
-**An experimental Rust SSD-first cache server.**
+**A super-fast, open-source SSD cache server.**
 
 Open-source · Rust · QUIC/TLS-over-TCP · SIMD-accelerated · SSD-first
 
