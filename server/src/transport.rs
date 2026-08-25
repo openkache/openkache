@@ -193,6 +193,14 @@ pub(super) trait Connection {
 
 /// Receive half of one request stream.
 pub(super) trait ReceiveStream {
+    /// Returns whether request reads may remain in flight while an operation
+    /// executes. Stream transports with a shared receive/send state lock must
+    /// disable read-ahead so a pending socket read cannot block the response
+    /// writer from acquiring that lock.
+    fn supports_concurrent_read(&self) -> bool {
+        true
+    }
+
     fn read_request<T>(
         &mut self,
         maximum: usize,

@@ -370,6 +370,7 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
     let mut request_direction_open = true;
     let mut stop_receive = false;
     let mut read_paused = false;
+    let supports_concurrent_read = receive.supports_concurrent_read();
 
     loop {
         if stop_receive {
@@ -423,7 +424,11 @@ pub(super) async fn serve_stream<S: SendStream, R: ReceiveStream>(
         .fuse();
         pin_mut!(execute);
         loop {
-            if request_direction_open && !read_paused && queue.len() < MAX_ADMITTED_REQUESTS {
+            if supports_concurrent_read
+                && request_direction_open
+                && !read_paused
+                && queue.len() < MAX_ADMITTED_REQUESTS
+            {
                 // Once a read has delivered bytes, its local frame buffer owns
                 // the only copy. Finish that read before writing the response
                 // if execution wins the race; otherwise dropping it would
