@@ -162,8 +162,8 @@ class OpenKacheClient:
         Gate 0 intentionally has no certificate, retry, timeout, TTL, or
         transport arguments.  The private native adapter fixes the
         verification-disabled DevelopmentTrust profile, ``openkache/1`` ALPN,
-        namespace 1, the development Item-ID root, and the uncompressed,
-        unprotected StructuredValue-CBOR-v1 selector.  Production
+        the server-assigned namespace, the development Item-ID root, and the
+        uncompressed, unprotected StructuredValue-CBOR-v1 selector.  Production
         authentication configuration is deferred to a later maintained-client
         gate.
         """

@@ -24,7 +24,8 @@ Gate 0 uses a fixed TLS 1.3 development profile:
 
 - QUIC-over-TLS 1.3 with `openkache/1` and `X25519MLKEM768`;
 - server certificate and hostname verification disabled (`DevelopmentTrust`);
-- namespace `1`, the public `NamespaceHash` Item-ID root, and
+- the server-assigned default namespace (ID `1` on a fresh server), the public
+  `NamespaceHash` Item-ID root, and
   uncompressed/unprotected `StructuredValue-CBOR-v1` values.
 
 The server still presents a certificate and TLS encrypts traffic. This profile
