@@ -90,8 +90,9 @@ Reads one value as a native Python value by default.
 
 - **Input:** a UTF-8 `str`, signed 64-bit `int`, or bytes-like value
   (`bytes`, `bytearray`, or `memoryview`).
-- **Returns:** the decoded value, or `None` when the key is absent. A stored
-  `None` also returns `None`, matching ordinary Python cache APIs.
+- **Returns:** the decoded value, or `None` when the key is absent. Stored
+  `None` and undefined values also return `None`, matching ordinary Python
+  cache APIs.
 - **Raises:** `OpenKacheValueError` for an invalid key, an ambiguous native
   map, or a value that cannot be projected to Python; `OpenKacheError` for
   connection or server failures.
@@ -109,12 +110,10 @@ print(exact)  # -> TextStringValue(value='hello')
 
 Native reads map integers to `int`, floats to `float`, bytes to `bytes`,
 arrays to `list`, and maps to `dict` when their keys remain distinct under
-Python equality. `UNDEFINED` is the explicit sentinel for a stored undefined
-value because Python has no built-in undefined type. Use the lossless
-representation for float width/raw bits or model-distinct map keys such as
-`True` and `1`. The ordinary `get` result intentionally follows Python's
-nullable cache convention, so a stored `None` and an absent key both return
-`None`.
+Python equality. A stored `None` or undefined value returns `None`, just like
+an absent key. Use the lossless representation for the distinction between
+`Null` and `Undefined`, float width/raw bits, or model-distinct map keys such
+as `True` and `1`.
 
 ### `client.set(key, value)`
 

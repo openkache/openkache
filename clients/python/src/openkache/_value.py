@@ -514,13 +514,14 @@ def to_native(value: Value) -> object:
     :func:`decode_value` when float width, raw bits, or model-key identity is
     significant.
 
-    ``UndefinedValue`` is represented by the public :data:`UNDEFINED`
-    singleton.  A map is projected to ``dict`` only when every scalar key is
-    hashable and the projection does not collapse two distinct model keys.
+    ``UndefinedValue`` is projected to ``None``, just like model ``Null``.
+    Use the lossless model when the distinction matters.  A map is projected
+    to ``dict`` only when every scalar key is hashable and the projection does
+    not collapse two distinct model keys.
     """
 
     if isinstance(value, UndefinedValue):
-        return UNDEFINED
+        return None
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, IntegerValue):

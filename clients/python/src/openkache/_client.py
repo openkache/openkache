@@ -176,11 +176,12 @@ class OpenKacheClient:
     ) -> object | Value | None:
         """Read one value as a native value or a lossless model.
 
-        ``None`` means that the key is absent. A stored ``Null`` also projects
-        to ``None`` in the native view, matching ordinary Python cache APIs.
-        Pass ``representation="lossless"`` to retain ``Undefined``,
-        integer/float distinctions, raw float bits, byte/text kinds, and
-        scalar-key map identity.
+        ``None`` means that the key is absent. Stored ``Null`` and
+        ``Undefined`` values also project to ``None`` in the native view,
+        matching ordinary Python cache APIs. Pass
+        ``representation="lossless"`` to retain ``Undefined``, integer/float
+        distinctions, raw float bits, byte/text kinds, and scalar-key map
+        identity.
         """
 
         self._assert_open()
