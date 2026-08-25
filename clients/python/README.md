@@ -1,6 +1,6 @@
 # OpenKache Python client
 
-OpenKache is a super-fast, open-source SSD cache server. Use this Python client
+OpenKache is a super-fast open-source SSD cache server. Use this Python client
 to store, read, and delete values in a few lines.
 
 [PyPI package](https://pypi.org/project/openkache/) ·
@@ -41,7 +41,7 @@ The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 from openkache import Client
 
 client = Client.connect("127.0.0.1:4433")
-print(client.set("greeting", "hello"))  # created
+print(client.set("greeting", "hello"))  # SetOutcome.CREATED
 print(client.get("greeting"))           # Found(value='hello')
 print(client.delete("greeting"))        # True
 client.close()

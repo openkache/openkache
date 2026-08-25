@@ -1,6 +1,6 @@
 # OpenKache Rust client
 
-OpenKache is a super-fast, open-source SSD cache server. Use this async Rust
+OpenKache is a super-fast open-source SSD cache server. Use this async Rust
 client to store, read, and delete values in a few lines.
 
 [crates.io package](https://crates.io/crates/openkache) ·
@@ -19,11 +19,11 @@ cargo add openkache
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-The public client currently uses the Tokio/Quinn transport, so an active Tokio
-runtime is required. `openkache` brings Tokio into the dependency graph; add
-Tokio directly only when your application needs the `#[tokio::main]` macro. If
-the application already uses Tokio, skip the second command. Other runtimes
-are not supported by this high-level client yet.
+The client uses Tokio internally, so an active Tokio runtime is required.
+`openkache` already brings Tokio into the dependency graph; add Tokio directly
+only when your application needs the `#[tokio::main]` macro. If the application
+already uses Tokio, skip the second command. Tokio is the supported runtime for
+this client.
 
 ## Quick start
 
@@ -48,8 +48,7 @@ The local development TLS profile does not verify the server certificate. Use
 this example only with a local development server.
 
 Values use the lossless `StructuredValue-CBOR-v1` format shared by the
-maintained clients. The Gate 0 facade has no JSON/raw-byte, cancellation,
-caller-selected protection, compression, or certificate options.
+OpenKache clients.
 
 ## Reference
 

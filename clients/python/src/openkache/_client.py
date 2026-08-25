@@ -1,10 +1,7 @@
-"""Small synchronous facade for the maintained OpenKache v1 client.
+"""Small synchronous client for the OpenKache cache server.
 
-Gate 0 intentionally keeps the Python surface narrow.  The five public
-operations are ``connect``, ``get``, ``set``, ``delete``, and ``close``.
-Mapped keys are encoded by the shared key contract and values always travel
-through ``StructuredValue-CBOR-v1``; per-request policy controls are not part
-of this facade.
+Mapped keys use the shared key contract and values travel through
+``StructuredValue-CBOR-v1``.
 """
 
 from __future__ import annotations
@@ -37,7 +34,7 @@ _T = TypeVar("_T")
 
 
 class OpenKacheError(RuntimeError):
-    """Base exception raised by the maintained client."""
+    """Base exception raised by the client."""
 
 
 class OpenKacheValueError(OpenKacheError, ValueError):
@@ -57,13 +54,13 @@ class OpenKacheUnknownMutationError(OpenKacheError):
 
 
 class OpenKacheIncompatibleServerError(OpenKacheError):
-    """The server returned an outcome outside the maintained Gate 0 contract."""
+    """The server returned an outcome outside the supported client API."""
 
     kind = "incompatible_server_outcome"
 
 
 # This spelling existed in the preview package. Keep it importable for code that
-# only catches the error; Gate 0 never exposes cancellation controls.
+# only catches the error; the client never exposes cancellation controls.
 UnknownMutationError = OpenKacheUnknownMutationError
 
 
@@ -160,13 +157,10 @@ class OpenKacheClient:
     def connect(cls, address: str) -> OpenKacheClient:
         """Open one development QUIC-over-TLS 1.3 connection.
 
-        Gate 0 intentionally has no certificate, retry, timeout, TTL, or
-        transport arguments.  The private native adapter fixes the
-        verification-disabled DevelopmentTrust profile, ``openkache/1`` ALPN,
-        the server-assigned namespace, the development Item-ID root, and the
-        uncompressed, unprotected StructuredValue-CBOR-v1 selector.  Production
-        authentication configuration is deferred to a later maintained-client
-        gate.
+        The local development profile disables certificate verification and
+        uses the server's default namespace and structured-value format.
+        Production authentication configuration is not available in this
+        client yet.
         """
 
         native_address = _resolve_address(address)

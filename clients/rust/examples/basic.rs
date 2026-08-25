@@ -1,4 +1,4 @@
-//! Complete Gate 0 CRUD example for a local development server.
+//! Complete CRUD example for a local development server.
 
 use openkache::{Client, GetResult, SetOutcome, Value};
 

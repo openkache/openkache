@@ -1,4 +1,4 @@
-"""Maintained synchronous Python client for OpenKache v1."""
+"""Python client for the OpenKache cache server."""
 
 from ._client import (
     Client,

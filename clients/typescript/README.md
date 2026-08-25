@@ -1,6 +1,6 @@
 # OpenKache TypeScript client
 
-OpenKache is a super-fast, open-source SSD cache server. Use this TypeScript
+OpenKache is a super-fast open-source SSD cache server. Use this TypeScript
 or JavaScript client to store, read, and delete values in a few lines. It runs
 on Node.js, Bun, and Deno; it is not a browser client.
 

@@ -1,6 +1,6 @@
 # OpenKache client libraries
 
-OpenKache is a super-fast, open-source SSD cache server.
+OpenKache is a super-fast open-source SSD cache server.
 
 Use a client library to connect to OpenKache and store, read, or delete values.
 
@@ -33,11 +33,10 @@ bytes, arrays, and maps. Each language maps these values to native types while
 also exposing lossless value classes for applications that need exact
 representation.
 
-The maintained clients encode values as `StructuredValue-CBOR-v1`, so a value
-written by one language can be read losslessly by the others. The Gate 0
-facade intentionally supports only `connect`, `get`, `set`, `delete`, and
-`close`; it does not expose JSON/raw-byte operations, caller-selected
-cancellation, protection, compression, or certificate configuration.
+These clients encode values as `StructuredValue-CBOR-v1`, so a value written by
+one language can be read losslessly by the others. The package-specific
+READMEs describe the supported operations, value types, and connection
+behavior for each language.
 
 The package README is the source for language-facing behavior. Shared formats
 and interoperability rules are documented separately:
