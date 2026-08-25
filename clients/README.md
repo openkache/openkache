@@ -5,11 +5,11 @@ delete values.
 
 ## Packages
 
-| Language | Package | Install | Reference |
-| --- | --- | --- | --- |
-| Python | [PyPI `openkache`](https://pypi.org/project/openkache/) | `python -m pip install openkache` | [Python README](python/README.md) |
-| Rust | [crates.io `openkache`](https://crates.io/crates/openkache) | `cargo add openkache` | [Rust README](rust/README.md) |
-| TypeScript / JavaScript | [npm `openkache`](https://www.npmjs.com/package/openkache) | `npm install openkache` | [TypeScript README](typescript/README.md) |
+| Language | Package | Install | Reference | Source |
+| --- | --- | --- | --- | --- |
+| Python | [PyPI `openkache`](https://pypi.org/project/openkache/) | `python -m pip install openkache` | [Python README](python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
+| Rust | [crates.io `openkache`](https://crates.io/crates/openkache) | `cargo add openkache` | [Rust README](rust/README.md) · [docs.rs](https://docs.rs/openkache/latest/openkache/) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
+| TypeScript / JavaScript | [npm `openkache`](https://www.npmjs.com/package/openkache) | `npm install openkache` | [TypeScript README](typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
 
 The package READMEs include alternative package-manager commands, a complete
 first-use example, and a reference for every public client API.

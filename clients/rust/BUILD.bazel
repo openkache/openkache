@@ -37,6 +37,7 @@ rust_library(
     ],
     crate_name = "openkache",
     crate_root = "src/lib.rs",
+    compile_data = ["README.md"],
     edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
     deps = cargo_deps("clients/rust"),

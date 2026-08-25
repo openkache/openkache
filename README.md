@@ -156,11 +156,11 @@ The examples in the client READMEs use the local development TLS profile. It
 does not verify the server certificate, so use it only with a local development
 server; do not reuse this trust profile for production traffic.
 
-| Package | Install | Documentation |
-|---|---|---|
-| TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [client README](clients/typescript/README.md) |
-| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) |
-| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [client README](clients/rust/README.md) |
+| Package | Install | Documentation | Source |
+|---|---|---|---|
+| TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [client README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
+| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
+| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [client README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
 
 All three client guides use `127.0.0.1:4433` as the default local endpoint.
 They also list alternative package managers and the complete public API for

@@ -4,6 +4,9 @@ Store, read, and delete values in an OpenKache server from TypeScript or
 JavaScript. The package runs on Node.js, Bun, and Deno; it is not a browser
 client.
 
+[npm package](https://www.npmjs.com/package/openkache) ·
+[GitHub source](https://github.com/openkache/openkache/tree/main/clients/typescript)
+
 ## Install
 
 Choose the package manager used by your project:

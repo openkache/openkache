@@ -2,10 +2,8 @@
 
 Store, read, and delete values in an OpenKache server from Python.
 
-The release workflow currently publishes one Linux `x86_64`
-`manylinux_2_38` wheel and one source distribution. Other platforms are not
-claimed to have published wheels: install from the source distribution only
-when a local Rust toolchain can build the native adapter.
+[PyPI package](https://pypi.org/project/openkache/) ·
+[GitHub source](https://github.com/openkache/openkache/tree/main/clients/python)
 
 ## Install
 

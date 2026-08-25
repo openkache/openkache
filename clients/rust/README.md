@@ -2,6 +2,10 @@
 
 Store, read, and delete values in an OpenKache server from Rust.
 
+[crates.io package](https://crates.io/crates/openkache) ·
+[docs.rs API reference](https://docs.rs/openkache/latest/openkache/) ·
+[GitHub source](https://github.com/openkache/openkache/tree/main/clients/rust)
+
 ## Install
 
 With Cargo:
@@ -118,5 +122,5 @@ For values that need explicit precision or large integers:
 ## More information
 
 - [OpenKache on crates.io](https://crates.io/crates/openkache)
-- [Rust API reference](https://docs.rs/openkache)
+- [Rust API reference](https://docs.rs/openkache/latest/openkache/)
 - [OpenKache repository](https://github.com/openkache/openkache)
