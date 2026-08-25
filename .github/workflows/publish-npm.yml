@@ -231,6 +231,7 @@ jobs:
     timeout-minutes: 20
     env:
       OPENKACHE_RELEASE_ARTIFACTS_READY: "1"
+      OPENKACHE_NPM_CLI: "npm"
       OPENKACHE_TRUSTED_PUBLISHING: "1"
     steps:
       - name: Check out the release tag
