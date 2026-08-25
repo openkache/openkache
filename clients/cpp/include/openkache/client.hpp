@@ -17,6 +17,10 @@
 
 namespace openkache {
 
+static_assert(OPENKACHE_CLIENT_GATE0_NAMESPACE_ID ==
+                  OPENKACHE_SMITHY_GATE0_NAMESPACE_ID,
+              "Gate 0 namespace identity drifted from Smithy");
+
 /// Native C++ exception carrying a validation, transport, or server failure.
 class Error : public std::runtime_error {
 public:

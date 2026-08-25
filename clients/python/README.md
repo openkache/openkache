@@ -22,17 +22,35 @@ configuration are outside this Gate 0 facade.
 writes. A mutation whose response is lost raises the distinct
 `OpenKacheUnknownMutationError`.
 
+Published package: [pypi.org/project/openkache](https://pypi.org/project/openkache/).
+Python 3.11 or newer is required.
+
 ## Install
 
 ```bash
 python -m pip install openkache
 ```
 
+The wheel includes the native client adapter. No compiler or OpenKache source
+checkout is needed for a normal installation.
+
+## Quick smoke test
+
+Start a local preview server on `127.0.0.1:4433`, then run:
+
+```bash
+python -m pip install --upgrade openkache
+python
+```
+
+The fixed development TLS profile disables server-certificate verification.
+It is suitable for a local preview only and must not be used for production
+traffic.
+
 ## Quick start
 
 The package-local example is intentionally development-only. It uses
-QUIC-over-TLS 1.3 with server-certificate verification disabled; do not use it
-for production credentials or internet-facing deployments.
+QUIC-over-TLS 1.3 with server-certificate verification disabled.
 
 ```bash
 OPENKACHE_ADDRESS=127.0.0.1:4433 python examples/basic.py
@@ -43,17 +61,27 @@ from openkache import Client, DeleteOutcome, Found, Missing
 
 client = Client.connect("127.0.0.1:4433")
 try:
-    client.set("profile", {"name": "OpenKache", "visits": 1})
-    result = client.get("profile")
+    print(client.set("hello", {"from": "python"}))
+
+    result = client.get("hello")
     if isinstance(result, Found):
         print(result.value)
     elif isinstance(result, Missing):
         print("missing")
-    if client.delete("profile") is DeleteOutcome.DELETED:
+
+    if client.delete("hello") is DeleteOutcome.DELETED:
         print("deleted")
+
+    if isinstance(client.get("hello"), Missing):
+        print("missing after delete")
 finally:
     client.close()
 ```
+
+`set` returns `SetOutcome.CREATED` or `SetOutcome.REPLACED`. `get` returns a
+`Found` wrapper or `Missing`; a stored `None` or `UNDEFINED` value is still
+`Found`. `delete` returns `DeleteOutcome.DELETED` or
+`DeleteOutcome.NOT_FOUND`.
 
 `client.get` always returns model wrappers that preserve `Undefined`,
 `None`/Null, booleans, arbitrary integers, Float16/32/64 width and raw bits,

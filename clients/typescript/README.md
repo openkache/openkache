@@ -6,6 +6,8 @@ client for Node.js, Bun, and Deno. Gate 0 keeps the application surface small:
 key mapping, and `StructuredValue-CBOR-v1` envelope handling to the shared Rust
 core.
 
+Published package: [npmjs.com/package/openkache](https://www.npmjs.com/package/openkache).
+
 ## Install
 
 ```bash
@@ -16,7 +18,34 @@ bun add openkache
 
 The package contains generated declarations and platform Node-API adapters. It
 has no runtime JavaScript dependencies. Deno uses its Node compatibility layer
-with `--allow-ffi`.
+with `--allow-ffi`. The published native adapters support Linux x64/ARM64 and
+Apple Silicon macOS; Node.js 20 or newer is required.
+
+## Quick smoke test
+
+Start a local preview server on `127.0.0.1:4433`, then run this from a
+temporary directory:
+
+```bash
+cd "$(mktemp -d)"
+npm init -y
+npm install openkache
+node --input-type=module
+```
+
+For Bun, use `bun init -y && bun add openkache && bun repl` instead. For Deno,
+import the package through its npm compatibility layer and run with
+`--allow-ffi`. The client uses the development TLS profile described below;
+certificate verification is intentionally disabled and must not be used for
+production traffic.
+
+From this checkout, the maintained example can be run with:
+
+```bash
+bun install --frozen-lockfile
+bun run build:package
+OPENKACHE_ADDRESS=127.0.0.1:4433 bun run examples/basic.ts
+```
 
 ## Quick start
 
@@ -35,30 +64,26 @@ does not accept certificate, trust-root, identity, transport, retry, timeout,
 TTL, compression, or value-protection options.
 
 ```typescript
-import { OpenKache_Client, type Found_Result } from "openkache"
+import { OpenKache_Client } from "openkache"
 
 const client = await OpenKache_Client.connect("127.0.0.1:4433")
 
 try {
-  const created = await client.set("profile", {
-    name: "Ada",
-    visits: 42n,
-    tags: ["ssd", "v1"],
-    metadata: undefined,
-  })
-  console.log(created) // "created"
+  console.log(await client.set("hello", { from: "typescript" }))
 
-  const profile = await client.get("profile")
-  if (profile.kind === "found") {
-    const value = (profile as Found_Result).value
-    console.log(value)
-  }
+  const result = await client.get("hello")
+  console.log(result.kind === "found" ? result.value : "missing")
 
-  console.log(await client.delete("profile")) // "deleted"
+  console.log(await client.delete("hello"))
 } finally {
   await client.close()
 }
 ```
+
+`set` resolves to `"created"` or `"replaced"`, `get` returns a tagged
+`Found_Result` or `Missing_Result`, and `delete` resolves to `"deleted"` or
+`"not_found"`. A stored `undefined` is a found value and is never confused
+with a missing key.
 
 `connect({ address: "127.0.0.1:4433" })` is accepted as an equivalent
 endpoint-only shape. DNS hostnames use the same `host:port` form as the shared
@@ -78,7 +103,9 @@ The package intentionally exports exactly these cache operations:
 | `close` | `client.close()` | `Promise<void>` |
 
 `close` is idempotent. It drains or completes accepted work before releasing
-the native connection; calls after close reject with `OpenKache_Error`.
+the native connection; calls after close reject with `OpenKache_Error`. If
+native shutdown rejects, the failed promise is discarded and a later `close`
+call retries shutdown while cache operations remain closed.
 
 `get` never uses JavaScript `undefined` as a missing sentinel:
 
@@ -129,7 +156,8 @@ Null | Undefined | Boolean | Integer | Float16/32/64 |
 ByteString | TextString | Array | Map
 ```
 
-Native JavaScript mappings are:
+Native JavaScript values accepted by `set` map to the lossless model as
+follows:
 
 | JavaScript value | Model value |
 | --- | --- |
@@ -143,8 +171,9 @@ Native JavaScript mappings are:
 | `Array` | ordered `Array` |
 | `Map` or plain object | ordered scalar-key `Map` |
 
-Use the lossless constructors when Float16/32 width, raw bits, or a scalar map
-key must survive a round trip:
+Gate 0 `get` always returns the lossless model in `Found_Result`; it never
+applies a native projection. Use the lossless constructors when Float16/32
+width, raw bits, or a scalar map key must survive a round trip:
 
 ```typescript
 import {
@@ -180,9 +209,9 @@ const bytes = encode_structured_value(1n)
 const model = decode_structured_value(bytes)
 ```
 
-`to_native` and `decode_native_value` are strict convenience projections. They
-map integers to `bigint`, bytes to copied `Uint8Array`, and maps to `Map`.
-They reject `Undefined_Value` and every `Float_Value` with
+`to_native` and `decode_native_value` are strict native projections. They map
+integers to `bigint`, bytes to copied `Uint8Array`, and maps to `Map`. They
+reject `Undefined_Value` and every `Float_Value` with
 `Structured_Value_Error`: JavaScript `undefined` would collapse the stored
 undefined/missing distinction, while `number` would discard float width and
 raw-bit distinctions. Keep the lossless result from `get` or use
@@ -223,5 +252,7 @@ bun run pack:check
 does not publish those internal operation selectors. The npm tarball contains
 only the maintained facade, runtime-neutral codec, private native loader, and
 platform adapters. `pack:check` builds the host Node-API adapter before
-checking package contents. Private integration tests live in the monorepo
-rather than this public package.
+checking package contents. The maintainer build requires Cargo, a C linker, and
+`cargo-zigbuild`; normal npm/Bun/Deno consumers only install the published
+artifact. Private integration tests live in the monorepo rather than this
+public package.
