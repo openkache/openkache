@@ -89,10 +89,12 @@ operation emits one deterministic StructuredValue-CBOR key item before the
 native FFI call.  Floating-point, Boolean, null, collection, invalid-UTF-8,
 and out-of-range integer keys are not accepted by the typed-key API.
 
-The Gate 0 profile fixes `NamespaceHash`, lazily resolves the server-assigned
-default namespace (ID `1` on a fresh server), the public development Item-ID
-root from `KEY_FORMAT.md`, `StructuredValue-CBOR-v1`, uncompressed/unprotected
-values, and TLS 1.3 with ALPN `openkache/1` and `X25519MLKEM768`.
+The Gate 0 profile fixes `NamespaceHash`, lazily resolves and validates the
+server-assigned default namespace (ID `1` on a fresh server), the public
+development Item-ID root from `KEY_FORMAT.md`, `StructuredValue-CBOR-v1`,
+uncompressed/unprotected values, and TLS 1.3 with ALPN `openkache/1` and
+`X25519MLKEM768`. An unexpected namespace ID is rejected before Item-ID
+derivation.
 `DevelopmentTrust` deliberately disables certificate and hostname verification
 while retaining TLS encryption and has no plaintext fallback.  This profile is
 **development only — do not use this trust profile in production**.  Trust

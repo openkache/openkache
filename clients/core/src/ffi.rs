@@ -4562,6 +4562,29 @@ pub unsafe extern "C" fn openkache_client_result_take_client(
     result.client.take().map_or(ptr::null_mut(), Box::into_raw)
 }
 
+/// Returns an owned protocol error for a server that violates the maintained
+/// Gate 0 namespace identity.
+///
+/// This package-private constructor is used by the maintained C facade after
+/// it has freed the namespace-open response. It deliberately does not dispatch
+/// another operation, so a rejected namespace can never produce a misleading
+/// item-level result such as `NotFound`.
+///
+/// # Returns
+///
+/// An owned error result that must be released with
+/// [`openkache_client_result_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn openkache_client_result_incompatible_server() -> *mut FfiResult {
+    boxed_result(FfiResult::error_with_category(
+        format!(
+            "incompatible server Gate 0 namespace; expected namespace ID {}",
+            crate::contract::CLIENT_GATE0_NAMESPACE_ID
+        ),
+        FfiErrorCategory::Protocol,
+    ))
+}
+
 /// Frees an FFI result.
 ///
 /// # Safety

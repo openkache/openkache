@@ -21,9 +21,19 @@ extern openkache_client_request_t *
 openkache_client_execute_structured_fields_async(
     const openkache_client_t *client, uint32_t operation,
     const openkache_client_operation_field_t *fields, size_t field_count);
+/*
+ * The mismatch result is intentionally package-private.  Gate 0 must return
+ * one owned, shared-core result without dispatching an operation against an
+ * invented namespace or Item ID.
+ */
+extern openkache_client_result_t *
+openkache_client_result_incompatible_server(void);
 
 _Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_ERROR ==
                    OPENKACHE_SMITHY_FFI_RESULT_ERROR,
+               "Gate 0 result constants drifted from Smithy");
+_Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_OK ==
+                   OPENKACHE_SMITHY_FFI_RESULT_OK,
                "Gate 0 result constants drifted from Smithy");
 _Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_VALUE ==
                    OPENKACHE_SMITHY_FFI_RESULT_VALUE,
@@ -63,6 +73,9 @@ _Static_assert(OPENKACHE_SMITHY_GATE0_ALPN_VERSION ==
                "Gate 0 protocol versions drifted from Smithy");
 _Static_assert(OPENKACHE_SMITHY_GATE0_NAMESPACE_ID > 0,
                "Gate 0 namespace identity must be positive");
+_Static_assert(OPENKACHE_CLIENT_GATE0_NAMESPACE_ID ==
+                   OPENKACHE_SMITHY_GATE0_NAMESPACE_ID,
+               "Gate 0 namespace identity drifted from Smithy");
 _Static_assert(OPENKACHE_SMITHY_GATE0_VALUE_SELECTOR ==
                    (OPENKACHE_SMITHY_GATE0_ENCRYPTION |
                     (OPENKACHE_SMITHY_GATE0_COMPRESSION << 2u) |
@@ -73,6 +86,49 @@ static const uint8_t gate0_item_id_root
     [OPENKACHE_SMITHY_GATE0_ITEM_ID_ROOT_KEY_LENGTH] = {
         OPENKACHE_SMITHY_GATE0_ITEM_ID_ROOT_KEY_BYTES,
 };
+
+/*
+ * Gate 0 derives Item IDs only after resolving the empty default namespace.
+ * The shared core stores the descriptor ID for subsequent structured
+ * operations, so reject a server that selected anything other than the
+ * generated Gate 0 identity before the caller's key reaches that path.
+ *
+ * The shared core owns the incompatible-server result returned for malformed
+ * or unexpected descriptors, so no key or Item ID reaches an operation path.
+ */
+static openkache_client_result_t *
+gate0_namespace_preflight(const openkache_client_t *client) {
+  openkache_client_result_t *namespace_result =
+      openkache_client_namespace_open(
+          client, NULL, 0, OPENKACHE_SMITHY_OPEN_CREATE_IF_MISSING, 0, 0);
+  if (namespace_result == NULL) {
+    return NULL;
+  }
+
+  const uint32_t result_kind =
+      openkache_client_result_kind(namespace_result);
+  if (result_kind != OPENKACHE_CLIENT_GATE0_RESULT_OK &&
+      result_kind != OPENKACHE_CLIENT_GATE0_RESULT_CREATED) {
+    return namespace_result;
+  }
+
+  openkache_client_namespace_descriptor_t descriptor = {0};
+  const uint8_t *payload =
+      openkache_client_result_data(namespace_result);
+  const size_t payload_length =
+      openkache_client_result_data_length(namespace_result);
+  const uint32_t decode_status = openkache_client_namespace_descriptor_decode(
+      payload, payload_length, &descriptor);
+  const int namespace_matches =
+      decode_status == OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_OK &&
+      descriptor.namespace_id == OPENKACHE_CLIENT_GATE0_NAMESPACE_ID;
+  openkache_client_result_free(namespace_result);
+  if (namespace_matches) {
+    return NULL;
+  }
+
+  return openkache_client_result_incompatible_server();
+}
 
 openkache_client_result_t *
 openkache_client_gate0_connect(const uint8_t *address, size_t address_length) {
@@ -121,6 +177,11 @@ openkache_client_result_t *
 openkache_client_gate0_get(const openkache_client_t *client,
                            const uint8_t *canonical_key,
                            size_t canonical_key_length) {
+  openkache_client_result_t *namespace_error =
+      gate0_namespace_preflight(client);
+  if (namespace_error != NULL) {
+    return namespace_error;
+  }
   const openkache_client_operation_field_t field = {
       .data = canonical_key,
       .length = canonical_key_length,
@@ -134,6 +195,11 @@ openkache_client_gate0_get(const openkache_client_t *client,
 openkache_client_result_t *openkache_client_gate0_set(
     const openkache_client_t *client, const uint8_t *canonical_key,
     size_t canonical_key_length, const uint8_t *value, size_t value_length) {
+  openkache_client_result_t *namespace_error =
+      gate0_namespace_preflight(client);
+  if (namespace_error != NULL) {
+    return namespace_error;
+  }
   const openkache_client_operation_field_t fields[2] = {
       {
           .data = canonical_key,
@@ -163,6 +229,11 @@ openkache_client_result_t *
 openkache_client_gate0_delete_value(const openkache_client_t *client,
                                     const uint8_t *canonical_key,
                                     size_t canonical_key_length) {
+  openkache_client_result_t *namespace_error =
+      gate0_namespace_preflight(client);
+  if (namespace_error != NULL) {
+    return namespace_error;
+  }
   const openkache_client_operation_field_t fields[1] = {
       {
           .data = canonical_key,
