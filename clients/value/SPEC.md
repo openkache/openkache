@@ -71,8 +71,10 @@ Value =
 
 `Undefined` is distinct from `Null`. A binding that has no native undefined
 value MUST expose it through a documented sentinel or its lossless value
-representation. A lookup result wrapper MUST keep a stored undefined value
-distinct from a missing key.
+representation. A lookup's absent-item outcome is separate at the wire level,
+but a dynamic binding MAY project it to the language's ordinary nullable
+sentinel. If that sentinel is also a valid stored value, the binding MUST
+document the collision and its presence-preserving alternative, if one exists.
 
 `Map` is an ordered sequence of key/value entries in the generic model:
 
@@ -269,12 +271,13 @@ Float(width=16/32/64, raw_bits) -> Float_Value
 ```
 
 The maintained TypeScript native projection maps `Integer` to `bigint`,
-`Undefined` to JavaScript `undefined`, and every `Float` to `number`. A
-`Found`/`Missing` lookup wrapper keeps a stored `undefined` distinct from a
-missing key. Float width and raw bits remain available through the lossless
-representation. An explicit checked convenience option MAY request safe
-integers as `number`, but it MUST reject values outside the exact safe-integer
-range instead of rounding them.
+`Undefined` to JavaScript `undefined`, and every `Float` to `number`. Its
+ordinary `get` returns `undefined` for both an absent key and a stored
+`Undefined`; the `lossless` view keeps the stored model value available.
+Float width and raw bits remain available through the lossless representation.
+An explicit checked convenience option MAY request safe integers as `number`,
+but it MUST reject values outside the exact safe-integer range instead of
+rounding them.
 
 ### 3.3 Other maintained languages
 
@@ -392,6 +395,11 @@ normalize float width or raw bits to the target language's observable
 floating-point value. It MAY provide a separate checked convenience
 conversion, such as JavaScript safe `Integer` values to `number`, only when it
 rejects values outside the exact target range.
+
+Lookup absence is not a structured value. The maintained Python client returns
+`None` for an absent key, while the maintained JavaScript/TypeScript clients
+return `undefined`; each may therefore collide with a stored native value of
+the same kind. Package documentation MUST call out that behavior.
 
 Opaque byte operations bypass this model and return the exact application
 bytes directly. They are not a representation option on structured-value

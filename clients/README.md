@@ -27,10 +27,10 @@ All three packages use the same logical operations:
 
 ## Values and keys
 
-These packages accept typed keys (text, bytes, and integers) and
-preserve structured values such as nulls, booleans, integers, floats, text,
-bytes, arrays, and maps. Each language maps these values to native types while
-also exposing lossless value classes for applications that need exact
+These packages accept typed keys (text, bytes, and integers) and preserve
+structured values such as nulls, booleans, integers, floats, text, bytes,
+arrays, and maps. Each language maps these values to native types while also
+exposing structured value types for applications that need exact
 representation.
 
 These clients encode values as `StructuredValue-CBOR-v1`, so a value written by

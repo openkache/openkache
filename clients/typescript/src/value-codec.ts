@@ -1000,8 +1000,9 @@ function safe_length(value: bigint, budget: Required<Value_Limits>): number {
 /**
  * Projects one lossless value into ordinary JavaScript values.
  *
- * JavaScript `undefined` is safe here because client lookups wrap every found
- * value in `FoundResult`; a missing lookup uses the separate `MISSING` result.
+ * JavaScript `undefined` represents the model's `Undefined` value. Client
+ * lookups also use `undefined` for an absent key, so callers that need to
+ * distinguish those two lookup states should request the lossless model.
  * Float width and raw bits are reduced to JavaScript's observable `number`
  * value. Callers that need those distinctions must keep the lossless model
  * returned by `decode_structured_value`.

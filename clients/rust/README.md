@@ -47,8 +47,8 @@ async fn main() -> openkache::Result<()> {
 The local development TLS profile does not verify the server certificate. Use
 this example only with a local development server.
 
-Rust uses the lossless `Value` type for reads. Writes accept common Rust
-values directly and convert them to `Value`; construct an explicit `Value`
+`Value` is the Rust type used for structured values. Writes accept common Rust
+values directly and convert them to `Value`; construct an explicit variant
 when float width, raw bits, or model map keys matter.
 
 ## Reference
@@ -68,7 +68,7 @@ let client = Client::connect("127.0.0.1:4433").await?;
 
 ### `client.get(key)`
 
-Reads one lossless `Value`.
+Reads one `Value`.
 
 - **Input:** anything that converts into `TypedKey`: text, bytes, or a signed
   64-bit integer.
@@ -150,7 +150,7 @@ client.get(42_i64).await?;
 
 ### Values
 
-`Value` is the lossless value type returned by `get` and accepted by `set`:
+`Value` is the structured value type returned by `get` and accepted by `set`:
 
 ```text
 Undefined | Null | Boolean | Integer | Float | TextString | Bytes | Array | Map

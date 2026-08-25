@@ -40,8 +40,7 @@ import { OpenKacheClient } from "openkache"
 const client = await OpenKacheClient.connect("127.0.0.1:4433")
 
 await client.set("greeting", "hello")
-const result = await client.get("greeting")
-console.log(result.kind === "found" ? result.value : "missing")
+console.log(await client.get("greeting")) // -> "hello"
 await client.delete("greeting")
 await client.close()
 ```
@@ -83,35 +82,30 @@ const client = await OpenKacheClient.connect("127.0.0.1:4433")
 Reads one value as native JavaScript values by default.
 
 - **Input:** a `ClientKey`.
-- **Returns:** `FoundResult` when the key exists, or `MissingResult` when it
-  does not. A stored `undefined` is still returned as `FoundResult`.
+- **Returns:** the decoded value, or `undefined` when the key is absent. A
+  stored `undefined` has the same result in the native view, matching
+  `Map.get`.
 - **Throws:** `OpenKacheError` when validation, transport, decoding, or native
   projection fails.
 
 ```javascript
-const result = await client.get("greeting")
-if (result.kind === "found") {
-  console.log(result.value) // -> "hello"
-}
+const value = await client.get("greeting")
+console.log(value) // -> "hello"
 ```
-
-`MISSING` is a shared `MissingResult` instance.
 
 Pass `{ representation: "lossless" }` when float width/raw bits or exact model
 map keys matter:
 
 ```javascript
 const exact = await client.get("greeting", { representation: "lossless" })
-if (exact.kind === "found") {
-  console.log(exact.value) // -> TextStringValue { value: "hello" }
-}
+console.log(exact) // -> TextString_Value { kind: "text", value: "hello" }
 ```
 
 Native reads return `bigint` for model integers, `number` for floats,
 `Uint8Array` for bytes, arrays for model arrays, and a null-prototype object
 for text-keyed maps when JavaScript property order can represent the model.
-Other maps remain a `Map`. Stored `undefined` is wrapped in `FoundResult`, so
-it cannot be confused with a missing key.
+Other maps remain a `Map`. Use the lossless representation when a stored
+`Undefined_Value` must be distinguished from an absent key.
 
 ### `client.set(key, value)`
 
@@ -230,9 +224,8 @@ or NaN payloads matter.
 - `StructuredValueError` — invalid structured-value input or a local codec
   failure. Its `kind` property identifies the category.
 
-The public type aliases are `ClientKey`, `NativeValue`, `GetResult`,
-`SetOutcome`, `StructuredValue`, and `OpenKacheErrorKind`.
-The result classes are `FoundResult` and `MissingResult`.
+The public type aliases are `ClientKey`, `NativeValue`, `SetOutcome`,
+`StructuredValue`, and `OpenKacheErrorKind`.
 `Client` is a short alias for `OpenKacheClient`.
 
 ## More information

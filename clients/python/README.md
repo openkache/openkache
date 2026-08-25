@@ -40,15 +40,15 @@ The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 from openkache import Client
 
 client = Client.connect("127.0.0.1:4433")
-print(client.set("greeting", "hello"))  # -> SetOutcome.CREATED
-print(client.get("greeting"))           # -> Found(value='hello')
+print(client.set("greeting", "hello"))  # -> created
+print(client.get("greeting"))           # -> hello
 print(client.delete("greeting"))        # -> True
 client.close()
 ```
 
 `set` returns `SetOutcome.CREATED` for a new key,
-`get` returns `Found(value)`, and `delete` returns `True` when a value was
-removed.
+`get` returns the value directly (`None` when the key is absent), and `delete`
+returns `True` when a value was removed.
 
 > The example uses the local development TLS profile, which does not verify
 > the server certificate. Use it only with a local development server.
@@ -75,29 +75,23 @@ Reads one value as a native Python value by default.
 
 - **Input:** a UTF-8 `str`, signed 64-bit `int`, or bytes-like value
   (`bytes`, `bytearray`, or `memoryview`).
-- **Returns:** `Found(value)` when the key exists, or `Missing` when it does
-  not. A stored `None` or `UNDEFINED` is still returned as `Found`.
+- **Returns:** the decoded value, or `None` when the key is absent. A stored
+  `None` also returns `None`, matching ordinary Python cache APIs.
 - **Raises:** `OpenKacheValueError` for an invalid key, an ambiguous native
   map, or a value that cannot be projected to Python; `OpenKacheError` for
   connection or server failures.
 
 ```python
-from openkache import Found
-
-result = client.get("greeting")
-if isinstance(result, Found):
-    print(result.value)  # -> "hello"
+value = client.get("greeting")
+if value is not None:
+    print(value)  # -> "hello"
 ```
-
-`MISSING` is a shared `Missing` instance. `GetResult` is the
-`Found | Missing` type alias.
 
 Use `representation="lossless"` when the exact value model matters:
 
 ```python
 exact = client.get("greeting", representation="lossless")
-if isinstance(exact, Found):
-    print(exact.value)  # -> TextStringValue(value="hello")
+print(exact)  # -> TextStringValue(value='hello')
 ```
 
 Native reads map integers to `int`, floats to `float`, bytes to `bytes`,
@@ -105,7 +99,9 @@ arrays to `list`, and maps to `dict` when their keys remain distinct under
 Python equality. `UNDEFINED` is the explicit sentinel for a stored undefined
 value because Python has no built-in undefined type. Use the lossless
 representation for float width/raw bits or model-distinct map keys such as
-`True` and `1`.
+`True` and `1`. The ordinary `get` result intentionally follows Python's
+nullable cache convention, so a stored `None` and an absent key both return
+`None`.
 
 ### `client.set(key, value)`
 

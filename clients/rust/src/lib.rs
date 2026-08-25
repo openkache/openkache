@@ -181,7 +181,7 @@ mod maintained {
             Ok(Self { inner })
         }
 
-        /// Retrieves one lossless structured value.
+        /// Retrieves one structured value.
         ///
         /// # Arguments
         ///
@@ -213,13 +213,13 @@ mod maintained {
         ///
         /// Native Rust strings, byte vectors, booleans, integers, and floats
         /// convert directly to [`Value`]. Use an explicit [`Value`] variant
-        /// when the exact lossless representation matters.
+        /// when the exact model representation matters.
         ///
         /// # Arguments
         ///
         /// * `key` - A text, byte, or signed integer key convertible to
         ///   [`TypedKey`].
-        /// * `value` - A native value or lossless [`Value`].
+        /// * `value` - A native value or [`Value`].
         ///
         /// # Returns
         ///

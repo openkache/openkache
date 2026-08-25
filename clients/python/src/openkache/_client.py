@@ -7,9 +7,8 @@ Mapped keys use the shared key contract and values travel through
 from __future__ import annotations
 
 import socket
-from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Generic, Literal, NoReturn, TypeVar, overload
+from typing import Final, Literal, NoReturn, overload
 
 from ._generated.smithy_contract import (
     SMITHY_MAX_CANONICAL_KEY_BYTES,
@@ -36,7 +35,6 @@ from ._value import (
 
 _I64_MIN: Final = -(1 << 63)
 _I64_MAX: Final = (1 << 63) - 1
-_T = TypeVar("_T")
 ValueRepresentation = Literal["native", "lossless"]
 
 
@@ -69,31 +67,6 @@ class OpenKacheIncompatibleServerError(OpenKacheError):
 # This spelling existed in the preview package. Keep it importable for code that
 # only catches the error; the client never exposes cancellation controls.
 UnknownMutationError = OpenKacheUnknownMutationError
-
-
-@dataclass(frozen=True, slots=True)
-class Found(Generic[_T]):
-    """A successful ``get`` result containing the decoded value."""
-
-    value: _T
-
-    def __bool__(self) -> bool:
-        return True
-
-
-@dataclass(frozen=True, slots=True)
-class Missing:
-    """A ``get`` result for a key that is not present."""
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __repr__(self) -> str:
-        return "Missing"
-
-
-MISSING = Missing()
-GetResult = Found[_T] | Missing
 
 
 class SetOutcome(StrEnum):
@@ -185,7 +158,7 @@ class OpenKacheClient:
         key: str | int | bytes | bytearray | memoryview,
         *,
         representation: Literal["native"] = "native",
-    ) -> Found[object] | Missing: ...
+    ) -> object | None: ...
 
     @overload
     def get(
@@ -193,21 +166,21 @@ class OpenKacheClient:
         key: str | int | bytes | bytearray | memoryview,
         *,
         representation: Literal["lossless"],
-    ) -> Found[Value] | Missing: ...
+    ) -> Value | None: ...
 
     def get(
         self,
         key: str | int | bytes | bytearray | memoryview,
         *,
         representation: ValueRepresentation = "native",
-    ) -> Found[object] | Missing:
+    ) -> object | Value | None:
         """Read one value as a native value or a lossless model.
 
-        ``Missing`` is distinct from ``Found(None)``.  The returned model
-        uses ordinary Python values by default.  Pass
-        ``representation="lossless"`` to retain ``Undefined``, integer/float
-        distinctions, raw float bits, byte/text kinds, and scalar-key map
-        identity.
+        ``None`` means that the key is absent. A stored ``Null`` also projects
+        to ``None`` in the native view, matching ordinary Python cache APIs.
+        Pass ``representation="lossless"`` to retain ``Undefined``,
+        integer/float distinctions, raw float bits, byte/text kinds, and
+        scalar-key map identity.
         """
 
         self._assert_open()
@@ -227,7 +200,7 @@ class OpenKacheClient:
             _raise_native_error(error)
         kind, payload = _read_result(result, operation_name="GET")
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
-            return MISSING
+            return None
         if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"GET returned unexpected native result {kind!r}")
         try:
@@ -237,14 +210,14 @@ class OpenKacheClient:
                 f"StructuredValue-CBOR-v1 decoding failed: {error}"
             ) from error
         if representation == "lossless":
-            return Found(model)
+            return model
         try:
             value = to_native(model)
         except StructuredValueError as error:
             raise OpenKacheValueError(
                 f"native value projection failed: {error}"
             ) from error
-        return Found(value)
+        return value
 
     def set(
         self,
@@ -437,10 +410,6 @@ def _canonical_cbor_integer(value: int) -> bytes:
 
 __all__ = [
     "Client",
-    "Found",
-    "GetResult",
-    "Missing",
-    "MISSING",
     "OpenKacheClient",
     "OpenKacheError",
     "OpenKacheIncompatibleServerError",

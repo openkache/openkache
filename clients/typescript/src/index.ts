@@ -113,33 +113,6 @@ export interface GetOptions {
 /** Compatibility spelling retained for existing callers. */
 export type Get_Options = GetOptions
 
-/** A tagged result for a lookup that may be absent. */
-export type GetResult<Value> = MissingResult | FoundResult<Value>
-
-/** Compatibility spelling retained for existing callers. */
-export type Get_Result<Value> = GetResult<Value>
-
-/** Explicit missing lookup result; it is distinct from a stored `Undefined`. */
-export class MissingResult {
-  readonly kind = "missing" as const
-}
-
-/** Compatibility spelling retained for existing callers. */
-export { MissingResult as Missing_Result }
-
-/** Explicit found lookup result, including a stored `Undefined` value. */
-export class FoundResult<Value> {
-  readonly kind = "found" as const
-
-  constructor(readonly value: Value) {}
-}
-
-/** Compatibility spelling retained for existing callers. */
-export { FoundResult as Found_Result }
-
-/** Stable singleton for callers that need to compare missing results by identity. */
-export const MISSING = new MissingResult()
-
 /** Public set outcomes for unconditional writes. */
 export type SetOutcome = Gate0_Set_Outcome
 
@@ -254,30 +227,30 @@ export class OpenKacheClient {
   /**
    * Retrieves one value using the native JavaScript representation by default.
    *
-   * `MissingResult` is returned when no live item exists. A stored `null` or
-   * `undefined` is always wrapped in `FoundResult`, so the native value never
-   * becomes the missing marker. Pass `{ representation: "lossless" }` to
-   * retain integer/float distinctions, raw float bits, and model map keys.
+   * `undefined` is returned when no live item exists. A stored `undefined` has
+   * the same result in the native view, just as with `Map.get`; pass
+   * `{ representation: "lossless" }` to retain the model's `Undefined` value,
+   * integer/float distinctions, raw float bits, and model map keys.
    *
    * @param key - UTF-8 text, exact bytes, a safe integer number, or a
    * signed-i64 bigint key.
    * @param options - Optional native or lossless value representation.
-   * @returns A tagged missing/found result.
+   * @returns The decoded value, or `undefined` when the key is absent.
    * @throws {OpenKacheError} When validation, transport, decoding, or native
    * projection fails.
    */
   async get(
     key: ClientKey,
     options?: GetOptions & { readonly representation?: "native" },
-  ): Promise<GetResult<NativeValue>>
+  ): Promise<NativeValue | undefined>
   async get(
     key: ClientKey,
     options: GetOptions & { readonly representation: "lossless" },
-  ): Promise<GetResult<StructuredValue>>
+  ): Promise<StructuredValue | undefined>
   async get(
     key: ClientKey,
     options: GetOptions = {},
-  ): Promise<GetResult<NativeValue | StructuredValue>> {
+  ): Promise<NativeValue | StructuredValue | undefined> {
     this.#assert_open()
     if (
       options.representation !== undefined &&
@@ -294,7 +267,7 @@ export class OpenKacheClient {
     } catch (error) {
       throw as_openkache_error(error)
     }
-    if (payload === null) return MISSING
+    if (payload === null) return undefined
     let model: StructuredValue
     try {
       model = decode_structured_value(payload)
@@ -305,10 +278,10 @@ export class OpenKacheClient {
       )
     }
     if (options.representation === "lossless") {
-      return new FoundResult(model)
+      return model
     }
     try {
-      return new FoundResult(to_native(model) as NativeValue)
+      return to_native(model) as NativeValue
     } catch (error) {
       throw new OpenKacheError(
         `native value projection failed: ${error_message(error)}`,
