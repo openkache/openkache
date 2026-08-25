@@ -28,7 +28,9 @@ All three packages use the same logical operations:
 The source-built [CLI](cli/README.md) provides the same Gate 0 key and
 structured-value profile by default for Bash scripts and interactive use.
 Select its `configured` profile when certificate roots, mTLS, client-side value
-protection, TTL, conditional writes, or maintenance operations are required.
+protection, TTL, or conditional writes are required. Its maintenance commands
+remain available only against a full OpenKache server with the matching
+experimental API policy; the prototype does not implement them.
 
 ## Values and keys
 
