@@ -32,8 +32,8 @@ aes-siv = { version = "=0.8.0-rc.3", features = ["zeroize"] }
 base64 = "=0.22.1"
 blake3 = { version = "=1.8.5", features = ["zeroize"] }
 cmac = { version = "=0.8.0", features = ["zeroize"] }
-compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
-compio-quic = { version = "*", features = ["ring"], optional = true }
+compio = { version = "=0.19.1", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
+compio-quic = { version = "=0.8.0", features = ["ring"], optional = true }
 crossbeam-queue = "=0.3.13"
 crossfire = "=3.1.19"
 futures-util = "=0.3.33"
