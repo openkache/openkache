@@ -76,8 +76,8 @@ jobs:
             exit 1
           fi
 
-  build:
-    name: Build sdist and Linux wheel
+  build-sdist:
+    name: Build source distribution
     needs: guard
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -98,45 +98,197 @@ jobs:
       - name: Install package builders
         run: python3 -m pip install --disable-pip-version-check --upgrade build twine
 
-      - name: Build and inspect distributions
+      - name: Build and inspect source distribution
         working-directory: clients/python
         run: |
           set -euo pipefail
           rm -rf "${RUNNER_TEMP}/openkache-python-dist"
           mkdir -p "${RUNNER_TEMP}/openkache-python-dist"
-          python3 -m build --sdist --wheel --outdir "${RUNNER_TEMP}/openkache-python-dist"
+          python3 -m build --sdist --outdir "${RUNNER_TEMP}/openkache-python-dist"
           sdist_count="$(
             find "${RUNNER_TEMP}/openkache-python-dist" -maxdepth 1 \
               -type f -name "openkache-${RELEASE_VERSION}.tar.gz" | wc -l
           )"
-          wheel_count="$(
-            find "${RUNNER_TEMP}/openkache-python-dist" -maxdepth 1 \
-              -type f \
-              -name "openkache-${RELEASE_VERSION}-py3-none-manylinux_2_38_x86_64.whl" \
-              | wc -l
-          )"
-          [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 1 ]] || {
-            echo "Expected exactly one sdist and one wheel." >&2
+          [[ "${sdist_count}" -eq 1 ]] || {
+            echo "Expected exactly one source distribution." >&2
             exit 1
           }
           python3 -m twine check "${RUNNER_TEMP}"/openkache-python-dist/*
 
+      - name: Upload source distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-python-sdist
+          path: ${{ runner.temp }}/openkache-python-dist
+          if-no-files-found: error
+          retention-days: 14
+
+  build-wheel:
+    name: Build ${{ matrix.name }} wheel
+    needs: [guard, build-sdist]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            platform_tag: manylinux_2_38_x86_64
+            native_library: libopenkache_client_python_native.so
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            platform_tag: manylinux_2_38_aarch64
+            native_library: libopenkache_client_python_native.so
+          - name: macos-x86_64
+            runner: macos-13
+            platform_tag: macosx_*_x86_64
+            native_library: libopenkache_client_python_native.dylib
+          - name: macos-arm64
+            runner: macos-14
+            platform_tag: macosx_*_arm64
+            native_library: libopenkache_client_python_native.dylib
+          - name: windows-x86_64
+            runner: windows-2022
+            platform_tag: win_amd64
+            native_library: openkache_client_python_native.dll
+          - name: windows-arm64
+            runner: windows-11-arm
+            platform_tag: win_arm64
+            native_library: openkache_client_python_native.dll
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download source distribution
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openkache-python-sdist
+          path: ${{ runner.temp }}/openkache-python-sdist
+
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Extract source distribution
+        env:
+          SOURCE_ROOT: ${{ runner.temp }}/openkache-python-source
+          SDIST_ROOT: ${{ runner.temp }}/openkache-python-sdist
+        run: >-
+          python -c
+          'import os,pathlib,shutil,tarfile;
+          d=pathlib.Path(os.environ["SOURCE_ROOT"]);
+          shutil.rmtree(d,ignore_errors=True);
+          d.mkdir(parents=True);
+          a=next(pathlib.Path(os.environ["SDIST_ROOT"]).glob("openkache-*.tar.gz"));
+          tarfile.open(a,"r:gz").extractall(d);
+          roots=sorted(d.iterdir());
+          assert len(roots)==1 and roots[0].is_dir(),"source distribution must extract to one directory";
+          r=roots[0];
+          [shutil.move(str(c),str(d/c.name)) for c in r.iterdir()];
+          r.rmdir()'
+
+      - name: Build native adapter
+        working-directory: ${{ runner.temp }}/openkache-python-source
+        run: cargo build --locked --release --manifest-path native/Cargo.toml
+
+      - name: Install package builders
+        run: python -m pip install --disable-pip-version-check --upgrade build twine
+
+      - name: Build and inspect wheel
+        working-directory: ${{ runner.temp }}/openkache-python-source
+        env:
+          SOURCE_ROOT: ${{ runner.temp }}/openkache-python-source
+          WHEEL_ROOT: ${{ runner.temp }}/openkache-python-wheel
+          OPENKACHE_CLIENT_NATIVE: ${{ runner.temp }}/openkache-python-source/native/target/release/${{ matrix.native_library }}
+          EXPECTED_PLATFORM_TAG: ${{ matrix.platform_tag }}
+        run: >-
+          python -c
+          'import os,pathlib,shutil,subprocess,sys;
+          d=pathlib.Path(os.environ["WHEEL_ROOT"]);
+          shutil.rmtree(d,ignore_errors=True);
+          d.mkdir(parents=True);
+          subprocess.run([sys.executable,"-m","build","--wheel","--outdir",str(d)],check=True);
+          version=os.environ["RELEASE_VERSION"];
+          platform=os.environ["EXPECTED_PLATFORM_TAG"];
+          pattern=f"openkache-{version}-py3-none-{platform}.whl";
+          wheels=sorted(d.glob(pattern));
+          assert len(wheels)==1,f"expected one wheel, found {len(wheels)}: {wheels}";
+          subprocess.run([sys.executable,"-m","twine","check",*map(str,wheels)],check=True)'
+
+      - name: Upload platform wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-python-wheel-${{ matrix.name }}
+          path: ${{ runner.temp }}/openkache-python-wheel/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+  collect:
+    name: Collect and validate Python distributions
+    needs: [guard, build-sdist, build-wheel]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_WHEEL_COUNT: 6
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Download all validated artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: openkache-python-*
+          path: ${{ runner.temp }}/openkache-python-dist
+          merge-multiple: true
+
+      - name: Validate complete distribution set
+        env:
+          DIST_ROOT: ${{ runner.temp }}/openkache-python-dist
+        run: |
+          set -euo pipefail
+          sdist_count="$(find "${DIST_ROOT}" -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}.tar.gz" | wc -l)"
+          wheel_count="$(find "${DIST_ROOT}" -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}-py3-none-*.whl" | wc -l)"
+          [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq "${EXPECTED_WHEEL_COUNT}" ]] || {
+            echo "Expected one sdist and ${EXPECTED_WHEEL_COUNT} platform wheels." >&2
+            find "${DIST_ROOT}" -maxdepth 1 -type f -print >&2
+            exit 1
+          }
+          python3 -m pip install --disable-pip-version-check --upgrade twine
+          python3 -m twine check "${DIST_ROOT}"/openkache-*
+
       - name: Record provenance and checksums
         env:
+          DIST_ROOT: ${{ runner.temp }}/openkache-python-dist
           SOURCE_SHA: ${{ github.sha }}
           SOURCE_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          release_root="${RUNNER_TEMP}/openkache-python-dist"
           printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\n' \
             "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
-            > "${release_root}/RELEASE-METADATA"
+            > "${DIST_ROOT}/RELEASE-METADATA"
           (
-            cd "${release_root}"
+            cd "${DIST_ROOT}"
             sha256sum openkache-* > SHA256SUMS
           )
 
-      - name: Upload Python distributions
+      - name: Upload complete Python distributions
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openkache-python-distributions
@@ -146,7 +298,7 @@ jobs:
 
   publish:
     name: Publish immutable PyPI version
-    needs: [guard, build]
+    needs: [guard, collect]
     runs-on: ubuntu-24.04
     environment: pypi-release
     permissions:
@@ -187,11 +339,11 @@ jobs:
             sdist_count="$(find . -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}.tar.gz" | wc -l)"
             wheel_count="$(
               find . -maxdepth 1 -type f \
-                -name "openkache-${RELEASE_VERSION}-py3-none-manylinux_2_38_x86_64.whl" \
+                -name "openkache-${RELEASE_VERSION}-py3-none-*.whl" \
                 | wc -l
             )"
-            [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 1 ]] || {
-              echo "Expected exactly one sdist and one wheel." >&2
+            [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 6 ]] || {
+              echo "Expected one sdist and six platform wheels." >&2
               exit 1
             }
           )

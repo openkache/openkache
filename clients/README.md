@@ -3,6 +3,8 @@
 OpenKache is a super-fast open-source SSD cache server.
 
 Use a client library to connect to OpenKache and store, read, or delete values.
+The Rust client uses Tokio/Quinn by default; applications using another
+executor can enable the optional Compio/QUIC feature and use `CompioClient`.
 
 ## Packages
 

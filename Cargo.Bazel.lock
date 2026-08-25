@@ -17011,6 +17011,7 @@
         ],
         "crate_features": {
           "common": [
+            "quic-compio",
             "default",
             "quic-quinn",
             "runtime-tokio"
@@ -17042,6 +17043,14 @@
             {
               "id": "cmac 0.8.0",
               "target": "cmac"
+            },
+            {
+              "id": "compio 0.19.1",
+              "target": "compio"
+            },
+            {
+              "id": "compio-quic 0.8.0",
+              "target": "compio_quic"
             },
             {
               "id": "crossbeam-queue 0.3.13",

@@ -19,13 +19,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if !runtime.driver_type().is_iouring() {
-        openkache_cli::report_message(
-            "openkache-cli requires the io_uring runtime driver",
-            "use `--no-default-features --features quic-quinn` on platforms without io_uring",
-        );
-        std::process::exit(1);
-    }
     if let Err(error) = runtime.block_on(openkache_cli::run(arguments)) {
         openkache_cli::report_error(&error);
         std::process::exit(1);
