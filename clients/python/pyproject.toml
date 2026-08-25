@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openkache"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python client for the OpenKache cache server"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,8 @@ keywords = ["cache", "openkache", "ssd"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",

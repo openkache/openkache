@@ -33,10 +33,12 @@ rust_library(
     srcs = glob(["src/**/*.rs"], exclude = ["src/contract_snapshot/**"]),
     aliases = crate_aliases("clients/rust"),
     crate_features = [
+        "quic-compio",
         "quic-quinn",
     ],
     crate_name = "openkache",
     crate_root = "src/lib.rs",
+    compile_data = ["README.md"],
     edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
     deps = cargo_deps("clients/rust"),

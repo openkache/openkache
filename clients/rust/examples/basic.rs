@@ -1,6 +1,6 @@
-//! Complete Gate 0 CRUD example for a local development server.
+//! Complete CRUD example for a local development server.
 
-use openkache::{Client, DeleteOutcome, GetResult, SetOutcome, Value};
+use openkache::{Client, GetResult, SetOutcome, Value};
 
 #[tokio::main]
 async fn main() -> openkache::Result<()> {
@@ -17,7 +17,8 @@ async fn main() -> openkache::Result<()> {
         client.get("greeting").await?,
         GetResult::Found(Value::text("hello"))
     );
-    assert_eq!(client.delete("greeting").await?, DeleteOutcome::Deleted);
+
+    assert!(client.delete("greeting").await?);
     assert_eq!(client.get("greeting").await?, GetResult::Missing);
 
     client.close().await?;

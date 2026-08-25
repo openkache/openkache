@@ -1,8 +1,7 @@
-"""Maintained synchronous Python client for OpenKache v1."""
+"""Python client for the OpenKache cache server."""
 
 from ._client import (
     Client,
-    DeleteOutcome,
     Found,
     GetResult,
     MISSING,
@@ -47,7 +46,6 @@ __all__ = [
     "ByteString",
     "ByteStringValue",
     "Client",
-    "DeleteOutcome",
     "Float",
     "FloatValue",
     "Found",

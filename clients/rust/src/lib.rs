@@ -1,11 +1,4 @@
-//! The maintained OpenKache Rust client.
-//!
-//! The published facade intentionally has one small surface: [`Client::connect`],
-//! [`Client::get`], [`Client::set`], [`Client::delete`], and [`Client::close`].
-//! Gate 0 fixes the development transport profile, NamespaceHash key mapping,
-//! and `StructuredValue-CBOR-v1`; callers cannot select certificates,
-//! protection, compression, retries, or cancellation.
-
+#![doc = include_str!("../README.md")]
 #![doc(html_root_url = "https://docs.rs/openkache/0.1.1")]
 
 #[path = "internal/core/lib.rs"]
@@ -55,15 +48,6 @@ mod maintained {
         Replaced,
     }
 
-    /// Result of an idempotent `delete`.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum DeleteOutcome {
-        /// An existing item was removed.
-        Deleted,
-        /// No item existed for the supplied key.
-        NotFound,
-    }
-
     /// A mutation whose response was lost after admission.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Mutation {
@@ -73,7 +57,7 @@ mod maintained {
         Delete,
     }
 
-    /// Errors returned by the maintained facade.
+    /// Errors returned by the client.
     #[derive(Debug, thiserror::Error)]
     pub enum Error {
         /// A mutation may have taken effect, but the response could not be
@@ -87,13 +71,13 @@ mod maintained {
         /// implementation.
         #[error("client operation failed: {0}")]
         Core(String),
-        /// The server returned a conditional-set status even though Gate 0
-        /// never sends conditional options.
+        /// The server returned a conditional-set status even though this
+        /// client uses unconditional writes.
         #[error("server returned an unsupported set outcome")]
         UnsupportedSetOutcome,
     }
 
-    /// Result alias for the maintained facade.
+    /// Result alias for client operations.
     pub type Result<T> = std::result::Result<T, Error>;
 
     impl<T> GetResult<T> {
@@ -128,15 +112,15 @@ mod maintained {
         }
     }
 
+    #[cfg(feature = "quic-compio")]
+    use core::LocalProtectedClient;
     #[cfg(feature = "quic-quinn")]
     use core::ProtectedClient;
 
-    /// A connected Gate 0 client.
+    /// A connected OpenKache client.
     ///
-    /// The only supported operations are [`Client::get`], [`Client::set`],
-    /// [`Client::delete`], and [`Client::close`]. Values are always
-    /// `StructuredValue-CBOR-v1`; the fixed profile is uncompressed and
-    /// unprotected inside TLS.
+    /// Values use the OpenKache structured value format. Connections use the
+    /// local development TLS profile described in [`Client::connect`].
     #[cfg(feature = "quic-quinn")]
     #[derive(Clone)]
     pub struct Client {
@@ -161,7 +145,7 @@ mod maintained {
             Ok(&self.inner)
         }
 
-        /// Connects using the fixed Gate 0 development profile.
+        /// Connects to an OpenKache server using the local development profile.
         ///
         /// The profile intentionally disables certificate verification for
         /// local development. It still requires a TLS 1.3 handshake and never
@@ -208,17 +192,16 @@ mod maintained {
                 })
         }
 
-        /// Deletes one key. Repeating the operation is safe and returns
-        /// [`DeleteOutcome::NotFound`].
-        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
+        /// Deletes one key and reports whether an item was removed.
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
             self.gate0_client()
                 .await?
                 .delete(key)
                 .await
                 .map_err(map_core_error)
                 .map(|outcome| match outcome {
-                    core::DeleteOutcome::Deleted => DeleteOutcome::Deleted,
-                    core::DeleteOutcome::NotFound => DeleteOutcome::NotFound,
+                    core::DeleteOutcome::Deleted => true,
+                    core::DeleteOutcome::NotFound => false,
                 })
         }
 
@@ -228,6 +211,108 @@ mod maintained {
             self.inner.close().await.map_err(map_core_error)
         }
     }
+
+    /// A connected Gate 0 client running on Compio.
+    ///
+    /// `CompioClient` has the same operation and value contract as [`Client`],
+    /// but it does not create or require a Tokio runtime. Call it from an
+    /// active Compio runtime, for example one created with
+    /// `compio::runtime::Runtime::new()`.
+    #[cfg(feature = "quic-compio")]
+    #[derive(Clone)]
+    pub struct CompioClient {
+        inner: LocalProtectedClient,
+    }
+
+    #[cfg(feature = "quic-compio")]
+    impl CompioClient {
+        async fn gate0_client(&self) -> Result<&LocalProtectedClient> {
+            let namespace_id = self
+                .inner
+                .raw()
+                .ensure_namespace_id()
+                .await
+                .map_err(map_core_error)?;
+            if namespace_id != core::contract::GATE0_NAMESPACE_ID {
+                return Err(Error::Core(format!(
+                    "server selected namespace {namespace_id}, expected Gate 0 namespace {}",
+                    core::contract::GATE0_NAMESPACE_ID,
+                )));
+            }
+            Ok(&self.inner)
+        }
+
+        /// Connects using the fixed Gate 0 development profile on Compio.
+        ///
+        /// The profile intentionally disables certificate verification for
+        /// local development. It still requires a TLS 1.3 handshake and never
+        /// falls back to plaintext. Do not use this trust profile in production.
+        pub async fn connect(endpoint: impl AsRef<str>) -> Result<Self> {
+            let endpoint = endpoint.as_ref().parse().map_err(map_core_error)?;
+            let inner = LocalProtectedClient::builder(
+                endpoint,
+                core::DataProtectionKey::from_bytes(core::contract::GATE0_ITEM_ID_ROOT),
+            )
+            .server_trust(core::ServerTrust::Insecure)
+            .compression(Compression::Disabled)
+            .encryption(Encryption::Unprotected)
+            .connect()
+            .await
+            .map_err(map_core_error)?;
+            Ok(Self { inner })
+        }
+
+        /// Retrieves one lossless structured value.
+        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetResult<Value>> {
+            self.gate0_client()
+                .await?
+                .get_structured(key)
+                .await
+                .map(|outcome| match outcome {
+                    CoreGetOutcome::Found(value) => GetResult::Found(value),
+                    CoreGetOutcome::NotFound => GetResult::Missing,
+                })
+                .map_err(map_core_error)
+        }
+
+        /// Stores one lossless structured value using an unconditional write.
+        pub async fn set(&self, key: impl Into<TypedKey>, value: Value) -> Result<SetOutcome> {
+            self.gate0_client()
+                .await?
+                .set_structured(key, value, core::SetOptions::new())
+                .await
+                .map_err(map_core_error)
+                .and_then(|outcome| match outcome {
+                    CoreSetOutcome::Created => Ok(SetOutcome::Created),
+                    CoreSetOutcome::Replaced => Ok(SetOutcome::Replaced),
+                    CoreSetOutcome::NotStored => Err(Error::UnsupportedSetOutcome),
+                })
+        }
+
+        /// Deletes one key and reports whether an item was removed.
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
+            self.gate0_client()
+                .await?
+                .delete(key)
+                .await
+                .map_err(map_core_error)
+                .map(|outcome| match outcome {
+                    core::DeleteOutcome::Deleted => true,
+                    core::DeleteOutcome::NotFound => false,
+                })
+        }
+
+        /// Idempotently closes the client and waits for admitted work to
+        /// settle before releasing the transport.
+        pub async fn close(&self) -> Result<()> {
+            self.inner.close().await.map_err(map_core_error)
+        }
+    }
+
+    /// Compatibility name for callers that use the core's local-runtime
+    /// terminology. Prefer [`CompioClient`] in new code.
+    #[cfg(feature = "quic-compio")]
+    pub type LocalClient = CompioClient;
 }
 
 pub use maintained::*;

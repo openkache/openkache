@@ -3,7 +3,7 @@ name = "openkache"
 publish = true
 version = "0.1.1"
 edition.workspace = true
-description = "Maintained Rust client for the OpenKache cache server"
+description = "Rust client for the OpenKache cache server"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/openkache/openkache"
@@ -23,6 +23,7 @@ crate-type = ["rlib"]
 [features]
 default = ["quic-quinn"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
+quic-compio = ["dep:compio", "dep:compio-quic"]
 
 [dependencies]
 aes = { version = "=0.9.1", features = ["zeroize"] }
@@ -31,9 +32,11 @@ aes-siv = { version = "=0.8.0-rc.3", features = ["zeroize"] }
 base64 = "*"
 blake3 = { version = "*", features = ["zeroize"] }
 cmac = { version = "=0.8.0", features = ["zeroize"] }
-crossbeam-queue = "*"
-crossfire = "*"
-futures-util = "*"
+compio = { version = "=0.19.1", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
+compio-quic = { version = "=0.8.0", features = ["ring"], optional = true }
+crossbeam-queue = "=0.3.13"
+crossfire = "=3.1.19"
+futures-util = "=0.3.33"
 getrandom = "0.3"
 http = "*"
 polyval = { version = "=0.7.3", features = ["zeroize"] }

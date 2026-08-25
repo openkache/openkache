@@ -1585,6 +1585,8 @@ dependencies = [
  "base64",
  "blake3",
  "cmac",
+ "compio",
+ "compio-quic",
  "crossbeam-queue",
  "crossfire",
  "futures-util",

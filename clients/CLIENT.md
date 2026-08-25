@@ -66,7 +66,7 @@ results, and error categories.
 | `connect` | endpoint and the fixed development profile | an open client |
 | `get` | one [`TypedKey`](KEY_FORMAT.md) | `GetResult<Value>` |
 | `set` | one `TypedKey` and one `Value` | `Created` or `Replaced` |
-| `delete` | one [`TypedKey`](KEY_FORMAT.md) | `Deleted` or `NotFound` |
+| `delete` | one [`TypedKey`](KEY_FORMAT.md) | `boolean` (`true` when deleted) |
 | `close` | an open client | completion with no value |
 
 `connect` MUST complete the TLS 1.3 handshake before returning a usable
@@ -96,9 +96,10 @@ three states; Python MUST NOT use `None` as the missing marker and
 TypeScript/JavaScript MUST NOT use `undefined` as the missing marker.
 
 An unconditional `set` returns `Created` when the item was absent and
-`Replaced` when a live item was overwritten. `delete` returns `Deleted` when
-an item was removed and `NotFound` when it was already absent. Conditional
-writes, `NotStored`, TTL, and expiration options are not Gate 0 outcomes.
+`Replaced` when a live item was overwritten. `delete` has the logical outcomes
+`Deleted` and `NotFound`, which maintained bindings project to `true` and
+`false`, respectively. Conditional writes, `NotStored`, TTL, and expiration
+options are not Gate 0 outcomes.
 
 If a mutation may have crossed admission but its response is lost, the binding
 MUST surface a distinct `UnknownMutation` error/result and MUST NOT

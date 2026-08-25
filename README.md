@@ -2,7 +2,7 @@
 
 # OpenKache ⚡
 
-**An experimental Rust SSD-backed cache server.**
+**A super-fast, open-source SSD cache server.**
 
 Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 
@@ -78,68 +78,34 @@ client.close().await?;
 The Gate 0 SDK intentionally disables certificate verification for local
 development. It still uses TLS 1.3 over QUIC and never falls back to plaintext.
 
-### Try a maintained client
+### Try a client
 
-The three maintained packages use the local development TLS profile. It
-disables certificate verification, so use these examples only against a local
-development server; do not reuse this trust profile for production traffic.
+The examples in the client READMEs use the local development TLS profile. It
+does not verify the server certificate, so use it only with a local development
+server; do not reuse this trust profile for production traffic.
 
-| Package | Install | Documentation |
-|---|---|---|
-| TypeScript / JavaScript | `npm install openkache` or `bun add openkache` | [npm](https://www.npmjs.com/package/openkache) · [README](clients/typescript/README.md) |
-| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [README](clients/python/README.md) |
-| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [README](clients/rust/README.md) |
+| Package | Install | Documentation | Source |
+|---|---|---|---|
+| TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [client README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
+| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
+| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [client README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
 
-All three clients can connect to the default local endpoint:
-`127.0.0.1:4433`.
+All three client guides use `127.0.0.1:4433` as the default local endpoint.
+They also list alternative package managers and the complete public API for
+their language.
 
-TypeScript / JavaScript:
+The source-built [`openkache-cli`](clients/cli/README.md) uses the same fixed
+Gate 0 profile by default. It is the Bash-friendly option for the Rust client
+and the native QUIC frontend of `my-ideal-prototype`:
 
-```typescript
-import { OpenKache_Client } from "openkache"
-
-const client = await OpenKache_Client.connect("127.0.0.1:4433")
-try {
-  console.log(await client.set("hello", { from: "javascript" }))
-  console.log(await client.get("hello"))
-  console.log(await client.delete("hello"))
-} finally {
-  await client.close()
-}
+```bash
+openkache-cli set hello "from cli"
+openkache-cli get hello
 ```
 
-Python:
-
-```python
-from openkache import Client
-
-client = Client.connect("127.0.0.1:4433")
-try:
-    print(client.set("hello", {"from": "python"}))
-    print(client.get("hello"))
-    print(client.delete("hello"))
-finally:
-    client.close()
-```
-
-Rust:
-
-```rust
-use openkache::{Client, Value};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::connect("127.0.0.1:4433").await?;
-    client.set("hello", Value::text("from rust")).await?;
-    println!("{:?}", client.get("hello").await?);
-    client.delete("hello").await?;
-    client.close().await?;
-    Ok(())
-}
-```
-
-Each package README contains a complete runnable example, result semantics,
-supported key/value types, and package-specific build requirements.
+Use `openkache-cli --profile configured` when certificate roots, mutual TLS,
+client-side value protection, or compatibility-only TTL/conditional writes
+are required.
 
 ### Container image
 
