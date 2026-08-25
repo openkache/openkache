@@ -177,7 +177,7 @@ jobs:
           mkdir -p "${destination}"
           tar -xJf "${archive}" --directory "${destination}" --strip-components=1
           "${destination}/zig" version
-          printf '%s/bin\n' "${destination}" >> "${GITHUB_PATH}"
+          printf '%s\n' "${destination}" >> "${GITHUB_PATH}"
 
       - name: Build native adapters
         working-directory: clients/typescript
