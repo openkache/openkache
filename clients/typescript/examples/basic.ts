@@ -14,12 +14,13 @@ try {
   console.log("SET:", await client.set("greeting", { from: "typescript" }))
 
   const result = await client.get("greeting")
-  console.log("GET:", result.kind === "found" ? result.value : "missing")
+  console.log("GET:", result)
 
   console.log("DELETE:", await client.delete("greeting"))
+  const after_delete = await client.get("greeting")
   console.log(
     "GET after DELETE:",
-    (await client.get("greeting")).kind === "missing" ? "missing" : "found",
+    after_delete === undefined ? "missing" : after_delete,
   )
 } finally {
   await client.close()
