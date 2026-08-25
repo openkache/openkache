@@ -25,6 +25,11 @@ writes. A mutation whose response is lost raises the distinct
 Published package: [pypi.org/project/openkache](https://pypi.org/project/openkache/).
 Python 3.11 or newer is required.
 
+The release workflow currently publishes one Linux `x86_64`
+`manylinux_2_38` wheel and one source distribution. Other platforms are not
+claimed to have published wheels: install from the source distribution only
+when a local Rust toolchain can build the native adapter.
+
 ## Install
 
 ```bash

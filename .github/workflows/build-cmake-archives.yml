@@ -110,6 +110,31 @@ jobs:
           cmake -S clients/cpp -B "${smoke_root}/cpp-build" \
             -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${smoke_root}/libopenkache_client_core.a"
           cmake --build "${smoke_root}/cpp-build"
+          install_root="${smoke_root}/install"
+          cmake --install "${smoke_root}/cpp-build" --prefix "${install_root}"
+
+          # Keep the consumer translation unit private to this workflow: the
+          # public header-only package stays lean while the archive job checks
+          # that an installed C++20 package is usable by downstream CMake.
+          consumer_root="${smoke_root}/consumer"
+          mkdir -p "${consumer_root}"
+          cat > "${consumer_root}/CMakeLists.txt" <<'CMAKE'
+          cmake_minimum_required(VERSION 3.25)
+          project(openkache_client_cpp_consumer LANGUAGES CXX)
+          find_package(OpenKacheClient CONFIG REQUIRED)
+          add_executable(openkache_client_cpp_consumer smoke.cpp)
+          target_link_libraries(openkache_client_cpp_consumer PRIVATE OpenKache::Client)
+          CMAKE
+          cat > "${consumer_root}/smoke.cpp" <<'CPP'
+          #include <openkache/client.hpp>
+
+          int main() {
+            return 0;
+          }
+          CPP
+          cmake -S "${consumer_root}" -B "${smoke_root}/consumer-build" \
+            -DCMAKE_PREFIX_PATH="${install_root}"
+          cmake --build "${smoke_root}/consumer-build"
 
       - name: Create deterministic C and C++ source archives
         env:
