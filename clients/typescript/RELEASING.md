@@ -32,6 +32,7 @@ merged:
 ```bash
 bun install --frozen-lockfile
 bun pm pkg set version=0.1.0
+bun run build
 bun run typecheck
 bun run release:dry-run
 ```
