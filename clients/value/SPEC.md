@@ -127,7 +127,10 @@ original float width MUST use the generic model returned by `lossless`.
 Native decoding MAY map `Float(width=16)` and `Float(width=32)` to the
 language's ordinary binary64 floating-point type. Such a conversion preserves
 the numeric value but not the original width in the native object; the generic
-representation remains available when width or raw bits matter.
+representation remains available when width or raw bits matter. A strict
+native adapter MAY reject this projection instead when its ordinary native
+type cannot preserve the model distinction; the lossless representation
+remains the cross-language fallback.
 
 ### 2.3 Strings and bytes
 
@@ -254,17 +257,24 @@ object projection MUST define properties without invoking inherited setters;
 adapters SHOULD use a null-prototype object or equivalent safe property
 definition for names such as `__proto__`.
 
-On decode, maintained JavaScript clients return:
+The JavaScript and TypeScript mappings above describe values accepted by
+`set`. On decode, maintained clients expose the complete model through their
+lossless representation:
 
 ```text
-Integer -> bigint
-Float(width=16/32/64, raw_bits) -> number
+Integer -> Integer_Value (backed by bigint)
+Undefined -> Undefined_Value
+Float(width=16/32/64, raw_bits) -> Float_Value
 ```
 
-An explicit convenience option MAY request safe integers as `number`, but it
-MUST reject values outside the exact safe-integer range instead of rounding
-them. The default MUST preserve the distinction between JavaScript `number`
-and `bigint`.
+The maintained TypeScript strict native projection maps `Integer` to `bigint`
+and returns a conversion error for `Undefined` and every `Float`, because
+JavaScript `undefined` would collapse the stored undefined/missing distinction
+and `number` would discard float width and raw-bit distinctions. An explicit
+checked convenience option MAY request safe integers as `number`, but it MUST
+reject values outside the exact safe-integer range instead of rounding them.
+Gate 0 `get` always uses the lossless representation and therefore preserves
+these distinctions.
 
 ### 3.3 Other maintained languages
 
@@ -364,10 +374,10 @@ The maintained default native projections are:
 | Model value | Python | JavaScript/TypeScript |
 |---|---|---|
 | `Null` | `None` | `null` |
-| `Undefined` | conversion error | `undefined` |
+| `Undefined` | conversion error | conversion error in strict native projection |
 | `Boolean` | `bool` | `boolean` |
 | `Integer` | `int` | `bigint` |
-| `Float(width=16/32/64, raw_bits)` | documented float wrapper/`float` | documented float wrapper/`number` |
+| `Float(width=16/32/64, raw_bits)` | documented float wrapper/`float` | conversion error in strict native projection |
 | `ByteString` | `bytes` | `Uint8Array` |
 | `TextString` | `str` | `string` |
 | `Array` | `list` | `Array` |

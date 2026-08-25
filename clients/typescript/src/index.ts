@@ -294,20 +294,30 @@ export class OpenKache_Client {
   /**
    * Closes the connection. Repeated calls complete successfully.
    *
+   * If native shutdown rejects, the rejected promise is discarded so a later
+   * call retries shutdown. Operations remain closed after the first attempt.
+   *
    * @returns A promise resolved after native resource release.
    */
   close(): Promise<void> {
-    this.#lifecycle.close_promise ??= (async (): Promise<void> => {
-      try {
-        await this.#native_client.close()
-      } catch (error) {
-        throw as_openkache_error(error)
-      } finally {
-        this.#lifecycle.closed = true
-        CLIENT_FINALIZER.unregister(this)
-      }
-    })()
-    return this.#lifecycle.close_promise
+    if (this.#lifecycle.close_promise !== undefined) {
+      return this.#lifecycle.close_promise
+    }
+    const close_promise = Promise.resolve()
+      .then(() => this.#native_client.close())
+      .then(
+        (): void => {
+          this.#lifecycle.closed = true
+          CLIENT_FINALIZER.unregister(this)
+        },
+        (error: unknown): never => {
+          this.#lifecycle.closed = true
+          this.#lifecycle.close_promise = undefined
+          throw as_openkache_error(error)
+        },
+      )
+    this.#lifecycle.close_promise = close_promise
+    return close_promise
   }
 
   #assert_open(): void {
