@@ -1,0 +1,22 @@
+[package]
+name = "my-ideal-prototype"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+alloc-mimalloc = ["dep:mimalloc"]
+alloc-jemalloc = ["dep:tikv-jemallocator"]
+uring-single-issuer = []
+uring-coop-taskrun = []
+uring-defer-taskrun = []
+
+[dependencies]
+blake3 = "*"
+io-uring = "*"
+libc = "*"
+slab = "*"
+mimalloc = { version = "*", optional = true }
+tikv-jemallocator = { version = "*", optional = true }
+
+[workspace]
