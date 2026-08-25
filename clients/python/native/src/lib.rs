@@ -17,14 +17,14 @@ use openkache_client_core::contract::{
     CLIENT_GATE0_ITEM_ID_ROOT, CLIENT_GATE0_NAMESPACE_ID, CLIENT_GATE0_VALUE_SELECTOR,
     FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
     FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_REPLACED,
-    FFI_RESULT_UNKNOWN_MUTATION, FFI_RESULT_VALUE, VALUE_FORMAT_COMPRESSION_NONE,
-    VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_SHIFT,
+    FFI_RESULT_RESOURCE_EXHAUSTED, FFI_RESULT_UNKNOWN_MUTATION, FFI_RESULT_VALUE,
+    VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_SHIFT,
     VALUE_FORMAT_SERIALIZATION_STRUCTURED,
 };
 use openkache_client_core::value::{Compression, Encryption};
 use openkache_client_core::{
     AlpnPolicy, ClientRootKey, DeleteOutcome, Endpoint, Error, GetOutcome, ProtectedClient,
-    ServerTrust, SetOptions, SetOutcome,
+    ServerErrorCode, ServerTrust, SetOptions, SetOutcome,
 };
 use tokio::runtime::Runtime;
 
@@ -64,16 +64,38 @@ impl Gate0Result {
     }
 
     fn core_error(error: Error) -> Self {
-        if matches!(error, Error::AmbiguousOutcome { .. }) {
-            Self::error_with_kind(FFI_RESULT_UNKNOWN_MUTATION, error.to_string())
+        let kind = if matches!(&error, Error::AmbiguousOutcome { .. }) {
+            FFI_RESULT_UNKNOWN_MUTATION
+        } else if is_resource_exhausted(&error) {
+            FFI_RESULT_RESOURCE_EXHAUSTED
         } else {
-            Self::error(error.to_string())
-        }
+            FFI_RESULT_ERROR
+        };
+        Self::error_with_kind(kind, error.to_string())
     }
 
     fn error_with_kind(kind: u32, message: impl Into<String>) -> Self {
         Self::success(kind, message.into().into_bytes())
     }
+}
+
+fn is_resource_exhausted(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::ResponseTooLarge { .. } | Error::ResourceLimit { .. }
+    ) || matches!(
+        error,
+        Error::Server { code, .. }
+            if matches!(
+                *code,
+                ServerErrorCode::TooLarge
+                    | ServerErrorCode::Overloaded
+                    | ServerErrorCode::NoCapacity
+            )
+    ) || matches!(
+        error,
+        Error::Value(openkache_client_core::value::Error::ResourceLimit { .. })
+    )
 }
 
 unsafe fn copy_bytes(pointer: *const u8, length: usize, name: &str) -> Result<Vec<u8>, String> {
