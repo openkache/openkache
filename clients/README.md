@@ -33,6 +33,8 @@ Each package README is the source for its language-facing API:
 - [TypeScript / JavaScript](typescript/README.md) — Node.js, Bun, and Deno
 - [Python](python/README.md) — synchronous Gate 0 facade
 - [Rust](rust/README.md) — published async crate
+- [CLI](cli/README.md) — source-built Gate 0 command-line client with a
+  configurable compatibility profile
 
 ## Documentation
 
@@ -60,7 +62,7 @@ formats or protocol behavior.
 | Shared core | [`core/`](core/) | Internal Rust engine and native ABI; not an end-user dependency |
 | Value model | [`value/`](value/) | Internal `Value` algebra and bounded structured payload codec |
 | Rust | [`rust/`](rust/) | Published `openkache` crate with the maintained five-operation facade |
-| CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
+| CLI | [`cli/`](cli/) | Bash-friendly Gate 0 client by default, with a configurable compatibility profile |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Node-API SDK with typed keys and a structured `set`/`get` facade |
 | C# / .NET | [`dotnet/`](dotnet/) | Compatibility adapter over the internal native ABI; not the Gate 0 Rust facade |
 | Python | [`python/`](python/) | Maintained synchronous five-operation Gate 0 facade |
@@ -92,7 +94,10 @@ interoperability implementers.
 
 The documents above are the frozen v1 contract. Package READMEs describe
 whether each package implements the maintained Gate 0 facade, is a compatibility
-adapter, or is an internal implementation crate.
+adapter, or is an internal implementation crate. The CLI README also documents
+the profile boundary: its default `gate0` mode shares keys and structured
+values with the Rust client and the prototype's native QUIC frontend, while
+`configured` keeps the broader raw-value and TLS controls.
 
 `EXPERIMENTAL_STATS` and `EXPERIMENTAL_SYNC` are out-of-band experimental
 maintenance operations and are disabled by default. A server exposes them only when configured with

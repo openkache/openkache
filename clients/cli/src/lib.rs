@@ -17,9 +17,11 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use openkache_client_core::LocalProtectedClient as LocalClient;
 #[cfg(feature = "quic-quinn")]
 use openkache_client_core::ProtectedClient as Client;
+use openkache_client_core::value::{Compression, Encryption};
 use openkache_client_core::{
     Certificate, ClientIdentity, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
-    PrivateKey, ServerTrust, SetOptions, SetOutcome,
+    PrivateKey, ServerTrust, SetOptions, SetOutcome, StructuredValue, contract,
+    encode_structured_value,
 };
 use owo_colors::OwoColorize;
 use reedline::{
@@ -119,6 +121,22 @@ pub enum OutputFormat {
     Base64,
 }
 
+/// Connection and value-format profile selected by the CLI.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum ConnectionProfile {
+    /// The fixed Rust Gate 0 profile used by local development clients.
+    ///
+    /// This profile uses the public Gate 0 Item-ID root, namespace `1`,
+    /// `StructuredValue-CBOR-v1`, and the explicit development TLS trust
+    /// policy. It is the default so the CLI can talk to the Rust client and
+    /// the RESP-backed prototype without additional flags.
+    #[default]
+    Gate0,
+    /// Configurable compatibility profile for certificates, value keys, and
+    /// conditional or expiring writes.
+    Configured,
+}
+
 /// Top-level command-line options and command selection.
 #[derive(Debug, Parser)]
 #[command(
@@ -128,6 +146,18 @@ pub enum OutputFormat {
     arg_required_else_help = true
 )]
 pub struct Arguments {
+    /// Client profile. Gate 0 matches the maintained Rust client and the
+    /// local RESP-backed prototype; configured retains the full compatibility
+    /// surface.
+    #[arg(
+        long,
+        env = "OPENKACHE_PROFILE",
+        value_enum,
+        default_value_t = ConnectionProfile::Gate0,
+        value_name = "PROFILE"
+    )]
+    pub profile: ConnectionProfile,
+
     /// OpenKache server address as `HOST:PORT`.
     #[arg(
         long,
@@ -250,9 +280,11 @@ pub enum Command {
 ///
 /// Returns configuration, transport, protocol, value, or terminal I/O errors.
 pub async fn run(arguments: Arguments) -> Result<()> {
+    let profile = profile_from_arguments(&arguments)?;
+    validate_command(profile, &arguments.command)?;
     let address = arguments.address.clone();
     let connecting = progress_bar(format!("connecting to {address}"));
-    let client = match connect(&arguments).await {
+    let client = match connect(&arguments, profile).await {
         Ok(client) => client,
         Err(error) => {
             connecting.abandon();
@@ -269,114 +301,227 @@ pub async fn run(arguments: Arguments) -> Result<()> {
 
 enum ConnectedClient {
     #[cfg(feature = "quic-compio")]
-    Compio(LocalClient),
+    Compio(LocalClient, ConnectionProfile),
     #[cfg(feature = "quic-quinn")]
-    Quinn(Client),
+    Quinn(Client, ConnectionProfile),
 }
 
 impl ConnectedClient {
     async fn ping(&self) -> openkache_client_core::Result<()> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.ping().await.map(|_| ()),
+            Self::Compio(client, _) => client.ping().await.map(|_| ()),
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.ping().await.map(|_| ()),
+            Self::Quinn(client, _) => client.ping().await.map(|_| ()),
         }
     }
 
     async fn get(
         &self,
-        application_key: &[u8],
-    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        application_key: &str,
+    ) -> openkache_client_core::Result<GetOutcome<ClientValue>> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.get(application_key).await,
+            Self::Compio(client, ConnectionProfile::Gate0) => {
+                match client.get_structured(application_key).await? {
+                    GetOutcome::Found(value) => {
+                        Ok(GetOutcome::Found(ClientValue::Structured(value)))
+                    }
+                    GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+                }
+            }
+            #[cfg(feature = "quic-compio")]
+            Self::Compio(client, ConnectionProfile::Configured) => {
+                match client.get(application_key).await? {
+                    GetOutcome::Found(value) => Ok(GetOutcome::Found(ClientValue::Raw(value))),
+                    GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+                }
+            }
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.get(application_key).await,
+            Self::Quinn(client, ConnectionProfile::Gate0) => {
+                match client.get_structured(application_key).await? {
+                    GetOutcome::Found(value) => {
+                        Ok(GetOutcome::Found(ClientValue::Structured(value)))
+                    }
+                    GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+                }
+            }
+            #[cfg(feature = "quic-quinn")]
+            Self::Quinn(client, ConnectionProfile::Configured) => {
+                match client.get(application_key).await? {
+                    GetOutcome::Found(value) => Ok(GetOutcome::Found(ClientValue::Raw(value))),
+                    GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+                }
+            }
         }
     }
 
     async fn set(
         &self,
-        application_key: &[u8],
-        value: Vec<u8>,
+        application_key: &str,
+        value: InputValue,
         options: SetOptions,
     ) -> openkache_client_core::Result<SetOutcome> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.set(application_key, value, options).await,
+            Self::Compio(client, ConnectionProfile::Gate0) => {
+                client
+                    .set_structured(application_key, value.into_structured(), options)
+                    .await
+            }
+            #[cfg(feature = "quic-compio")]
+            Self::Compio(client, ConnectionProfile::Configured) => {
+                client
+                    .set(application_key, value.into_bytes(), options)
+                    .await
+            }
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.set(application_key, value, options).await,
+            Self::Quinn(client, ConnectionProfile::Gate0) => {
+                client
+                    .set_structured(application_key, value.into_structured(), options)
+                    .await
+            }
+            #[cfg(feature = "quic-quinn")]
+            Self::Quinn(client, ConnectionProfile::Configured) => {
+                client
+                    .set(application_key, value.into_bytes(), options)
+                    .await
+            }
         }
     }
 
-    async fn delete(&self, application_key: &[u8]) -> openkache_client_core::Result<DeleteOutcome> {
+    async fn delete(&self, application_key: &str) -> openkache_client_core::Result<DeleteOutcome> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.delete(application_key).await,
+            Self::Compio(client, _) => client.delete(application_key).await,
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.delete(application_key).await,
+            Self::Quinn(client, _) => client.delete(application_key).await,
         }
     }
 
     async fn experimental_stats(&self) -> openkache_client_core::Result<String> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.experimental_stats().await,
+            Self::Compio(client, _) => client.experimental_stats().await,
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.experimental_stats().await,
+            Self::Quinn(client, _) => client.experimental_stats().await,
         }
     }
 
     async fn experimental_sync(&self) -> openkache_client_core::Result<()> {
         match self {
             #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.experimental_sync().await,
+            Self::Compio(client, _) => client.experimental_sync().await,
             #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.experimental_sync().await,
+            Self::Quinn(client, _) => client.experimental_sync().await,
         }
     }
 }
 
-async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
+async fn connect(arguments: &Arguments, profile: ConnectionProfile) -> Result<ConnectedClient> {
     let endpoint = endpoint_from_arguments(arguments)?;
-    let data_protection_key = data_protection_key_from_arguments(arguments)?;
-    let trust = trust_from_arguments(arguments)?;
-    let identity = client_identity_from_arguments(arguments)?;
+    let data_protection_key = match profile {
+        ConnectionProfile::Gate0 => {
+            Some(DataProtectionKey::from_bytes(contract::GATE0_ITEM_ID_ROOT))
+        }
+        ConnectionProfile::Configured => data_protection_key_from_arguments(arguments)?,
+    };
+    let trust = match profile {
+        ConnectionProfile::Gate0 => ServerTrust::Insecure,
+        ConnectionProfile::Configured => trust_from_arguments(arguments)?,
+    };
+    let identity = match profile {
+        ConnectionProfile::Gate0 => None,
+        ConnectionProfile::Configured => client_identity_from_arguments(arguments)?,
+    };
 
     #[cfg(feature = "quic-compio")]
     {
-        let mut builder = match data_protection_key {
-            Some(key) => LocalClient::builder(endpoint, key),
-            None => LocalClient::builder_unprotected(endpoint),
-        }
-        .server_trust(trust);
+        let mut builder = match profile {
+            ConnectionProfile::Gate0 => LocalClient::builder(
+                endpoint,
+                data_protection_key.expect("Gate 0 always supplies its fixed root"),
+            )
+            .server_trust(trust)
+            .compression(Compression::Disabled)
+            .encryption(Encryption::Unprotected)
+            .namespace_id(contract::GATE0_NAMESPACE_ID),
+            ConnectionProfile::Configured => match data_protection_key {
+                Some(key) => LocalClient::builder(endpoint, key).server_trust(trust),
+                None => LocalClient::builder_unprotected(endpoint).server_trust(trust),
+            },
+        };
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }
         builder
             .connect()
             .await
-            .map(ConnectedClient::Compio)
+            .map(|client| ConnectedClient::Compio(client, profile))
             .map_err(CliError::from)
     }
 
     #[cfg(feature = "quic-quinn")]
     {
-        let mut builder = match data_protection_key {
-            Some(key) => Client::builder(endpoint, key),
-            None => Client::builder_unprotected(endpoint),
-        }
-        .server_trust(trust);
+        let mut builder = match profile {
+            ConnectionProfile::Gate0 => Client::builder(
+                endpoint,
+                data_protection_key.expect("Gate 0 always supplies its fixed root"),
+            )
+            .server_trust(trust)
+            .compression(Compression::Disabled)
+            .encryption(Encryption::Unprotected)
+            .namespace_id(contract::GATE0_NAMESPACE_ID),
+            ConnectionProfile::Configured => match data_protection_key {
+                Some(key) => Client::builder(endpoint, key).server_trust(trust),
+                None => Client::builder_unprotected(endpoint).server_trust(trust),
+            },
+        };
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }
         builder
             .connect()
             .await
-            .map(ConnectedClient::Quinn)
+            .map(|client| ConnectedClient::Quinn(client, profile))
             .map_err(CliError::from)
     }
+}
+
+fn profile_from_arguments(arguments: &Arguments) -> Result<ConnectionProfile> {
+    let profile = arguments.profile;
+    let has_configured_option = arguments.server_name.is_some()
+        || arguments.certificate.is_some()
+        || arguments.client_certificate.is_some()
+        || arguments.client_key.is_some()
+        || arguments.data_protection_key.is_some()
+        || arguments.data_protection_key_file.is_some();
+    if profile == ConnectionProfile::Gate0 && has_configured_option {
+        return Err(CliError::Configuration(
+            "Gate 0 uses the fixed Rust/prototype profile; use --profile configured for certificate, client-identity, or data-protection-key options".to_string(),
+        ));
+    }
+    Ok(profile)
+}
+
+fn validate_command(profile: ConnectionProfile, command: &Command) -> Result<()> {
+    if profile != ConnectionProfile::Gate0 {
+        return Ok(());
+    }
+    if let Command::Set {
+        if_absent,
+        if_present,
+        ttl_ms,
+        ..
+    } = command
+        && (*if_absent || *if_present || ttl_ms.is_some())
+    {
+        return Err(CliError::Command(
+            "Gate 0 supports only unconditional SET; use --profile configured for --if-absent, --if-present, or --ttl-ms"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn endpoint_from_arguments(arguments: &Arguments) -> Result<Endpoint> {
@@ -463,7 +608,7 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
             client.ping().await?;
             print_status("PONG");
         }
-        Command::Get { key, output } => match client.get(key.as_bytes()).await? {
+        Command::Get { key, output } => match client.get(&key).await? {
             GetOutcome::Found(value) => write_value(&value, output)?,
             GetOutcome::NotFound => print_status("NOT_FOUND"),
         },
@@ -477,11 +622,11 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
         } => {
             let value = value_from_arguments(value, value_stdin)?;
             let options = set_options(if_absent, if_present, ttl_ms)?;
-            let outcome = client.set(key.as_bytes(), value, options).await?;
+            let outcome = client.set(&key, value, options).await?;
             print_status(set_outcome_label(outcome));
         }
         Command::Delete { key } => {
-            let outcome = client.delete(key.as_bytes()).await?;
+            let outcome = client.delete(&key).await?;
             print_status(delete_outcome_label(outcome));
         }
         Command::ExperimentalStats => print_stats(&client.experimental_stats().await?)?,
@@ -583,13 +728,54 @@ fn progress_bar(message: String) -> ProgressBar {
     progress
 }
 
-fn value_from_arguments(value: Option<String>, value_stdin: bool) -> Result<Vec<u8>> {
+enum ClientValue {
+    Raw(Vec<u8>),
+    Structured(StructuredValue),
+}
+
+impl ClientValue {
+    fn output_bytes(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Raw(value) => Ok(value.clone()),
+            Self::Structured(StructuredValue::TextString(value)) => Ok(value.as_bytes().to_vec()),
+            Self::Structured(StructuredValue::Bytes(value)) => Ok(value.clone()),
+            Self::Structured(value) => encode_structured_value(value).map_err(|error| {
+                CliError::Command(format!(
+                    "could not encode the structured value for CLI output: {error}"
+                ))
+            }),
+        }
+    }
+}
+
+enum InputValue {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl InputValue {
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Text(value) => value.into_bytes(),
+            Self::Bytes(value) => value,
+        }
+    }
+
+    fn into_structured(self) -> StructuredValue {
+        match self {
+            Self::Text(value) => StructuredValue::text(value),
+            Self::Bytes(value) => StructuredValue::bytes(value),
+        }
+    }
+}
+
+fn value_from_arguments(value: Option<String>, value_stdin: bool) -> Result<InputValue> {
     match (value, value_stdin) {
-        (Some(value), false) => Ok(value.into_bytes()),
+        (Some(value), false) => Ok(InputValue::Text(value)),
         (None, true) => {
             let mut value = Vec::new();
             io::stdin().read_to_end(&mut value)?;
-            Ok(value)
+            Ok(InputValue::Bytes(value))
         }
         (Some(_), true) => Err(CliError::Command(
             "set accepts either VALUE or --value-stdin, not both".to_string(),
@@ -624,16 +810,17 @@ fn set_options(if_absent: bool, if_present: bool, ttl_ms: Option<u64>) -> Result
     Ok(options)
 }
 
-fn write_value(value: &[u8], output: OutputFormat) -> Result<()> {
+fn write_value(value: &ClientValue, output: OutputFormat) -> Result<()> {
+    let value = value.output_bytes()?;
     let mut stdout = io::stdout().lock();
     match output {
         OutputFormat::Text => {
-            stdout.write_all(String::from_utf8_lossy(value).as_bytes())?;
+            stdout.write_all(String::from_utf8_lossy(&value).as_bytes())?;
             stdout.write_all(b"\n")?;
         }
-        OutputFormat::Raw => stdout.write_all(value)?,
+        OutputFormat::Raw => stdout.write_all(&value)?,
         OutputFormat::Base64 => {
-            stdout.write_all(STANDARD.encode(value).as_bytes())?;
+            stdout.write_all(STANDARD.encode(&value).as_bytes())?;
             stdout.write_all(b"\n")?;
         }
     }

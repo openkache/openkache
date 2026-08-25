@@ -163,6 +163,19 @@ development server; do not reuse this trust profile for production traffic.
 All three clients can connect to the default local endpoint:
 `127.0.0.1:4433`.
 
+The source-built [`openkache-cli`](clients/cli/README.md) uses the same fixed
+Gate 0 profile by default. It is the Bash-friendly option for the Rust client
+and the native QUIC frontend of `my-ideal-prototype`:
+
+```bash
+openkache-cli set hello "from cli"
+openkache-cli get hello
+```
+
+Use `openkache-cli --profile configured` when certificate roots, mutual TLS,
+client-side value protection, or compatibility-only TTL/conditional writes
+are required.
+
 TypeScript / JavaScript:
 
 ```typescript
@@ -498,7 +511,7 @@ the languages listed below; package status details live in
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with runtime SIMD dispatch |
 | QUIC client (Rust) | 🚧 Preview | Shared Rust core, binary protocol v1, secure value codec |
-| Command-line client | 🚧 Preview | `openkache-cli` for Bash scripts and interactive shell use |
+| Command-line client | 🚧 Preview | `openkache-cli` Gate 0 profile for Bash scripts and interactive shell use |
 | QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
 | Python client | 🚧 Preview | Synchronous five-operation Gate 0 facade |
 | Go client | 🚧 Preview | Context-aware shared-core native ABI binding |
