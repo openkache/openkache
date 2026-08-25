@@ -29,7 +29,8 @@ runs:
           cd "${destination}"
           jar xf "${archive}"
         )
-        chmod +x "${destination}/smithy-cli-linux-x86_64/bin/smithy"
+        find "${destination}/smithy-cli-linux-x86_64/bin" \
+          -maxdepth 1 -type f -exec chmod +x {} +
         printf '%s\n' "${destination}/smithy-cli-linux-x86_64/bin" >> "${GITHUB_PATH}"
         printf 'OPENKACHE_SMITHY_EXECUTABLE=%s\n' \
           "${destination}/smithy-cli-linux-x86_64/bin/smithy" >> "${GITHUB_ENV}"
