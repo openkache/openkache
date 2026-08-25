@@ -103,7 +103,9 @@ The package intentionally exports exactly these cache operations:
 | `close` | `client.close()` | `Promise<void>` |
 
 `close` is idempotent. It drains or completes accepted work before releasing
-the native connection; calls after close reject with `OpenKache_Error`.
+the native connection; calls after close reject with `OpenKache_Error`. If
+native shutdown rejects, the failed promise is discarded and a later `close`
+call retries shutdown while cache operations remain closed.
 
 `get` never uses JavaScript `undefined` as a missing sentinel:
 
@@ -154,7 +156,8 @@ Null | Undefined | Boolean | Integer | Float16/32/64 |
 ByteString | TextString | Array | Map
 ```
 
-Native JavaScript mappings are:
+Native JavaScript values accepted by `set` map to the lossless model as
+follows:
 
 | JavaScript value | Model value |
 | --- | --- |
@@ -168,8 +171,9 @@ Native JavaScript mappings are:
 | `Array` | ordered `Array` |
 | `Map` or plain object | ordered scalar-key `Map` |
 
-Use the lossless constructors when Float16/32 width, raw bits, or a scalar map
-key must survive a round trip:
+Gate 0 `get` always returns the lossless model in `Found_Result`; it never
+applies a native projection. Use the lossless constructors when Float16/32
+width, raw bits, or a scalar map key must survive a round trip:
 
 ```typescript
 import {
@@ -205,9 +209,9 @@ const bytes = encode_structured_value(1n)
 const model = decode_structured_value(bytes)
 ```
 
-`to_native` and `decode_native_value` are strict convenience projections. They
-map integers to `bigint`, bytes to copied `Uint8Array`, and maps to `Map`.
-They reject `Undefined_Value` and every `Float_Value` with
+`to_native` and `decode_native_value` are strict native projections. They map
+integers to `bigint`, bytes to copied `Uint8Array`, and maps to `Map`. They
+reject `Undefined_Value` and every `Float_Value` with
 `Structured_Value_Error`: JavaScript `undefined` would collapse the stored
 undefined/missing distinction, while `number` would discard float width and
 raw-bit distinctions. Keep the lossless result from `get` or use
