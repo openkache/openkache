@@ -30,3 +30,5 @@ runs:
           jar xf "${archive}"
         )
         printf '%s\n' "${destination}/smithy-cli-linux-x86_64/bin" >> "${GITHUB_PATH}"
+        printf 'OPENKACHE_SMITHY_EXECUTABLE=%s\n' \
+          "${destination}/smithy-cli-linux-x86_64/bin/smithy" >> "${GITHUB_ENV}"
