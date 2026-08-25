@@ -80,21 +80,38 @@ const client = await OpenKacheClient.connect("127.0.0.1:4433")
 
 ### `client.get(key)`
 
-Reads one structured value.
+Reads one value as native JavaScript values by default.
 
 - **Input:** a `ClientKey`.
 - **Returns:** `FoundResult` when the key exists, or `MissingResult` when it
   does not. A stored `undefined` is still returned as `FoundResult`.
-- **Throws:** `OpenKacheError` when validation, transport, or decoding fails.
+- **Throws:** `OpenKacheError` when validation, transport, decoding, or native
+  projection fails.
 
 ```javascript
 const result = await client.get("greeting")
 if (result.kind === "found") {
-  console.log(result.value)
+  console.log(result.value) // -> "hello"
 }
 ```
 
 `MISSING` is a shared `MissingResult` instance.
+
+Pass `{ representation: "lossless" }` when float width/raw bits or exact model
+map keys matter:
+
+```javascript
+const exact = await client.get("greeting", { representation: "lossless" })
+if (exact.kind === "found") {
+  console.log(exact.value) // -> TextStringValue { value: "hello" }
+}
+```
+
+Native reads return `bigint` for model integers, `number` for floats,
+`Uint8Array` for bytes, arrays for model arrays, and a null-prototype object
+for text-keyed maps when JavaScript property order can represent the model.
+Other maps remain a `Map`. Stored `undefined` is wrapped in `FoundResult`, so
+it cannot be confused with a missing key.
 
 ### `client.set(key, value)`
 
@@ -183,7 +200,7 @@ Use the lossless model when float width, raw bits, or exact map keys matter:
   `Uint8Array`.
 - `decodeStructuredValue(bytes)` decodes one complete value.
 - `modelEqual(left, right)` compares model values without native coercion.
-- `toNative(value)` projects safe lossless values to JavaScript values.
+- `toNative(value)` projects lossless values to native JavaScript values.
 - `decodeNativeValue(bytes)` decodes and projects in one step.
 - `toPlainObject(map)` converts a text-keyed lossless map to a
   null-prototype object.
@@ -200,8 +217,9 @@ const decoded = decodeStructuredValue(encoded)
 ```
 
 `toNative` and `decodeNativeValue` preserve integers as `bigint` and bytes
-as `Uint8Array`, but reject `UndefinedValue` and `FloatValue` when a native
-JavaScript value would lose their distinctions.
+as `Uint8Array`. They map `UndefinedValue` to JavaScript `undefined` and
+floating-point values to `number`; use the lossless model when width, raw bits,
+or NaN payloads matter.
 
 ### Errors
 
@@ -215,6 +233,7 @@ JavaScript value would lose their distinctions.
 The public type aliases are `ClientKey`, `NativeValue`, `GetResult`,
 `SetOutcome`, `StructuredValue`, and `OpenKacheErrorKind`.
 The result classes are `FoundResult` and `MissingResult`.
+`Client` is a short alias for `OpenKacheClient`.
 
 ## More information
 

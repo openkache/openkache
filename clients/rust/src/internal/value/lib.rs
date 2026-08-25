@@ -573,6 +573,74 @@ impl Value {
     }
 }
 
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::TextString(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Bytes(value)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(value: &[u8]) -> Self {
+        Self::bytes(value.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for Value {
+    fn from(value: &[u8; N]) -> Self {
+        Self::bytes(value.as_slice())
+    }
+}
+
+impl From<&Vec<u8>> for Value {
+    fn from(value: &Vec<u8>) -> Self {
+        Self::bytes(value.clone())
+    }
+}
+
+macro_rules! impl_integer_value_from {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl From<$type> for Value {
+                fn from(value: $type) -> Self {
+                    Self::integer(value)
+                }
+            }
+        )+
+    };
+}
+
+impl_integer_value_from!(i8, i16, i32, i64, i128, u8, u16, u32, u64, u128);
+
+impl From<f32> for Value {
+    fn from(value: f32) -> Self {
+        Self::float32(value.to_bits())
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Self::float64(value.to_bits())
+    }
+}
+
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         values_equal(self, other)

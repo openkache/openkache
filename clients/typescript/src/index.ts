@@ -6,6 +6,7 @@ import {
 import {
   decode_structured_value,
   encode_structured_value,
+  to_native,
   type Structured_Value,
   type Structured_Value_Error_Kind,
   type Value_Limits,
@@ -97,6 +98,20 @@ export type NativeValue =
 
 /** Compatibility spelling retained for existing callers. */
 export type Native_Value = NativeValue
+
+/** Selects the value view returned by `get`. */
+export type ValueRepresentation = "native" | "lossless"
+
+/** Compatibility spelling retained for existing callers. */
+export type Value_Representation = ValueRepresentation
+
+/** Optional value-view settings accepted by `get`. */
+export interface GetOptions {
+  readonly representation?: ValueRepresentation
+}
+
+/** Compatibility spelling retained for existing callers. */
+export type Get_Options = GetOptions
 
 /** A tagged result for a lookup that may be absent. */
 export type GetResult<Value> = MissingResult | FoundResult<Value>
@@ -237,19 +252,42 @@ export class OpenKacheClient {
   }
 
   /**
-   * Retrieves one lossless StructuredValue-CBOR-v1 value.
+   * Retrieves one value using the native JavaScript representation by default.
    *
-   * `MissingResult` is returned when no live item exists. A stored `Null` or
-   * `UndefinedValue` is always wrapped in `FoundResult`, so JavaScript
-   * `undefined` is never used as the missing marker.
+   * `MissingResult` is returned when no live item exists. A stored `null` or
+   * `undefined` is always wrapped in `FoundResult`, so the native value never
+   * becomes the missing marker. Pass `{ representation: "lossless" }` to
+   * retain integer/float distinctions, raw float bits, and model map keys.
    *
    * @param key - UTF-8 text, exact bytes, a safe integer number, or a
    * signed-i64 bigint key.
+   * @param options - Optional native or lossless value representation.
    * @returns A tagged missing/found result.
-   * @throws {OpenKacheError} When validation, transport, or decoding fails.
+   * @throws {OpenKacheError} When validation, transport, decoding, or native
+   * projection fails.
    */
-  async get(key: ClientKey): Promise<GetResult<StructuredValue>> {
+  async get(
+    key: ClientKey,
+    options?: GetOptions & { readonly representation?: "native" },
+  ): Promise<GetResult<NativeValue>>
+  async get(
+    key: ClientKey,
+    options: GetOptions & { readonly representation: "lossless" },
+  ): Promise<GetResult<StructuredValue>>
+  async get(
+    key: ClientKey,
+    options: GetOptions = {},
+  ): Promise<GetResult<NativeValue | StructuredValue>> {
     this.#assert_open()
+    if (
+      options.representation !== undefined &&
+      options.representation !== "native" &&
+      options.representation !== "lossless"
+    ) {
+      throw new OpenKacheError(
+        'representation must be "native" or "lossless"',
+      )
+    }
     let payload: Uint8Array | null
     try {
       payload = await this.#native_client.get(owned_key_bytes(key))
@@ -257,11 +295,23 @@ export class OpenKacheClient {
       throw as_openkache_error(error)
     }
     if (payload === null) return MISSING
+    let model: StructuredValue
     try {
-      return new FoundResult(decode_structured_value(payload))
+      model = decode_structured_value(payload)
     } catch (error) {
       throw new OpenKacheError(
         `structured value decoding failed: ${error_message(error)}`,
+        error,
+      )
+    }
+    if (options.representation === "lossless") {
+      return new FoundResult(model)
+    }
+    try {
+      return new FoundResult(to_native(model) as NativeValue)
+    } catch (error) {
+      throw new OpenKacheError(
+        `native value projection failed: ${error_message(error)}`,
         error,
       )
     }
@@ -374,6 +424,8 @@ export class OpenKacheClient {
 
 /** Compatibility spelling retained for existing callers. */
 export { OpenKacheClient as OpenKache_Client }
+/** Short primary spelling for the package-level client. */
+export { OpenKacheClient as Client }
 
 function parse_endpoint(endpoint: string | ClientOptions): string {
   if (typeof endpoint === "string") {

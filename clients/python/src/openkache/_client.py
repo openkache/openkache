@@ -9,7 +9,7 @@ from __future__ import annotations
 import socket
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Generic, NoReturn, TypeVar
+from typing import Final, Generic, Literal, NoReturn, TypeVar, overload
 
 from ._generated.smithy_contract import (
     SMITHY_MAX_CANONICAL_KEY_BYTES,
@@ -25,12 +25,19 @@ from ._generated.smithy_contract import (
     SMITHY_OPCODE_DELETE,
 )
 from ._native import NativeClient as _NativeClient, NativeError
-from ._value import StructuredValueError, decode_value, encode_value
+from ._value import (
+    StructuredValueError,
+    Value,
+    decode_value,
+    encode_value,
+    to_native,
+)
 
 
 _I64_MIN: Final = -(1 << 63)
 _I64_MAX: Final = (1 << 63) - 1
 _T = TypeVar("_T")
+ValueRepresentation = Literal["native", "lossless"]
 
 
 class OpenKacheError(RuntimeError):
@@ -172,18 +179,42 @@ class OpenKacheClient:
             raise OpenKacheError(str(error)) from error
         return cls(native)
 
+    @overload
     def get(
         self,
         key: str | int | bytes | bytearray | memoryview,
+        *,
+        representation: Literal["native"] = "native",
+    ) -> Found[object] | Missing: ...
+
+    @overload
+    def get(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        *,
+        representation: Literal["lossless"],
+    ) -> Found[Value] | Missing: ...
+
+    def get(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        *,
+        representation: ValueRepresentation = "native",
     ) -> Found[object] | Missing:
-        """Read one structured value as lossless model wrappers.
+        """Read one value as a native value or a lossless model.
 
         ``Missing`` is distinct from ``Found(None)``.  The returned model
-        retains ``Undefined``, integer/float distinctions, raw float bits,
-        byte/text kinds, and scalar-key map identity.
+        uses ordinary Python values by default.  Pass
+        ``representation="lossless"`` to retain ``Undefined``, integer/float
+        distinctions, raw float bits, byte/text kinds, and scalar-key map
+        identity.
         """
 
         self._assert_open()
+        if representation not in ("native", "lossless"):
+            raise OpenKacheValueError(
+                "representation must be 'native' or 'lossless'"
+            )
         key_bytes = _key_bytes(key)
         operation = getattr(self._native, "get_structured", None)
         if not callable(operation):
@@ -200,10 +231,18 @@ class OpenKacheClient:
         if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"GET returned unexpected native result {kind!r}")
         try:
-            value = decode_value(payload)
+            model = decode_value(payload)
         except StructuredValueError as error:
             raise OpenKacheValueError(
                 f"StructuredValue-CBOR-v1 decoding failed: {error}"
+            ) from error
+        if representation == "lossless":
+            return Found(model)
+        try:
+            value = to_native(model)
+        except StructuredValueError as error:
+            raise OpenKacheValueError(
+                f"native value projection failed: {error}"
             ) from error
         return Found(value)
 
@@ -409,4 +448,5 @@ __all__ = [
     "OpenKacheUnknownMutationError",
     "OpenKacheValueError",
     "SetOutcome",
+    "ValueRepresentation",
 ]

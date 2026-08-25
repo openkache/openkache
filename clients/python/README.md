@@ -30,8 +30,7 @@ pdm add openkache
 pipenv install openkache
 ```
 
-The published wheel currently supports Linux x86_64
-(`manylinux_2_38`).
+The current wheel is for Linux x86_64 (`manylinux_2_38`).
 
 ## Quick start
 
@@ -41,9 +40,9 @@ The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 from openkache import Client
 
 client = Client.connect("127.0.0.1:4433")
-print(client.set("greeting", "hello"))  # SetOutcome.CREATED
-print(client.get("greeting"))           # Found(value='hello')
-print(client.delete("greeting"))        # True
+print(client.set("greeting", "hello"))  # -> SetOutcome.CREATED
+print(client.get("greeting"))           # -> Found(value='hello')
+print(client.delete("greeting"))        # -> True
 client.close()
 ```
 
@@ -72,25 +71,41 @@ client = Client.connect("127.0.0.1:4433")
 
 ### `client.get(key)`
 
-Reads one value.
+Reads one value as a native Python value by default.
 
 - **Input:** a UTF-8 `str`, signed 64-bit `int`, or bytes-like value
   (`bytes`, `bytearray`, or `memoryview`).
 - **Returns:** `Found(value)` when the key exists, or `Missing` when it does
   not. A stored `None` or `UNDEFINED` is still returned as `Found`.
-- **Raises:** `OpenKacheValueError` for an invalid key and `OpenKacheError`
-  for connection or server failures.
+- **Raises:** `OpenKacheValueError` for an invalid key, an ambiguous native
+  map, or a value that cannot be projected to Python; `OpenKacheError` for
+  connection or server failures.
 
 ```python
 from openkache import Found
 
 result = client.get("greeting")
 if isinstance(result, Found):
-    print(result.value)
+    print(result.value)  # -> "hello"
 ```
 
 `MISSING` is a shared `Missing` instance. `GetResult` is the
 `Found | Missing` type alias.
+
+Use `representation="lossless"` when the exact value model matters:
+
+```python
+exact = client.get("greeting", representation="lossless")
+if isinstance(exact, Found):
+    print(exact.value)  # -> TextStringValue(value="hello")
+```
+
+Native reads map integers to `int`, floats to `float`, bytes to `bytes`,
+arrays to `list`, and maps to `dict` when their keys remain distinct under
+Python equality. `UNDEFINED` is the explicit sentinel for a stored undefined
+value because Python has no built-in undefined type. Use the lossless
+representation for float width/raw bits or model-distinct map keys such as
+`True` and `1`.
 
 ### `client.set(key, value)`
 
@@ -182,6 +197,8 @@ The short names `Undefined`, `Integer`, `Float`, `ByteString`, `TextString`,
   `bytes`-like input.
 - `model_equal(left, right)` compares model values without treating
   `True` and `1` as equal.
+- `to_native(value)` projects a decoded lossless value to the native
+  representation used by `client.get(..., representation="native")`.
 - `ValueLimits` bounds encoded bytes, nesting depth, item count, and integer
   magnitude.
 
@@ -205,6 +222,9 @@ limit failures. Its `kind` property is a `ValueErrorKind`.
 - `OpenKacheIncompatibleServerError` — the server returned an outcome that
   this client does not support.
 - `StructuredValueError` — invalid structured-value data or resource limits.
+
+Strings must contain well-formed Unicode. Unpaired UTF-16 surrogate code units
+are rejected.
 
 ## More information
 

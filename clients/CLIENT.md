@@ -484,26 +484,26 @@ application concern in v1 and should be encoded explicitly as `Text` or
 
 Opaque byte operations preserve exact bytes. Logical structured-value
 operations use the portable value model in [`value/SPEC.md`](value/SPEC.md)
-and convert to native values where that conversion is lossless and
-unsurprising.
+and project it into the language's ordinary types for convenient reads.
 
 An adapter MUST NOT stringify, coerce, reorder with semantic loss, or silently
-drop a value or map key that its native container cannot represent. It follows
-the value model's representation options: `lossless` returns the complete
-generic model, while a strict `native` view returns a conversion error when
-the language's ordinary containers cannot represent it. The value
-specification is the normative source for these representations; each package
-documents only its language-specific names and syntax.
+drop a value or map key that its native container cannot represent. The
+`native` view may intentionally reduce metadata that the language's ordinary
+type cannot expose, such as float width; it MUST still reject an unsupported
+container or an ambiguous map-key projection. `lossless` returns the complete
+generic model. The value specification is the normative source for these
+representations; each package documents only its language-specific names and
+syntax.
 
-Maintained bindings SHOULD expose one `get` operation with a representation
-option equivalent to:
+Maintained dynamic bindings SHOULD expose one `get` operation with a
+representation option equivalent to:
 
 ```text
-get(key, representation="lossless")
 get(key, representation="native")
+get(key, representation="lossless")
 ```
 
-The default for dynamic bindings SHOULD be `lossless`. An adapter MUST report
+The default for dynamic bindings SHOULD be `native`. An adapter MUST report
 ambiguous native lookups rather than silently selecting or merging an entry.
 Exact Item ID and raw operations separately return caller-owned opaque bytes;
 they are not structured-value representation modes.

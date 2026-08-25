@@ -13,6 +13,7 @@ from ._client import (
     OpenKacheUnknownMutationError,
     OpenKacheValueError,
     SetOutcome,
+    ValueRepresentation,
 )
 from ._value import (
     Array,
@@ -37,6 +38,7 @@ from ._value import (
     decode_value,
     encode_value,
     model_equal,
+    to_native,
     to_value,
 )
 
@@ -63,6 +65,7 @@ __all__ = [
     "OpenKacheUnknownMutationError",
     "OpenKacheValueError",
     "SetOutcome",
+    "ValueRepresentation",
     "StructuredValueError",
     "TextString",
     "TextStringValue",
@@ -75,5 +78,6 @@ __all__ = [
     "decode_value",
     "encode_value",
     "model_equal",
+    "to_native",
     "to_value",
 ]

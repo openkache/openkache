@@ -81,6 +81,24 @@ mod maintained {
     pub type Result<T> = std::result::Result<T, Error>;
 
     impl<T> GetResult<T> {
+        /// Returns the found value as `Some`, or `None` for a missing key.
+        pub fn into_option(self) -> Option<T> {
+            match self {
+                Self::Missing => None,
+                Self::Found(value) => Some(value),
+            }
+        }
+
+        /// Returns whether the lookup found an item.
+        pub fn is_found(&self) -> bool {
+            matches!(self, Self::Found(_))
+        }
+
+        /// Returns whether the lookup did not find an item.
+        pub fn is_missing(&self) -> bool {
+            matches!(self, Self::Missing)
+        }
+
         /// Applies a function only when the lookup found an item.
         pub fn map<U>(self, function: impl FnOnce(T) -> U) -> GetResult<U> {
             match self {
@@ -164,6 +182,21 @@ mod maintained {
         }
 
         /// Retrieves one lossless structured value.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        ///
+        /// # Returns
+        ///
+        /// `Ok(GetResult::Found(value))` when the item exists, or
+        /// `Ok(GetResult::Missing)` when it does not.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error`] when the connection, protocol, key, or value
+        /// operation fails.
         pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetResult<Value>> {
             self.gate0_client()
                 .await?
@@ -176,8 +209,33 @@ mod maintained {
                 .map_err(map_core_error)
         }
 
-        /// Stores one lossless structured value using an unconditional write.
-        pub async fn set(&self, key: impl Into<TypedKey>, value: Value) -> Result<SetOutcome> {
+        /// Stores one structured value using an unconditional write.
+        ///
+        /// Native Rust strings, byte vectors, booleans, integers, and floats
+        /// convert directly to [`Value`]. Use an explicit [`Value`] variant
+        /// when the exact lossless representation matters.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        /// * `value` - A native value or lossless [`Value`].
+        ///
+        /// # Returns
+        ///
+        /// [`SetOutcome::Created`] for a new item or
+        /// [`SetOutcome::Replaced`] when an existing item is overwritten.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error`] when the connection, protocol, value, or storage
+        /// operation fails.
+        pub async fn set(
+            &self,
+            key: impl Into<TypedKey>,
+            value: impl Into<Value>,
+        ) -> Result<SetOutcome> {
+            let value = value.into();
             self.gate0_client()
                 .await?
                 .set_structured(key, value, core::SetOptions::new())

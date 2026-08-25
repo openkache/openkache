@@ -70,8 +70,9 @@ Value =
 ```
 
 `Undefined` is distinct from `Null`. A binding that has no native undefined
-value MUST expose it through its lossless value representation or report a
-conversion error in strict native mode.
+value MUST expose it through a documented sentinel or its lossless value
+representation. A lookup result wrapper MUST keep a stored undefined value
+distinct from a missing key.
 
 `Map` is an ordered sequence of key/value entries in the generic model:
 
@@ -127,8 +128,8 @@ original float width MUST use the generic model returned by `lossless`.
 Native decoding MAY map `Float(width=16)` and `Float(width=32)` to the
 language's ordinary binary64 floating-point type. Such a conversion preserves
 the numeric value but not the original width in the native object; the generic
-representation remains available when width or raw bits matter. A strict
-native adapter MAY reject this projection instead when its ordinary native
+representation remains available when width or raw bits matter. A native
+adapter MAY reject this projection instead when its ordinary native
 type cannot preserve the model distinction; the lossless representation
 remains the cross-language fallback.
 
@@ -267,14 +268,13 @@ Undefined -> Undefined_Value
 Float(width=16/32/64, raw_bits) -> Float_Value
 ```
 
-The maintained TypeScript strict native projection maps `Integer` to `bigint`
-and returns a conversion error for `Undefined` and every `Float`, because
-JavaScript `undefined` would collapse the stored undefined/missing distinction
-and `number` would discard float width and raw-bit distinctions. An explicit
-checked convenience option MAY request safe integers as `number`, but it MUST
-reject values outside the exact safe-integer range instead of rounding them.
-Gate 0 `get` always uses the lossless representation and therefore preserves
-these distinctions.
+The maintained TypeScript native projection maps `Integer` to `bigint`,
+`Undefined` to JavaScript `undefined`, and every `Float` to `number`. A
+`Found`/`Missing` lookup wrapper keeps a stored `undefined` distinct from a
+missing key. Float width and raw bits remain available through the lossless
+representation. An explicit checked convenience option MAY request safe
+integers as `number`, but it MUST reject values outside the exact safe-integer
+range instead of rounding them.
 
 ### 3.3 Other maintained languages
 
@@ -305,17 +305,19 @@ identity such as Python tuple versus list or a JavaScript plain object versus
 
 ## 4. Representation options
 
-Profiles beyond Gate 0 SHOULD expose one `get` operation with a representation
+Maintained bindings SHOULD expose one `get` operation with a representation
 option rather than forcing callers to learn separate method names. Language
 syntax may differ, but the semantics are shared:
 
 ```text
-get(key, representation="lossless")
 get(key, representation="native")
+get(key, representation="lossless")
 ```
 
-Gate 0 always returns `lossless` values from `get`; profiles beyond Gate 0
-SHOULD keep `lossless` as the default for dynamic bindings.
+Maintained dynamic bindings use `native` as the default `get` view and offer
+`lossless` as an explicit opt-in. Static bindings MAY return their language's
+lossless value type directly when that is the idiomatic native type, as in the
+Rust client.
 
 Encoding SHOULD accept every value expressible by the binding's documented
 native mapping. Decoding into a different language's native representation
@@ -362,9 +364,10 @@ it MUST NOT silently discard information.
 
 ### 4.2 Native representation
 
-`native` requires the complete value to be representable by the binding's
-documented native types. It MUST return a conversion error for an unsupported
-value, an unrepresentable map key, or a map that would collapse entries.
+`native` returns documented ordinary language values. It MUST return a
+conversion error for an unsupported value, an unrepresentable map key, or a
+map that would collapse entries. Numeric metadata that the target language
+does not expose MAY be reduced to the target's observable value.
 
 This mode is intended for APIs that require a real `dict`, plain object, or
 other native container. It is not allowed to silently lose information.
@@ -374,18 +377,19 @@ The maintained default native projections are:
 | Model value | Python | JavaScript/TypeScript |
 |---|---|---|
 | `Null` | `None` | `null` |
-| `Undefined` | conversion error | conversion error in strict native projection |
+| `Undefined` | documented `UNDEFINED` sentinel | `undefined` |
 | `Boolean` | `bool` | `boolean` |
 | `Integer` | `int` | `bigint` |
-| `Float(width=16/32/64, raw_bits)` | documented float wrapper/`float` | conversion error in strict native projection |
+| `Float(width=16/32/64, raw_bits)` | `float` | `number` |
 | `ByteString` | `bytes` | `Uint8Array` |
 | `TextString` | `str` | `string` |
 | `Array` | `list` | `Array` |
 | `Map` | `dict` when representable | `Map` when representable |
 
 `native` MUST return a conversion error instead of rounding an integer,
-normalizing a float distinction, collapsing scalar map keys, or silently
-changing a map's order. A binding MAY provide a separate checked convenience
+collapsing scalar map keys, or silently changing a map's order. A binding MAY
+normalize float width or raw bits to the target language's observable
+floating-point value. It MAY provide a separate checked convenience
 conversion, such as JavaScript safe `Integer` values to `number`, only when it
 rejects values outside the exact target range.
 
@@ -505,7 +509,7 @@ The following mappings are normative:
 
 A map containing keys that are distinct in the model but collide in a native
 container MUST be returned through a lossless representation or rejected by
-strict native conversion.
+native conversion.
 
 The following initial codec vectors are normative:
 
