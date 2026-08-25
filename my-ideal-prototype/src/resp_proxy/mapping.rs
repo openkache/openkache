@@ -1,7 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::io;
-use std::sync::Mutex;
 
 use openkache_protocol::compat_v1::{
     POLICY_EVICTION_OVERRIDE, POLICY_EXPIRATION_OVERRIDE, POLICY_NO_EXPIRY,
@@ -17,16 +15,7 @@ use super::resp_backend::RespBackend;
 const GATE0_NAMESPACE_ID: u64 = 1;
 const GATE0_NAMESPACE_REVISION: u64 = 1;
 
-#[derive(Default)]
-pub(super) struct ProxyState {
-    deleted_keys: Mutex<HashSet<Vec<u8>>>,
-}
-
-pub(super) async fn dispatch(
-    frame: &[u8],
-    backend: &mut RespBackend,
-    state: &ProxyState,
-) -> io::Result<Response> {
+pub(super) async fn dispatch(frame: &[u8], backend: &mut RespBackend) -> io::Result<Response> {
     let opcode = Opcode::try_from(
         frame
             .first()
@@ -44,9 +33,6 @@ pub(super) async fn dispatch(
         Opcode::Get => {
             require_gate0_namespace(frame, fields[op_get::NAMESPACE_ID])?;
             let key = field_bytes(frame, fields[op_get::ITEM_ID])?;
-            if state.is_deleted(&key)? {
-                return response(Status::NotFound, request_id, Vec::new());
-            }
             match backend.get(&key).await? {
                 Some(value) => response(Status::Ok, request_id, value),
                 None => response(Status::NotFound, request_id, Vec::new()),
@@ -57,9 +43,8 @@ pub(super) async fn dispatch(
             require_default_set_options(&fields)?;
             let key = field_bytes(frame, fields[op_set::ITEM_ID])?;
             let value = field_bytes(frame, fields[op_set::VALUE])?;
-            let existed = !state.is_deleted(&key)? && backend.get(&key).await?.is_some();
+            let existed = backend.get(&key).await?.is_some();
             backend.set(&key, &value).await?;
-            state.restore(&key)?;
             response(
                 if existed {
                     Status::Replaced
@@ -73,10 +58,7 @@ pub(super) async fn dispatch(
         Opcode::Delete => {
             require_gate0_namespace(frame, fields[op_delete::NAMESPACE_ID])?;
             let key = field_bytes(frame, fields[op_delete::ITEM_ID])?;
-            let existed = !state.is_deleted(&key)? && backend.get(&key).await?.is_some();
-            if existed {
-                state.delete(key.into_owned())?;
-            }
+            let existed = backend.delete(&key).await?;
             response(
                 if existed {
                     Status::Deleted
@@ -168,31 +150,4 @@ fn synthetic_namespace_descriptor() -> Vec<u8> {
     descriptor.extend_from_slice(&GATE0_NAMESPACE_REVISION.to_be_bytes());
     descriptor.push(policy);
     descriptor
-}
-
-impl ProxyState {
-    fn is_deleted(&self, key: &[u8]) -> io::Result<bool> {
-        self.deleted_keys
-            .lock()
-            .map(|keys| keys.contains(key))
-            .map_err(|_| io::Error::other("native proxy tombstone lock is poisoned"))
-    }
-
-    fn delete(&self, key: Vec<u8>) -> io::Result<()> {
-        self.deleted_keys
-            .lock()
-            .map(|mut keys| {
-                keys.insert(key);
-            })
-            .map_err(|_| io::Error::other("native proxy tombstone lock is poisoned"))
-    }
-
-    fn restore(&self, key: &[u8]) -> io::Result<()> {
-        self.deleted_keys
-            .lock()
-            .map(|mut keys| {
-                keys.remove(key);
-            })
-            .map_err(|_| io::Error::other("native proxy tombstone lock is poisoned"))
-    }
 }
