@@ -158,7 +158,7 @@ class OpenKacheClient:
         """Open one development QUIC-over-TLS 1.3 connection.
 
         The local development profile disables certificate verification and
-        uses the server's default namespace and structured-value format.
+        uses a fixed local-development namespace and structured-value format.
         Production authentication configuration is not available in this
         client yet.
         """
