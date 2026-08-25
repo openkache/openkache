@@ -249,6 +249,18 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/core/generated_local/client_contract.rs"),
   rust_operation_constants: process.env.OPENKACHE_RUST_OPERATION_CONSTANTS_OUTPUT ??
     generated_path("clients/core/generated_local/operation_constants.rs"),
+  rust_core_client_snapshot: generated_path(
+    "clients/core/src/contract_snapshot/client_contract.rs",
+  ),
+  rust_core_operation_constants_snapshot: generated_path(
+    "clients/core/src/contract_snapshot/operation_constants.rs",
+  ),
+  rust_facade_client_snapshot: generated_path(
+    "clients/rust/src/internal/core/contract_snapshot/client_contract.rs",
+  ),
+  rust_facade_operation_constants_snapshot: generated_path(
+    "clients/rust/src/internal/core/contract_snapshot/operation_constants.rs",
+  ),
   rust_api: process.env.OPENKACHE_RUST_API_OUTPUT ??
     generated_path("clients/rust/generated_local/smithy_api.rs"),
   rust_operations: process.env.OPENKACHE_RUST_OPERATIONS_OUTPUT ??
@@ -363,6 +375,7 @@ type Generation_Target =
   | "python"
   | "rust-api"
   | "rust-client"
+  | "rust-snapshots"
   | "rust-wire"
   | "swift"
   | "typescript"
@@ -393,6 +406,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "rust-api"
     case "rust-client":
       return "rust-client"
+    case "rust-snapshots":
+      return "rust-snapshots"
     case "rust-wire":
       return "rust-wire"
     case "swift":
@@ -546,6 +561,19 @@ function expected_outputs(
         [GENERATED_OUTPUTS.rust_operation_constants]:
           render_rust_operation_constants(contract),
       }
+    case "rust-snapshots": {
+      const operation_constants = render_rust_operation_constants(contract)
+      return {
+        [GENERATED_OUTPUTS.rust_core_client_snapshot]:
+          render_rust_client(contract),
+        [GENERATED_OUTPUTS.rust_core_operation_constants_snapshot]:
+          operation_constants,
+        [GENERATED_OUTPUTS.rust_facade_client_snapshot]:
+          render_rust_client(contract, "crate::internal_protocol"),
+        [GENERATED_OUTPUTS.rust_facade_operation_constants_snapshot]:
+          operation_constants,
+      }
+    }
     case "rust-wire":
       return {
         [GENERATED_OUTPUTS.rust_wire]: render_protocol_rust_wire(contract),
@@ -658,6 +686,7 @@ function write_outputs(
   outputs: Readonly<Record<string, string>>,
   check_only: boolean,
   scopes: readonly Generated_Output_Scope[],
+  target: Generation_Target,
 ): void {
   if (check_only) {
     const mismatches = generated_output_issues(outputs, scopes)
@@ -665,7 +694,7 @@ function write_outputs(
       throw new Error(
         "generated contract outputs are stale:\n" +
           mismatches.map((output_path) => `  - ${output_path}`).join("\n") +
-          "\nRun `just generate-protocol-contract` to regenerate them.",
+          `\nRun \`cd clients && OPENKACHE_GENERATION_TARGET=${target} ./generate.ts\` to regenerate them.`,
       )
     }
     return
@@ -709,6 +738,7 @@ export function main(): number {
       outputs,
       process.env.OPENKACHE_GENERATION_CHECK === "1",
       generated_output_scopes(target),
+      target,
     )
     return 0
   } catch (error) {

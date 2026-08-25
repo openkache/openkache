@@ -30,6 +30,11 @@ filegroup(
     srcs = [":source_tree"],
 )
 
+filegroup(
+    name = "contract_snapshots",
+    srcs = glob(["src/contract_snapshot/**"]),
+)
+
 cargo_build_script(
     name = "openkache_client_core_build_script",
     srcs = ["build.rs"],
@@ -44,6 +49,7 @@ cargo_build_script(
     # direct-dependency gate active under both Cargo and Bazel.
     data = [
         "Cargo.toml",
+        ":contract_snapshots",
         "//clients:client_generator_inputs",
     ],
     edition = RUST_EDITION,

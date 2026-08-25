@@ -139,7 +139,10 @@ function rust_status_variant(contract: Client_Contract, status: string): string 
   return entry.name
 }
 
-function render_rust_operation_contract(contract: Client_Contract): string {
+function render_rust_operation_contract(
+  contract: Client_Contract,
+  protocol_path: "openkache_protocol" | "crate::internal_protocol",
+): string {
   const operations = contract.api.operations
   if (
     operations.length !== contract.opcodes.length ||
@@ -187,9 +190,9 @@ function render_rust_operation_contract(contract: Client_Contract): string {
         // production FFI models provide the Raw member, while render-only
         // fixtures can still inspect the generated mapping.
         "FfiResultKind::Raw"
-      return `            openkache_protocol::Status::${status_variant} => Some(${result_variant}),`
+      return `            ${protocol_path}::Status::${status_variant} => Some(${result_variant}),`
     })
-    return `        openkache_protocol::Opcode::${operation.name} => match status {
+    return `        ${protocol_path}::Opcode::${operation.name} => match status {
 ${status_mapping.join("\n")}
             _ => None,
         },`
@@ -218,7 +221,7 @@ ${status_mapping.join("\n")}
 // layouts are generated once by protocol/wire.ts. Client retry/result policy
 // is rendered here, at the client adapter boundary, so the protocol crate
 // remains free of client execution metadata.
-pub use openkache_protocol::operation::{
+pub use ${protocol_path}::operation::{
     OperationFieldLayout,
     OperationFramePolicy,
     OperationFieldPlan,
@@ -257,20 +260,20 @@ pub struct OperationClientProjection {
 }
 
 /// Generated client projections in opcode order.
-pub const OPERATION_CLIENT_PROJECTIONS: [OperationClientProjection; openkache_protocol::Opcode::COUNT] = [
+pub const OPERATION_CLIENT_PROJECTIONS: [OperationClientProjection; ${protocol_path}::Opcode::COUNT] = [
 ${client_projection_metadata}
 ];
 
 /// Returns the canonical wire-only operation spec.
 pub const fn operation_wire_spec(
-    opcode: openkache_protocol::Opcode,
+    opcode: ${protocol_path}::Opcode,
 ) -> OperationWireSpec {
-    openkache_protocol::operation::operation_wire_spec(opcode)
+    ${protocol_path}::operation::operation_wire_spec(opcode)
 }
 
 /// Returns the client-only projection for one operation.
 pub const fn operation_client_projection(
-    opcode: openkache_protocol::Opcode,
+    opcode: ${protocol_path}::Opcode,
 ) -> Option<OperationClientProjection> {
     Some(OPERATION_CLIENT_PROJECTIONS[opcode.index()])
 }
@@ -278,8 +281,8 @@ pub const fn operation_client_projection(
 /// Resolves a canonical generated codec identifier.
 pub fn wire_codec_kind(
     name: &str,
-) -> Option<openkache_protocol::codec::CodecKind> {
-    openkache_protocol::wire_codec_kind(name)
+) -> Option<${protocol_path}::codec::CodecKind> {
+    ${protocol_path}::wire_codec_kind(name)
 }
 
 /// Maps a contract-approved response status to the native result discriminator
@@ -287,8 +290,8 @@ pub fn wire_codec_kind(
 /// operation's semantic result plan; the transport executor does not maintain
 /// an operation-name table.
 pub const fn operation_result_kind(
-    opcode: openkache_protocol::Opcode,
-    status: openkache_protocol::Status,
+    opcode: ${protocol_path}::Opcode,
+    status: ${protocol_path}::Status,
 ) -> Option<FfiResultKind> {
     match opcode {
 ${response_result_kind_metadata}
@@ -297,7 +300,10 @@ ${response_result_kind_metadata}
 `
 }
 
-function render_rust_ffi_operation_contract(contract: Client_Contract): string {
+function render_rust_ffi_operation_contract(
+  contract: Client_Contract,
+  protocol_path: "openkache_protocol" | "crate::internal_protocol",
+): string {
   const protocol_contracts = new Map(
     contract.api.operations.map((operation) => [
       operation.name,
@@ -343,7 +349,7 @@ function render_rust_ffi_operation_contract(contract: Client_Contract): string {
   const protocol_opcode_arms = contract.opcodes
     .map(
       (entry) =>
-        `        FfiOperation::${entry.name} => Some(openkache_protocol::Opcode::${entry.name}),`,
+        `        FfiOperation::${entry.name} => Some(${protocol_path}::Opcode::${entry.name}),`,
     )
     .join("\n")
   return `/// Input buffer kind declared by the native FFI contract.
@@ -379,7 +385,7 @@ ${rendered_entries}
 /// Resolves a protocol opcode from the shared native operation enum.
 pub const fn protocol_opcode(
     operation: FfiOperation,
-) -> Option<openkache_protocol::Opcode> {
+) -> Option<${protocol_path}::Opcode> {
     match operation {
 ${protocol_opcode_arms}
         _ => None,
@@ -404,8 +410,17 @@ ${constants}
 `
 }
 
-/** Renders the client-owned Rust defaults, ABI, and value-format declarations. */
-export function render_rust_client(contract: Client_Contract): string {
+/** Renders the client-owned Rust defaults, ABI, and value-format declarations.
+ *
+ * @param contract - Validated language-neutral wire and value-format contract.
+ * @param protocol_path - Rust path to the generated protocol implementation.
+ * @returns Deterministic Rust declarations with a trailing newline.
+ */
+export function render_rust_client(
+  contract: Client_Contract,
+  protocol_path: "openkache_protocol" | "crate::internal_protocol" =
+    "openkache_protocol",
+): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
   const gate0 = gate0_defaults(defaults)
@@ -678,7 +693,7 @@ ${descriptor_offset_constants}
 ${ffi_namespace_descriptor}
 ${rust_native_structures}
 ${api_enum_constants}
-${render_rust_operation_contract(contract)}
+${render_rust_operation_contract(contract, protocol_path)}
 ${rust_ffi_enum(
   "FfiOperation",
   "Native FFI operation identifiers shared by every language adapter.",
@@ -686,7 +701,7 @@ ${rust_ffi_enum(
   ffi_operation_entries,
 )}
 
-${render_rust_ffi_operation_contract(contract)}
+${render_rust_ffi_operation_contract(contract, protocol_path)}
 
 ${rust_ffi_enum(
   "FfiResultKind",

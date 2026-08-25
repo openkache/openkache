@@ -25,6 +25,34 @@
 // also audit transitive dependency trees with `cargo tree` when adding
 // new dependencies.
 
+fn verify_generated_snapshot(
+    generated: &std::path::Path,
+    snapshot: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let generated_content = std::fs::read(generated).map_err(|error| {
+        format!(
+            "could not read generated contract {}: {error}",
+            generated.display()
+        )
+    })?;
+    let snapshot_content = std::fs::read(snapshot).map_err(|error| {
+        format!(
+            "could not read packaged contract snapshot {}: {error}",
+            snapshot.display()
+        )
+    })?;
+    if generated_content != snapshot_content {
+        return Err(format!(
+            "generated client contract snapshot is stale: {}\n\
+             Why: crates.io consumers use this committed fallback without the repository generator, so drift can omit generated API aliases.\n\
+             Fix: run `cd clients && OPENKACHE_GENERATION_TARGET=rust-snapshots ./generate.ts`, then commit all four Rust snapshot outputs.",
+            snapshot.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read the real `Cargo.toml` from the crate root.
     let manifest_directory =
@@ -193,5 +221,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    verify_generated_snapshot(&output, &packaged_snapshot.join("client_contract.rs"))?;
+    verify_generated_snapshot(
+        &operation_constants_output,
+        &packaged_snapshot.join("operation_constants.rs"),
+    )?;
     Ok(())
 }
