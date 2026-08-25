@@ -1,7 +1,7 @@
 # OpenKache Python client
 
 `openkache` is the maintained synchronous Python client for the frozen
-OpenKache v1 Gate 0 contract. It exposes only the five contract operations:
+OpenKache v1 Gate 0 (`v1-gate0`) contract. It exposes only the five contract operations:
 
 | Operation | Result |
 | --- | --- |
@@ -22,7 +22,13 @@ configuration are outside this Gate 0 facade.
 writes. A mutation whose response is lost raises the distinct
 `OpenKacheUnknownMutationError`.
 
-## Development example
+## Install
+
+```bash
+python -m pip install openkache
+```
+
+## Quick start
 
 The package-local example is intentionally development-only. It uses the
 shared TLS 1.3 transport with server-certificate verification disabled; do not

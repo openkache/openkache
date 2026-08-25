@@ -92,8 +92,8 @@ jobs:
         run: |
           set -euo pipefail
           bun install --frozen-lockfile
-          bun run typecheck
           bun run build
+          bun run typecheck
 
       - name: Stage and checksum JavaScript outputs
         env:

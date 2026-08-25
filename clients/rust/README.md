@@ -1,6 +1,6 @@
 # OpenKache Rust client
 
-`openkache` is the maintained Rust binding for the OpenKache Gate 0
+`openkache` is the maintained Rust binding for the OpenKache v1 Gate 0
 (`v1-gate0`) client contract. It is one publishable crate; the transport,
 protocol, key, and value implementation crates are private workspace
 implementation details. The server is released separately as the
@@ -41,16 +41,19 @@ in production**.
 The facade has no certificate, cancellation, retry, timeout, compression,
 protection, raw-byte, Exact Item ID, conditional-write, or policy options.
 
+## Quick start
+
 ```rust
-use openkache::{Client, GetResult, SetOutcome, Value};
+use openkache::{Client, DeleteOutcome, GetResult, SetOutcome, Value};
 
 # async fn example() -> openkache::Result<()> {
 let client = Client::connect("127.0.0.1:4433").await?;
-assert_eq!(client.set("greeting", Value::text("hello")).await?, SetOutcome::Created);
+assert_eq!(client.set("profile", Value::text("OpenKache")).await?, SetOutcome::Created);
 assert_eq!(
-    client.get("greeting").await?,
-    GetResult::Found(Value::text("hello")),
+    client.get("profile").await?,
+    GetResult::Found(Value::text("OpenKache")),
 );
+assert_eq!(client.delete("profile").await?, DeleteOutcome::Deleted);
 client.close().await?;
 # Ok(())
 # }
