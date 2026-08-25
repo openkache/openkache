@@ -35,9 +35,9 @@ The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 Save it as `index.mjs`; the same code can be used from a TypeScript file.
 
 ```javascript
-import { OpenKache_Client } from "openkache"
+import { OpenKacheClient } from "openkache"
 
-const client = await OpenKache_Client.connect("127.0.0.1:4433")
+const client = await OpenKacheClient.connect("127.0.0.1:4433")
 
 await client.set("greeting", "hello")
 const result = await client.get("greeting")
@@ -65,27 +65,27 @@ this example only with a local development server.
 
 ## Reference
 
-### `OpenKache_Client.connect(endpoint)`
+### `OpenKacheClient.connect(endpoint)`
 
 Opens a connection and returns a client.
 
 - **Input:** a non-empty `host:port` string or `{ address }`. IPv6 endpoints
   use `[host]:port`.
-- **Returns:** `Promise<OpenKache_Client>`.
-- **Throws:** `OpenKache_Error` when validation or connection setup fails.
+- **Returns:** `Promise<OpenKacheClient>`.
+- **Throws:** `OpenKacheError` when validation or connection setup fails.
 
 ```javascript
-const client = await OpenKache_Client.connect("127.0.0.1:4433")
+const client = await OpenKacheClient.connect("127.0.0.1:4433")
 ```
 
 ### `client.get(key)`
 
 Reads one structured value.
 
-- **Input:** a `Client_Key`.
-- **Returns:** `Found_Result` when the key exists, or `Missing_Result` when it
-  does not. A stored `undefined` is still returned as `Found_Result`.
-- **Throws:** `OpenKache_Error` when validation, transport, or decoding fails.
+- **Input:** a `ClientKey`.
+- **Returns:** `FoundResult` when the key exists, or `MissingResult` when it
+  does not. A stored `undefined` is still returned as `FoundResult`.
+- **Throws:** `OpenKacheError` when validation, transport, or decoding fails.
 
 ```javascript
 const result = await client.get("greeting")
@@ -94,15 +94,15 @@ if (result.kind === "found") {
 }
 ```
 
-`MISSING` is a shared `Missing_Result` instance.
+`MISSING` is a shared `MissingResult` instance.
 
 ### `client.set(key, value)`
 
 Stores one value with an unconditional write.
 
-- **Input:** a `Client_Key` and a native or lossless structured value.
+- **Input:** a `ClientKey` and a native or lossless structured value.
 - **Returns:** `"created"` for a new key or `"replaced"` for an existing key.
-- **Throws:** `OpenKache_Error` when validation, encoding, transport, or
+- **Throws:** `OpenKacheError` when validation, encoding, transport, or
   storage fails.
 
 ```javascript
@@ -113,10 +113,10 @@ const outcome = await client.set("greeting", "hello")
 
 Deletes one key. Repeating the operation is safe.
 
-- **Input:** a `Client_Key`.
+- **Input:** a `ClientKey`.
 - **Returns:** `"deleted"` when a value was removed, or `"not_found"` when no
   value existed.
-- **Throws:** `OpenKache_Error` when validation, transport, or storage fails.
+- **Throws:** `OpenKacheError` when validation, transport, or storage fails.
 
 ```javascript
 const outcome = await client.delete("greeting")
@@ -170,49 +170,48 @@ await client.set("profile", { name: "Ada", active: true })
 ```
 
 Use the lossless model when float width, raw bits, or exact map keys matter:
-`UNDEFINED_VALUE`/`Undefined_Value`, `Integer_Value`, `Float_Value`,
-`ByteString_Value`, `TextString_Value`, `Array_Value`, and `Map_Value`.
+`UNDEFINED_VALUE`/`UndefinedValue`, `IntegerValue`, `FloatValue`,
+`ByteStringValue`, `TextStringValue`, `ArrayValue`, and `MapValue`.
 
 ### Value helpers
 
-- `to_value(value)` converts a native value to the lossless model.
-- `encode_structured_value(value)` returns one encoded value as
+- `toValue(value)` converts a native value to the lossless model.
+- `encodeStructuredValue(value)` returns one encoded value as
   `Uint8Array`.
-- `decode_structured_value(bytes)` decodes one complete value.
-- `model_equal(left, right)` compares model values without native coercion.
-- `to_native(value)` projects safe lossless values to JavaScript values.
-- `decode_native_value(bytes)` decodes and projects in one step.
-- `to_plain_object(map)` converts a text-keyed lossless map to a
+- `decodeStructuredValue(bytes)` decodes one complete value.
+- `modelEqual(left, right)` compares model values without native coercion.
+- `toNative(value)` projects safe lossless values to JavaScript values.
+- `decodeNativeValue(bytes)` decodes and projects in one step.
+- `toPlainObject(map)` converts a text-keyed lossless map to a
   null-prototype object.
-- `Value_Limits` bounds bytes, depth, item count, and integer magnitude.
+- `ValueLimits` bounds bytes, depth, item count, and integer magnitude.
 
 ```javascript
 import {
-  decode_structured_value,
-  encode_structured_value,
+  decodeStructuredValue,
+  encodeStructuredValue,
 } from "openkache/value-codec"
 
-const encoded = encode_structured_value({ count: 1n })
-const decoded = decode_structured_value(encoded)
+const encoded = encodeStructuredValue({ count: 1n })
+const decoded = decodeStructuredValue(encoded)
 ```
 
-`to_native` and `decode_native_value` preserve integers as `bigint` and bytes
-as `Uint8Array`, but reject `Undefined_Value` and `Float_Value` when a native
+`toNative` and `decodeNativeValue` preserve integers as `bigint` and bytes
+as `Uint8Array`, but reject `UndefinedValue` and `FloatValue` when a native
 JavaScript value would lose their distinctions.
 
 ### Errors
 
-- `OpenKache_Error` — validation, connection, protocol, server, or value
+- `OpenKacheError` — validation, connection, protocol, server, or value
   failure. Inspect its `kind` property for the stable category.
-- `OpenKache_Unknown_Mutation_Error` — a mutation may have reached the server
+- `OpenKacheUnknownMutationError` — a mutation may have reached the server
   without a confirmed result; do not replay it automatically.
-- `Structured_Value_Error` — invalid structured-value input or a local codec
+- `StructuredValueError` — invalid structured-value input or a local codec
   failure. Its `kind` property identifies the category.
 
-The public type aliases are `Client_Key`, `Native_Value`, `Get_Result`,
-`Set_Outcome`, `Delete_Outcome`, `Structured_Value`, and
-`OpenKache_Error_Kind`. The result classes are `Found_Result` and
-`Missing_Result`.
+The public type aliases are `ClientKey`, `NativeValue`, `GetResult`,
+`SetOutcome`, `DeleteOutcome`, `StructuredValue`, and `OpenKacheErrorKind`.
+The result classes are `FoundResult` and `MissingResult`.
 
 ## More information
 

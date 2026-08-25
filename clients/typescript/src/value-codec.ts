@@ -1137,3 +1137,29 @@ function assert_valid_unicode_string(value: string): void {
     }
   }
 }
+
+// Idiomatic TypeScript spellings. The underscored exports remain available
+// for compatibility with the first package release.
+export {
+  Array_Value as ArrayValue,
+  ByteString_Value as ByteStringValue,
+  Float_Value as FloatValue,
+  Integer_Value as IntegerValue,
+  Map_Value as MapValue,
+  Structured_Value_Error as StructuredValueError,
+  TextString_Value as TextStringValue,
+  Undefined_Value as UndefinedValue,
+  decode_native_value as decodeNativeValue,
+  decode_structured_value as decodeStructuredValue,
+  encode_structured_value as encodeStructuredValue,
+  model_equal as modelEqual,
+  to_native as toNative,
+  to_plain_object as toPlainObject,
+  to_value as toValue,
+}
+
+export type {
+  Structured_Value as StructuredValue,
+  Structured_Value_Error_Kind as StructuredValueErrorKind,
+  Value_Limits as ValueLimits,
+}
