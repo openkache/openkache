@@ -6,7 +6,7 @@
 //! and `StructuredValue-CBOR-v1`; callers cannot select certificates,
 //! protection, compression, retries, or cancellation.
 
-#![doc(html_root_url = "https://docs.rs/openkache/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/openkache/0.1.1")]
 
 #[path = "internal/core/lib.rs"]
 #[allow(

@@ -131,12 +131,14 @@ Check the facade and run its package-local build, test, and documentation comman
 cargo check --locked
 cargo test --locked
 cargo doc --locked --no-deps
+cargo package --locked
 ```
 
 The same commands are the package-local dry run used before creating a
-`client-v<version>` release tag. The immutable publication workflow rebuilds
-and checksums the exact tagged archive before asking the protected
-`crates-io-release` environment for approval.
+`client-v<version>` release tag. `cargo package` verifies that the publishable
+archive builds and includes the documented crate entry points. The immutable
+publication workflow rebuilds and checksums the exact tagged archive before
+asking the protected `crates-io-release` environment for approval.
 
 Run the checked-in example against a local development server:
 

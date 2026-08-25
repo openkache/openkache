@@ -69,6 +69,33 @@ jobs:
             echo "package.json version does not match the release input." >&2
             exit 1
           fi
+          if ! npm_status="$(
+            curl --silent --show-error --location --retry 2 --retry-all-errors \
+              --user-agent "openkache-release/${RELEASE_VERSION}" \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://registry.npmjs.org/openkache/${RELEASE_VERSION}"
+          )"; then
+            echo "Could not query npm for openkache@${RELEASE_VERSION}." >&2
+            echo "Why: npm versions are immutable and publication cannot safely continue without proving this version is unused." >&2
+            echo "Fix: restore npm registry access, then rerun the release guard." >&2
+            exit 1
+          fi
+          case "${npm_status}" in
+            404)
+              ;;
+            200)
+              echo "openkache@${RELEASE_VERSION} already exists on npm." >&2
+              echo "Why: npm versions are immutable and cannot be overwritten." >&2
+              echo "Fix: choose the next unused version, update package.json and its typescript-v<version> tag, then rerun the workflow." >&2
+              exit 1
+              ;;
+            *)
+              echo "npm returned HTTP ${npm_status} while checking openkache@${RELEASE_VERSION}." >&2
+              echo "Why: the release guard could not prove that the immutable version is available." >&2
+              echo "Fix: investigate npm registry access and rerun the workflow; do not bypass this guard." >&2
+              exit 1
+              ;;
+          esac
           if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
             echo "The release checkout is dirty; refusing to continue." >&2
             exit 1
@@ -316,6 +343,10 @@ jobs:
           set -euo pipefail
           bun install --frozen-lockfile
           bun run release:verify
+
+      - name: Smoke-test package archive and close retry
+        working-directory: clients/typescript
+        run: bun run release:smoke
 
       - name: Publish to npm
         working-directory: clients/typescript

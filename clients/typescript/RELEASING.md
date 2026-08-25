@@ -24,27 +24,30 @@ all three outputs under `target/native/` before the release verification is
 run. `release:check` performs the host build first; `release:verify` is the
 artifact-only check used after a multi-platform build has been assembled.
 
-## First release: `0.1.0`
+## Next release: `0.1.1`
 
 Run these commands from `clients/typescript` after the public source change has
 merged:
 
 ```bash
 bun install --frozen-lockfile
-bun pm pkg set version=0.1.0
+bun pm pkg set version=0.1.1
 bun run build
 bun run typecheck
 bun run release:dry-run
 ```
 
 The version edit must be committed and merged before publication. Do not
-publish from a detached checkout or with a dirty worktree.
+publish from a detached checkout or with a dirty worktree. The current
+`0.1.1` choice is the next unused npm version; verify the registry check again
+if another release lands before this one.
 
 `release:dry-run` builds the package, prints the tarball contents, checks the
 registry for a free version, and performs Bun's own publish dry run. It does
-not require registry credentials and does not mutate npm. On Linux, stage the
-Apple Silicon adapter first when using this command for a complete release
-check.
+not require registry credentials and does not mutate npm. It also extracts the
+archive and smoke-tests the package's documented close retry behavior. On
+Linux, stage the Apple Silicon adapter first when using this command for a
+complete release check.
 
 ## Publish
 
@@ -77,8 +80,8 @@ After a successful publication, verify the registry metadata and install the
 published package from a clean consumer project:
 
 ```bash
-bun pm view openkache@0.1.0
-bun add openkache@0.1.0
+bun pm view openkache@0.1.1
+bun add openkache@0.1.1
 ```
 
 The package cannot be republished at the same version. If publication fails
