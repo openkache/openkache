@@ -312,7 +312,7 @@ def copy_license(destination: Path) -> None:
 
 
 class bdist_wheel(_bdist_wheel):
-    """Mark ctypes wheels as platform-specific without a Python ABI lock."""
+    """Build a PyPI-compatible platform wheel without a Python ABI lock."""
 
     def finalize_options(self) -> None:
         super().finalize_options()
@@ -320,6 +320,11 @@ class bdist_wheel(_bdist_wheel):
 
     def get_tag(self) -> tuple[str, str, str]:
         _, _, platform = super().get_tag()
+        if platform.startswith("linux_"):
+            # PyPI rejects generic ``linux_*`` wheel tags. The release runner
+            # is Ubuntu 24.04 and the native adapter's highest glibc symbol is
+            # GLIBC_2.38, so advertise the matching PEP 600 policy tag.
+            platform = f"manylinux_2_38_{platform.removeprefix('linux_')}"
         return "py3", "none", platform
 
 

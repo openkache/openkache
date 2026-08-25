@@ -158,12 +158,18 @@ impl Network {
                     .pending_commands
                     .pop_front()
                     .expect("queued client should have a pending command");
+                let sequence = client_read_state.next_request_sequence;
 
                 assert!(
                     self.request_sender
-                        .push(StorageRequest { client_id, command })
+                        .push(StorageRequest {
+                            client_id,
+                            sequence,
+                            command,
+                        })
                         .is_ok()
                 );
+                client_read_state.next_request_sequence += 1;
 
                 if client_read_state.pending_commands.is_empty() {
                     client_read_state.submission_queued = false;
@@ -258,12 +264,18 @@ impl Network {
             let Some(command) = client_read_state.pending_commands.pop_front() else {
                 break;
             };
+            let sequence = client_read_state.next_request_sequence;
 
             assert!(
                 self.request_sender
-                    .push(StorageRequest { client_id, command })
+                    .push(StorageRequest {
+                        client_id,
+                        sequence,
+                        command,
+                    })
                     .is_ok()
             );
+            client_read_state.next_request_sequence += 1;
         }
 
         if !client_read_state.pending_commands.is_empty() {
@@ -306,10 +318,30 @@ impl Network {
     fn process_storage_responses(&mut self) {
         while let Some(storage_response) = self.response_receiver.pop() {
             let client_id = storage_response.client_id;
+            let sequence = storage_response.sequence;
             let response_to_write = make_response_to_write(storage_response.reply);
             let client = &mut self.clients[client_id.0];
+            let write_state = &mut client.write_state;
 
-            client.write_state.pending.push_back(response_to_write);
+            assert!(
+                sequence >= write_state.next_response_sequence,
+                "storage returned the same response sequence twice"
+            );
+            assert!(
+                write_state
+                    .completed_out_of_order
+                    .insert(sequence, response_to_write)
+                    .is_none(),
+                "storage returned the same response sequence twice"
+            );
+
+            while let Some(response) = write_state
+                .completed_out_of_order
+                .remove(&write_state.next_response_sequence)
+            {
+                write_state.pending.push_back(response);
+                write_state.next_response_sequence += 1;
+            }
         }
     }
 

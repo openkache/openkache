@@ -10,14 +10,15 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod client;
+mod aa;
+mod compio_example;
 mod network;
 mod resp;
 mod resp_proxy;
 mod spsc;
-mod storage_message;
-
-#[path = "resp_proxy/compat_storage.rs"]
 mod storage;
+mod storage_example;
+mod storage_message;
 
 use std::net::TcpListener;
 use std::{env, io, mem, thread};

@@ -200,6 +200,19 @@ function require_publish_source(version: string): void {
   }
 }
 
+function require_trusted_publishing_oidc(): void {
+  if (
+    process.env.ACTIONS_ID_TOKEN_REQUEST_URL === undefined ||
+    process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN === undefined
+  ) {
+    fail(
+      "GitHub Actions OIDC authentication is unavailable.\n" +
+        "Why: Trusted Publishing requires an OIDC token minted with the publish job's id-token: write permission.\n" +
+        "Fix: grant id-token: write to this publish job and run it on a GitHub-hosted runner.",
+    )
+  }
+}
+
 async function require_registry_version_is_free(
   package_name: string,
   version: string,
@@ -255,19 +268,23 @@ async function main(): Promise<void> {
   await require_registry_version_is_free(package_name, version)
 
   if (process.env.OPENKACHE_PUBLISH_AUTH === "1") {
-    const identity = Bun.spawnSync([process.execPath, "pm", "whoami"], {
-      cwd: CLIENT_DIRECTORY,
-      stderr: "pipe",
-      stdout: "pipe",
-    })
-    if (identity.exitCode !== 0) {
-      fail(
-        "Registry authentication is not configured.\n" +
-          "Why: release:publish must prove the registry identity before it can mutate the registry.\n" +
-          "Fix: configure NPM_CONFIG_TOKEN or a user .npmrc, then verify with `bun pm whoami`.",
-      )
+    if (process.env.OPENKACHE_TRUSTED_PUBLISHING === "1") {
+      require_trusted_publishing_oidc()
+    } else {
+      const identity = Bun.spawnSync([process.execPath, "pm", "whoami"], {
+        cwd: CLIENT_DIRECTORY,
+        stderr: "pipe",
+        stdout: "pipe",
+      })
+      if (identity.exitCode !== 0) {
+        fail(
+          "Registry authentication is not configured.\n" +
+            "Why: release:publish must prove the registry identity before it can mutate the registry.\n" +
+            "Fix: configure NPM_CONFIG_TOKEN or a user .npmrc, then verify with `bun pm whoami`.",
+        )
+      }
+      console.log(`Registry identity verified: ${identity.stdout.toString().trim()}`)
     }
-    console.log(`Registry identity verified: ${identity.stdout.toString().trim()}`)
   }
 
   console.log(`Release preflight passed for ${package_name}@${version}.`)
