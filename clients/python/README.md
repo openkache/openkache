@@ -1,142 +1,212 @@
 # OpenKache Python client
 
-`openkache` is the maintained synchronous Python client for the frozen
-OpenKache v1 Gate 0 (`v1-gate0`) contract. It exposes only the five contract operations:
+OpenKache is a super-fast open-source SSD cache server. Use this Python client
+to store, read, and delete values in a few lines.
 
-| Operation | Result |
-| --- | --- |
-| `Client.connect(address)` | A connected client |
-| `client.get(key)` | `Found(value)` or `Missing` |
-| `client.set(key, value)` | `SetOutcome` |
-| `client.delete(key)` | `DeleteOutcome.DELETED` or `DeleteOutcome.NOT_FOUND` |
-| `client.close()` | Idempotent resource release |
-
-Mapped keys accept UTF-8 `str`, signed 64-bit `int`, and bytes-like values.
-Every public value read and write uses `StructuredValue-CBOR-v1`; JSON, raw
-operations, TTL and retry overrides, cancellation controls, and certificate
-configuration are outside this Gate 0 facade.
-
-`SetOutcome` contains only `CREATED` and `REPLACED`. A conditional
-`NOT_STORED` response is outside Gate 0 and raises
-`OpenKacheIncompatibleServerError`, because the facade never sends conditional
-writes. A mutation whose response is lost raises the distinct
-`OpenKacheUnknownMutationError`.
-
-Published package: [pypi.org/project/openkache](https://pypi.org/project/openkache/).
-Python 3.11 or newer is required.
-
-The release workflow currently publishes one Linux `x86_64`
-`manylinux_2_38` wheel and one source distribution. Other platforms are not
-claimed to have published wheels: install from the source distribution only
-when a local Rust toolchain can build the native adapter.
+[PyPI package](https://pypi.org/project/openkache/) ·
+[GitHub source](https://github.com/openkache/openkache/tree/main/clients/python)
 
 ## Install
 
+Python 3.11 or newer is required.
+
 ```bash
+# pip
 python -m pip install openkache
+
+# uv
+uv add openkache
+
+# Existing uv virtual environment:
+uv pip install openkache
+
+# Poetry
+poetry add openkache
+
+# PDM
+pdm add openkache
+
+# Pipenv
+pipenv install openkache
 ```
 
-The wheel includes the native client adapter. No compiler or OpenKache source
-checkout is needed for a normal installation.
-
-## Quick smoke test
-
-Start a local preview server on `127.0.0.1:4433`, then run:
-
-```bash
-python -m pip install --upgrade openkache
-python
-```
-
-The fixed development TLS profile disables server-certificate verification.
-It is suitable for a local preview only and must not be used for production
-traffic.
+The published wheel currently supports Linux x86_64
+(`manylinux_2_38`).
 
 ## Quick start
 
-The package-local example is intentionally development-only. It uses
-QUIC-over-TLS 1.3 with server-certificate verification disabled.
-
-```bash
-OPENKACHE_ADDRESS=127.0.0.1:4433 python examples/basic.py
-```
+The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 
 ```python
-from openkache import Client, DeleteOutcome, Found, Missing
+from openkache import Client
 
 client = Client.connect("127.0.0.1:4433")
-try:
-    print(client.set("hello", {"from": "python"}))
-
-    result = client.get("hello")
-    if isinstance(result, Found):
-        print(result.value)
-    elif isinstance(result, Missing):
-        print("missing")
-
-    if client.delete("hello") is DeleteOutcome.DELETED:
-        print("deleted")
-
-    if isinstance(client.get("hello"), Missing):
-        print("missing after delete")
-finally:
-    client.close()
+print(client.set("greeting", "hello"))  # SetOutcome.CREATED
+print(client.get("greeting"))           # Found(value='hello')
+print(client.delete("greeting"))        # True
+client.close()
 ```
 
-`set` returns `SetOutcome.CREATED` or `SetOutcome.REPLACED`. `get` returns a
-`Found` wrapper or `Missing`; a stored `None` or `UNDEFINED` value is still
-`Found`. `delete` returns `DeleteOutcome.DELETED` or
-`DeleteOutcome.NOT_FOUND`.
+`set` returns `SetOutcome.CREATED` for a new key,
+`get` returns `Found(value)`, and `delete` returns `True` when a value was
+removed.
 
-`client.get` always returns model wrappers that preserve `Undefined`,
-`None`/Null, booleans, arbitrary integers, Float16/32/64 width and raw bits,
-bytes, text, arrays, and ordered scalar-key maps. This lossless contract keeps
-every StructuredValue kind observable to Python callers.
+> The example uses the local development TLS profile, which does not verify
+> the server certificate. Use it only with a local development server.
 
-## Configuration
+## Reference
 
-Gate 0 has no certificate, timeout, retry, TTL, or transport configuration. The
-development example reads only `OPENKACHE_ADDRESS`.
+### `Client.connect(address)`
 
-The lossless constructors and codec helpers are available for applications
-that need an explicit model value:
+Opens a connection and returns a `Client`.
+
+- **Input:** a non-empty `host:port` string. IPv6 endpoints use `[host]:port`.
+- **Returns:** `Client`.
+- **Raises:** `OpenKacheError` when the connection cannot be opened.
 
 ```python
-from openkache import FloatValue, IntegerValue, MapValue, UNDEFINED
-
-value = MapValue([
-    ("count", IntegerValue(2**80)),
-    ("missing", UNDEFINED),
-    ("half", FloatValue(16, 0x3C00)),
-])
+client = Client.connect("127.0.0.1:4433")
 ```
 
-## Build and verify
+`Client` and `OpenKacheClient` refer to the same class.
 
-Run these commands from `openkache/clients/python` in a checkout with the
-repository development tools:
+### `client.get(key)`
 
-```bash
-python -m compileall src examples
-OPENKACHE_GENERATION_TARGET=python ../generate.ts
-python -m unittest ../../../tests/clients/python_value_test.py
-python -m build --sdist --wheel --outdir dist
+Reads one value.
+
+- **Input:** a UTF-8 `str`, signed 64-bit `int`, or bytes-like value
+  (`bytes`, `bytearray`, or `memoryview`).
+- **Returns:** `Found(value)` when the key exists, or `Missing` when it does
+  not. A stored `None` or `UNDEFINED` is still returned as `Found`.
+- **Raises:** `OpenKacheValueError` for an invalid key and `OpenKacheError`
+  for connection or server failures.
+
+```python
+from openkache import Found
+
+result = client.get("greeting")
+if isinstance(result, Found):
+    print(result.value)
 ```
 
-The generated Smithy modules and platform-native adapter are package build
-outputs. Do not commit `dist/`, `build/`, generated modules, or native
-libraries.
+`MISSING` is a shared `Missing` instance. `GetResult` is the
+`Found | Missing` type alias.
 
-## Package layout
+### `client.set(key, value)`
 
-- `src/openkache/_client.py` — Gate 0 facade and key/result mapping.
-- `src/openkache/_native.py` — ctypes ownership and native ABI conversion.
-- `src/openkache/_value.py` — lossless StructuredValue-CBOR-v1 codec.
-- `src/openkache/_generated/` — generated contract and ABI modules.
-- `native/` — thin Rust `cdylib` adapter over the shared client core.
-- `examples/basic.py` — clearly labeled development-only TLS example.
+Stores one value, replacing any existing value for the key.
 
-## License
+- **Input:** the same key types accepted by `get`, plus a native or lossless
+  structured value.
+- **Returns:** `SetOutcome.CREATED` for a new key or
+  `SetOutcome.REPLACED` for an existing key.
+- **Raises:** `OpenKacheValueError` for an invalid key or value and
+  `OpenKacheError` for connection or server failures.
 
-The Python client and native adapter are distributed under the Apache License
-2.0. Package artifacts include the license text.
+```python
+outcome = client.set("greeting", "hello")
+# outcome is SetOutcome.CREATED or SetOutcome.REPLACED
+```
+
+### `client.delete(key)`
+
+Deletes one key. Deleting a missing key is safe.
+
+- **Input:** a key accepted by `get`.
+- **Returns:** `True` when a value was removed, or `False` when no value
+  existed.
+- **Raises:** `OpenKacheValueError` for an invalid key and
+  `OpenKacheError` for connection or server failures.
+
+```python
+removed = client.delete("greeting")
+if removed:
+    print("deleted")
+```
+
+### `client.close()`
+
+Closes the connection and returns `None`. Calling it more than once is safe.
+
+```python
+client.close()
+```
+
+The client also supports `with Client.connect(address)`, which closes the
+connection automatically when the block exits.
+
+### Keys
+
+Keys are typed. Use:
+
+- `str` for UTF-8 text keys;
+- `int` for signed 64-bit integer keys;
+- `bytes`, `bytearray`, or `memoryview` for exact byte keys.
+
+```python
+client.get("text-key")
+client.get(42)
+client.get(b"bytes-key")
+```
+
+### Values
+
+The client converts common Python values to structured values:
+
+- `None` becomes Null.
+- `bool` becomes Boolean.
+- `int` becomes an exact Integer.
+- `float` becomes an IEEE-754 binary64 Float.
+- `str` becomes UTF-8 TextString.
+- `bytes`, `bytearray`, and `memoryview` become Bytes.
+- `list` and `tuple` become Array.
+- `dict` becomes Map.
+
+```python
+client.set("profile", {"name": "Ada", "active": True})
+```
+
+Use the lossless model when the exact representation matters:
+`UNDEFINED`/`UndefinedValue`, `IntegerValue`, `FloatValue`,
+`ByteStringValue`, `TextStringValue`, `ArrayValue`, and `MapValue`.
+The short names `Undefined`, `Integer`, `Float`, `ByteString`, `TextString`,
+`Array`, `Map`, and `Value` are compatibility aliases.
+
+### Value helpers
+
+- `to_value(value, limits=None)` converts a native Python value to the
+  lossless model.
+- `encode_value(value, limits=None)` returns one encoded
+  `StructuredValue-CBOR-v1` item as `bytes`.
+- `decode_value(data, limits=None)` decodes one complete item from
+  `bytes`-like input.
+- `model_equal(left, right)` compares model values without treating
+  `True` and `1` as equal.
+- `ValueLimits` bounds encoded bytes, nesting depth, item count, and integer
+  magnitude.
+
+```python
+from openkache import decode_value, encode_value, model_equal, to_value
+
+encoded = encode_value({"count": 1})
+decoded = decode_value(encoded)
+assert model_equal(decoded, to_value({"count": 1}))
+```
+
+`StructuredValueError` reports conversion, encoding, decoding, and resource
+limit failures. Its `kind` property is a `ValueErrorKind`.
+
+### Errors
+
+- `OpenKacheError` — connection, protocol, server, or operation failure.
+- `OpenKacheValueError` — invalid key or value supplied by the caller.
+- `OpenKacheUnknownMutationError` — a mutation may have reached the server
+  without a confirmed result; do not replay it automatically.
+- `OpenKacheIncompatibleServerError` — the server returned an outcome that
+  this client does not support.
+- `StructuredValueError` — invalid structured-value data or resource limits.
+
+## More information
+
+- [OpenKache on PyPI](https://pypi.org/project/openkache/)
+- [OpenKache repository](https://github.com/openkache/openkache)
