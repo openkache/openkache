@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   ci:
-    runs-on: [self-hosted, Linux, openkache-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       CC: clang
@@ -28,6 +28,11 @@ jobs:
 
       - uses: ./.github/actions/setup-smithy-codegen
 
+      - name: Install Clang/LLVM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang llvm
+
       - name: Verify Clang toolchain
         run: |
           for tool in clang clang++ llvm-ar llvm-ranlib; do
@@ -42,7 +47,7 @@ jobs:
 
       - name: Generate Python Smithy contract
         working-directory: clients/python
-        run: OPENKACHE_GENERATION_TARGET=python ../../protocol/generate.ts
+        run: OPENKACHE_GENERATION_TARGET=python ../generate.ts
 
       - name: Check Python package sources
         run: python -m compileall clients/python/src
