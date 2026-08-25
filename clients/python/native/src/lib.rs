@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use openkache_client_core::contract::{
     CLIENT_GATE0_ALPN_VERSION, CLIENT_GATE0_COMPRESSION, CLIENT_GATE0_ENCRYPTION,
-    CLIENT_GATE0_ITEM_ID_ROOT, CLIENT_GATE0_VALUE_SELECTOR,
+    CLIENT_GATE0_ITEM_ID_ROOT, CLIENT_GATE0_NAMESPACE_ID, CLIENT_GATE0_VALUE_SELECTOR,
     FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
     FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_REPLACED,
     FFI_RESULT_UNKNOWN_MUTATION, FFI_RESULT_VALUE, VALUE_FORMAT_COMPRESSION_NONE,
@@ -164,6 +164,22 @@ fn lock_client<'a>(
         .map_err(|_| Gate0Result::error("native client mutex is poisoned"))
 }
 
+fn ensure_gate0_namespace(client: &Gate0ClientInner) -> Result<(), Gate0Result> {
+    let namespace_id = match client
+        .runtime
+        .block_on(client.client.raw().ensure_namespace_id())
+    {
+        Ok(namespace_id) => namespace_id,
+        Err(error) => return Err(Gate0Result::core_error(error)),
+    };
+    if namespace_id != CLIENT_GATE0_NAMESPACE_ID {
+        return Err(Gate0Result::error(format!(
+            "server selected namespace {namespace_id}, expected Gate 0 namespace {CLIENT_GATE0_NAMESPACE_ID}"
+        )));
+    }
+    Ok(())
+}
+
 unsafe fn run_get(client: *mut Gate0Client, key: *const u8, key_length: usize) -> Gate0Result {
     let key = match unsafe { copy_bytes(key, key_length, "key") } {
         Ok(key) => key,
@@ -177,6 +193,9 @@ unsafe fn run_get(client: *mut Gate0Client, key: *const u8, key_length: usize) -
         Ok(client) => client,
         Err(error) => return error,
     };
+    if let Err(error) = ensure_gate0_namespace(&client) {
+        return error;
+    }
     match client
         .runtime
         .block_on(client.client.get_structured_canonical_key_cbor(key))
@@ -210,6 +229,9 @@ unsafe fn run_set(
         Ok(client) => client,
         Err(error) => return error,
     };
+    if let Err(error) = ensure_gate0_namespace(&client) {
+        return error;
+    }
     match client
         .runtime
         .block_on(
@@ -237,6 +259,9 @@ unsafe fn run_delete(client: *mut Gate0Client, key: *const u8, key_length: usize
         Ok(client) => client,
         Err(error) => return error,
     };
+    if let Err(error) = ensure_gate0_namespace(&client) {
+        return error;
+    }
     match client
         .runtime
         .block_on(client.client.delete_canonical_key(key))
