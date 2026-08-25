@@ -47,6 +47,8 @@ pub const POLICY_RESERVED_MASK: u8 = 0xe0;
 
 /// Default maximum number of concurrent request lanes.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
+/// Maximum complete canonical CBOR key item accepted by every SDK.
+pub const MAX_CANONICAL_KEY_BYTES: usize = 1_048_576;
 /// Default connection-establishment timeout in milliseconds.
 pub const DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: u64 = 5_000;
 /// Default complete-request timeout in milliseconds.

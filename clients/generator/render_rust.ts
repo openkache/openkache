@@ -279,6 +279,8 @@ use openkache_protocol::Opcode;
 
 /// Default maximum number of concurrent request lanes.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = ${formatted_decimal(defaults.max_in_flight)};
+/// Maximum complete canonical CBOR key item accepted by every SDK.
+pub const MAX_CANONICAL_KEY_BYTES: usize = ${formatted_decimal(defaults.max_canonical_key_bytes)};
 /// Default connection-establishment timeout in milliseconds.
 pub const DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: u64 = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
 /// Default complete-request timeout in milliseconds.

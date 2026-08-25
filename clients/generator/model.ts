@@ -42,6 +42,8 @@ export interface Value_Envelope_Contract {
 
 /** Defaults shared by the Rust client core and its native language adapters. */
 export interface Client_Defaults_Contract {
+  /** Maximum complete canonical CBOR key item accepted by every SDK. */
+  readonly max_canonical_key_bytes: number
   readonly connect_timeout_milliseconds: number
   readonly gate0_alpn_version: number
   readonly gate0_compression: number

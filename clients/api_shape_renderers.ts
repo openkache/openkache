@@ -645,6 +645,8 @@ export const SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES = ${contract.ffi.namespa
 ${descriptor_offsets}
 /** Default maximum number of concurrent request lanes. */
 export const SMITHY_DEFAULT_MAX_IN_FLIGHT = ${contract.client_defaults.max_in_flight}
+/** Maximum complete canonical CBOR key item accepted by every SDK. */
+export const SMITHY_MAX_CANONICAL_KEY_BYTES = ${contract.client_defaults.max_canonical_key_bytes}
 /** Default connection-establishment timeout in milliseconds. */
 export const SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${contract.client_defaults.connect_timeout_milliseconds}
 /** Default complete-request timeout in milliseconds. */

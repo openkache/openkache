@@ -284,6 +284,12 @@ export function client_defaults_contract(value: unknown): Client_Defaults_Contra
     )
   }
   const defaults = {
+    max_canonical_key_bytes: integer_member(
+      contract,
+      "maxCanonicalKeyBytes",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
     max_in_flight: integer_member(
       contract,
       "maxInFlight",

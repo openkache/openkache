@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Final, Generic, NoReturn, TypeVar
 
 from ._generated.smithy_contract import (
+    SMITHY_MAX_CANONICAL_KEY_BYTES,
     SMITHY_FFI_RESULT_CREATED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
@@ -31,7 +32,6 @@ from ._value import StructuredValueError, decode_value, encode_value
 
 _I64_MIN: Final = -(1 << 63)
 _I64_MAX: Final = (1 << 63) - 1
-_MAX_CANONICAL_KEY_BYTES: Final = 1_048_576
 _T = TypeVar("_T")
 
 
@@ -162,8 +162,8 @@ class OpenKacheClient:
         Gate 0 intentionally has no certificate, retry, timeout, TTL, or
         transport arguments.  The private native adapter fixes the
         verification-disabled DevelopmentTrust profile, ``openkache/1`` ALPN,
-        namespace 1, the development Item-ID root, and the uncompressed,
-        unprotected StructuredValue-CBOR-v1 selector.  Production
+        the server-assigned namespace, the development Item-ID root, and the
+        uncompressed, unprotected StructuredValue-CBOR-v1 selector.  Production
         authentication configuration is deferred to a later maintained-client
         gate.
         """
@@ -365,9 +365,9 @@ def _key_bytes(value: str | int | bytes | bytearray | memoryview) -> bytes:
 def _canonical_cbor_string(major: int, payload: bytes) -> bytes:
     header = _canonical_cbor_argument(major, len(payload))
     total = len(header) + len(payload)
-    if total > _MAX_CANONICAL_KEY_BYTES:
+    if total > SMITHY_MAX_CANONICAL_KEY_BYTES:
         raise OpenKacheValueError(
-            f"canonical key exceeds {_MAX_CANONICAL_KEY_BYTES} bytes"
+            f"canonical key exceeds {SMITHY_MAX_CANONICAL_KEY_BYTES} bytes"
         )
     return header + payload
 

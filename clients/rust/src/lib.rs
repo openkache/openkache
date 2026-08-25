@@ -145,6 +145,22 @@ mod maintained {
 
     #[cfg(feature = "quic-quinn")]
     impl Client {
+        async fn gate0_client(&self) -> Result<&ProtectedClient> {
+            let namespace_id = self
+                .inner
+                .raw()
+                .ensure_namespace_id()
+                .await
+                .map_err(map_core_error)?;
+            if namespace_id != core::contract::GATE0_NAMESPACE_ID {
+                return Err(Error::Core(format!(
+                    "server selected namespace {namespace_id}, expected Gate 0 namespace {}",
+                    core::contract::GATE0_NAMESPACE_ID,
+                )));
+            }
+            Ok(&self.inner)
+        }
+
         /// Connects using the fixed Gate 0 development profile.
         ///
         /// The profile intentionally disables certificate verification for
@@ -157,7 +173,6 @@ mod maintained {
                 core::DataProtectionKey::from_bytes(core::contract::GATE0_ITEM_ID_ROOT),
             )
             .server_trust(core::ServerTrust::Insecure)
-            .namespace_id(core::contract::GATE0_NAMESPACE_ID)
             .compression(Compression::Disabled)
             .encryption(Encryption::Unprotected)
             .connect()
@@ -168,7 +183,8 @@ mod maintained {
 
         /// Retrieves one lossless structured value.
         pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetResult<Value>> {
-            self.inner
+            self.gate0_client()
+                .await?
                 .get_structured(key)
                 .await
                 .map(|outcome| match outcome {
@@ -180,7 +196,8 @@ mod maintained {
 
         /// Stores one lossless structured value using an unconditional write.
         pub async fn set(&self, key: impl Into<TypedKey>, value: Value) -> Result<SetOutcome> {
-            self.inner
+            self.gate0_client()
+                .await?
                 .set_structured(key, value, core::SetOptions::new())
                 .await
                 .map_err(map_core_error)
@@ -194,7 +211,8 @@ mod maintained {
         /// Deletes one key. Repeating the operation is safe and returns
         /// [`DeleteOutcome::NotFound`].
         pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
-            self.inner
+            self.gate0_client()
+                .await?
                 .delete(key)
                 .await
                 .map_err(map_core_error)

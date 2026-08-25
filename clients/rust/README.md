@@ -32,11 +32,12 @@ integer magnitude, float width and raw bits, byte/text identity, ordered
 containers, and scalar map-key equality. `TypedKey` accepts only signed `i64`,
 UTF-8 text, or exact bytes.
 
-Gate 0 fixes NamespaceHash mapping, namespace `1`, selector `0x10`
-(uncompressed, unprotected, StructuredValue-CBOR-v1), ALPN `openkache/1`, and
-the development trust profile. The development profile disables certificate
-verification while retaining TLS encryption; **development only — do not use
-this trust profile in production**.
+Gate 0 fixes NamespaceHash mapping, resolves the server-assigned default
+namespace lazily (ID `1` on a fresh server), selector `0x10` (uncompressed,
+unprotected, StructuredValue-CBOR-v1), ALPN `openkache/1`, and the development
+trust profile. The development profile disables certificate verification while
+retaining TLS encryption; **development only — do not use this trust profile
+in production**.
 The facade has no certificate, cancellation, retry, timeout, compression,
 protection, raw-byte, Exact Item ID, conditional-write, or policy options.
 

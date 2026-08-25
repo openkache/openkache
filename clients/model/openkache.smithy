@@ -44,6 +44,10 @@ structure ffiValue {
 /// Defaults used by the shared client core and language adapters.
 @trait(selector: "service")
 structure clientDefaults {
+    /// Maximum complete canonical CBOR key item accepted by every SDK.
+    @required
+    maxCanonicalKeyBytes: Integer
+
     @required
     maxInFlight: Integer
 
@@ -328,6 +332,7 @@ structure valueEnvelope {
 }
 
 @clientDefaults(
+    maxCanonicalKeyBytes: 1048576,
     // Maintained formatted-value defaults. Automatic compression uses one
     // level-1 Zstandard frame and keeps it only when the complete frame is
     // smaller; zero means no input-size or minimum-savings threshold.
