@@ -189,7 +189,11 @@ jobs:
             > "${release_root}/RELEASE-METADATA"
           (
             cd "${release_root}"
-            sha256sum "target/native/${NATIVE_ARTIFACT}" > SHA256SUMS
+            if [[ "${RUNNER_OS}" == "macOS" ]]; then
+              shasum -a 256 "target/native/${NATIVE_ARTIFACT}" > SHA256SUMS
+            else
+              sha256sum "target/native/${NATIVE_ARTIFACT}" > SHA256SUMS
+            fi
           )
 
       - name: Upload native artifact
