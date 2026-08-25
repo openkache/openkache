@@ -90,18 +90,12 @@ deterministic item IDs and encoded sizes, but not application keys or value
 plaintext. The complete threat model and protection matrix are documented in
 [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
 
-The value-format design is pre-freeze. This branch implements the
-namespace-bound key conversion and Item ID derivation; migration of the
-shared value codec to the packed layout described in
-[`clients/VALUE_FORMAT.md`](clients/VALUE_FORMAT.md) is separate.
-
-### 📦 Transparent compression
-
-The current preview lets clients configure optional zstd compression before
-storage; the server stores the resulting value bytes opaquely. The target
-maintained-client policy enables automatic level-1 compression and keeps the
-compressed form only when it is smaller. See the [client implementation
-guide](clients/CLIENT.md).
+Maintained Gate 0 clients use the frozen `StructuredValue-CBOR-v1` value
+profile. Every successful mapped `get` and `set` uses selector `0x10`
+(`Unprotected | Uncompressed | StructuredValue-CBOR-v1`), preserving the
+lossless value model across bindings. Gate 0 does not expose caller-selected
+compression or value protection; see [`clients/VALUE_FORMAT.md`](clients/VALUE_FORMAT.md)
+for the complete envelope and future-profile rules.
 
 ### 📚 Multi-language SDKs
 
@@ -525,7 +519,7 @@ the languages listed below; package status details live in
 | Core engine | ✅ Done | Allocators, BCF53 filter, types, and client foundations |
 | Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
 | Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl release artifacts, and capacity guidance |
-| E2E encryption | 🚧 Pre-freeze | Zstandard plus the v1 AES-256-SIV-CMAC/AES-256-GCM-SIV profiles are being migrated |
+| Value protection profiles | 🚧 Future | AES-256-SIV-CMAC/AES-256-GCM-SIV profiles beyond the unprotected Gate 0 profile |
 | Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
 | General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
 

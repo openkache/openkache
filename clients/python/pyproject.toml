@@ -13,8 +13,6 @@ authors = [{ name = "OpenKache Team" }]
 keywords = ["cache", "openkache", "ssd"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
-  "Operating System :: MacOS",
-  "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
