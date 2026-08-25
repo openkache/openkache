@@ -111,7 +111,9 @@ jobs:
           )"
           wheel_count="$(
             find "${RUNNER_TEMP}/openkache-python-dist" -maxdepth 1 \
-              -type f -name "openkache-${RELEASE_VERSION}-*.whl" | wc -l
+              -type f \
+              -name "openkache-${RELEASE_VERSION}-py3-none-manylinux_2_38_x86_64.whl" \
+              | wc -l
           )"
           [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 1 ]] || {
             echo "Expected exactly one sdist and one wheel." >&2
@@ -183,7 +185,11 @@ jobs:
             cd "${release_root}"
             sha256sum --check SHA256SUMS
             sdist_count="$(find . -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}.tar.gz" | wc -l)"
-            wheel_count="$(find . -maxdepth 1 -type f -name "openkache-${RELEASE_VERSION}-*.whl" | wc -l)"
+            wheel_count="$(
+              find . -maxdepth 1 -type f \
+                -name "openkache-${RELEASE_VERSION}-py3-none-manylinux_2_38_x86_64.whl" \
+                | wc -l
+            )"
             [[ "${sdist_count}" -eq 1 && "${wheel_count}" -eq 1 ]] || {
               echo "Expected exactly one sdist and one wheel." >&2
               exit 1
