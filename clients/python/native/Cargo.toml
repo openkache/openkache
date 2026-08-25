@@ -1,5 +1,6 @@
 [package]
 name = "openkache-client-python-native"
+publish = false
 version = "0.1.0"
 edition = "2024"
 description = "C ABI adapter for the OpenKache Python client"

@@ -241,17 +241,29 @@ class ValueLimits:
             raise StructuredValueError("value limits must be positive integers")
 
 
-def to_value(value: object) -> Value:
+def to_value(value: object, *, limits: ValueLimits | None = None) -> Value:
     """Converts one Python value to the generic model.
 
     ``bool`` is deliberately checked before ``int``.  Python ``int`` values
     remain arbitrary precision and Python tuples intentionally map to arrays.
     """
 
-    return _convert(value, set())
+    budget = limits or ValueLimits()
+    try:
+        return _convert(value, set(), 0, budget.max_depth)
+    except RecursionError as error:
+        raise StructuredValueError(
+            f"depth limit {budget.max_depth} exceeded",
+            ValueErrorKind.RESOURCE_LIMIT,
+        ) from error
 
 
-def _convert(value: object, ancestors: set[int]) -> Value:
+def _convert(
+    value: object,
+    ancestors: set[int],
+    depth: int = 0,
+    max_depth: int = ValueLimits.max_depth,
+) -> Value:
     if isinstance(
         value,
         (
@@ -276,6 +288,8 @@ def _convert(value: object, ancestors: set[int]) -> Value:
     if isinstance(value, str):
         return TextStringValue(value)
     if isinstance(value, (list, tuple)):
+        if depth >= max_depth:
+            _resource("depth", max_depth, depth + 1)
         identity = id(value)
         if identity in ancestors:
             raise StructuredValueError(
@@ -284,10 +298,14 @@ def _convert(value: object, ancestors: set[int]) -> Value:
             )
         ancestors.add(identity)
         try:
-            return ArrayValue._from_values(_convert(child, ancestors) for child in value)
+            return ArrayValue._from_values(
+                _convert(child, ancestors, depth + 1, max_depth) for child in value
+            )
         finally:
             ancestors.remove(identity)
     if isinstance(value, Mapping):
+        if depth >= max_depth:
+            _resource("depth", max_depth, depth + 1)
         identity = id(value)
         if identity in ancestors:
             raise StructuredValueError(
@@ -298,7 +316,8 @@ def _convert(value: object, ancestors: set[int]) -> Value:
         try:
             entries: list[tuple[Value, Value]] = []
             for key, child in value.items():
-                model_key, model_child = _convert(key, ancestors), _convert(child, ancestors)
+                model_key = _convert(key, ancestors, depth + 1, max_depth)
+                model_child = _convert(child, ancestors, depth + 1, max_depth)
                 _validate_map_key(model_key, len(entries), entries)
                 entries.append((model_key, model_child))
             return MapValue._from_entries(entries)
@@ -314,7 +333,7 @@ def _convert_sequence(values: Iterable[object]) -> tuple[Value, ...]:
     ancestors: set[int] = set()
     converted: list[Value] = []
     for value in values:
-        converted.append(_convert(value, ancestors))
+        converted.append(_convert(value, ancestors, 0, ValueLimits.max_depth))
     return tuple(converted)
 
 
@@ -329,7 +348,8 @@ def _convert_entries(
                 f"map entry {index} must be a two-item pair",
                 ValueErrorKind.CONVERSION,
             )
-        key, value = _convert(pair[0], ancestors), _convert(pair[1], ancestors)
+        key = _convert(pair[0], ancestors, 0, ValueLimits.max_depth)
+        value = _convert(pair[1], ancestors, 0, ValueLimits.max_depth)
         _validate_map_key(key, index, converted)
         converted.append((key, value))
     return tuple(converted)
@@ -388,7 +408,7 @@ def encode_value(value: object, *, limits: ValueLimits | None = None) -> bytes:
     """Encodes a Python/native or lossless value as one CBOR item."""
 
     budget = limits or ValueLimits()
-    model = to_value(value)
+    model = to_value(value, limits=budget)
     output = bytearray()
     tasks: list[tuple[Value, int]] = [(model, 0)]
     item_count = 0
@@ -566,21 +586,21 @@ def decode_value(data: bytes | bytearray | memoryview, *, limits: ValueLimits | 
             length = length_or_value
             if length > budget.max_items:
                 _resource("items", budget.max_items, length)
+            if len(frames) >= budget.max_depth:
+                _resource("depth", budget.max_depth, len(frames) + 1)
             if length == 0:
                 accept(ArrayValue(()))
             else:
-                if len(frames) >= budget.max_depth:
-                    _resource("depth", budget.max_depth, len(frames) + 1)
                 frames.append(["array", length, []])
         elif major == 5:
             length = length_or_value
             if length * 2 > budget.max_items:
                 _resource("items", budget.max_items, length * 2)
+            if len(frames) >= budget.max_depth:
+                _resource("depth", budget.max_depth, len(frames) + 1)
             if length == 0:
                 accept(MapValue(()))
             else:
-                if len(frames) >= budget.max_depth:
-                    _resource("depth", budget.max_depth, len(frames) + 1)
                 frames.append(["map", length * 2, [], pending_key])
         elif major == 6:
             # Tags 2 and 3 are the only profile tags.  Their payload must be a

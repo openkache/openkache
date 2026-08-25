@@ -13,6 +13,9 @@ use napi::{Error, Result, Status};
 use napi_derive::napi;
 use openkache_client_core::{
     DeleteOutcome, Endpoint, GetOutcome, ProtectedClient, SetOptions, SetOutcome,
+    contract::{
+        SMITHY_SET_OUTCOME_CREATED, SMITHY_SET_OUTCOME_NOT_STORED, SMITHY_SET_OUTCOME_REPLACED,
+    },
 };
 
 /// Endpoint-only connection settings consumed by the private native loader.
@@ -55,11 +58,11 @@ impl NativeClient {
             .await
             .map_err(native_core_error)?;
         match outcome {
-            SetOutcome::Created => Ok("created".to_owned()),
-            SetOutcome::Replaced => Ok("replaced".to_owned()),
-            SetOutcome::NotStored => Err(incompatible_outcome(
-                "server returned conditional SET outcome NotStored",
-            )),
+            SetOutcome::Created => Ok(SMITHY_SET_OUTCOME_CREATED.to_owned()),
+            SetOutcome::Replaced => Ok(SMITHY_SET_OUTCOME_REPLACED.to_owned()),
+            SetOutcome::NotStored => Err(incompatible_outcome(format!(
+                "server returned conditional SET outcome {SMITHY_SET_OUTCOME_NOT_STORED}"
+            ))),
         }
     }
 
@@ -138,14 +141,12 @@ impl NativeClient {
 #[napi]
 pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let profile = gate0_contract::profile();
-    let address = options.address.parse().map_err(|error| {
+    let endpoint = options.address.parse::<Endpoint>().map_err(|error| {
         invalid_argument(format!(
             "invalid server address {:?}: {error}",
             options.address
         ))
     })?;
-    let endpoint =
-        Endpoint::from_socket_addr(address, profile.server_name).map_err(native_core_error)?;
     let client = ProtectedClient::builder(endpoint, profile.item_id_root)
         .server_trust(profile.server_trust)
         .alpn_policy(profile.alpn)

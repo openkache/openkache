@@ -6,7 +6,10 @@ provides the maintained `connect`/`get`/`set`/`delete`/`close` facade and
 `StructuredValue-CBOR-v1` values. The [`openkache-server`](../server/) package
 is a separate release artifact. The other Rust crates in this directory are
 internal implementation crates used to build the published packages and are
-not end-user dependencies.
+not end-user dependencies. Release the client from a reviewed
+`client-v<version>` tag through the `Release OpenKache Rust crate` workflow with
+`package=client`; do not publish the internal core, value, CLI, or native
+adapter crates.
 
 ## Documentation
 
