@@ -48,19 +48,30 @@ check.
 
 ## Publish
 
-Configure an npm automation token outside the repository. Bun reads
-`NPM_CONFIG_TOKEN`; never put the token in a committed file or command output:
+GitHub Actions uses npm Trusted Publishing for registry authentication. In the
+`openkache` package settings on npmjs.com, configure a GitHub Actions trusted
+publisher with:
+
+- organization or user: `openkache`;
+- repository: `openkache`;
+- workflow filename: `publish-npm.yml`; and
+- environment: `npm-release`.
+
+The publish job grants `id-token: write` and invokes npm's OIDC-aware CLI from
+a GitHub-hosted runner. No `NPM_TOKEN` secret is required. `release:publish`
+repeats the complete preflight and publishes exactly one immutable package
+version with the `latest` dist-tag. It skips lifecycle scripts because
+`release:check` has already built and inspected the artifact.
+
+For an explicitly local, token-authenticated publication, leave
+`OPENKACHE_TRUSTED_PUBLISHING` unset and configure `NPM_CONFIG_TOKEN` outside
+the repository. Never put the token in a committed file or command output:
 
 ```bash
 export NPM_CONFIG_TOKEN='...'
 bun pm whoami
 bun run release:publish
 ```
-
-`release:publish` repeats the complete preflight, verifies the authenticated
-npm identity, and publishes exactly one immutable package version with the
-`latest` dist-tag. It skips lifecycle scripts because `release:check` has
-already built and inspected the artifact.
 
 After a successful publication, verify the registry metadata and install the
 published package from a clean consumer project:
