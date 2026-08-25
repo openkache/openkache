@@ -199,7 +199,9 @@ impl StatefulRespParser {
 
                             if self.args.len() == 1 {
                                 let command_name = &self.args[0];
-                                let valid_count = if command_name.eq_ignore_ascii_case(b"GET") {
+                                let valid_count = if command_name.eq_ignore_ascii_case(b"GET")
+                                    || command_name.eq_ignore_ascii_case(b"DEL")
+                                {
                                     self.arg_count == 2
                                 } else if command_name.eq_ignore_ascii_case(b"SET") {
                                     self.arg_count == 3
@@ -273,11 +275,22 @@ fn command_from_args(
         });
     }
 
+    if command_name.eq_ignore_ascii_case(b"DEL") {
+        if set_value.is_some() {
+            return Err("DEL cannot have a value");
+        }
+        return Ok(Command::Delete {
+            key: key.into_boxed_slice(),
+        });
+    }
+
     Err("unsupported command")
 }
 
 static GET_NOT_FOUND_RESPONSE_BYTES: &[u8] = b"$-1\r\n";
 static SET_OK_RESPONSE_BYTES: &[u8] = b"+OK\r\n";
+static DELETE_FOUND_RESPONSE_BYTES: &[u8] = b":1\r\n";
+static DELETE_NOT_FOUND_RESPONSE_BYTES: &[u8] = b":0\r\n";
 static RESPONSE_END: &[u8] = b"\r\n";
 
 pub(crate) struct ResponseToWrite {
@@ -300,6 +313,15 @@ pub(crate) fn make_response_to_write(reply: Reply) -> ResponseToWrite {
         },
         Reply::SetOk => ResponseToWrite {
             header_bytes: Cow::Borrowed(SET_OK_RESPONSE_BYTES),
+            value_bytes: None,
+            ending_bytes: &[],
+        },
+        Reply::Delete(existed) => ResponseToWrite {
+            header_bytes: Cow::Borrowed(if existed {
+                DELETE_FOUND_RESPONSE_BYTES
+            } else {
+                DELETE_NOT_FOUND_RESPONSE_BYTES
+            }),
             value_bytes: None,
             ending_bytes: &[],
         },
@@ -356,6 +378,25 @@ mod tests {
     }
 
     #[test]
+    fn stateful_parser_builds_delete_across_chunks() {
+        let request_bytes = b"*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n";
+        let mut parser = StatefulRespParser::new();
+        let mut pending_commands = VecDeque::new();
+
+        for byte in request_bytes {
+            parser
+                .feed(std::slice::from_ref(byte), &mut pending_commands)
+                .expect("each request byte should parse");
+        }
+
+        let Command::Delete { key } = pending_commands.pop_front().unwrap() else {
+            panic!("stateful parser should produce DEL");
+        };
+        assert_eq!(&*key, b"key");
+        assert!(pending_commands.is_empty());
+    }
+
+    #[test]
     fn get_found_response_owns_only_its_header() {
         let response = make_response_to_write(Reply::Get(Some(Arc::from(&b"value"[..]))));
 
@@ -389,5 +430,16 @@ mod tests {
             first_response.header_bytes.as_ptr(),
             second_response.header_bytes.as_ptr()
         );
+    }
+
+    #[test]
+    fn delete_responses_use_resp_integers() {
+        let deleted = make_response_to_write(Reply::Delete(true));
+        let not_found = make_response_to_write(Reply::Delete(false));
+
+        assert_eq!(deleted.header_bytes.as_ref(), b":1\r\n");
+        assert_eq!(not_found.header_bytes.as_ref(), b":0\r\n");
+        assert!(deleted.value_bytes.is_none());
+        assert!(not_found.value_bytes.is_none());
     }
 }

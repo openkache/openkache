@@ -2,7 +2,6 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 
-use super::mapping::ProxyState;
 use super::resp_backend::RespBackend;
 use openkache_protocol::{
     ALPN, MAX_REQUEST_FRAME_BYTES, OpaqueRequestFrame, Opcode, wire_request_layout,
@@ -62,10 +61,7 @@ pub(super) async fn serve(
         socket,
         Arc::new(TokioRuntime),
     )?;
-    let state = Arc::new(ProxyState::default());
-
     while let Some(incoming) = endpoint.accept().await {
-        let state = Arc::clone(&state);
         tokio::spawn(async move {
             let connection = match incoming.await {
                 Ok(connection) => connection,
@@ -75,22 +71,17 @@ pub(super) async fn serve(
                 }
             };
 
-            serve_connection(connection, resp_backend, state).await;
+            serve_connection(connection, resp_backend).await;
         });
     }
 
     Ok(())
 }
 
-async fn serve_connection(
-    connection: Connection,
-    resp_backend: SocketAddr,
-    state: Arc<ProxyState>,
-) {
+async fn serve_connection(connection: Connection, resp_backend: SocketAddr) {
     while let Ok((send, receive)) = connection.accept_bi().await {
-        let state = Arc::clone(&state);
         tokio::spawn(async move {
-            if let Err(error) = serve_lane(send, receive, resp_backend, state).await {
+            if let Err(error) = serve_lane(send, receive, resp_backend).await {
                 eprintln!("native RESP proxy lane failed: {error}");
             }
         });
@@ -101,13 +92,12 @@ async fn serve_lane(
     mut send: SendStream,
     mut receive: RecvStream,
     resp_backend: SocketAddr,
-    state: Arc<ProxyState>,
 ) -> io::Result<()> {
     let mut reader = RequestReader::default();
     let mut backend = RespBackend::new(resp_backend);
 
     while let Some(frame) = reader.next(&mut receive).await? {
-        let response = super::mapping::dispatch(&frame, &mut backend, &state).await?;
+        let response = super::mapping::dispatch(&frame, &mut backend).await?;
         let encoded = response.into_encoded().map_err(io::Error::other)?;
         send.write_all(&encoded).await.map_err(io::Error::other)?;
     }

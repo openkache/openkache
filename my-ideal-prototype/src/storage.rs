@@ -96,6 +96,11 @@ struct SetObservation {
     previous: Option<u32>,
 }
 
+struct DeleteObservation {
+    previous: Option<u32>,
+    existed: bool,
+}
+
 enum Lookup {
     Value(Arc<[u8]>),
     Tombstone,
@@ -109,6 +114,11 @@ enum CommitSet {
         result: Result<(), SetError>,
         flush: Option<FlushJob>,
     },
+}
+
+enum CommitDelete {
+    Retry,
+    Finished(bool),
 }
 
 #[derive(Debug)]
@@ -292,6 +302,32 @@ impl Storage {
             result: Ok(()),
             flush,
         }
+    }
+
+    /// await 전에 관찰한 table 위치가 그대로일 때 Entry 하나만 제거한다.
+    fn commit_delete(
+        &mut self,
+        key: &StorageKey,
+        plan: SetPlan,
+        observation: DeleteObservation,
+    ) -> CommitDelete {
+        if let Some(previous) = observation.previous {
+            if !self.table.remove(key.table_hash(), previous) {
+                return CommitDelete::Retry;
+            }
+
+            // Mutable SG의 바이트는 다시 SET할 때 같은 bucket에서 과거 값과
+            // 충돌하지 않도록 회수한다. SSD/Flushing SG는 table에서만 제거한다.
+            self.remove_from_mutable_sg(previous, key);
+            return CommitDelete::Finished(observation.existed);
+        }
+
+        let current_candidates = self.table.values(key.table_hash()).collect::<Vec<_>>();
+        if current_candidates.as_slice() != plan.candidates.as_ref() {
+            return CommitDelete::Retry;
+        }
+
+        CommitDelete::Finished(false)
     }
 
     fn append_to_mutable_sg(
@@ -505,6 +541,54 @@ async fn resolve_set_plan(
     Ok(SetObservation { previous: None })
 }
 
+async fn resolve_delete_plan(
+    worker: WorkerHandle,
+    file: Rc<File>,
+    key: &StorageKey,
+    plan: &SetPlan,
+) -> io::Result<DeleteObservation> {
+    for candidate in plan.candidates.iter().copied() {
+        match worker.access(|worker| worker.storage.lookup(key, candidate)) {
+            Lookup::Value(_) => {
+                return Ok(DeleteObservation {
+                    previous: Some(candidate),
+                    existed: true,
+                });
+            }
+            Lookup::Tombstone => {
+                return Ok(DeleteObservation {
+                    previous: Some(candidate),
+                    existed: false,
+                });
+            }
+            Lookup::CandidateMiss => {}
+            Lookup::ReadBucket { file_offset } => {
+                let bucket = read_bucket(Rc::clone(&file), file_offset).await?;
+                match bucket.get(key) {
+                    Some(BucketValue::Value(_)) => {
+                        return Ok(DeleteObservation {
+                            previous: Some(candidate),
+                            existed: true,
+                        });
+                    }
+                    Some(BucketValue::Tombstone) => {
+                        return Ok(DeleteObservation {
+                            previous: Some(candidate),
+                            existed: false,
+                        });
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    Ok(DeleteObservation {
+        previous: None,
+        existed: false,
+    })
+}
+
 async fn execute_set(
     worker: WorkerHandle,
     file: Rc<File>,
@@ -532,6 +616,21 @@ async fn execute_set(
                 })?;
                 return Ok(Reply::SetOk);
             }
+        }
+    }
+}
+
+async fn execute_delete(
+    worker: WorkerHandle,
+    file: Rc<File>,
+    key: StorageKey,
+) -> io::Result<Reply> {
+    loop {
+        let plan = worker.access(|worker| worker.storage.prepare_set(&key));
+        let observation = resolve_delete_plan(worker, Rc::clone(&file), &key, &plan).await?;
+        match worker.access(|worker| worker.storage.commit_delete(&key, plan, observation)) {
+            CommitDelete::Retry => continue,
+            CommitDelete::Finished(existed) => return Ok(Reply::Delete(existed)),
         }
     }
 }
@@ -571,6 +670,9 @@ async fn execute_request(
         }
         Command::Set { key, value } => {
             execute_set(worker, file, StorageKey::from_key(&key), value).await?
+        }
+        Command::Delete { key } => {
+            execute_delete(worker, file, StorageKey::from_key(&key)).await?
         }
     };
 
@@ -676,4 +778,117 @@ pub(crate) fn run(
         request_receiver,
         response_sender,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiny_storage() -> Storage {
+        let table = Table::new(TableConfig {
+            max_entries: 32,
+            value_bits: TABLE_VALUE_BITS,
+            fingerprint_bits: 8,
+        })
+        .unwrap();
+        let mut sgs = (0..4)
+            .map(|_| SgState::Unused)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        for state in &mut sgs[..MUTABLE_SG_COUNT] {
+            *state = SgState::Mutable(MutableSg::new(8, BUCKET_CHOICE_COUNT));
+        }
+
+        Storage {
+            table,
+            sgs,
+            oldest_mutable_sg_index: 0,
+            spare_mutable_sg: Some(MutableSg::new(8, BUCKET_CHOICE_COUNT)),
+        }
+    }
+
+    fn set_without_flush(storage: &mut Storage, key: &StorageKey, value: &[u8]) {
+        let plan = storage.prepare_set(key);
+        let commit = storage.commit_set(key, value, plan, SetObservation { previous: None });
+        let CommitSet::Finished { result, flush } = commit else {
+            panic!("uncontended SET should not retry");
+        };
+        assert!(result.is_ok());
+        assert!(flush.is_none());
+    }
+
+    #[test]
+    fn delete_removes_table_entry_and_allows_reinsert() {
+        let mut storage = tiny_storage();
+        let key = StorageKey::from_key(b"key");
+        set_without_flush(&mut storage, &key, b"old");
+
+        let plan = storage.prepare_set(&key);
+        let previous = plan.candidates[0];
+        assert!(matches!(storage.lookup(&key, previous), Lookup::Value(_)));
+        assert!(matches!(
+            storage.commit_delete(
+                &key,
+                plan,
+                DeleteObservation {
+                    previous: Some(previous),
+                    existed: true,
+                },
+            ),
+            CommitDelete::Finished(true)
+        ));
+        assert!(storage.candidates(&key).is_empty());
+        assert!(matches!(
+            storage.lookup(&key, previous),
+            Lookup::CandidateMiss
+        ));
+
+        let missing_plan = storage.prepare_set(&key);
+        assert!(matches!(
+            storage.commit_delete(
+                &key,
+                missing_plan,
+                DeleteObservation {
+                    previous: None,
+                    existed: false,
+                },
+            ),
+            CommitDelete::Finished(false)
+        ));
+
+        set_without_flush(&mut storage, &key, b"new");
+        let replacement = storage.candidates(&key)[0];
+        match storage.lookup(&key, replacement) {
+            Lookup::Value(value) => assert_eq!(&*value, b"new"),
+            _ => panic!("reinserted key should resolve to its new value"),
+        }
+    }
+
+    #[test]
+    fn delete_removes_ssd_table_entry_without_rewriting_sg() {
+        let mut storage = tiny_storage();
+        let key = StorageKey::from_key(b"ssd-key");
+        let ssd_sg_index = 3;
+        let table_value = Storage::encode_table_value(ssd_sg_index, 0);
+        storage.sgs[ssd_sg_index] = SgState::Ssd;
+        storage
+            .table
+            .insert(key.table_hash(), table_value)
+            .unwrap();
+
+        let plan = storage.prepare_set(&key);
+        assert!(matches!(
+            storage.commit_delete(
+                &key,
+                plan,
+                DeleteObservation {
+                    previous: Some(table_value),
+                    existed: true,
+                },
+            ),
+            CommitDelete::Finished(true)
+        ));
+        assert!(storage.candidates(&key).is_empty());
+        assert!(matches!(storage.sgs[ssd_sg_index], SgState::Ssd));
+    }
 }

@@ -14,6 +14,7 @@ pub(crate) struct StorageRequest {
 pub(crate) enum Command {
     Get { key: Box<[u8]> },
     Set { key: Box<[u8]>, value: Arc<[u8]> },
+    Delete { key: Box<[u8]> },
 }
 
 pub(crate) struct StorageResponse {
@@ -25,4 +26,5 @@ pub(crate) struct StorageResponse {
 pub(crate) enum Reply {
     Get(Option<Arc<[u8]>>),
     SetOk,
+    Delete(bool),
 }

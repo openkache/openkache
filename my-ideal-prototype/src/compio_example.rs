@@ -317,6 +317,13 @@ async fn execute_request(
         Command::Set { key, value } => {
             execute_set(worker, file, StorageKey::from_key(&key), value).await?
         }
+
+        Command::Delete { .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "DELETE is implemented by storage.rs, not this design example",
+            ));
+        }
     };
 
     Ok(StorageResponse {

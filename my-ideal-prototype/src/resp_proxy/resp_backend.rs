@@ -58,6 +58,18 @@ impl RespBackend {
         }
     }
 
+    pub(super) async fn delete(&mut self, key: &[u8]) -> io::Result<bool> {
+        let request = command(&[b"DEL", key]);
+        let stream = self.stream().await?;
+        stream.write_all(&request).await?;
+
+        match read_line(stream).await?.as_slice() {
+            b":1" => Ok(true),
+            b":0" => Ok(false),
+            line => Err(resp_error("DEL", line)),
+        }
+    }
+
     async fn stream(&mut self) -> io::Result<&mut TcpStream> {
         if self.stream.is_none() {
             let stream = TcpStream::connect(self.address).await?;
