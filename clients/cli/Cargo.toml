@@ -1,5 +1,6 @@
 [package]
 name = "openkache-cli"
+publish = false
 version = "0.1.0"
 edition.workspace = true
 description = "Command-line client for the OpenKache cache server"

@@ -17,7 +17,8 @@ commit, or Git worktree is inconsistent.
 | --- | --- | --- | --- |
 | `Release TypeScript npm package` | `typescript-v<version>` | `clients/typescript/package.json` | `RELEASE` |
 | `Release Python PyPI package` | `python-v<version>` | `clients/python/pyproject.toml` | `RELEASE` |
-| `Release openkache-server crate` | `server-v<version>` | `server/Cargo.toml` | `RELEASE` |
+| `Release OpenKache Rust crate` (`package=server`) | `server-v<version>` | `server/Cargo.toml` (`openkache-server`) | `RELEASE` |
+| `Release OpenKache Rust crate` (`package=client`) | `client-v<version>` | `clients/rust/Cargo.toml` (`openkache`) | `RELEASE` |
 | `Build C and C++ CMake archives` | `cmake-v<version>` | both CMake project files | `RELEASE` |
 
 The CMake workflow creates source archives and does not upload to a package
@@ -37,8 +38,10 @@ registry:
 - `pypi-release`: a PyPI trusted publisher for this repository, workflow
   (`.github/workflows/publish-pypi.yml`), and environment. The workflow uses
   the short-lived GitHub OIDC exchange and stores no PyPI token.
-- `crates-io-release`: `CARGO_REGISTRY_TOKEN` repository secret. Keep the token
-  scoped to the `openkache-server` owner and rotate it outside this repository.
+- `crates-io-release`: `CARGO_REGISTRY_TOKEN` repository secret. Scope the
+  token only to the `openkache-server` and `openkache` crate owners and rotate
+  it outside this repository. The workflow always passes one explicit
+  publishable manifest; internal workspace crates remain `publish = false`.
 - `cmake-release`: no credential; the workflow only uploads an Actions
   artifact.
 
@@ -97,8 +100,9 @@ cd clients/python
 python -m build --sdist --wheel --outdir dist
 python -m twine check dist/*
 
-# Server crate
+# Rust crates (select the matching tag and workflow package input)
 cargo package --manifest-path server/Cargo.toml --locked --no-verify
+cargo package --manifest-path clients/rust/Cargo.toml --locked --no-verify
 
 # C and C++ CMake smoke checks
 cmake -S clients/c -B _local/cmake-c

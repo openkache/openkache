@@ -60,7 +60,9 @@ try {
 ```
 
 `connect({ address: "127.0.0.1:4433" })` is accepted as an equivalent
-endpoint-only shape. Any other connection field is rejected.
+endpoint-only shape. DNS hostnames use the same `host:port` form as the shared
+Rust core, for example `cache.example.com:4433`; bracket IPv6 literals as
+`[2001:db8::10]:4433`. Any other connection field is rejected.
 
 ## The five-operation facade
 

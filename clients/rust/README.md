@@ -4,7 +4,11 @@
 (`v1-gate0`) client contract. It is one publishable crate; the transport,
 protocol, key, and value implementation crates are private workspace
 implementation details. The server is released separately as the
-[`openkache-server`](../../server/) package.
+[`openkache-server`](../../server/) package. Release this crate from a
+reviewed `client-v<version>` tag through the public
+`Release OpenKache Rust crate` workflow with `package=client`; the workflow
+packages only `clients/rust/Cargo.toml` and never publishes internal workspace
+crates.
 
 ## Install
 
@@ -63,6 +67,11 @@ cargo check --locked
 cargo test --locked
 cargo doc --locked --no-deps
 ```
+
+The same commands are the package-local dry run used before creating a
+`client-v<version>` release tag. The immutable publication workflow rebuilds
+and checksums the exact tagged archive before asking the protected
+`crates-io-release` environment for approval.
 
 Run the checked-in example against a local development server:
 

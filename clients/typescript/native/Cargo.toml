@@ -1,5 +1,6 @@
 [package]
 name = "openkache-client-napi"
+publish = false
 version = "0.1.0"
 edition.workspace = true
 description = "Node-API adapter for the OpenKache Rust client"

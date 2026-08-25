@@ -6,17 +6,16 @@
 //! independent profile literals.
 
 use openkache_client_core::contract::{
-    CLIENT_DEFAULT_SERVER_NAME, CLIENT_GATE0_ALPN_VERSION, CLIENT_GATE0_COMPRESSION,
-    CLIENT_GATE0_ENCRYPTION, CLIENT_GATE0_ITEM_ID_ROOT, CLIENT_GATE0_NAMESPACE_ID,
-    CLIENT_GATE0_VALUE_SELECTOR, VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_ENCRYPTION_NONE,
-    VALUE_FORMAT_ENCRYPTION_SHIFT, VALUE_FORMAT_SERIALIZATION_STRUCTURED,
+    CLIENT_GATE0_ALPN_VERSION, CLIENT_GATE0_COMPRESSION, CLIENT_GATE0_ENCRYPTION,
+    CLIENT_GATE0_ITEM_ID_ROOT, CLIENT_GATE0_NAMESPACE_ID, CLIENT_GATE0_VALUE_SELECTOR,
+    VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_SHIFT,
+    VALUE_FORMAT_SERIALIZATION_STRUCTURED,
 };
 use openkache_client_core::value::{Compression, Encryption};
 use openkache_client_core::{AlpnPolicy, ClientRootKey, ServerTrust};
 
 /// The fixed profile consumed by the TypeScript Gate 0 adapter.
 pub(crate) struct Gate0Profile {
-    pub(crate) server_name: &'static str,
     pub(crate) item_id_root: ClientRootKey,
     pub(crate) server_trust: ServerTrust,
     pub(crate) compression: Compression,
@@ -29,7 +28,6 @@ pub(crate) fn profile() -> Gate0Profile {
     validate_value_selector();
 
     Gate0Profile {
-        server_name: CLIENT_DEFAULT_SERVER_NAME,
         item_id_root: ClientRootKey::from_bytes(CLIENT_GATE0_ITEM_ID_ROOT),
         server_trust: ServerTrust::Insecure,
         compression: gate0_compression(),
