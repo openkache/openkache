@@ -33,8 +33,11 @@ each environment and restrict deployment branches/tags to the corresponding
 release tag pattern. Configure only the credentials needed by the target
 registry:
 
-- `npm-release`: `NPM_TOKEN` repository secret. The workflow exposes it only as
-  `NPM_CONFIG_TOKEN`; it is never written to a file or command line.
+- `npm-release`: an npm Trusted Publisher for the `openkache` package with
+  organization `openkache`, repository `openkache`, workflow
+  (`.github/workflows/publish-npm.yml`), and environment `npm-release`. The
+  publish job exchanges its `id-token: write` permission for short-lived npm
+  credentials on a GitHub-hosted runner; no npm token is stored in GitHub.
 - `pypi-release`: a PyPI trusted publisher for this repository, workflow
   (`.github/workflows/publish-pypi.yml`), and environment. The workflow uses
   the short-lived GitHub OIDC exchange and stores no PyPI token.
