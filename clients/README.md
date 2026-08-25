@@ -11,6 +11,29 @@ not end-user dependencies. Release the client from a reviewed
 `package=client`; do not publish the internal core, value, CLI, or native
 adapter crates.
 
+## Install a maintained SDK
+
+These are the three supported registry packages for the maintained Gate 0
+facade. They share the same logical operations and value model, but retain
+idiomatic language APIs.
+
+| Language | Registry | Install | API style |
+|---|---|---|---|
+| TypeScript / JavaScript | [npm](https://www.npmjs.com/package/openkache) | `npm install openkache` or `bun add openkache` | Promise-based |
+| Python | [PyPI](https://pypi.org/project/openkache/) | `python -m pip install openkache` | Synchronous |
+| Rust | [crates.io](https://crates.io/crates/openkache) | `cargo add openkache` | Async |
+
+Start the local preview server from the
+[server quick start](../README.md#-quick-start), then use
+`127.0.0.1:4433` as the endpoint. The fixed development TLS profile disables
+certificate verification and is intended only for local development.
+
+Each package README is the source for its language-facing API:
+
+- [TypeScript / JavaScript](typescript/README.md) — Node.js, Bun, and Deno
+- [Python](python/README.md) — synchronous Gate 0 facade
+- [Rust](rust/README.md) — published async crate
+
 ## Documentation
 
 Shared client topics are documented here:

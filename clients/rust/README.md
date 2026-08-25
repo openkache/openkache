@@ -10,11 +10,28 @@ reviewed `client-v<version>` tag through the public
 packages only `clients/rust/Cargo.toml` and never publishes internal workspace
 crates.
 
+Published package: [crates.io/crates/openkache](https://crates.io/crates/openkache).
+The facade requires Rust 1.85 or newer and a native C linker because the
+default TLS backend builds AWS-LC.
+
 ## Install
 
 ```toml
 [dependencies]
 openkache = "0.1"
+```
+
+For a new application, the equivalent commands are:
+
+```bash
+cargo add openkache
+cargo add tokio --features macros,rt-multi-thread
+```
+
+On a Nix-only environment, include a C compiler when building the dependency:
+
+```bash
+nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc
 ```
 
 The facade exposes exactly five operations:
@@ -59,6 +76,50 @@ client.close().await?;
 # }
 ```
 
+The following is a complete `src/main.rs` example. It accepts an optional
+`host:port` argument and exercises the full CRUD lifecycle:
+
+```rust
+use openkache::{Client, DeleteOutcome, GetResult, SetOutcome, Value};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let endpoint = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1:4433".to_owned());
+    let client = Client::connect(endpoint).await?;
+
+    let key = "hello";
+    assert_eq!(
+        client.set(key, Value::text("from rust")).await?,
+        SetOutcome::Created
+    );
+    assert!(matches!(
+        client.get(key).await?,
+        GetResult::Found(Value::TextString(_))
+    ));
+    assert_eq!(
+        client.delete(key).await?,
+        DeleteOutcome::Deleted
+    );
+    assert!(matches!(client.get(key).await?, GetResult::Missing));
+
+    client.close().await?;
+    println!("Rust OpenKache CRUD smoke test passed");
+    Ok(())
+}
+```
+
+Run it from the application directory after adding the two dependencies:
+
+```bash
+env -u CARGO_BUILD_TARGET cargo run -- 127.0.0.1:4433
+```
+
+The `CARGO_BUILD_TARGET` override is only needed when an enclosing Nix
+development shell forces a musl target that is not installed in the temporary
+application environment.
+
 If a mutation crosses admission but its response is lost, the client returns
 `Error::UnknownMutation` and never replays it.
 
@@ -80,5 +141,5 @@ and checksums the exact tagged archive before asking the protected
 Run the checked-in example against a local development server:
 
 ```bash
-cargo run --example basic
+env -u CARGO_BUILD_TARGET cargo run --example basic -- 127.0.0.1:4433
 ```
