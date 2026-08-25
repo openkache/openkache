@@ -47,7 +47,7 @@ jobs:
 
       - name: Generate Python Smithy contract
         working-directory: clients/python
-        run: OPENKACHE_GENERATION_TARGET=python ../../protocol/generate.ts
+        run: OPENKACHE_GENERATION_TARGET=python ../generate.ts
 
       - name: Check Python package sources
         run: python -m compileall clients/python/src
