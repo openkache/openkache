@@ -64,7 +64,7 @@ If a mutation crosses admission but its response is lost, the client returns
 
 ## Commands
 
-Check the facade and run its (source-contained) test and documentation suites:
+Check the facade and run its package-local build, test, and documentation commands:
 
 ```bash
 cargo check --locked
