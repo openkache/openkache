@@ -14,6 +14,7 @@ mod aa;
 mod compio_example;
 mod network;
 mod resp;
+mod resp_proxy;
 mod spsc;
 mod storage;
 mod storage_example;
@@ -84,6 +85,9 @@ fn main() -> io::Result<()> {
     }
 
     let tcp_listener = TcpListener::bind(&address)?;
+    let tcp_address = tcp_listener.local_addr()?;
+    let udp_socket = std::net::UdpSocket::bind(tcp_address)?;
+    let _resp_proxy_thread = resp_proxy::spawn(udp_socket, resp_backend_address(tcp_address))?;
     let (request_producer, request_consumer) =
         spsc::channel::<StorageRequest, STORAGE_QUEUE_SLOTS>();
     let (response_producer, response_consumer) =
@@ -100,9 +104,24 @@ fn main() -> io::Result<()> {
     pin_current_thread(network_cpu)?;
 
     eprintln!(
-        "my-ideal-prototype listening on {address}; network CPU={network_cpu}, storage CPU={storage_cpu}"
+        "my-ideal-prototype listening on {tcp_address} over RESP/TCP and native QUIC/UDP; network CPU={network_cpu}, storage CPU={storage_cpu}"
     );
 
     let mut network = network::Network::new(tcp_listener, request_producer, response_consumer)?;
     network.run()
+}
+
+fn resp_backend_address(public_address: std::net::SocketAddr) -> std::net::SocketAddr {
+    if public_address.ip().is_unspecified() {
+        std::net::SocketAddr::new(
+            if public_address.is_ipv4() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                std::net::Ipv6Addr::LOCALHOST.into()
+            },
+            public_address.port(),
+        )
+    } else {
+        public_address
+    }
 }

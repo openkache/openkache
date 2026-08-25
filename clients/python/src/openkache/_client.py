@@ -157,7 +157,7 @@ class OpenKacheClient:
 
     @classmethod
     def connect(cls, address: str) -> OpenKacheClient:
-        """Open one development TLS 1.3 connection.
+        """Open one development QUIC-over-TLS 1.3 connection.
 
         Gate 0 intentionally has no certificate, retry, timeout, TTL, or
         transport arguments.  The private native adapter fixes the

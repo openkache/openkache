@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 default = []
 
 [dependencies]
-openkache-client-core = { path = "../../core", default-features = false, features = ["ffi", "tls-tcp"] }
+openkache-client-core = { path = "../../core", default-features = false, features = ["ffi", "quic-quinn"] }
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"] }
 
 [workspace]
