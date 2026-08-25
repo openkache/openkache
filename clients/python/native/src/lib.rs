@@ -23,8 +23,8 @@ use openkache_client_core::contract::{
 };
 use openkache_client_core::value::{Compression, Encryption};
 use openkache_client_core::{
-    AlpnPolicy, ClientRootKey, DeleteOutcome, Endpoint, Error, GetOutcome, ServerTrust, SetOptions,
-    SetOutcome, TlsTcpProtectedClient,
+    AlpnPolicy, ClientRootKey, DeleteOutcome, Endpoint, Error, GetOutcome, ProtectedClient,
+    ServerTrust, SetOptions, SetOutcome,
 };
 use tokio::runtime::Runtime;
 
@@ -40,7 +40,7 @@ pub struct Gate0Client {
 
 struct Gate0ClientInner {
     runtime: Runtime,
-    client: TlsTcpProtectedClient,
+    client: ProtectedClient,
 }
 
 /// Owned result returned by the private Python ABI.
@@ -120,9 +120,9 @@ fn connect_gate0(address: String) -> Gate0Result {
         }
     };
     // The core's default ALPN policy is the sole `openkache/1` protocol and
-    // its TLS-over-TCP transport is TLS 1.3 with the required hybrid group.
+    // its QUIC transport uses TLS 1.3 with the required hybrid group.
     let client = runtime.block_on(
-        TlsTcpProtectedClient::builder(
+        ProtectedClient::builder(
             endpoint,
             ClientRootKey::from_bytes(CLIENT_GATE0_ITEM_ID_ROOT),
         )

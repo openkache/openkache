@@ -30,9 +30,9 @@ python -m pip install openkache
 
 ## Quick start
 
-The package-local example is intentionally development-only. It uses the
-shared TLS 1.3 transport with server-certificate verification disabled; do not
-use it for production credentials or internet-facing deployments.
+The package-local example is intentionally development-only. It uses
+QUIC-over-TLS 1.3 with server-certificate verification disabled; do not use it
+for production credentials or internet-facing deployments.
 
 ```bash
 OPENKACHE_ADDRESS=127.0.0.1:4433 python examples/basic.py

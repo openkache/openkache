@@ -84,6 +84,7 @@ rust_library(
     crate_features = [
         "ffi",
         "quic-compio",
+        "quic-quinn",
         "tls-tcp",
     ],
     crate_name = "openkache_client_core",
