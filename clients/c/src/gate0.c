@@ -21,6 +21,13 @@ extern openkache_client_request_t *
 openkache_client_execute_structured_fields_async(
     const openkache_client_t *client, uint32_t operation,
     const openkache_client_operation_field_t *fields, size_t field_count);
+/*
+ * The mismatch result is intentionally package-private.  Gate 0 must return
+ * one owned, shared-core result without dispatching an operation against an
+ * invented namespace or Item ID.
+ */
+extern openkache_client_result_t *
+openkache_client_result_incompatible_server(void);
 
 _Static_assert(OPENKACHE_CLIENT_GATE0_RESULT_ERROR ==
                    OPENKACHE_SMITHY_FFI_RESULT_ERROR,
@@ -86,9 +93,8 @@ static const uint8_t gate0_item_id_root
  * operations, so reject a server that selected anything other than the
  * generated Gate 0 identity before the caller's key reaches that path.
  *
- * The generated ABI currently has no result-construction entry point.  The
- * zero namespace passed to execute_scoped intentionally exercises its normal
- * owned error-result path when the descriptor is malformed or incompatible.
+ * The shared core owns the incompatible-server result returned for malformed
+ * or unexpected descriptors, so no key or Item ID reaches an operation path.
  */
 static openkache_client_result_t *
 gate0_namespace_preflight(const openkache_client_t *client) {
@@ -121,8 +127,7 @@ gate0_namespace_preflight(const openkache_client_t *client) {
     return NULL;
   }
 
-  return openkache_client_execute_scoped(
-      client, OPENKACHE_SMITHY_OPCODE_GET, 0, NULL, 0, NULL, 0, 0, 0);
+  return openkache_client_result_incompatible_server();
 }
 
 openkache_client_result_t *
