@@ -166,6 +166,19 @@ All three client guides use `127.0.0.1:4433` as the default local endpoint.
 They also list alternative package managers and the complete public API for
 their language.
 
+The source-built [`openkache-cli`](clients/cli/README.md) uses the same fixed
+Gate 0 profile by default. It is the Bash-friendly option for the Rust client
+and the native QUIC frontend of `my-ideal-prototype`:
+
+```bash
+openkache-cli set hello "from cli"
+openkache-cli get hello
+```
+
+Use `openkache-cli --profile configured` when certificate roots, mutual TLS,
+client-side value protection, or compatibility-only TTL/conditional writes
+are required.
+
 ### Container image
 
 The server is published for Linux `amd64` and `arm64` as
@@ -453,7 +466,7 @@ languages listed below; package status details live in
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with runtime SIMD dispatch |
 | Rust client | 🚧 Preview | Async client package |
-| Command-line client | 🚧 Preview | `openkache-cli` for Bash scripts and interactive shell use |
+| Command-line client | 🚧 Preview | `openkache-cli` Gate 0 profile for Bash scripts and interactive shell use |
 | TypeScript / JavaScript client | 🚧 Preview | Node.js, Bun, and Deno package |
 | Python client | 🚧 Preview | Python package |
 | Go client | 🚧 Preview | Context-aware shared-core native ABI binding |
