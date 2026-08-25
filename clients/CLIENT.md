@@ -64,7 +64,7 @@ results, and error categories.
 | Operation | Input | Successful result |
 |---|---|---|
 | `connect` | endpoint and the fixed development profile | an open client |
-| `get` | one [`TypedKey`](KEY_FORMAT.md) | `GetResult<Value>` |
+| `get` | one [`TypedKey`](KEY_FORMAT.md) | a language-native value or absence sentinel |
 | `set` | one `TypedKey` and one `Value` | `Created` or `Replaced` |
 | `delete` | one [`TypedKey`](KEY_FORMAT.md) | `boolean` (`true` when deleted) |
 | `close` | an open client | completion with no value |
@@ -84,16 +84,21 @@ operation or close the client.
 
 ### Lookup and mutation outcomes
 
-`get` returns a tagged result, never a nullable sentinel:
+The wire-level GET outcome distinguishes an absent item from every stored
+value. Bindings project that outcome using the idiom of their host language:
 
-```text
-GetResult<T> = Missing | Found(T)
-```
+- Python returns the decoded value directly and `None` for an absent key.
+  Because `None` is also the native representation of `Null`, those two states
+  intentionally share the ordinary result.
+- JavaScript and TypeScript return the decoded value directly and `undefined`
+  for an absent key. A stored `Undefined` has the same native result.
+- Rust and other static bindings may expose an explicit `GetResult<T>` with
+  `Missing` and `Found(T)` variants.
 
-An absent item returns `Missing`. A stored `Null` returns `Found(Null)`, and a
-stored `Undefined` returns `Found(Undefined)`. Bindings MUST preserve these
-three states; Python MUST NOT use `None` as the missing marker and
-TypeScript/JavaScript MUST NOT use `undefined` as the missing marker.
+The lossless representation preserves the complete stored value model.
+Applications that need to distinguish absence from a native value with the
+same sentinel need a presence-preserving lookup path; ordinary Python and
+JavaScript lookups follow their native nullable conventions.
 
 An unconditional `set` returns `Created` when the item was absent and
 `Replaced` when a live item was overwritten. `delete` has the logical outcomes
@@ -484,26 +489,26 @@ application concern in v1 and should be encoded explicitly as `Text` or
 
 Opaque byte operations preserve exact bytes. Logical structured-value
 operations use the portable value model in [`value/SPEC.md`](value/SPEC.md)
-and convert to native values where that conversion is lossless and
-unsurprising.
+and project it into the language's ordinary types for convenient reads.
 
 An adapter MUST NOT stringify, coerce, reorder with semantic loss, or silently
-drop a value or map key that its native container cannot represent. It follows
-the value model's representation options: `lossless` returns the complete
-generic model, while a strict `native` view returns a conversion error when
-the language's ordinary containers cannot represent it. The value
-specification is the normative source for these representations; each package
-documents only its language-specific names and syntax.
+drop a value or map key that its native container cannot represent. The
+`native` view may intentionally reduce metadata that the language's ordinary
+type cannot expose, such as float width; it MUST still reject an unsupported
+container or an ambiguous map-key projection. `lossless` returns the complete
+generic model. The value specification is the normative source for these
+representations; each package documents only its language-specific names and
+syntax.
 
-Maintained bindings SHOULD expose one `get` operation with a representation
-option equivalent to:
+Maintained dynamic bindings SHOULD expose one `get` operation with a
+representation option equivalent to:
 
 ```text
-get(key, representation="lossless")
 get(key, representation="native")
+get(key, representation="lossless")
 ```
 
-The default for dynamic bindings SHOULD be `lossless`. An adapter MUST report
+The default for dynamic bindings SHOULD be `native`. An adapter MUST report
 ambiguous native lookups rather than silently selecting or merging an entry.
 Exact Item ID and raw operations separately return caller-owned opaque bytes;
 they are not structured-value representation modes.

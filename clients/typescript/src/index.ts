@@ -6,6 +6,7 @@ import {
 import {
   decode_structured_value,
   encode_structured_value,
+  to_native,
   type Structured_Value,
   type Structured_Value_Error_Kind,
   type Value_Limits,
@@ -98,32 +99,19 @@ export type NativeValue =
 /** Compatibility spelling retained for existing callers. */
 export type Native_Value = NativeValue
 
-/** A tagged result for a lookup that may be absent. */
-export type GetResult<Value> = MissingResult | FoundResult<Value>
+/** Selects the value view returned by `get`. */
+export type ValueRepresentation = "native" | "lossless"
 
 /** Compatibility spelling retained for existing callers. */
-export type Get_Result<Value> = GetResult<Value>
+export type Value_Representation = ValueRepresentation
 
-/** Explicit missing lookup result; it is distinct from a stored `Undefined`. */
-export class MissingResult {
-  readonly kind = "missing" as const
+/** Optional value-view settings accepted by `get`. */
+export interface GetOptions {
+  readonly representation?: ValueRepresentation
 }
 
 /** Compatibility spelling retained for existing callers. */
-export { MissingResult as Missing_Result }
-
-/** Explicit found lookup result, including a stored `Undefined` value. */
-export class FoundResult<Value> {
-  readonly kind = "found" as const
-
-  constructor(readonly value: Value) {}
-}
-
-/** Compatibility spelling retained for existing callers. */
-export { FoundResult as Found_Result }
-
-/** Stable singleton for callers that need to compare missing results by identity. */
-export const MISSING = new MissingResult()
+export type Get_Options = GetOptions
 
 /** Public set outcomes for unconditional writes. */
 export type SetOutcome = Gate0_Set_Outcome
@@ -237,31 +225,66 @@ export class OpenKacheClient {
   }
 
   /**
-   * Retrieves one lossless StructuredValue-CBOR-v1 value.
+   * Retrieves one value using the native JavaScript representation by default.
    *
-   * `MissingResult` is returned when no live item exists. A stored `Null` or
-   * `UndefinedValue` is always wrapped in `FoundResult`, so JavaScript
-   * `undefined` is never used as the missing marker.
+   * `undefined` is returned when no live item exists. A stored `undefined` has
+   * the same result in the native view, just as with `Map.get`; pass
+   * `{ representation: "lossless" }` to retain the model's `Undefined` value,
+   * integer/float distinctions, raw float bits, and model map keys.
    *
    * @param key - UTF-8 text, exact bytes, a safe integer number, or a
    * signed-i64 bigint key.
-   * @returns A tagged missing/found result.
-   * @throws {OpenKacheError} When validation, transport, or decoding fails.
+   * @param options - Optional native or lossless value representation.
+   * @returns The decoded value, or `undefined` when the key is absent.
+   * @throws {OpenKacheError} When validation, transport, decoding, or native
+   * projection fails.
    */
-  async get(key: ClientKey): Promise<GetResult<StructuredValue>> {
+  async get(
+    key: ClientKey,
+    options?: GetOptions & { readonly representation?: "native" },
+  ): Promise<NativeValue | undefined>
+  async get(
+    key: ClientKey,
+    options: GetOptions & { readonly representation: "lossless" },
+  ): Promise<StructuredValue | undefined>
+  async get(
+    key: ClientKey,
+    options: GetOptions = {},
+  ): Promise<NativeValue | StructuredValue | undefined> {
     this.#assert_open()
+    if (
+      options.representation !== undefined &&
+      options.representation !== "native" &&
+      options.representation !== "lossless"
+    ) {
+      throw new OpenKacheError(
+        'representation must be "native" or "lossless"',
+      )
+    }
     let payload: Uint8Array | null
     try {
       payload = await this.#native_client.get(owned_key_bytes(key))
     } catch (error) {
       throw as_openkache_error(error)
     }
-    if (payload === null) return MISSING
+    if (payload === null) return undefined
+    let model: StructuredValue
     try {
-      return new FoundResult(decode_structured_value(payload))
+      model = decode_structured_value(payload)
     } catch (error) {
       throw new OpenKacheError(
         `structured value decoding failed: ${error_message(error)}`,
+        error,
+      )
+    }
+    if (options.representation === "lossless") {
+      return model
+    }
+    try {
+      return to_native(model) as NativeValue
+    } catch (error) {
+      throw new OpenKacheError(
+        `native value projection failed: ${error_message(error)}`,
         error,
       )
     }
@@ -374,6 +397,8 @@ export class OpenKacheClient {
 
 /** Compatibility spelling retained for existing callers. */
 export { OpenKacheClient as OpenKache_Client }
+/** Short primary spelling for the package-level client. */
+export { OpenKacheClient as Client }
 
 function parse_endpoint(endpoint: string | ClientOptions): string {
   if (typeof endpoint === "string") {

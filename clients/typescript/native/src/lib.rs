@@ -34,8 +34,8 @@ pub struct NativeClient {
 impl NativeClient {
     /// Retrieves one canonical StructuredValue-CBOR-v1 payload.
     ///
-    /// `None` is an internal FFI sentinel only; the TypeScript adapter maps it
-    /// to its explicit `Missing_Result` value.
+    /// `None` is an internal FFI sentinel; the TypeScript adapter maps it to
+    /// JavaScript `undefined`.
     #[napi]
     pub async fn get(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
         let client = self.gate0_client().await?;
