@@ -493,6 +493,27 @@ impl<C: ClientConnection> Drop for PendingRequestReservation<'_, C> {
     }
 }
 
+/// Completes a leader close request if its future is canceled while draining.
+///
+/// Without this guard, cancellation after `close_requested` becomes true
+/// would leave every later close caller waiting for a terminal state that no
+/// task can publish. The synchronous fallback is intentionally abortive: a
+/// caller that cancels graceful close has chosen not to wait for admitted
+/// operations.
+struct CloseFallback<'a, C: ClientConnection> {
+    core: &'a Core<C>,
+    completed: bool,
+}
+
+impl<C: ClientConnection> Drop for CloseFallback<'_, C> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.core.close_abortive();
+    }
+}
+
 struct RequestFailure {
     error: Error,
     may_have_reached_server: bool,
@@ -979,6 +1000,17 @@ impl<C: ClientConnection> Core<C> {
         }
     }
 
+    fn close_abortive(&self) {
+        let connection = match self.connection.read() {
+            Ok(connection) => connection,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        connection.close();
+        self.state
+            .store(ConnectionState::Closed.code(), Ordering::Release);
+        self.wake_close_waiters();
+    }
+
     async fn wait_for_pending_requests(&self) {
         futures_util::future::poll_fn(|context| {
             let pending = self
@@ -1393,6 +1425,10 @@ impl<C: ClientConnection> Core<C> {
             self.wait_for_closed().await;
             return Ok(());
         }
+        let mut fallback = CloseFallback {
+            core: self,
+            completed: false,
+        };
         self.wait_for_pending_requests().await;
         let result = self
             .connection
@@ -1402,6 +1438,7 @@ impl<C: ClientConnection> Core<C> {
         self.state
             .store(ConnectionState::Closed.code(), Ordering::Release);
         self.wake_close_waiters();
+        fallback.completed = true;
         result
     }
 }

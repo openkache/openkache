@@ -1254,10 +1254,12 @@ public actor OpenKacheClient {
     /// Permanently and gracefully closes this client.
     ///
     /// New operations are rejected immediately. The returned operation waits
-    /// for work already admitted through this actor to finish before releasing
-    /// the native handle. If a caller abandons the actor without calling
-    /// `close`, `NativeHandle.deinit` remains a nondeterministic, best-effort
-    /// fallback and cannot report completion or errors.
+    /// for work already admitted through this actor to finish before
+    /// releasing this actor's native reference. If `raw()` produced a
+    /// sharing client, that actor retains the underlying connection until it
+    /// is also closed or deallocated. If a caller abandons the actor without
+    /// calling `close`, `NativeHandle.deinit` remains a nondeterministic,
+    /// best-effort fallback and cannot report completion or errors.
     public func close() async {
         native = nil
         guard activeOperations != 0 else {
@@ -1496,10 +1498,12 @@ public actor OpenKacheRawClient {
     /// Permanently and gracefully closes this client.
     ///
     /// New operations are rejected immediately. The returned operation waits
-    /// for work already admitted through this actor to finish before releasing
-    /// the native handle. If a caller abandons the actor without calling
-    /// `close`, `NativeHandle.deinit` remains a nondeterministic, best-effort
-    /// fallback and cannot report completion or errors.
+    /// for work already admitted through this actor to finish before
+    /// releasing this actor's native reference. The underlying connection is
+    /// released when no sharing client retains it. If a caller abandons the
+    /// actor without calling `close`, `NativeHandle.deinit` remains a
+    /// nondeterministic, best-effort fallback and cannot report completion or
+    /// errors.
     public func close() async {
         native = nil
         guard activeOperations != 0 else {

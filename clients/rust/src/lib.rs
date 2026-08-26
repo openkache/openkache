@@ -473,13 +473,17 @@ mod maintained {
         /// This is the explicit shutdown path: it rejects new operations,
         /// waits for all operations already admitted to settle, and then
         /// releases the transport. Repeated or concurrent calls, including
-        /// calls through clones, wait for the same terminal state and return
-        /// `Ok(())`.
+        /// calls through clones, wait for the same terminal state. The call
+        /// that performs shutdown reports any core close error; calls
+        /// arriving after a completed shutdown return `Ok(())`.
         ///
         /// Dropping a [`Client`] cannot await this drain. Dropping the final
         /// clone instead performs a synchronous, best-effort abortive
         /// transport close that may interrupt admitted work. Await this
-        /// method whenever graceful completion is required.
+        /// method whenever graceful completion is required. If this future is
+        /// canceled after it starts draining, it performs the same abortive
+        /// fallback so later close callers cannot remain stuck waiting for a
+        /// terminal state.
         ///
         /// # Returns
         ///

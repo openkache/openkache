@@ -34,9 +34,11 @@ definitive outcomes are drained before cancellation returns.
 
 `OpenKacheClient.close()` and `OpenKacheRawClient.close()` are the normative
 graceful lifecycle boundaries. They reject new operations, wait for operations
-already admitted through that actor to finish, and then release the native
-handle; call them explicitly and await completion when the client is no longer
-needed. Repeated calls are safe.
+already admitted through that actor to finish, and then release that actor's
+native reference; call them explicitly and await completion when the client is
+no longer needed. A raw client created with `raw()` shares the underlying
+connection, so close each actor (or let each deallocate) before the native
+handle is released. Repeated calls are safe.
 
 If a client is abandoned without an explicit close, Swift's `deinit` releases
 the native handle only as a nondeterministic, best-effort fallback. It cannot
