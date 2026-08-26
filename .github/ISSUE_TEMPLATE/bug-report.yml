@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a reproducible defect in OpenKache
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve OpenKache. Please search existing issues
+        before opening a new report and include the smallest reproducible case.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: Describe the observed problem in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: List the commands, configuration, and inputs that reproduce the issue.
+      placeholder: |
+        1. Start the server with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect OpenKache to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What did OpenKache do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the OpenKache version or commit, OS/architecture, client, and relevant configuration.
+      placeholder: |
+        - OpenKache version or commit:
+        - OS and architecture:
+        - Client and version:
+        - Storage/runtime configuration:
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traces
+      description: Paste relevant output and redact credentials or private data.
+      render: text
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched the existing issues for duplicates.
+          required: true
+        - label: I removed secrets and other sensitive data from the report.
+          required: true
