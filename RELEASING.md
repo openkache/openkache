@@ -84,8 +84,11 @@ Before creating tags, confirm the manifest versions and that the registry
 versions are still unused:
 
 ```bash
+set -euo pipefail
+
 python3 - <<'PY'
 import json
+import os
 import pathlib
 import tomllib
 
@@ -102,8 +105,11 @@ versions = {
 }
 for package, version in versions.items():
     print(package, version)
-if len(set(versions.values())) != 1:
-    raise SystemExit("client manifests do not use one shared version")
+expected = os.environ["RELEASE_VERSION"]
+if set(versions.values()) != {expected}:
+    raise SystemExit(
+        f"client manifests must all use RELEASE_VERSION={expected}"
+    )
 PY
 
 check_registry() {
@@ -273,16 +279,16 @@ registry check for the affected package. Only when that package's version is
 still unused may you move its tag to the fixed `main` commit:
 
 ```bash
+tag_prefix=python  # set to client or typescript for another package
 fixed_main_commit="$(git rev-parse HEAD)"
-git tag -f "python-v${RELEASE_VERSION}" "${fixed_main_commit}"
+git tag -f "${tag_prefix}-v${RELEASE_VERSION}" "${fixed_main_commit}"
 git push --force-with-lease \
   "origin" \
-  "${fixed_main_commit}:refs/tags/python-v${RELEASE_VERSION}"
+  "${fixed_main_commit}:refs/tags/${tag_prefix}-v${RELEASE_VERSION}"
 ```
 
-Replace `python` with the affected package (`client` or `typescript`) as
-needed. Never move a tag after its registry has accepted the version; create
-the next shared patch release instead.
+Never move a tag after its registry has accepted the version; create the next
+shared patch release instead.
 
 Dispatch one workflow for each package whose registry check returned `404`,
 from its matching tag. The `RELEASE` value is case-sensitive:
