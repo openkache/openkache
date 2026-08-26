@@ -408,11 +408,17 @@ use `ValueError::kind()` for its stable category.
 ### Results and errors
 
 - `GetResult<T>` is `Missing` or `Found(T)`.
+- `GetResult::unwrap` and `GetResult::expect` return a found value and panic
+  when the key is missing; `unwrap_or` and `unwrap_or_else` provide fallbacks.
 - `SetOutcome` is `Created` or `Replaced`.
+- `SetOutcome::is_created` and `SetOutcome::is_replaced` inspect the write
+  outcome without matching on its variants.
 - `delete` returns `true` when an item existed and `false` otherwise.
 - `Error::UnknownMutation` means a `set` or `delete` may have reached the
   server without a confirmed result. Its `Mutation` identifies the operation;
-  do not replay it automatically.
+  do not replay it automatically. Use `Error::is_unknown_mutation`,
+  `Error::mutation`, and `Error::kind` to inspect errors without matching on
+  their payloads.
 - `Error::Core` reports connection, protocol, key, value, or server failures.
 - `Error::SerdeSerialize` and `Error::SerdeDeserialize` report Serde
   conversion failures before and after transport, respectively.
