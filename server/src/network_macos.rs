@@ -9,7 +9,7 @@
 //! listener with direct RESP clients.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::TcpListener as StdTcpListener;
 use std::rc::Rc;
@@ -26,10 +26,12 @@ use super::super::storage_message::{
 };
 
 type ResponseKey = (usize, u64);
+const MAX_CLIENTS: usize = 2_000;
 
 struct NetworkState {
     request_sender: Producer<StorageRequest, STORAGE_QUEUE_SLOTS>,
     response_receiver: Consumer<StorageResponse, STORAGE_QUEUE_SLOTS>,
+    active_clients: HashSet<usize>,
     pending_responses: HashMap<ResponseKey, ResponseToWrite>,
     next_client_id: usize,
 }
@@ -51,6 +53,7 @@ impl Network {
             state: Rc::new(RefCell::new(NetworkState {
                 request_sender,
                 response_receiver,
+                active_clients: HashSet::new(),
                 pending_responses: HashMap::new(),
                 next_client_id: 0,
             })),
@@ -78,18 +81,28 @@ impl Network {
                     let (stream, peer) = listener.accept().await?;
                     let client_id = {
                         let mut state = state.borrow_mut();
+                        if state.active_clients.len() >= MAX_CLIENTS {
+                            continue;
+                        }
                         let client_id = ClientId(state.next_client_id);
                         state.next_client_id = state
                             .next_client_id
                             .checked_add(1)
                             .ok_or_else(|| io::Error::other("macOS client ID space exhausted"))?;
+                        state.active_clients.insert(client_id.0);
                         client_id
                     };
                     let connection_state = Rc::clone(&state);
                     tokio::task::spawn_local(async move {
-                        if let Err(error) =
-                            serve_connection(connection_state, client_id, stream).await
-                        {
+                        let result =
+                            serve_connection(Rc::clone(&connection_state), client_id, stream).await;
+                        let mut state = connection_state.borrow_mut();
+                        state.active_clients.remove(&client_id.0);
+                        state
+                            .pending_responses
+                            .retain(|(pending_client_id, _), _| *pending_client_id != client_id.0);
+                        drop(state);
+                        if let Err(error) = result {
                             eprintln!("RESP connection {peer} stopped: {error}");
                         }
                     });
@@ -103,9 +116,12 @@ async fn pump_storage_responses(state: Rc<RefCell<NetworkState>>) {
     loop {
         let response = {
             let mut state = state.borrow_mut();
-            state.response_receiver.pop().map(|response| {
+            state.response_receiver.pop().and_then(|response| {
                 let key = (response.client_id.0, response.sequence);
-                (key, make_response_to_write(response.reply))
+                state
+                    .active_clients
+                    .contains(&key.0)
+                    .then(|| (key, make_response_to_write(response.reply)))
             })
         };
 
