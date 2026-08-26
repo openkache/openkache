@@ -61,14 +61,14 @@ time the server starts.
 ### Use the Rust SDK
 
 ```rust
-use openkache::{Client, GetResult, Value};
+use openkache::{Client, Value};
 
 # async fn example() -> openkache::Result<()> {
 let client = Client::connect("127.0.0.1:4433").await?;
 client.set("greeting", Value::text("hello")).await?;
 assert_eq!(
-    client.get("greeting").await?,
-    GetResult::Found(Value::text("hello")),
+    client.get("greeting").await?.unwrap(),
+    Value::text("hello"),
 );
 client.close().await?;
 # Ok(())
