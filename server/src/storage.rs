@@ -665,13 +665,18 @@ fn create_runtime() -> io::Result<Runtime> {
 }
 
 fn open_storage_file(runtime: &Runtime) -> io::Result<Rc<File>> {
+    #[cfg(target_os = "linux")]
+    let direct_io_flags = libc::O_DIRECT;
+    #[cfg(target_os = "macos")]
+    let direct_io_flags = 0;
+
     runtime.block_on(async {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
-            .custom_flags(libc::O_DIRECT)
+            .custom_flags(direct_io_flags)
             .open(STORAGE_FILE_PATH)
             .await?;
         file.set_len(STORAGE_FILE_BYTES).await?;

@@ -1,7 +1,8 @@
-# Release OpenKache client packages
+# Release OpenKache packages and server binaries
 
 This guide covers the Python package on PyPI, the Rust crate on crates.io,
-and the TypeScript package on npm. Every registry version is immutable.
+the TypeScript package on npm, and the server archives published as GitHub
+Release assets. Every registry version and server release is immutable.
 
 The release has two phases:
 
@@ -24,6 +25,48 @@ If one registry already contains a version while the other registries return
 `404`, treat it as a partial release: skip the package that is already
 published and continue with the remaining packages at the same shared
 version. Do not force a new version just because one package finished first.
+
+## Server binary releases
+
+Server binaries use an independent `server-v<version>` tag. The version must
+match `server/Cargo.toml`; it does not need to match the client package
+versions. The public release workflow builds and checks these immutable assets:
+
+- Linux x86_64: static `x86_64-unknown-linux-musl`
+- Linux aarch64: static `aarch64-unknown-linux-musl`
+- Apple Silicon macOS: native `aarch64-apple-darwin`
+
+Before tagging, merge the workflow and server changes to public `main`, verify
+the public checkout is clean, and confirm that the protected `server-release`
+environment requires a reviewer. Then create and push the tag:
+
+```bash
+export RELEASE_VERSION=0.1.0  # replace with the chosen server version
+git fetch origin main --no-tags
+git switch main
+git pull --ff-only
+test "$(sed -n 's/^version = "\(.*\)"/\1/p' server/Cargo.toml | head -n 1)" = "${RELEASE_VERSION}"
+git tag "server-v${RELEASE_VERSION}"
+git push origin "server-v${RELEASE_VERSION}"
+```
+
+Dispatch the workflow from that exact tag and type `RELEASE` for the
+confirmation input:
+
+```bash
+gh workflow run publish-server-binaries.yml \
+  --repo openkache/openkache \
+  --ref "server-v${RELEASE_VERSION}" \
+  -f "version=${RELEASE_VERSION}" \
+  -f confirm=RELEASE
+```
+
+The workflow refuses an existing GitHub Release with the same tag, verifies
+ELF/Mach-O architecture and Linux static-linking properties, and publishes
+per-archive `.sha256` files plus the aggregate `SHA256SUMS`. SHA-256 detects
+transfer corruption; it is not a signature or provenance attestation. These
+archives remain preview artifacts and must not be described as production
+support until a separate signing and provenance policy is in place.
 
 ## Choose the release version
 
@@ -73,6 +116,7 @@ intend to run before creating tags:
 git show origin/main:.github/workflows/publish-pypi.yml >/dev/null
 git show origin/main:.github/workflows/publish-crates.yml >/dev/null
 git show origin/main:.github/workflows/publish-npm.yml >/dev/null
+git show origin/main:.github/workflows/publish-server-binaries.yml >/dev/null
 ```
 
 The release commit is the provenance boundary. Do not build or publish from a

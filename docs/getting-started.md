@@ -2,9 +2,14 @@
 
 ## Requirements
 
-- Linux with `io_uring`
-- two distinct CPUs available to the process
-- Rust and the native build tools required by the workspace dependencies
+- Linux with `io_uring`, or Apple Silicon macOS
+- two distinct CPU IDs available to the process (Linux pins the workers;
+  macOS leaves placement to the scheduler)
+- Rust and the native build tools required by the workspace dependencies when
+  building from source
+
+Prebuilt archives are available for [Linux x86_64, Linux aarch64, and Apple
+Silicon macOS](../README.md#download-server-binaries).
 
 ## Run the server
 
@@ -14,9 +19,10 @@ From the repository root:
 cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-The default command binds `127.0.0.1:4433`, pins networking to CPU 0, and pins
-storage to CPU 1. TCP accepts RESP commands while UDP accepts the OpenKache
-Gate 0 protocol over QUIC.
+The default command binds `127.0.0.1:4433` and uses CPU arguments 0 and 1.
+Linux pins networking and storage to those CPUs; macOS leaves placement to the
+scheduler. TCP accepts RESP commands while UDP accepts the OpenKache Gate 0
+protocol over QUIC.
 
 Choose another address and CPU pair with positional arguments:
 
@@ -27,6 +33,9 @@ cargo run --locked --package openkache-server --bin openkache-server -- \
 
 The process creates a fixed 16 GiB `openkache.data` file in its working
 directory. The current preview truncates that file on every start.
+
+On Linux the server uses `io_uring`; the Apple Silicon build uses Tokio's
+native polling fallback.
 
 ## Use the Rust client
 

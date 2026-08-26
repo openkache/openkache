@@ -18,7 +18,10 @@ mod storage;
 mod storage_message;
 
 use std::net::TcpListener;
-use std::{env, io, mem, thread};
+use std::{env, io, thread};
+
+#[cfg(target_os = "linux")]
+use std::mem;
 
 use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
 // Create the network layer.
@@ -35,6 +38,7 @@ use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
 // Submit queued writes and reads, starting at the buffer write position and
 // shifting up to the last read position when the buffer is full.
 
+#[cfg(target_os = "linux")]
 fn pin_current_thread(cpu: usize) -> io::Result<()> {
     let mut cpu_set: libc::cpu_set_t = unsafe { mem::zeroed() };
 
@@ -56,6 +60,14 @@ fn pin_current_thread(cpu: usize) -> io::Result<()> {
     } else {
         Err(io::Error::from_raw_os_error(result))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn pin_current_thread(_cpu: usize) -> io::Result<()> {
+    // macOS does not expose Linux's pthread affinity API. The Apple Silicon
+    // build keeps the same CLI contract but lets the scheduler place both
+    // preview threads.
+    Ok(())
 }
 
 fn parse_cpu(value: Option<String>, default: usize, role: &str) -> io::Result<usize> {

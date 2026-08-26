@@ -28,7 +28,6 @@ uring-defer-taskrun = []
 blake3 = "*"
 compio = { version = "*", features = ["fs"] }
 # Cargo.lock retains the tested release that provides the required registration API.
-io-uring = "*"
 libc = "*"
 mimalloc = { version = "*", optional = true }
 openkache-protocol = { version = "*", path = "../protocol" }
@@ -38,3 +37,6 @@ rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "pr
 slab = "*"
 tikv-jemallocator = { version = "*", optional = true }
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "*"
