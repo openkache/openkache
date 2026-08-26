@@ -2,7 +2,7 @@
 
 # OpenKache ⚡
 
-**A super-fast, open-source SSD cache server.**
+**OpenKache is a high-performance cache server designed from the ground up for modern SSDs.**
 
 Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 
