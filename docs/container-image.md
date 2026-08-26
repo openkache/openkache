@@ -37,7 +37,16 @@ podman run --rm \
   --security-opt seccomp=unconfined \
   --publish 4433:4433/tcp \
   --publish 4433:4433/udp \
-  ghcr.io/openkache/openkache:server
+  ghcr.io/openkache/openkache:edge
+```
+
+`edge` is a rolling preview tag that advances only after a successful `main`
+build. A rerun for a commit that is no longer the current `main` commit fails
+before it can update the tag. Pin the multi-platform manifest digest for
+reproducible deployments:
+
+```bash
+ghcr.io/openkache/openkache@sha256:<multi-platform-manifest-digest>
 ```
 
 The image listens on `0.0.0.0:4433`, with networking pinned to CPU 0 and
@@ -77,13 +86,12 @@ scoped profile when running outside an isolated development environment.
 
 | Tag | Meaning |
 | --- | --- |
-| `server` | Stable compatibility tag for the current published server image |
-| `main` | Current `main` build |
-| `sha-<commit>` | Immutable source revision |
-| `1.2.3`, `1.2`, `1` | Tags generated from `v1.2.3` |
+| `edge` | Latest successful `main` build; mutable rolling preview |
+| `@sha256:<digest>` | Immutable multi-platform manifest reference |
 
-Pull requests build without publishing. Pushes to `main` and matching version
-tags publish a multi-platform manifest with provenance and an SBOM.
+Pull requests build without publishing. Pushes to `main` publish the `edge`
+multi-platform manifest with provenance and an SBOM. The workflow rejects stale
+reruns so an older commit cannot move `edge` backwards.
 
 The Nix toolchain inputs used by `server/Dockerfile` are locked in
 `server/flake.lock` and updated by the scheduled container-input workflow.
