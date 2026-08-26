@@ -92,8 +92,8 @@ value. Bindings project that outcome using the idiom of their host language:
   intentionally share the ordinary result.
 - JavaScript and TypeScript return the decoded value directly and `undefined`
   for an absent key. A stored `Undefined` has the same native result.
-- Rust and other static bindings may expose an explicit `GetResult<T>` with
-  `Missing` and `Found(T)` variants.
+- Rust and other static bindings may return `Option<T>`, with `None` for an
+  absent key and `Some(value)` for a stored value.
 
 The lossless representation preserves the complete stored value model.
 Applications that need to distinguish absence from a native value with the

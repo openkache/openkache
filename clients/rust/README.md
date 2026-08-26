@@ -60,7 +60,7 @@ cargo add serde --features derive
 ```
 
 ```rust
-use openkache::{Client, GetResult};
+use openkache::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -74,8 +74,7 @@ async fn example() -> openkache::Result<()> {
     client
         .set_serde("user:1", &User { id: 7, name: "Ada".into() })
         .await?;
-    let result: GetResult<User> = client.get_serde("user:1").await?;
-    let user: User = result.unwrap();
+    let user: User = client.get_serde("user:1").await?.unwrap();
     assert_eq!(user.id, 7);
     assert_eq!(user.name, "Ada");
     client.close().await?;
@@ -83,15 +82,16 @@ async fn example() -> openkache::Result<()> {
 }
 ```
 
-`get_serde` returns `Result<GetResult<T>>`; in this example, `T` is `User`,
-so a hit is `GetResult::Found(User)`.
+`get_serde` returns `Result<Option<T>>`; in this example, `T` is `User`, so a
+hit is `Some(User)`. The final `unwrap` handles the expected hit in this
+small example; production code should decide how a missing key is handled.
 
-`GetResult::Missing` remains distinct from a stored `null`; a stored `null`
-decodes as `None` for `Option<T>`. Integers are range-checked, floating-point
-values retain their IEEE-754 bits, and map keys must be scalar and unique.
-Serde serialization happens before write admission, so
-`Error::SerdeSerialize` cannot produce an unknown mutation. A value that does
-not match the requested type returns `Error::SerdeDeserialize`.
+`None` remains distinct from a stored `Value::Null` for `get`; a stored `null`
+decodes as `Some(None)` for `get_serde::<Option<T>>`. Integers are
+range-checked, floating-point values retain their IEEE-754 bits, and map keys
+must be scalar and unique. Serde serialization happens before write admission,
+so `Error::SerdeSerialize` cannot produce an unknown mutation. A value that
+does not match the requested type returns `Error::SerdeDeserialize`.
 
 `set_serde` stores the structured model as `StructuredValue-CBOR-v1`, not as
 an opaque Rust-specific payload. Python and JavaScript clients can therefore
@@ -161,8 +161,8 @@ async fn example() -> openkache::Result<()> {
     let point_codec = FunctionCodec::new(encode_point, decode_point);
     client.set_with("point:1", &point, &point_codec).await?;
     assert_eq!(
-        client.get_with("point:1", &point_codec).await?,
-        openkache::GetResult::Found(point),
+        client.get_with("point:1", &point_codec).await?.unwrap(),
+        point,
     );
     client.close().await?;
     Ok(())
@@ -186,7 +186,7 @@ decode it:
 
 ```rust
 use bincode::config;
-use openkache::{Client, GetResult, Value};
+use openkache::{Client, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
@@ -212,9 +212,9 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 
     let stored = client.get("session:1").await?;
     let bytes = match &stored {
-        GetResult::Found(Value::Bytes(bytes)) => bytes,
-        GetResult::Found(_) => return Err(invalid_data("expected opaque bytes")),
-        GetResult::Missing => return Err(invalid_data("session is missing")),
+        Some(Value::Bytes(bytes)) => bytes,
+        Some(_) => return Err(invalid_data("expected opaque bytes")),
+        None => return Err(invalid_data("session is missing")),
     };
     let (decoded, _bytes_read): (Session, usize) =
         bincode::serde::decode_from_slice(bytes, config::standard())?;
@@ -249,15 +249,14 @@ Reads one `Value`.
 
 - **Input:** anything that converts into `TypedKey`: text, bytes, or a signed
   64-bit integer.
-- **Returns:** `Ok(GetResult::Found(value))` when the key exists, or
-  `Ok(GetResult::Missing)` when it does not. A stored `Value::Null` or
-  `Value::Undefined` is still `Found`.
+- **Returns:** `Ok(Some(value))` when the key exists, or `Ok(None)` when it
+  does not. A stored `Value::Null` or `Value::Undefined` is still `Some`.
 - **Errors:** `Error::Core` for connection, protocol, key, or value failures.
 
 ```rust
 match client.get("greeting").await? {
-    GetResult::Found(value) => println!("{value:?}"),
-    GetResult::Missing => println!("missing"),
+    Some(value) => println!("{value:?}"),
+    None => println!("missing"),
 }
 ```
 
@@ -282,8 +281,8 @@ let outcome = client.set("greeting", "hello").await?;
 
 Reads one value and decodes it into `T: serde::de::DeserializeOwned`.
 
-- **Returns:** `Ok(GetResult::Found(value))` for a matching stored value, or
-  `Ok(GetResult::Missing)` when the key does not exist.
+- **Returns:** `Ok(Some(value))` for a matching stored value, or `Ok(None)`
+  when the key does not exist.
 - **Errors:** `Error::SerdeDeserialize` for a type mismatch, overflow, or
   unsupported stored value; transport and protocol failures use
   `Error::Core`.
@@ -306,9 +305,9 @@ are enough; implement `ValueCodec<T>` directly when the codec needs state or
 more control. The codec operates on `Value`, so it does not alter wire
 admission or mutation semantics. Encoding happens before admission, so a
 codec error cannot produce `Error::UnknownMutation`; decoding happens after
-retrieval and leaves `GetResult::Missing` unchanged. The value type is normally
-inferred from the codec, so no turbofish is needed. If inference is ambiguous,
-annotate the result as `GetResult<Point>`.
+retrieval and leaves `None` unchanged. The value type is normally inferred from
+the codec, so no turbofish is needed. If inference is ambiguous, annotate the
+result as `Option<Point>`.
 
 ### `client.delete(key)`
 
@@ -396,7 +395,7 @@ client.set("stats", value).await?;
 Inspect a structured value with `ValueKind` and borrowed accessors:
 
 ```rust
-use openkache::{Client, GetResult, Value, ValueKind};
+use openkache::{Client, Value, ValueKind};
 
 #[tokio::main]
 async fn main() -> openkache::Result<()> {
@@ -409,10 +408,9 @@ async fn main() -> openkache::Result<()> {
     .map_err(|error| openkache::Error::Core(error.to_string()))?;
     client.set("profile", profile).await?;
 
-    let result: GetResult<Value> = client.get("profile").await?;
-    let profile = match result {
-        GetResult::Found(value) => value,
-        GetResult::Missing => {
+    let profile = match client.get("profile").await? {
+        Some(value) => value,
+        None => {
             return Err(openkache::Error::Core("profile is missing".into()));
         }
     };
@@ -452,9 +450,8 @@ use `ValueError::kind()` for its stable category.
 
 ### Results and errors
 
-- `GetResult<T>` is `Missing` or `Found(T)`.
-- `GetResult::unwrap` and `GetResult::expect` return a found value and panic
-  when the key is missing; `unwrap_or` and `unwrap_or_else` provide fallbacks.
+- Get methods return `Result<Option<T>>`; standard `Option` methods such as
+  `unwrap`, `expect`, `unwrap_or`, and `unwrap_or_else` handle missing keys.
 - `SetOutcome` is `Created` or `Replaced`.
 - `SetOutcome::is_created` and `SetOutcome::is_replaced` inspect the write
   outcome without matching on its variants.
