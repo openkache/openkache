@@ -8,6 +8,7 @@ unsupported values.
 
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass
 from enum import StrEnum
@@ -504,6 +505,81 @@ def model_equal(left: Value, right: Value) -> bool:
     return False
 
 
+def to_native(value: Value) -> object:
+    """Project one lossless value into ordinary Python values.
+
+    Native projection intentionally keeps the value kinds that Python can use
+    naturally while allowing numeric metadata that Python does not expose to
+    be reduced to its observable value.  Use the lossless model returned by
+    :func:`decode_value` when float width, raw bits, or model-key identity is
+    significant.
+
+    ``UndefinedValue`` is projected to ``None``, just like model ``Null``.
+    Use the lossless model when the distinction matters.  A map is projected
+    to ``dict`` only when every scalar key is hashable and the projection does
+    not collapse two distinct model keys.
+    """
+
+    if isinstance(value, UndefinedValue):
+        return None
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, IntegerValue):
+        return value.value
+    if isinstance(value, FloatValue):
+        return _float_to_native(value)
+    if isinstance(value, ByteStringValue):
+        return bytes(value.value)
+    if isinstance(value, TextStringValue):
+        return value.value
+    if isinstance(value, ArrayValue):
+        return [to_native(child) for child in value.values]
+    if isinstance(value, MapValue):
+        result: dict[object, object] = {}
+        projected_keys: list[object] = []
+        for key, child in value.entries:
+            native_key = to_native(key)
+            try:
+                hash(native_key)
+            except TypeError as error:
+                raise StructuredValueError(
+                    "map keys cannot be represented by a Python dict",
+                    ValueErrorKind.CONVERSION,
+                ) from error
+            if any(
+                _native_key_equal(previous, native_key)
+                for previous in projected_keys
+            ):
+                raise StructuredValueError(
+                    "map keys cannot be represented by a Python dict without loss",
+                    ValueErrorKind.CONVERSION,
+                )
+            if isinstance(native_key, float) and math.isnan(native_key):
+                raise StructuredValueError(
+                    "NaN map keys cannot be represented by a Python dict without loss",
+                    ValueErrorKind.CONVERSION,
+                )
+            projected_keys.append(native_key)
+            result[native_key] = to_native(child)
+        return result
+    raise StructuredValueError("unsupported model value", ValueErrorKind.UNSUPPORTED_TYPE)
+
+
+def _float_to_native(value: FloatValue) -> float:
+    if value.width == 16:
+        return struct.unpack(">e", value.raw_bits.to_bytes(2, "big"))[0]
+    if value.width == 32:
+        return struct.unpack(">f", value.raw_bits.to_bytes(4, "big"))[0]
+    return struct.unpack(">d", value.raw_bits.to_bytes(8, "big"))[0]
+
+
+def _native_key_equal(left: object, right: object) -> bool:
+    try:
+        return bool(left == right)
+    except (TypeError, ValueError):
+        return False
+
+
 def _is_scalar_key(value: Value) -> bool:
     return not isinstance(value, (ArrayValue, MapValue))
 
@@ -842,4 +918,5 @@ __all__ = [
     "encode_value",
     "model_equal",
     "to_value",
+    "to_native",
 ]

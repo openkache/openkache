@@ -39,9 +39,10 @@ cargo build --release -p openkache-cli
 cargo run -p openkache-cli -- --help
 ```
 
-The default `quic-compio` feature is intended for Linux deployments with
-io_uring. Build the optional Tokio/Quinn variant on platforms where io_uring is
-unavailable:
+The default `quic-compio` feature selects Compio's platform-native driver:
+io_uring on supported Linux hosts, IOCP on Windows, and polling on other Unix
+hosts. Build the optional Tokio/Quinn variant when the application already uses
+Tokio:
 
 ```bash
 cargo build --release -p openkache-cli \

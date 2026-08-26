@@ -9,14 +9,12 @@ async fn main() -> openkache::Result<()> {
         .unwrap_or_else(|| "127.0.0.1:4433".to_owned());
     let client = Client::connect(endpoint).await?;
 
-    assert_eq!(
-        client.set("greeting", Value::text("hello")).await?,
-        SetOutcome::Created
-    );
+    assert_eq!(client.set("greeting", "hello").await?, SetOutcome::Created);
     assert_eq!(
         client.get("greeting").await?,
         GetResult::Found(Value::text("hello"))
     );
+
     assert!(client.delete("greeting").await?);
     assert_eq!(client.get("greeting").await?, GetResult::Missing);
 

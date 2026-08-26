@@ -4,79 +4,61 @@
 
 ### What is OpenKache?
 
-An open-source, SSD-first cache server. It is designed to use NVMe SSD as
-primary storage instead of DRAM. Current cost, latency, and throughput
-comparisons are not publication-ready; the maintained server exposes QUIC and
-TLS-over-TCP transport profiles.
+OpenKache is an experimental SSD-backed cache server for Linux. The current
+preview exposes Redis-compatible `GET`, `SET`, and `DEL` over RESP/TCP and the
+Gate 0 `PING`, `GET`, `SET`, and `DELETE` operations over OpenKache/QUIC.
 
 ### How is it different from Redis?
 
-| | Redis | OpenKache |
-|---|---|---|
-| **Cost per GB** | DRAM (~$3–5/GB) | SSD (~$0.05–0.10/GB) |
-| **Transport** | TCP (HOL blocking) | QUIC or TLS-over-TCP (TLS 1.3) |
-| **Security** | TLS optional, no client-side value protection | TLS 1.3 transport by default; client-side value protection is optional |
-| **Index** | Hash table | BCF53 SIMD filter |
+The current prototype uses a fixed 16 GiB file as its primary value store and
+keeps a lookup table in memory. It also exposes a QUIC endpoint for OpenKache
+clients. It is an implementation preview, not a production-ready or
+benchmark-backed Redis replacement.
 
 ### Is it production-ready?
 
-Core components are under active development. The public QUIC and TLS-over-TCP
-server listeners are a preview; the target SSD-backed worker and
-restart-recovery contract, plus production hardening, remain in progress.
+No. The server truncates its cache file at startup, uses an ephemeral
+self-signed certificate, and has no client authentication. Restart recovery,
+clustering, namespace administration, and the broader target API remain
+unimplemented.
 
-## SSD
+## Runtime
 
-### Does OpenKache wear out SSDs?
+### What does the server require?
 
-The log-structured design is intended to bound write amplification, but device
-endurance depends on workload and has not been established by a current
-publication-ready report.
+The server requires Linux with `io_uring` and two distinct CPUs. One thread is
+pinned to the network CPU and one to the storage CPU.
 
-### What about latency?
+### Which ports and protocols does it use?
 
-OpenKache has a sub-millisecond latency target, but no current publication-ready
-P99 result is being claimed. SIMD-accelerated indexing and QUIC multiplexing are
-implementation mechanisms rather than measured guarantees.
+TCP and UDP share the same numeric address, `127.0.0.1:4433` by default. TCP
+accepts RESP while UDP accepts the OpenKache Gate 0 protocol over QUIC.
 
-## Usage
+### Is data persistent?
 
-### How do I install?
+No. The server creates `openkache.data` in its working directory, fixes it at
+16 GiB, and truncates it every time the process starts.
 
-See [Getting Started](getting-started.md). Build from source with `cargo build --release`.
+### Is QUIC certificate verification enabled?
+
+Not in the current Gate 0 development SDK. The connection uses TLS 1.3 over
+QUIC, but the SDK accepts the server's ephemeral self-signed certificate. Do
+not expose this preview as a trusted production service.
+
+## Clients and contracts
 
 ### What client languages are available?
 
-Rust, TypeScript and JavaScript on Node.js, Bun, and Deno, .NET, Python, Go,
-C, C++, Swift, and the `openkache-cli` command-line client are available.
-Java, Kotlin, and Dart currently remain package scaffolds.
+See [the client status](../clients/README.md). Several packages are available
+or scaffolded, but the current server implements only the Gate 0 subset listed
+above.
 
-### Is end-to-end encryption mandatory?
+### Why do some design documents describe more features?
 
-No. TLS 1.3 protects the transport, while client-side value protection is
-optional. Maintained clients derive namespace-bound Item IDs with keyed BLAKE3.
-When a client supplies a persistent random 32-byte data-protection key, values
-use AES-256-GCM-SIV by default or the explicit AES-SIV-CMAC profile. When the
-key is omitted, formatted values are stored unprotected; the Item ID mapping
-still applies. The low-level raw API accepts exact Item IDs and encoded values
-for callers that intentionally own those transformations.
+The protocol, client-format, security, and storage design documents are target
+contracts. Their implementations may temporarily lag during the migration.
 
-### Can I use my own QUIC implementation?
+### Where do I start?
 
-The server has a backend-independent connection and stream boundary. The
-default `noq` backend and the optional `quinn` backend retain their Compio-native
-UDP I/O and timers, so they require `network-runtime-compio`. The `quiche`
-backend uses the runtime-neutral network adapter and can run with Compio,
-Monoio, Glommio, or Kimojio. Select a backend with `--quic-backend` or
-`[quic].backend`; enable it with `quic-noq`, `quic-quinn`, or `quic-quiche`.
-A build with exactly one backend selects it automatically, while a build with
-multiple backends requires an explicit selection. Mozilla neqo is not currently
-available: its official transport is not published as a standalone crate and
-its server API requires NSS certificate-database integration.
-
-### Can I select a different in-process channel implementation?
-
-Yes. The server uses one compile-time channel backend for its worker,
-request/reply, and transport channels. `channel-kanal` is enabled by default;
-replace it with exactly one of `channel-crossfire` or `channel-flume` in a
-`--no-default-features` build. This is a build choice and does not add a runtime
-configuration field.
+Follow [Getting Started](getting-started.md) or read the
+[server README](../server/README.md).

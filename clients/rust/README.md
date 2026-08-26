@@ -19,11 +19,19 @@ cargo add openkache
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-The client uses Tokio internally, so an active Tokio runtime is required.
+The default `quic-quinn` client uses Tokio internally, so an active Tokio
+runtime is required for `Client`.
 `openkache` already brings Tokio into the dependency graph; add Tokio directly
 only when your application needs the `#[tokio::main]` macro. If the application
-already uses Tokio, skip the second command. Tokio is the supported runtime for
-this client.
+already uses Tokio, skip the second command. `CompioClient` uses the optional
+Compio runtime instead.
+To use Compio instead of Tokio, disable the default feature and select
+`quic-compio`:
+
+```bash
+cargo add openkache --no-default-features --features quic-compio
+cargo add compio --no-default-features --features net,runtime,time
+```
 
 Native value helpers require Serde. Add it with derive support when defining
 your own stored types:
@@ -37,13 +45,13 @@ cargo add serde --features derive
 The example below assumes a local OpenKache server at `127.0.0.1:4433`.
 
 ```rust
-use openkache::{Client, Value};
+use openkache::Client;
 
 #[tokio::main]
 async fn main() -> openkache::Result<()> {
     let client = Client::connect("127.0.0.1:4433").await?;
 
-    client.set("greeting", Value::text("hello")).await?;
+    client.set("greeting", "hello").await?;
     println!("{:?}", client.get("greeting").await?);
     client.delete("greeting").await?;
     client.close().await?;
@@ -54,8 +62,26 @@ async fn main() -> openkache::Result<()> {
 The local development TLS profile does not verify the server certificate. Use
 this example only with a local development server.
 
-Values use the lossless `StructuredValue-CBOR-v1` format shared by the
-OpenKache clients.
+`Value` is the Rust type used for structured values. Writes accept common Rust
+values directly and convert them to `Value`; construct an explicit variant
+when float width, raw bits, or model map keys matter.
+
+When Tokio is not part of an application, enable `quic-compio` and use the
+equivalent `CompioClient` facade:
+
+```rust
+use compio::runtime::Runtime;
+use openkache::{CompioClient, Value};
+
+let runtime = Runtime::new()?;
+runtime.block_on(async {
+    let client = CompioClient::connect("127.0.0.1:4433").await?;
+    client.set("hello", Value::text("from compio")).await?;
+    client.close().await
+})?;
+```
+
+Both clients use OpenKache's structured value format.
 
 ## Native Rust values
 
@@ -104,7 +130,7 @@ let client = Client::connect("127.0.0.1:4433").await?;
 
 ### `client.get(key)`
 
-Reads one structured value.
+Reads one `Value`.
 
 - **Input:** anything that converts into `TypedKey`: text, bytes, or a signed
   64-bit integer.
@@ -124,7 +150,9 @@ match client.get("greeting").await? {
 
 Stores one value with an unconditional write.
 
-- **Input:** a `TypedKey`-convertible key and a `Value`.
+- **Input:** a `TypedKey`-convertible key and any value that implements
+  `Into<Value>`. Common strings, byte slices, booleans, integers, and floats
+  are accepted directly.
 - **Returns:** `Ok(SetOutcome::Created)` for a new key or
   `Ok(SetOutcome::Replaced)` for an existing key.
 - **Errors:** `Error::UnknownMutation` when admission happened but the result
@@ -132,7 +160,7 @@ Stores one value with an unconditional write.
   as `Error::Core`.
 
 ```rust
-let outcome = client.set("greeting", Value::text("hello")).await?;
+let outcome = client.set("greeting", "hello").await?;
 ```
 
 ### `client.get_native<T>(key)`
@@ -210,7 +238,7 @@ client.get(42_i64).await?;
 
 ### Values
 
-`Value` is the lossless value type accepted by `set` and returned by `get`:
+`Value` is the structured value type returned by `get` and accepted by `set`:
 
 ```text
 Undefined | Null | Boolean | Integer | Float | TextString | Bytes | Array | Map
@@ -227,6 +255,15 @@ Construct values with:
 - `Value::map(entries)` for an ordered map with scalar, unique keys.
 - `Value::to_cbor()` and `Value::from_cbor(bytes)` to encode or decode one
   complete structured value.
+
+For common writes, the client also accepts `&str`, `String`, `&[u8]`,
+`Vec<u8>`, booleans, all signed and unsigned integer types, `f32`, and `f64`:
+
+```rust
+client.set("name", "Ada").await?;
+client.set("count", 42_u64).await?;
+client.set("payload", b"bytes").await?;
+```
 
 ```rust
 let value = Value::map(vec![

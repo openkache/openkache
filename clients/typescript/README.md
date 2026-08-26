@@ -40,8 +40,7 @@ import { OpenKacheClient } from "openkache"
 const client = await OpenKacheClient.connect("127.0.0.1:4433")
 
 await client.set("greeting", "hello")
-const result = await client.get("greeting")
-console.log(result.kind === "found" ? result.value : "missing")
+console.log(await client.get("greeting")) // -> "hello"
 await client.delete("greeting")
 await client.close()
 ```
@@ -80,21 +79,33 @@ const client = await OpenKacheClient.connect("127.0.0.1:4433")
 
 ### `client.get(key)`
 
-Reads one structured value.
+Reads one value as native JavaScript values by default.
 
 - **Input:** a `ClientKey`.
-- **Returns:** `FoundResult` when the key exists, or `MissingResult` when it
-  does not. A stored `undefined` is still returned as `FoundResult`.
-- **Throws:** `OpenKacheError` when validation, transport, or decoding fails.
+- **Returns:** the decoded value, or `undefined` when the key is absent. A
+  stored `undefined` has the same result in the native view, matching
+  `Map.get`.
+- **Throws:** `OpenKacheError` when validation, transport, decoding, or native
+  projection fails.
 
 ```javascript
-const result = await client.get("greeting")
-if (result.kind === "found") {
-  console.log(result.value)
-}
+const value = await client.get("greeting")
+console.log(value) // -> "hello"
 ```
 
-`MISSING` is a shared `MissingResult` instance.
+Pass `{ representation: "lossless" }` when float width/raw bits or exact model
+map keys matter:
+
+```javascript
+const exact = await client.get("greeting", { representation: "lossless" })
+console.log(exact) // -> TextString_Value { kind: "text", value: "hello" }
+```
+
+Native reads return `bigint` for model integers, `number` for floats,
+`Uint8Array` for bytes, arrays for model arrays, and a null-prototype object
+for text-keyed maps when JavaScript property order can represent the model.
+Other maps remain a `Map`. Use the lossless representation when a stored
+`Undefined_Value` must be distinguished from an absent key.
 
 ### `client.set(key, value)`
 
@@ -183,7 +194,7 @@ Use the lossless model when float width, raw bits, or exact map keys matter:
   `Uint8Array`.
 - `decodeStructuredValue(bytes)` decodes one complete value.
 - `modelEqual(left, right)` compares model values without native coercion.
-- `toNative(value)` projects safe lossless values to JavaScript values.
+- `toNative(value)` projects lossless values to native JavaScript values.
 - `decodeNativeValue(bytes)` decodes and projects in one step.
 - `toPlainObject(map)` converts a text-keyed lossless map to a
   null-prototype object.
@@ -200,8 +211,9 @@ const decoded = decodeStructuredValue(encoded)
 ```
 
 `toNative` and `decodeNativeValue` preserve integers as `bigint` and bytes
-as `Uint8Array`, but reject `UndefinedValue` and `FloatValue` when a native
-JavaScript value would lose their distinctions.
+as `Uint8Array`. They map `UndefinedValue` to JavaScript `undefined` and
+floating-point values to `number`; use the lossless model when width, raw bits,
+or NaN payloads matter.
 
 ### Errors
 
@@ -212,9 +224,9 @@ JavaScript value would lose their distinctions.
 - `StructuredValueError` — invalid structured-value input or a local codec
   failure. Its `kind` property identifies the category.
 
-The public type aliases are `ClientKey`, `NativeValue`, `GetResult`,
-`SetOutcome`, `StructuredValue`, and `OpenKacheErrorKind`.
-The result classes are `FoundResult` and `MissingResult`.
+The public type aliases are `ClientKey`, `NativeValue`, `SetOutcome`,
+`StructuredValue`, and `OpenKacheErrorKind`.
+`Client` is a short alias for `OpenKacheClient`.
 
 ## More information
 

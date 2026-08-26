@@ -34,59 +34,15 @@ crate.from_cargo(
     manifests = ["//:Cargo.toml"],
     skip_cargo_lockfile_overwrite = False,
 )
-# Keep optional server feature variants available to the Bazel graph. Cargo's
-# default workspace selection omits these crates even though the locked
-# production feature matrix references them.
-crate.spec(
-    features = ["pq-experimental"],
-    package = "boring",
-    version = "4.22.0",
-)
+# Keep optional workspace feature variants available to the Bazel graph.
 crate.spec(package = "event-listener", version = "5.4.2")
 crate.spec(package = "flume", version = "0.12.0")
-crate.spec(package = "kanal", version = "0.1.1")
-crate.spec(
-    default_features = False,
-    package = "kimojio",
-    version = "0.17.0",
-)
-crate.spec(package = "glommio", version = "0.9.0")
 crate.spec(package = "mimalloc", version = "0.1.52")
-crate.spec(
-    default_features = False,
-    features = ["metrics"],
-    package = "opentelemetry",
-    version = "0.32.0",
-)
-crate.spec(
-    default_features = False,
-    features = ["http-proto", "metrics", "reqwest-blocking-client"],
-    package = "opentelemetry-otlp",
-    version = "0.32.0",
-)
-crate.spec(
-    default_features = False,
-    features = ["metrics"],
-    package = "opentelemetry_sdk",
-    version = "0.32.1",
-)
-crate.spec(
-    default_features = False,
-    features = ["async-cancel", "iouring", "sync"],
-    package = "monoio",
-    version = "0.2.4",
-)
 crate.spec(
     default_features = False,
     features = ["fmt", "json"],
     package = "tracing-subscriber",
     version = "0.3.23",
-)
-crate.spec(
-    default_features = False,
-    features = ["boringssl-boring-crate"],
-    package = "quiche",
-    version = "0.29.3",
 )
 crate.spec(
     default_features = False,
@@ -100,32 +56,7 @@ crate.spec(
     package = "tokio-rustls",
     version = "0.26.4",
 )
-crate.spec(
-    default_features = False,
-    features = ["build_cc", "usewait-on-address"],
-    package = "snmalloc-rs",
-    version = "0.7.4",
-)
-crate.annotation(
-    crate = "snmalloc-sys",
-    version = "0.7.4",
-    patch_args = ["-p1"],
-    patches = ["//:bazel/snmalloc-sys-musl-runtime.patch"],
-)
 use_repo(crate, "crates")
-
-# glommio's vendored liburing declarations use `cpu_set_t`, which musl only
-# exposes when GNU extensions are enabled. Keep the build-script environment
-# explicit so the Bazel musl graph matches Cargo's Linux build.
-crate.annotation(
-    crate = "glommio",
-    version = "0.9.0",
-    build_script_env = {
-        "CFLAGS": "-D_GNU_SOURCE -U_FORTIFY_SOURCE",
-    },
-    patch_args = ["-p1"],
-    patches = ["//:bazel/glommio-musl.patch"],
-)
 
 # Bazel's musl target does not synthesize Cargo's unstable libc cfg
 # environment variable. libc's build script needs it to expose the Linux

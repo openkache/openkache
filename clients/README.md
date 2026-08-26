@@ -3,6 +3,8 @@
 OpenKache is a super-fast open-source SSD cache server.
 
 Use a client library to connect to OpenKache and store, read, or delete values.
+The Rust client uses Tokio/Quinn by default; applications using another
+executor can enable the optional Compio/QUIC feature and use `CompioClient`.
 
 ## Packages
 
@@ -35,10 +37,10 @@ matching experimental API policy. The prototype does not implement them.
 
 ## Values and keys
 
-These packages accept typed keys (text, bytes, and integers) and
-preserve structured values such as nulls, booleans, integers, floats, text,
-bytes, arrays, and maps. Each language maps these values to native types while
-also exposing lossless value classes for applications that need exact
+These packages accept typed keys (text, bytes, and integers) and preserve
+structured values such as nulls, booleans, integers, floats, text, bytes,
+arrays, and maps. Each language maps these values to native types while also
+exposing structured value types for applications that need exact
 representation.
 
 These clients encode values as `StructuredValue-CBOR-v1`, so a value written by

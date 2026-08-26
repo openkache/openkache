@@ -14,6 +14,8 @@ keywords = ["cache", "openkache", "ssd"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",

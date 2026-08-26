@@ -77,9 +77,11 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. It requires the platform's io_uring driver and exports
-`openkache_client_*` symbols from the native library crate outputs. The ABI
-exposes the shared-core operations and lifecycle required by native adapters.
+`LocalProtectedClient`. Compio selects the platform-native completion driver
+(io_uring on supported Linux hosts, IOCP on Windows, and polling on other
+platforms) and exports `openkache_client_*` symbols from the native library
+crate outputs. The ABI exposes the shared-core operations and lifecycle
+required by native adapters.
 CMake, Go, and Python package builds regenerate the scoped Smithy-derived
 client contract as needed. Reusable ABI declarations are in
 `include/openkache/client_abi.h` (with the
@@ -217,7 +219,7 @@ owning a connection lifecycle.
   C++, Python, and other non-Rust bindings. It exposes both protected
   application-key operations and exact-item-ID operations for raw, JSON,
   StructuredValue-CBOR-v1, and caller-owned-v0 values, while the worker owns
-  one Compio runtime per native handle. The canonical declarations
+  one platform-native Compio runtime per native handle. The canonical declarations
   are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
   with [`include/openkache_client.h`](include/openkache_client.h) retained as
   a compatibility include. Generated ABI/protocol constants are emitted to
