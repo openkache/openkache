@@ -78,6 +78,18 @@ await client.ExperimentalSyncAsync();
 var deleted = await client.DeleteAsync(itemId);
 ```
 
+## Client lifetime
+
+`Client.DisposeAsync()` is the normative graceful lifecycle boundary. It
+rejects new operations, waits for operations already admitted to the native
+worker, and then releases the native handle. Use `await using` or explicitly
+await `DisposeAsync()` and observe completion; repeated disposal is safe.
+
+If a client is abandoned without disposal, the private native handle has a
+nondeterministic, best-effort finalizer that uses the synchronous close-now
+path and discards errors. Finalization may run much later or not at all and
+cannot provide a graceful-shutdown completion signal.
+
 `SetAsync` returns `NotStored` when a condition fails and `Created` or
 `Replaced` after a write. `GetAsync` returns `null` for a missing item ID.
 `DeleteAsync` reports whether the item ID existed. Every item-ID-taking operation

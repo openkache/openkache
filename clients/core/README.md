@@ -88,6 +88,13 @@ client contract as needed. Reusable ABI declarations are in
 `include/openkache_client.h` compatibility include); the generated Smithy
 contract header is supplied by each package build.
 
+`close` is the explicit graceful lifecycle path: it rejects new admission,
+waits for already admitted operations, and then closes the transport.
+`Core<C>` also has a synchronous `Drop` fallback for the final shared owner;
+that fallback cannot await the drain and may interrupt admitted work. The
+cloneable raw and protected clients therefore rely on callers to invoke
+`close().await` when graceful completion matters.
+
 ## Usage
 
 The following raw-layer example is for internal adapter integration only. It

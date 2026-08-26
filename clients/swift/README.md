@@ -30,6 +30,19 @@ complete policy flags, and scoped or namespace calls without request handles,
 use a detached synchronous safe-completion boundary so native ownership and
 definitive outcomes are drained before cancellation returns.
 
+## Client lifetime
+
+`OpenKacheClient.close()` and `OpenKacheRawClient.close()` are the normative
+graceful lifecycle boundaries. They reject new operations, wait for operations
+already admitted through that actor to finish, and then release the native
+handle; call them explicitly and await completion when the client is no longer
+needed. Repeated calls are safe.
+
+If a client is abandoned without an explicit close, Swift's `deinit` releases
+the native handle only as a nondeterministic, best-effort fallback. It cannot
+report shutdown errors or guarantee that asynchronous work has drained, so it
+must not be used as an application shutdown signal.
+
 The native library exports the versioned ABI declared in
 [`../core/include/openkache/client_abi.h`](../core/include/openkache/client_abi.h).
 Build or install the `openkache-client-core` Rust `cdylib` for the target platform

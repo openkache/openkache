@@ -86,7 +86,7 @@ if (result.is_found()) {
     // value remains lossless; Null and Undefined are separate kinds.
 }
 client.remove(Typed_Key::text("greeting"));
-client.close(); // idempotent; the destructor closes as well
+client.close(); // explicit close is normative; the destructor is fallback
 ```
 
 `Integer` keys are signed `i64`; text keys are valid UTF-8 with an explicit
@@ -94,6 +94,14 @@ length; byte keys preserve every byte, including empty and NUL bytes.  Every
 operation emits one deterministic StructuredValue-CBOR key item before the
 native FFI call.  Floating-point, Boolean, null, collection, invalid-UTF-8,
 and out-of-range integer keys are not accepted by the typed-key API.
+
+`Client::close()` is the normative lifecycle boundary: call it explicitly and
+keep the client alive until the call returns. It is idempotent and releases
+the native worker after synchronous operations complete; do not race it with
+`get`, `set`, or `remove`. If an owner is abandoned first, the C++ destructor
+invokes a no-throw, best-effort fallback;
+destruction cannot report failures and must not be treated as an observable
+graceful-shutdown signal.
 
 The Gate 0 profile fixes `NamespaceHash`, lazily resolves and validates the
 server-assigned default namespace (ID `1` on a fresh server), the public

@@ -132,6 +132,14 @@ openkache_client_gate0_delete_value(const openkache_client_t *client,
                                     const uint8_t *canonical_key,
                                     size_t canonical_key_length);
 
+/*
+ * Explicitly closes and frees a Gate 0 client.
+ *
+ * The caller must ensure no operation is using the handle, call this function
+ * exactly once for each non-null handle, and discard the handle afterwards.
+ * C has no destructor or finalizer, so omitting this call leaks native
+ * resources; callers must not rely on process teardown as a lifecycle boundary.
+ */
 void openkache_client_gate0_close(openkache_client_t *client);
 
 uint32_t

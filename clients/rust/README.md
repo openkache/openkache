@@ -337,6 +337,12 @@ safe.
 client.close().await?;
 ```
 
+`Client` is cloneable and clones share one connection. Dropping a clone only
+releases that clone; dropping the final clone performs a synchronous,
+best-effort transport close and does not wait for admitted operations. Call
+`client.close().await?` when graceful draining and a reported close error are
+required.
+
 ### Keys
 
 Use `TypedKey` constructors when you want to make the key type explicit:

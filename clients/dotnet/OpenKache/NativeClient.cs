@@ -173,6 +173,21 @@ internal sealed class NativeClient : IAsyncDisposable
         _handle = handle;
     }
 
+    ~NativeClient()
+    {
+        // Finalization is nondeterministic and cannot report shutdown errors.
+        // Use the synchronous free path only as a best-effort fallback when
+        // an application abandons a client without awaiting DisposeAsync().
+        try
+        {
+            CloseNow();
+        }
+        catch
+        {
+            // Finalizers must not escape exceptions onto the runtime thread.
+        }
+    }
+
     internal static async ValueTask<NativeClient> ConnectAsync(
         string address,
         string serverName,
@@ -323,6 +338,7 @@ internal sealed class NativeClient : IAsyncDisposable
         {
             if (_closed)
             {
+                GC.SuppressFinalize(this);
                 return;
             }
 
@@ -341,6 +357,7 @@ internal sealed class NativeClient : IAsyncDisposable
             await Task.Run(
                 () => NativeMethods.openkache_client_free(handle)).ConfigureAwait(false);
         }
+        GC.SuppressFinalize(this);
     }
 
     internal uint ConnectionState()
@@ -667,6 +684,35 @@ internal sealed class NativeClient : IAsyncDisposable
             {
                 Monitor.PulseAll(_gate);
             }
+        }
+    }
+
+    private void CloseNow()
+    {
+        IntPtr handle;
+        lock (_gate)
+        {
+            if (_closed)
+            {
+                return;
+            }
+
+            // A live operation normally keeps this object reachable. If a
+            // runtime ever finalizes concurrently with one, prefer leaking the
+            // handle over freeing it while native code may still be using it.
+            if (_activeCalls != 0)
+            {
+                return;
+            }
+
+            _closed = true;
+            handle = _handle;
+            _handle = IntPtr.Zero;
+        }
+
+        if (handle != IntPtr.Zero)
+        {
+            NativeMethods.openkache_client_free(handle);
         }
     }
 

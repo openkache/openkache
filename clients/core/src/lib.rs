@@ -1406,6 +1406,19 @@ impl<C: ClientConnection> Core<C> {
     }
 }
 
+impl<C: ClientConnection> Drop for Core<C> {
+    fn drop(&mut self) {
+        // `Drop` cannot await the admitted-request drain.  Close the
+        // underlying transport synchronously as a best-effort abortive
+        // fallback when the final shared client handle goes away.
+        let connection = match self.connection.get_mut() {
+            Ok(connection) => connection,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        connection.close();
+    }
+}
+
 fn validate_client_namespace_id(namespace_id: u64) -> Result<()> {
     if namespace_id == 0 {
         return Err(Error::configuration(

@@ -82,6 +82,29 @@ the transport. Later calls complete successfully. Gate 0 has no public
 cancellation handle or cancellation operation; callers wait for an accepted
 operation or close the client.
 
+### Client lifetime and implicit cleanup
+
+Explicit close is the normative lifecycle boundary for every maintained
+binding. Applications MUST call the language's close/dispose operation when
+they finish using a client and MUST observe its completion or error. This is
+the only path that can report whether admitted work drained successfully and
+whether transport shutdown completed.
+
+Bindings MAY provide a destructor, finalizer, or garbage-collection hook as a
+best-effort fallback for abandoned clients. Such implicit cleanup MUST be
+idempotent and MUST NOT wait for asynchronous work, surface an error, or be
+required for a successful application shutdown. It may run much later, or not
+at all, depending on the host runtime. A finalizer MUST therefore use the
+client's synchronous abort/close-now primitive when one exists, rather than
+trying to start or block an asynchronous runtime.
+
+The Rust client deliberately follows ownership semantics: its cloneable public
+facades do not implement `Drop`, because dropping one clone cannot safely close
+the shared connection owned by another clone. The shared core closes its
+transport synchronously only when the final owner is dropped; callers that need
+graceful draining MUST call `Client::close().await` (or the corresponding raw
+client method) explicitly.
+
 ### Lookup and mutation outcomes
 
 The wire-level GET outcome distinguishes an absent item from every stored

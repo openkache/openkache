@@ -176,6 +176,12 @@ mod maintained {
     ///
     /// Values use the OpenKache structured value format. Connections use the
     /// local development TLS profile described in [`Client::connect`].
+    ///
+    /// Cloning a client shares its connection and lifecycle state. Dropping a
+    /// clone only releases that handle; dropping the final clone synchronously
+    /// closes the transport as a best-effort abortive fallback. It does not
+    /// wait for admitted operations to finish. Call [`Client::close`] and
+    /// await it when graceful shutdown is required.
     #[cfg(feature = "quic-quinn")]
     #[derive(Clone)]
     pub struct Client {
@@ -462,8 +468,18 @@ mod maintained {
                 })
         }
 
-        /// Idempotently closes the client and waits for admitted work to
-        /// settle before releasing the transport.
+        /// Gracefully and idempotently closes the shared client connection.
+        ///
+        /// This is the explicit shutdown path: it rejects new operations,
+        /// waits for all operations already admitted to settle, and then
+        /// releases the transport. Repeated or concurrent calls, including
+        /// calls through clones, wait for the same terminal state and return
+        /// `Ok(())`.
+        ///
+        /// Dropping a [`Client`] cannot await this drain. Dropping the final
+        /// clone instead performs a synchronous, best-effort abortive
+        /// transport close that may interrupt admitted work. Await this
+        /// method whenever graceful completion is required.
         ///
         /// # Returns
         ///
