@@ -514,7 +514,7 @@ Exact Item ID and raw operations separately return caller-owned opaque bytes;
 they are not structured-value representation modes.
 
 Typed languages SHOULD preserve compile-time distinctions with overloads or
-distinct methods such as `set_native` and `set_value`, rather than one
+distinct methods such as `set_<serializer>` and `set_value`, rather than one
 unconstrained `Any` parameter. Overloads are an API-shape choice: all forms
 MUST map to the same value-model semantics and MUST reject an
 unsupported cross-language decode. A package MAY instead use one generic

@@ -48,9 +48,9 @@ when float width, raw bits, or model map keys matter.
 
 The Rust client uses OpenKache's structured value format.
 
-## Native Rust values
+## Serde Rust values
 
-`Client::set_native` and `Client::get_native` use Serde while retaining the
+`Client::set_serde` and `Client::get_serde` use Serde while retaining the
 same lossless structured-value format as `set` and `get`. The Serde traits and
 derive macros are re-exported by `openkache`, so an application does not need a
 separate direct Serde dependency for this example:
@@ -65,29 +65,51 @@ struct User {
     name: String,
 }
 
-client.set_native("user:1", &User { id: 7, name: "Ada".into() }).await?;
-let user = client.get_native::<User>("user:1").await?;
+client.set_serde("user:1", &User { id: 7, name: "Ada".into() }).await?;
+let user = client.get_serde::<User>("user:1").await?;
 ```
 
 `GetResult::Missing` remains distinct from a stored `null`; a stored `null`
 decodes as `None` for `Option<T>`. Integers are range-checked, floating-point
 values retain their IEEE-754 bits, and map keys must be scalar and unique.
 Serde serialization happens before write admission, so
-`Error::NativeSerialize` cannot produce an unknown mutation. A value that does
-not match the requested native type returns `Error::NativeDeserialize`.
+`Error::SerdeSerialize` cannot produce an unknown mutation. A value that does
+not match the requested type returns `Error::SerdeDeserialize`.
 
-`set_native` stores the structured model as `StructuredValue-CBOR-v1`, not as
+`set_serde` stores the structured model as `StructuredValue-CBOR-v1`, not as
 an opaque Rust-specific payload. Python and JavaScript clients can therefore
-read a value written by `set_native` as a structured object, array, scalar, or
+read a value written by `set_serde` as a structured object, array, scalar, or
 null. Keep the schema within the cross-language value model; opaque bytes,
 unsupported map keys, and serializer-specific representations remain
 application-owned.
 
+### Structured codecs with `get_with` and `set_with`
+
+`get_with` and `set_with` use the same `Value` boundary for any structured
+serializer. Serde can use the explicit codec path too:
+
+```rust
+let serde_codec = openkache::SerdeCodec;
+client.set_with("user:1", &user, &serde_codec).await?;
+let user = client.get_with::<User, _>("user:1", &serde_codec).await?;
+```
+
 For a non-Serde structured serializer, implement `ValueCodec<T>` or construct
-one with `FunctionCodec::new(encode, decode)` and use `set_with`/`get_with`.
-This path does not require the application's code to depend on Serde. Opaque
-formats are intentionally not interpreted by the client: encode them yourself
-and store the resulting bytes with `Value::bytes` through `set`.
+one with `FunctionCodec::new(encode, decode)`:
+
+```rust
+use openkache::{FunctionCodec, Value};
+
+let point_codec = FunctionCodec::new(encode_point, decode_point);
+client.set_with("point:1", &point, &point_codec).await?;
+let point = client.get_with::<Point, _>("point:1", &point_codec).await?;
+```
+
+The application-owned `encode_point` and `decode_point` functions map `Point`
+to and from structured `Value` entries. This path does not require the
+application's code to depend on Serde. Opaque formats are intentionally not
+interpreted by the client: encode them yourself and store the resulting bytes
+with `Value::bytes` through `set`.
 
 ## Reference
 
@@ -139,31 +161,31 @@ Stores one value with an unconditional write.
 let outcome = client.set("greeting", "hello").await?;
 ```
 
-### `client.get_native<T>(key)`
+### `client.get_serde<T>(key)`
 
 Reads one value and decodes it into `T: serde::de::DeserializeOwned`.
 
 - **Returns:** `Ok(GetResult::Found(value))` for a matching stored value, or
   `Ok(GetResult::Missing)` when the key does not exist.
-- **Errors:** `Error::NativeDeserialize` for a type mismatch, overflow, or
+- **Errors:** `Error::SerdeDeserialize` for a type mismatch, overflow, or
   unsupported stored value; transport and protocol failures use
   `Error::Core`.
 
-### `client.set_native(key, value)`
+### `client.set_serde(key, value)`
 
 Serializes `value: impl serde::Serialize` and stores it with an unconditional
 write. Serde serialization completes before network admission.
 
 - **Returns:** the same `SetOutcome` as `client.set`.
-- **Errors:** `Error::NativeSerialize` for values that cannot be represented
+- **Errors:** `Error::SerdeSerialize` for values that cannot be represented
   by the structured model, or the transport and mutation errors from
   `client.set`.
 
 ### `client.get_with` and `client.set_with`
 
-Use an application-provided `ValueCodec<T>` for a non-Serde structured format.
-The codec operates on `Value`, so it does not alter the wire admission or
-mutation semantics.
+Use an application-provided `ValueCodec<T>` for Serde or another structured
+format. `SerdeCodec` makes this path explicit when desired; the codec operates
+on `Value`, so it does not alter wire admission or mutation semantics.
 
 ### `client.delete(key)`
 
@@ -264,7 +286,7 @@ use `ValueError::kind()` for its stable category.
   server without a confirmed result. Its `Mutation` identifies the operation;
   do not replay it automatically.
 - `Error::Core` reports connection, protocol, key, value, or server failures.
-- `Error::NativeSerialize` and `Error::NativeDeserialize` report Serde
+- `Error::SerdeSerialize` and `Error::SerdeDeserialize` report Serde
   conversion failures before and after transport, respectively.
 - `Error::CodecEncode` and `Error::CodecDecode` report application
   `ValueCodec` failures before and after transport, respectively.

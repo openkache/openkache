@@ -86,12 +86,12 @@ mod maintained {
         /// client uses unconditional writes.
         #[error("server returned an unsupported set outcome")]
         UnsupportedSetOutcome,
-        /// Native Serde serialization failed before the request was admitted.
-        #[error("native serialization failed: {0}")]
-        NativeSerialize(String),
-        /// Native Serde deserialization failed after the value was retrieved.
-        #[error("native deserialization failed: {0}")]
-        NativeDeserialize(String),
+        /// Serde serialization failed before the request was admitted.
+        #[error("serde serialization failed: {0}")]
+        SerdeSerialize(String),
+        /// Serde deserialization failed after the value was retrieved.
+        #[error("serde deserialization failed: {0}")]
+        SerdeDeserialize(String),
         /// A custom [`ValueCodec`] failed before a write was admitted.
         #[error("value codec encoding failed: {0}")]
         CodecEncode(String),
@@ -270,7 +270,7 @@ mod maintained {
                 })
         }
 
-        /// Retrieves one value and decodes it into a native Serde type.
+        /// Retrieves one value and decodes it into a Serde type.
         ///
         /// Serialization is performed against the same lossless structured
         /// value model as [`Client::set`]. A missing key remains
@@ -279,10 +279,10 @@ mod maintained {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::NativeDeserialize`] when the stored value cannot
+        /// Returns [`Error::SerdeDeserialize`] when the stored value cannot
         /// be represented by `T`, and [`Error::Core`] for transport,
         /// protocol, key, or value failures.
-        pub async fn get_native<T: DeserializeOwned>(
+        pub async fn get_serde<T: DeserializeOwned>(
             &self,
             key: impl Into<TypedKey>,
         ) -> Result<GetResult<T>> {
@@ -290,28 +290,28 @@ mod maintained {
                 GetResult::Missing => Ok(GetResult::Missing),
                 GetResult::Found(value) => from_value(value)
                     .map(GetResult::Found)
-                    .map_err(|error| Error::NativeDeserialize(error.to_string())),
+                    .map_err(|error| Error::SerdeDeserialize(error.to_string())),
             }
         }
 
-        /// Serializes a native Serde value and stores it with an unconditional
+        /// Serializes a Serde value and stores it with an unconditional
         /// write.
         ///
-        /// Native serialization completes before the request is admitted, so
+        /// Serde serialization completes before the request is admitted, so
         /// a serialization error cannot produce [`Error::UnknownMutation`].
         ///
         /// # Errors
         ///
-        /// Returns [`Error::NativeSerialize`] when `value` cannot be represented
+        /// Returns [`Error::SerdeSerialize`] when `value` cannot be represented
         /// by the structured value model. Transport and protocol failures use
         /// the same errors as [`Client::set`].
-        pub async fn set_native<T: Serialize>(
+        pub async fn set_serde<T: Serialize>(
             &self,
             key: impl Into<TypedKey>,
             value: T,
         ) -> Result<SetOutcome> {
             let value =
-                to_value(&value).map_err(|error| Error::NativeSerialize(error.to_string()))?;
+                to_value(&value).map_err(|error| Error::SerdeSerialize(error.to_string()))?;
             self.set(key, value).await
         }
 
