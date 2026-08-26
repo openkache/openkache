@@ -36,16 +36,6 @@ mod maintained {
     pub use core::KeyError;
     pub use core::TypedKey;
 
-    /// A successful lookup result. `Missing` is distinct from every stored
-    /// value, including `Value::Null` and `Value::Undefined`.
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub enum GetResult<T> {
-        /// No item exists for the supplied key.
-        Missing,
-        /// The item exists and contains the supplied value.
-        Found(T),
-    }
-
     /// Result of an unconditional `set`.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum SetOutcome {
@@ -145,74 +135,6 @@ mod maintained {
 
     /// Result alias for client operations.
     pub type Result<T> = std::result::Result<T, Error>;
-
-    impl<T> GetResult<T> {
-        /// Returns the found value as `Some`, or `None` for a missing key.
-        pub fn into_option(self) -> Option<T> {
-            match self {
-                Self::Missing => None,
-                Self::Found(value) => Some(value),
-            }
-        }
-
-        /// Returns whether the lookup found an item.
-        pub fn is_found(&self) -> bool {
-            matches!(self, Self::Found(_))
-        }
-
-        /// Returns whether the lookup did not find an item.
-        pub fn is_missing(&self) -> bool {
-            matches!(self, Self::Missing)
-        }
-
-        /// Returns the found value.
-        ///
-        /// # Panics
-        ///
-        /// Panics if this lookup is [`GetResult::Missing`].
-        #[track_caller]
-        pub fn unwrap(self) -> T {
-            self.expect("called `GetResult::unwrap()` on a missing value")
-        }
-
-        /// Returns the found value.
-        ///
-        /// # Panics
-        ///
-        /// Panics if this lookup is [`GetResult::Missing`], with `message`.
-        #[track_caller]
-        pub fn expect(self, message: &str) -> T {
-            match self {
-                Self::Missing => panic!("{message}"),
-                Self::Found(value) => value,
-            }
-        }
-
-        /// Returns the found value, or `default` when the lookup is missing.
-        pub fn unwrap_or(self, default: T) -> T {
-            match self {
-                Self::Missing => default,
-                Self::Found(value) => value,
-            }
-        }
-
-        /// Returns the found value, or computes a default when the lookup is
-        /// missing.
-        pub fn unwrap_or_else(self, function: impl FnOnce() -> T) -> T {
-            match self {
-                Self::Missing => function(),
-                Self::Found(value) => value,
-            }
-        }
-
-        /// Applies a function only when the lookup found an item.
-        pub fn map<U>(self, function: impl FnOnce(T) -> U) -> GetResult<U> {
-            match self {
-                Self::Missing => GetResult::Missing,
-                Self::Found(value) => GetResult::Found(function(value)),
-            }
-        }
-    }
 
     impl SetOutcome {
         /// Returns whether this outcome created a new item.
@@ -321,21 +243,21 @@ mod maintained {
         ///
         /// # Returns
         ///
-        /// `Ok(GetResult::Found(value))` when the item exists, or
-        /// `Ok(GetResult::Missing)` when it does not.
+        /// `Ok(Some(value))` when the item exists, or `Ok(None)` when it does
+        /// not. A stored `Value::Null` is still `Some(Value::Null)`.
         ///
         /// # Errors
         ///
         /// Returns [`Error`] when the connection, protocol, key, or value
         /// operation fails.
-        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetResult<Value>> {
+        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<Option<Value>> {
             self.gate0_client()
                 .await?
                 .get_structured(key)
                 .await
                 .map(|outcome| match outcome {
-                    CoreGetOutcome::Found(value) => GetResult::Found(value),
-                    CoreGetOutcome::NotFound => GetResult::Missing,
+                    CoreGetOutcome::Found(value) => Some(value),
+                    CoreGetOutcome::NotFound => None,
                 })
                 .map_err(map_core_error)
         }
@@ -382,9 +304,8 @@ mod maintained {
         /// Retrieves one value and decodes it into a Serde type.
         ///
         /// Deserialization is performed against the same lossless structured
-        /// value model as [`Client::set`]. A missing key remains
-        /// [`GetResult::Missing`], while a stored null decodes as `None` for
-        /// an `Option<T>`.
+        /// value model as [`Client::set`]. A missing key returns `None`. A
+        /// stored null decodes as `Some(None)` when `T` is an `Option<U>`.
         ///
         /// # Arguments
         ///
@@ -393,8 +314,8 @@ mod maintained {
         ///
         /// # Returns
         ///
-        /// `Ok(GetResult::Found(value))` for a value that decodes into `T`, or
-        /// `Ok(GetResult::Missing)` when the key does not exist.
+        /// `Ok(Some(value))` for a value that decodes into `T`, or `Ok(None)`
+        /// when the key does not exist.
         ///
         /// # Errors
         ///
@@ -404,11 +325,11 @@ mod maintained {
         pub async fn get_serde<T: DeserializeOwned>(
             &self,
             key: impl Into<TypedKey>,
-        ) -> Result<GetResult<T>> {
+        ) -> Result<Option<T>> {
             match self.get(key).await? {
-                GetResult::Missing => Ok(GetResult::Missing),
-                GetResult::Found(value) => from_value(value)
-                    .map(GetResult::Found)
+                None => Ok(None),
+                Some(value) => from_value(value)
+                    .map(Some)
                     .map_err(|error| Error::SerdeDeserialize(error.to_string())),
             }
         }
@@ -456,26 +377,22 @@ mod maintained {
         ///
         /// # Returns
         ///
-        /// `Ok(GetResult::Found(value))` when the item exists and decodes
-        /// successfully, or `Ok(GetResult::Missing)` when it does not.
+        /// `Ok(Some(value))` when the item exists and decodes successfully, or
+        /// `Ok(None)` when it does not.
         ///
         /// # Errors
         ///
         /// Returns [`Error::CodecDecode`] when `codec` rejects the stored
         /// value, or the same transport and protocol errors as [`Client::get`].
-        pub async fn get_with<T, C>(
-            &self,
-            key: impl Into<TypedKey>,
-            codec: &C,
-        ) -> Result<GetResult<T>>
+        pub async fn get_with<T, C>(&self, key: impl Into<TypedKey>, codec: &C) -> Result<Option<T>>
         where
             C: ValueCodecTrait<T>,
         {
             match self.get(key).await? {
-                GetResult::Missing => Ok(GetResult::Missing),
-                GetResult::Found(value) => codec
+                None => Ok(None),
+                Some(value) => codec
                     .decode(value)
-                    .map(GetResult::Found)
+                    .map(Some)
                     .map_err(|error| Error::CodecDecode(error.to_string())),
             }
         }
