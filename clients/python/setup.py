@@ -8,6 +8,7 @@ they are built outside the repository.
 from __future__ import annotations
 
 import os
+import platform as host_platform
 import shutil
 import subprocess
 import sys
@@ -325,6 +326,16 @@ class bdist_wheel(_bdist_wheel):
             # is Ubuntu 24.04 and the native adapter's highest glibc symbol is
             # GLIBC_2.38, so advertise the matching PEP 600 policy tag.
             platform = f"manylinux_2_38_{platform.removeprefix('linux_')}"
+        elif sys.platform == "darwin":
+            # Some macOS Python distributions report ``universal2`` even
+            # though this build contains one host-architecture Rust library.
+            # Advertising universal2 would let pip install an x86_64 wheel on
+            # arm64 (or the reverse), where the bundled library cannot load.
+            machine = host_platform.machine().lower()
+            if machine in {"arm64", "aarch64"}:
+                platform = "macosx_11_0_arm64"
+            elif machine == "x86_64":
+                platform = "macosx_10_13_x86_64"
         return "py3", "none", platform
 
 

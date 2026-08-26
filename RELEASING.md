@@ -14,6 +14,12 @@ The release has two phases:
 Do not dispatch a workflow until its protected environment requires a reviewer.
 Without that gate, dispatching can publish immediately.
 
+The workflow file is read from the selected `--ref`, not from `main`. Merge
+workflow fixes before creating release tags. If a tag already exists and its
+version is still unused, move the tag only after confirming all three registry
+checks return `404`; never move a tag after a registry has accepted that
+version.
+
 ## Current release
 
 The currently staged client versions are:
@@ -43,6 +49,15 @@ git fetch origin main --tags
 git switch main
 git pull --ff-only
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
+```
+
+Confirm that the release workflow files on `origin/main` are the ones you
+intend to run before creating tags:
+
+```bash
+git show origin/main:.github/workflows/publish-pypi.yml >/dev/null
+git show origin/main:.github/workflows/publish-crates.yml >/dev/null
+git show origin/main:.github/workflows/publish-npm.yml >/dev/null
 ```
 
 The release commit is the provenance boundary. Do not build or publish from a
@@ -97,6 +112,13 @@ check_unused \
   "https://crates.io/api/v1/crates/openkache/0.1.3" \
   "crates.io openkache@0.1.3"
 ```
+
+Before dispatching, confirm that `pypi-release`, `crates-io-release`, and
+`npm-release` exist as protected GitHub environments with required reviewers.
+Also confirm the registry credential for the package you are about to publish:
+PyPI and npm use Trusted Publishing; crates.io needs its bootstrap token for
+the first publication and can use Trusted Publishing after that first version
+exists. See [Review and credentials](#21-review-the-run-and-credentials).
 
 If any check returns `200`, choose the next unused shared patch version and
 update all three manifests, tags, and workflow inputs together.
@@ -190,6 +212,18 @@ git tag typescript-v0.1.3
 git push origin python-v0.1.3 client-v0.1.3 typescript-v0.1.3
 ```
 
+If a release workflow was fixed after a tag was created, first rerun the
+registry checks above. Only when the version is still unused may you move that
+unused tag to the fixed `main` commit:
+
+```bash
+git tag -f python-v0.1.3 <fixed-main-commit>
+git push --force-with-lease origin <fixed-main-commit>:refs/tags/python-v0.1.3
+```
+
+Repeat for the other client tags as needed. Never move a tag after its registry
+has accepted the version; create the next shared patch release instead.
+
 Dispatch one workflow for each package from its matching tag. The `RELEASE`
 value is case-sensitive:
 
@@ -223,6 +257,19 @@ Then stop. The `publish` job should show **Waiting for approval** for
 `pypi-release`, `crates-io-release`, or `npm-release`. Do not select **Review
 deployments** or **Approve and deploy** in this phase.
 
+Record each run ID and cancel stale runs before retrying a failed preparation:
+
+```bash
+gh run list --repo openkache/openkache --limit 20 \
+  --json databaseId,workflowName,status,conclusion,headBranch,createdAt
+gh run cancel <stale-run-id> --repo openkache/openkache
+gh run watch <current-run-id> --repo openkache/openkache --exit-status
+```
+
+Wait until the cancelled run is actually `completed` before dispatching its
+replacement. A queued or in-progress run for the same tag can make a retry
+look stale or consume the protected-environment approval.
+
 ## 2. Publish the release
 
 ### 2.1 Review the run and credentials
@@ -244,12 +291,19 @@ Configure the protected environments before the first release:
 - **`npm-release`** — configure an npm Trusted Publisher for package
   `openkache`, repository `openkache`, workflow `publish-npm.yml`, and
   environment `npm-release`.
-- **`crates-io-release`** — store a narrowly scoped
-  `CARGO_REGISTRY_TOKEN` repository secret for the `openkache` crate.
+- **`crates-io-release`** — for the first `openkache` publication, store a
+  narrowly scoped `CARGO_REGISTRY_TOKEN` environment secret. crates.io
+  Trusted Publishing cannot bootstrap a crate that has never been published.
+  After the first `openkache` version exists, configure its
+  [Trusted Publisher](https://crates.io/docs/trusted-publishing) for owner
+  `openkache`, repository `openkache`, workflow `publish-crates.yml`, and
+  environment `crates-io-release`, then remove the bootstrap secret.
 
-PyPI and npm use GitHub OIDC short-lived credentials. The Rust workflow passes
-the scoped token to `cargo publish`. Never commit registry credentials or put
-them in shell history or release artifacts.
+PyPI and npm use GitHub OIDC short-lived credentials. The Rust workflow uses
+the bootstrap secret when present and otherwise obtains a short-lived
+crates.io credential through GitHub Actions OIDC. Never commit registry
+credentials, print them in chat or shell history, or put them in release
+artifacts.
 
 ### 2.2 Approve and publish
 
@@ -260,7 +314,7 @@ then performs the registry mutation on the tagged checkout:
 | Registry | Workflow publish step |
 | --- | --- |
 | PyPI | `pypa/gh-action-pypi-publish` uploads the sdist and six wheels. |
-| crates.io | `cargo publish --manifest-path clients/rust/Cargo.toml --locked` uploads the crate. |
+| crates.io | `rust-lang/crates-io-auth-action` (after bootstrap) or the protected bootstrap secret supplies a short-lived token to `cargo publish --manifest-path clients/rust/Cargo.toml --locked`. |
 | npm | `bun run release:publish` publishes the assembled package with the `latest` dist-tag. |
 
 There is no separate local publish command in the normal release path. The
@@ -304,6 +358,22 @@ mkdir -p /tmp/openkache-consumer-typescript
 
 Download the workflow artifacts before their retention period expires and keep
 `RELEASE-METADATA` and `SHA256SUMS` in the release record.
+
+## 3. Recovery
+
+Fix the cause in `main`, merge it, and create or move an unused release tag
+only after the registry check returns `404`. A workflow run reads its YAML
+from the tag, so rerunning an old tag does not pick up a later workflow fix.
+
+| Symptom | Action |
+| --- | --- |
+| A macOS Python wheel is named `universal2` or fails the expected architecture check | Keep the wheel architecture-specific, verify the bundled dylib with `lipo -archs`, merge the workflow/setup fix, then move the still-unused `python-v<version>` tag. |
+| A wheel build reports missing Bun or Smithy | Use the generated contract snapshots in the sdist and remove generator inputs before the native build; verify the fixed workflow is present on the release tag. |
+| A macOS runner stays queued or is unavailable | Use a currently supported runner label in the workflow, merge it, and retag only while the version remains unused. |
+| crates.io reports a missing token | For the first crate version, add `CARGO_REGISTRY_TOKEN` to `crates-io-release` without exposing it. For later versions, configure the crates.io Trusted Publisher and let the OIDC step mint the credential. |
+| Artifact collection fails or the count is wrong | Do not approve publication. Inspect the failed matrix job and artifact names, fix the build, and rerun preparation from a tag containing the fix. |
+| A stale or duplicate run is queued | Cancel the stale run, wait for `completed`, then dispatch one replacement and watch that run ID. |
+| A registry check returns `200` | Stop. The version is consumed and cannot be republished; choose the next shared patch version. |
 
 If a workflow fails before its registry command, fix the cause and rerun the
 tagged workflow. If a registry has accepted a version, that version is
