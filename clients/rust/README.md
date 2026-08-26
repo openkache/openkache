@@ -75,12 +75,7 @@ async fn example() -> openkache::Result<()> {
         .set_serde("user:1", &User { id: 7, name: "Ada".into() })
         .await?;
     let result: GetResult<User> = client.get_serde("user:1").await?;
-    let user: User = match result {
-        GetResult::Found(user) => user,
-        GetResult::Missing => {
-            return Err(openkache::Error::Core("user is missing".into()));
-        }
-    };
+    let user: User = result.unwrap();
     assert_eq!(user.id, 7);
     assert_eq!(user.name, "Ada");
     client.close().await?;
