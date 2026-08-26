@@ -85,17 +85,9 @@ application-owned.
 
 ### Structured codecs with `get_with` and `set_with`
 
-`get_with` and `set_with` use the same `Value` boundary for any structured
-serializer. Serde can use the explicit codec path too:
-
-```rust
-let serde_codec = openkache::SerdeCodec;
-client.set_with("user:1", &user, &serde_codec).await?;
-let user = client.get_with::<User, _>("user:1", &serde_codec).await?;
-```
-
 For a non-Serde structured serializer, implement `ValueCodec<T>` or construct
-one with `FunctionCodec::new(encode, decode)`:
+one with `FunctionCodec::new(encode, decode)`. The functions below are
+application-owned mappings between a type and structured `Value` entries:
 
 ```rust
 use openkache::{FunctionCodec, Value};
@@ -105,11 +97,9 @@ client.set_with("point:1", &point, &point_codec).await?;
 let point = client.get_with::<Point, _>("point:1", &point_codec).await?;
 ```
 
-The application-owned `encode_point` and `decode_point` functions map `Point`
-to and from structured `Value` entries. This path does not require the
-application's code to depend on Serde. Opaque formats are intentionally not
-interpreted by the client: encode them yourself and store the resulting bytes
-with `Value::bytes` through `set`.
+This path does not require the application's code to depend on Serde. Opaque
+formats are intentionally not interpreted by the client: encode them yourself
+and store the resulting bytes with `Value::bytes` through `set`.
 
 ## Reference
 
@@ -183,9 +173,9 @@ write. Serde serialization completes before network admission.
 
 ### `client.get_with` and `client.set_with`
 
-Use an application-provided `ValueCodec<T>` for Serde or another structured
-format. `SerdeCodec` makes this path explicit when desired; the codec operates
-on `Value`, so it does not alter wire admission or mutation semantics.
+Use an application-provided `ValueCodec<T>` for a non-Serde structured format.
+The codec operates on `Value`, so it does not alter wire admission or mutation
+semantics.
 
 ### `client.delete(key)`
 
