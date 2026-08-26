@@ -30,6 +30,16 @@ docker run --rm \
   localhost/openkache:dev
 ```
 
+The published image is available without registry authentication:
+
+```bash
+podman run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:server
+```
+
 The image listens on `0.0.0.0:4433`, with networking pinned to CPU 0 and
 storage pinned to CPU 1. Override the command when the container receives a
 different CPU set:
@@ -67,6 +77,7 @@ scoped profile when running outside an isolated development environment.
 
 | Tag | Meaning |
 | --- | --- |
+| `server` | Stable compatibility tag for the current published server image |
 | `main` | Current `main` build |
 | `sha-<commit>` | Immutable source revision |
 | `1.2.3`, `1.2`, `1` | Tags generated from `v1.2.3` |

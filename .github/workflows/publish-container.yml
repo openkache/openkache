@@ -60,6 +60,9 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
+            # Keep the stable `server` name as a compatibility tag for the
+            # documented one-command container invocation.
+            type=raw,value=server
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
@@ -149,6 +152,9 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
+            # Keep the stable `server` name as a compatibility tag for the
+            # documented one-command container invocation.
+            type=raw,value=server
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
