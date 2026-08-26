@@ -4,9 +4,10 @@
 
 ### What is OpenKache?
 
-OpenKache is an experimental SSD-backed cache server for Linux. The current
-preview exposes Redis-compatible `GET`, `SET`, and `DEL` over RESP/TCP and the
-Gate 0 `PING`, `GET`, `SET`, and `DELETE` operations over OpenKache/QUIC.
+OpenKache is a high-performance cache server designed from the ground up for
+modern SSDs. The current Linux preview exposes Redis-compatible `GET`, `SET`,
+and `DEL` over RESP/TCP and the Gate 0 `PING`, `GET`, `SET`, and `DELETE`
+operations over OpenKache/QUIC.
 
 ### How is it different from Redis?
 

@@ -1,6 +1,7 @@
 # OpenKache Rust client
 
-OpenKache is a super-fast open-source SSD cache server. Use this async Rust
+OpenKache is a high-performance cache server designed from the ground up for
+modern SSDs. Use this async Rust
 client to store, read, and delete values in a few lines.
 
 [crates.io package](https://crates.io/crates/openkache) ·

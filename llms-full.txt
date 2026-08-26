@@ -1,10 +1,11 @@
 # OpenKache
 
-OpenKache is an experimental Rust SSD-backed cache server for Linux. Unless a
-section is explicitly marked as a target or draft, repository documentation
-describes the current public preview. Protocol, client-format, security, and
-storage design documents are target contracts and may lead the implementation
-during migration.
+OpenKache is a high-performance cache server designed from the ground up for
+modern SSDs. The current public preview is an experimental Rust server for
+Linux. Unless a section is explicitly marked as a target or draft, repository
+documentation describes the current public preview. Protocol, client-format,
+security, and storage design documents are target contracts and may lead the
+implementation during migration.
 
 ## Current server
 
