@@ -156,6 +156,11 @@ hosted runners:
 - TypeScript: JavaScript and declarations plus Linux x64/arm64 and Apple
   Silicon macOS native adapters.
 
+Python wheel jobs compile the native adapter from the generated Rust snapshots
+already included in the source distribution. They intentionally remove the
+repository generator inputs before compiling, so the cross-platform release
+matrix does not require Bun or the Smithy CLI on every runner.
+
 Linux can build the two Linux TypeScript adapters locally. The Darwin adapter
 is built on Apple Silicon macOS, and the Python macOS/Windows wheels are built
 by their workflow matrix. A local TypeScript `release:dry-run` is therefore a
