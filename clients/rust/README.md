@@ -25,6 +25,13 @@ only when your application needs the `#[tokio::main]` macro. If the application
 already uses Tokio, skip the second command. Tokio is the supported runtime for
 this client.
 
+Native value helpers require Serde. Add it with derive support when defining
+your own stored types:
+
+```bash
+cargo add serde --features derive
+```
+
 ## Quick start
 
 The example below assumes a local OpenKache server at `127.0.0.1:4433`.
@@ -49,6 +56,36 @@ this example only with a local development server.
 
 Values use the lossless `StructuredValue-CBOR-v1` format shared by the
 OpenKache clients.
+
+## Native Rust values
+
+`Client::set_native` and `Client::get_native` use Serde while retaining the
+same lossless structured-value format as `set` and `get`:
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct User {
+    id: u64,
+    name: String,
+}
+
+client.set_native("user:1", &User { id: 7, name: "Ada".into() }).await?;
+let user = client.get_native::<User>("user:1").await?;
+```
+
+`GetResult::Missing` remains distinct from a stored `null`; a stored `null`
+decodes as `None` for `Option<T>`. Integers are range-checked, floating-point
+values retain their IEEE-754 bits, and map keys must be scalar and unique.
+Serde serialization happens before write admission, so
+`Error::NativeSerialize` cannot produce an unknown mutation. A value that does
+not match the requested native type returns `Error::NativeDeserialize`.
+
+For a non-Serde structured serializer, implement `ValueCodec<T>` or construct
+one with `FunctionCodec::new(encode, decode)` and use `set_with`/`get_with`.
+Opaque formats are intentionally not interpreted by the client: encode them
+yourself and store the resulting bytes with `Value::bytes` through `set`.
 
 ## Reference
 
@@ -97,6 +134,32 @@ Stores one value with an unconditional write.
 ```rust
 let outcome = client.set("greeting", Value::text("hello")).await?;
 ```
+
+### `client.get_native<T>(key)`
+
+Reads one value and decodes it into `T: serde::de::DeserializeOwned`.
+
+- **Returns:** `Ok(GetResult::Found(value))` for a matching stored value, or
+  `Ok(GetResult::Missing)` when the key does not exist.
+- **Errors:** `Error::NativeDeserialize` for a type mismatch, overflow, or
+  unsupported stored value; transport and protocol failures use
+  `Error::Core`.
+
+### `client.set_native(key, value)`
+
+Serializes `value: impl serde::Serialize` and stores it with an unconditional
+write. Serde serialization completes before network admission.
+
+- **Returns:** the same `SetOutcome` as `client.set`.
+- **Errors:** `Error::NativeSerialize` for values that cannot be represented
+  by the structured model, or the transport and mutation errors from
+  `client.set`.
+
+### `client.get_with` and `client.set_with`
+
+Use an application-provided `ValueCodec<T>` for a non-Serde structured format.
+The codec operates on `Value`, so it does not alter the wire admission or
+mutation semantics.
 
 ### `client.delete(key)`
 
@@ -188,6 +251,10 @@ use `ValueError::kind()` for its stable category.
   server without a confirmed result. Its `Mutation` identifies the operation;
   do not replay it automatically.
 - `Error::Core` reports connection, protocol, key, value, or server failures.
+- `Error::NativeSerialize` and `Error::NativeDeserialize` report Serde
+  conversion failures before and after transport, respectively.
+- `Error::CodecEncode` and `Error::CodecDecode` report application
+  `ValueCodec` failures before and after transport, respectively.
 - `Error::UnsupportedSetOutcome` reports a server result outside the
   unconditional-write API.
 

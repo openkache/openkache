@@ -16,16 +16,22 @@ mod internal_protocol;
 #[allow(dead_code, unexpected_cfgs, unused_imports)]
 mod internal_value;
 
+mod native;
+
 mod maintained {
     use std::fmt;
 
     use super::internal_core as core;
+    use super::native::{ValueCodec as ValueCodecTrait, from_value, to_value};
     use core::value::{Compression, Encryption};
     use core::{GetOutcome as CoreGetOutcome, Operation, SetOutcome as CoreSetOutcome};
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
 
     pub use super::internal_value::{
         Error as ValueError, Float, FloatWidth, Integer, Limits as ValueLimits, Sign, Value,
     };
+    pub use super::native::{FunctionCodec, SerdeCodec, ValueCodec};
     pub use core::KeyError;
     pub use core::TypedKey;
 
@@ -75,6 +81,18 @@ mod maintained {
         /// client uses unconditional writes.
         #[error("server returned an unsupported set outcome")]
         UnsupportedSetOutcome,
+        /// Native Serde serialization failed before the request was admitted.
+        #[error("native serialization failed: {0}")]
+        NativeSerialize(String),
+        /// Native Serde deserialization failed after the value was retrieved.
+        #[error("native deserialization failed: {0}")]
+        NativeDeserialize(String),
+        /// A custom [`ValueCodec`] failed before a write was admitted.
+        #[error("value codec encoding failed: {0}")]
+        CodecEncode(String),
+        /// A custom [`ValueCodec`] failed after a value was retrieved.
+        #[error("value codec decoding failed: {0}")]
+        CodecDecode(String),
     }
 
     /// Result alias for client operations.
@@ -188,6 +206,99 @@ mod maintained {
                     CoreSetOutcome::Replaced => Ok(SetOutcome::Replaced),
                     CoreSetOutcome::NotStored => Err(Error::UnsupportedSetOutcome),
                 })
+        }
+
+        /// Retrieves one value and decodes it into a native Serde type.
+        ///
+        /// Serialization is performed against the same lossless structured
+        /// value model as [`Client::set`]. A missing key remains
+        /// [`GetResult::Missing`], while a stored null decodes as `None` for
+        /// an `Option<T>`.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::NativeDeserialize`] when the stored value cannot
+        /// be represented by `T`, and [`Error::Core`] for transport,
+        /// protocol, key, or value failures.
+        pub async fn get_native<T: DeserializeOwned>(
+            &self,
+            key: impl Into<TypedKey>,
+        ) -> Result<GetResult<T>> {
+            match self.get(key).await? {
+                GetResult::Missing => Ok(GetResult::Missing),
+                GetResult::Found(value) => from_value(value)
+                    .map(GetResult::Found)
+                    .map_err(|error| Error::NativeDeserialize(error.to_string())),
+            }
+        }
+
+        /// Serializes a native Serde value and stores it with an unconditional
+        /// write.
+        ///
+        /// Native serialization completes before the request is admitted, so
+        /// a serialization error cannot produce [`Error::UnknownMutation`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::NativeSerialize`] when `value` cannot be represented
+        /// by the structured value model. Transport and protocol failures use
+        /// the same errors as [`Client::set`].
+        pub async fn set_native<T: Serialize>(
+            &self,
+            key: impl Into<TypedKey>,
+            value: T,
+        ) -> Result<SetOutcome> {
+            let value =
+                to_value(&value).map_err(|error| Error::NativeSerialize(error.to_string()))?;
+            self.set(key, value).await
+        }
+
+        /// Retrieves one value and decodes it with an application codec.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::CodecDecode`] when `codec` rejects the stored
+        /// value, or the same transport and protocol errors as [`Client::get`].
+        pub async fn get_with<T, C>(
+            &self,
+            key: impl Into<TypedKey>,
+            codec: &C,
+        ) -> Result<GetResult<T>>
+        where
+            C: ValueCodecTrait<T>,
+        {
+            match self.get(key).await? {
+                GetResult::Missing => Ok(GetResult::Missing),
+                GetResult::Found(value) => codec
+                    .decode(value)
+                    .map(GetResult::Found)
+                    .map_err(|error| Error::CodecDecode(error.to_string())),
+            }
+        }
+
+        /// Encodes a native value with an application codec and stores it with
+        /// an unconditional write.
+        ///
+        /// Encoding completes before request admission, so a codec failure
+        /// cannot produce [`Error::UnknownMutation`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::CodecEncode`] when `codec` rejects `value`, or the
+        /// same transport and mutation errors as [`Client::set`].
+        pub async fn set_with<T, C>(
+            &self,
+            key: impl Into<TypedKey>,
+            value: &T,
+            codec: &C,
+        ) -> Result<SetOutcome>
+        where
+            C: ValueCodecTrait<T>,
+        {
+            let value = codec
+                .encode(value)
+                .map_err(|error| Error::CodecEncode(error.to_string()))?;
+            self.set(key, value).await
         }
 
         /// Deletes one key and reports whether an item was removed.
