@@ -1,4 +1,4 @@
-//! hash를 1~32bit value 후보들로 연결하는 고정 크기 압축 Table이다.
+//! A fixed-size compressed Table that maps hashes to 1-32 bit value candidates.
 
 use std::num::NonZeroU64;
 
@@ -8,19 +8,19 @@ const MIN_UNARY_COUNT: usize = 2;
 const MAX_UNARY_COUNT: usize = 96;
 const FRONT_BACK_RATIOS: [usize; 4] = [2, 4, 8, 16];
 
-/// Table이 담아야 할 Entry 수와 Entry 필드 크기다.
+/// Entry capacity and field widths for a Table.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TableConfig {
-    /// 지정한 목표 사용률에서 담아야 할 Entry 수다.
+    /// Number of Entries the Table must hold at the target load factor.
     pub(crate) max_entries: usize,
-    /// Entry마다 저장할 value bit 수다.
+    /// Number of value bits stored per Entry.
     pub(crate) value_bits: u8,
-    /// Entry마다 저장할 fingerprint bit 수다.
+    /// Number of fingerprint bits stored per Entry.
     pub(crate) fingerprint_bits: u8,
 }
 
 impl TableConfig {
-    /// 외부에서 지정하는 세 값의 범위를 확인한다.
+    /// Validates the ranges of the three externally supplied values.
     fn validate(self) -> Result<(), TableCreateError> {
         if self.max_entries == 0 {
             return Err(TableCreateError::InvalidConfig(
@@ -41,39 +41,39 @@ impl TableConfig {
     }
 }
 
-/// 고정 크기 Table을 만들지 못한 이유다.
+/// Reason a fixed-size Table could not be created.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TableCreateError {
-    /// 외부에서 받은 설정값이 유효하지 않다.
+    /// An externally supplied configuration value is invalid.
     InvalidConfig(&'static str),
-    /// 설정값을 담을 수 있는 64byte Subtable 배치가 없다.
+    /// No 64-byte Subtable layout can represent the configuration.
     NoValidLayout,
-    /// Front 또는 Back Subtable의 고정 배열을 확보하지 못했다.
+    /// Allocation of the fixed Front or Back Subtable array failed.
     AllocationFailed,
 }
 
-/// 고정 크기 Table에 더 이상 Entry를 넣을 수 없다.
+/// The fixed-size Table cannot accept another Entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TableFull;
 
-/// Front와 Back Subtable의 개수 및 내부 배치를 계산한 결과다.
+/// Computed counts and internal layouts for Front and Back Subtables.
 struct TableAllocation {
-    /// Front Subtable 한 개의 64바이트 내부 배치다.
+    /// Internal 64-byte layout of one Front Subtable.
     front_subtable_layout: SubtableLayout,
-    /// Back Subtable 한 개의 64바이트 내부 배치다.
+    /// Internal 64-byte layout of one Back Subtable.
     back_subtable_layout: SubtableLayout,
-    /// 할당할 Front Subtable 개수다.
+    /// Number of Front Subtables to allocate.
     front_subtable_count: usize,
-    /// 할당할 Back Subtable 개수다.
+    /// Number of Back Subtables to allocate.
     back_subtable_count: usize,
-    /// 두 번째 Back 경로에서 한 묶음이 차지하는 Subtable 수다.
+    /// Number of Subtables in a group on the second Back route.
     back_subtable_group_count: usize,
-    /// Front Subtable을 Back 경로에 묶는 단위다.
+    /// Grouping ratio between Front Subtables and Back routes.
     front_back_ratio: usize,
 }
 
 impl TableAllocation {
-    /// 가능한 배치를 전부 계산해 가장 적은 메모리로 목표 Entry를 담는 배치를 고른다.
+    /// Evaluates every valid layout and selects the smallest one that holds the target Entries.
     fn new(config: TableConfig) -> Result<Self, TableCreateError> {
         let mut selected: Option<(usize, usize, Self)> = None;
 
@@ -141,30 +141,30 @@ impl TableAllocation {
     }
 }
 
-/// 생성할 때 고정 크기로 할당되고 hash에 연결된 value만 보관한다.
+/// A fixed-size Table allocated at creation that stores only values associated with hashes.
 pub(crate) struct Table {
-    /// 모든 Entry가 먼저 들어가는 Front Subtable 배열이다.
+    /// Front Subtable array that receives every Entry first.
     front_table: Box<[Subtable]>,
-    /// Front에서 밀려난 Entry를 보관하는 Back Subtable 배열이다.
+    /// Back Subtable array that stores Entries evicted from Front.
     back_table: Box<[Subtable]>,
-    /// Front Subtable 내부의 bit 배치다.
+    /// Bit layout within a Front Subtable.
     front_subtable_layout: SubtableLayout,
-    /// Back Subtable 내부의 bit 배치다.
+    /// Bit layout within a Back Subtable.
     back_subtable_layout: SubtableLayout,
-    /// 두 번째 Back 경로에서 한 묶음이 차지하는 Subtable 수다.
+    /// Number of Subtables in a group on the second Back route.
     back_subtable_group_count: usize,
-    /// Front Subtable들을 Back 경로에 묶는 단위다.
+    /// Grouping ratio between Front Subtables and Back routes.
     front_back_ratio: usize,
-    /// hash에서 fingerprint bit만 남기는 mask다.
+    /// Mask that retains only fingerprint bits from a hash.
     fingerprint_mask: u32,
-    /// hash 좌표를 Front Subtable과 unary 그룹 범위에 접는 나머지 연산 값이다.
+    /// Modulus that folds hash coordinates into the Front Subtable and unary-group range.
     coordinate_modulus: NonZeroU64,
-    /// value의 허용된 bit만 1인 mask다.
+    /// Mask whose set bits represent the permitted value width.
     value_mask: u32,
 }
 
 impl Table {
-    /// 자동으로 배치를 고른 뒤 Front와 Back 배열을 고정 크기로 할당한다.
+    /// Selects a layout automatically and allocates fixed-size Front and Back arrays.
     pub(crate) fn new(config: TableConfig) -> Result<Self, TableCreateError> {
         config.validate()?;
         let allocation = TableAllocation::new(config)?;
@@ -204,12 +204,12 @@ impl Table {
         })
     }
 
-    /// fingerprint가 맞는 value들을 별도 할당 없이 순회한다.
+    /// Iterates over values with matching fingerprints without additional allocation.
     pub(crate) fn values(&self, hash: u128) -> impl Iterator<Item = u32> + '_ {
         TableValues::new(self, hash)
     }
 
-    /// hash와 value를 Front에 넣고 밀려난 Entry는 두 Back 후보 중 덜 찬 곳에 넣는다.
+    /// Inserts a hash and value into Front, placing any overflow in the less-full Back candidate.
     pub(crate) fn insert(&mut self, hash: u128, value: u32) -> Result<(), TableFull> {
         self.assert_value_fits(value);
         let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(hash);
@@ -243,7 +243,7 @@ impl Table {
         Ok(())
     }
 
-    /// fingerprint와 value가 모두 같은 Entry 하나를 제거한다.
+    /// Removes one Entry whose fingerprint and value both match.
     pub(crate) fn remove(&mut self, hash: u128, value: u32) -> bool {
         self.assert_value_fits(value);
         let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(hash);
@@ -298,7 +298,7 @@ impl Table {
         false
     }
 
-    /// hash의 기존 value 하나를 새 value로 제자리에서 바꾼다.
+    /// Replaces one existing value for a hash in place.
     pub(crate) fn replace(&mut self, hash: u128, old_value: u32, new_value: u32) -> bool {
         self.assert_value_fits(old_value);
         self.assert_value_fits(new_value);
@@ -356,7 +356,7 @@ impl Table {
         false
     }
 
-    /// Back에 밀려난 Entry 하나를 Front의 빈 slot으로 되돌린다.
+    /// Promotes one overflow Entry from Back into a free Front slot.
     fn promote(&mut self, front_subtable_index: usize) {
         let [first, second] = self.back_subtable_routes(front_subtable_index);
         let first_entry =
@@ -386,7 +386,7 @@ impl Table {
         debug_assert!(overflow.is_none());
     }
 
-    /// hash를 Front Subtable index, unary index, fingerprint로 나눈다.
+    /// Splits a hash into a Front Subtable index, unary index, and fingerprint.
     fn table_coordinates(&self, hash: u128) -> (usize, usize, u32) {
         let fingerprint = hash as u32 & self.fingerprint_mask;
         let coordinate_hash = (hash >> self.front_subtable_layout.fingerprint_bits) as u64;
@@ -403,7 +403,7 @@ impl Table {
         );
     }
 
-    /// Front Subtable가 사용할 수 있는 Back 후보 두 곳과 crumb를 계산한다.
+    /// Computes the two Back candidates and crumbs available to a Front Subtable.
     fn back_subtable_routes(&self, front_subtable_index: usize) -> [(usize, u8); 2] {
         let upper = front_subtable_index / self.front_back_ratio;
         let low = front_subtable_index % self.front_back_ratio;
@@ -418,7 +418,7 @@ impl Table {
     }
 }
 
-/// Table의 Front와 필요한 Back 두 곳을 순차적으로 읽는 iterator다.
+/// An iterator that scans Table Front followed by the two relevant Back locations.
 struct TableValues<'a> {
     table: &'a Table,
     front_subtable_index: usize,
@@ -499,44 +499,44 @@ impl Iterator for TableValues<'_> {
     }
 }
 
-/// Subtable byte 배열에서 Entry 하나를 읽고 쓸 때 사용하는 형태다.
+/// CPU representation used to read or write one Entry in a Subtable byte array.
 #[derive(Clone, Copy, Debug)]
 struct SubtableEntry {
-    /// 이 Entry가 속한 Subtable 내부 unary 그룹 번호다.
+    /// Unary-group index within the Subtable containing this Entry.
     unary_index: usize,
-    /// 전체 key hash 중 Table에 저장하는 짧은 식별 값이다.
+    /// Short identifier retained by the Table from the full key hash.
     fingerprint: u32,
-    /// 외부에서 정한 의미를 Table이 해석하지 않고 그대로 보관하는 값이다.
+    /// Opaque value whose externally defined meaning is not interpreted by the Table.
     value: u32,
-    /// 공유 Back Subtable 안에서 Entry의 Front 경로를 구분한다.
+    /// Distinguishes the Entry's Front route within a shared Back Subtable.
     crumb: u8,
 }
 
-/// 64바이트 Subtable 안의 각 영역 크기와 시작 bit를 보관한다.
+/// Stores the size and starting bit of each region in a 64-byte Subtable.
 #[derive(Clone, Copy, Debug)]
 struct SubtableLayout {
-    /// Subtable 하나의 unary 그룹 수다.
+    /// Number of unary groups in one Subtable.
     unary_count: usize,
-    /// Subtable 하나에 들어가는 최대 Entry 수다.
+    /// Maximum number of Entries in one Subtable.
     entry_capacity: usize,
-    /// Entry 하나의 fingerprint bit 수다.
+    /// Number of fingerprint bits per Entry.
     fingerprint_bits: usize,
-    /// Entry 하나의 value bit 수다.
+    /// Number of value bits per Entry.
     value_bits: usize,
-    /// Entry 하나의 crumb bit 수다. Front에서는 0이다.
+    /// Number of crumb bits per Entry; zero for Front.
     crumb_bits: usize,
-    /// unary bit열에 예약된 byte 수다.
+    /// Number of bytes reserved for the unary bit string.
     unary_bytes: usize,
-    /// Subtable 시작점에서 fingerprint 영역까지의 bit offset이다.
+    /// Bit offset from the start of the Subtable to the fingerprint region.
     fingerprint_bit: usize,
-    /// Subtable 시작점에서 value 영역까지의 bit offset이다.
+    /// Bit offset from the start of the Subtable to the value region.
     value_bit: usize,
-    /// Subtable 시작점에서 crumb 영역까지의 bit offset이다.
+    /// Bit offset from the start of the Subtable to the crumb region.
     crumb_bit: usize,
 }
 
 impl SubtableLayout {
-    /// 설정된 필드가 64바이트에 들어가도록 최대 Entry 수를 계산한다.
+    /// Computes the maximum number of Entries that fit with the configured fields in 64 bytes.
     fn new(
         fingerprint_bits: usize,
         value_bits: usize,
@@ -575,16 +575,16 @@ impl SubtableLayout {
     }
 }
 
-/// 캐시라인 하나에 unary와 모든 Entry 필드를 압축해서 보관한다.
+/// Compresses unary data and all Entry fields into one cache line.
 #[repr(C, align(64))]
 #[derive(Clone)]
 struct Subtable {
-    /// `[unary][fingerprints][values][crumbs]`가 들어 있는 한 캐시라인이다.
+    /// One cache line containing `[unary][fingerprints][values][crumbs]`.
     bytes: [u8; SUBTABLE_BYTES],
 }
 
 impl Subtable {
-    /// Entry가 하나도 없는 Subtable을 만든다.
+    /// Creates a Subtable containing no Entries.
     fn new(layout: &SubtableLayout) -> Self {
         let mut subtable = Self {
             bytes: [0; SUBTABLE_BYTES],
@@ -593,31 +593,31 @@ impl Subtable {
         subtable
     }
 
-    /// byte 배열 앞의 unary 영역을 읽는다.
+    /// Reads the unary region at the front of the byte array.
     fn unary(&self, layout: &SubtableLayout) -> u128 {
         let mut bytes = [0u8; 16];
         bytes[..layout.unary_bytes].copy_from_slice(&self.bytes[..layout.unary_bytes]);
         u128::from_le_bytes(bytes)
     }
 
-    /// unary bit열을 byte 배열 앞에 저장한다.
+    /// Stores the unary bit string at the front of the byte array.
     fn store_unary(&mut self, layout: &SubtableLayout, value: u128) {
         self.bytes[..layout.unary_bytes]
             .copy_from_slice(&value.to_le_bytes()[..layout.unary_bytes]);
     }
 
-    /// 현재 들어 있는 전체 Entry 수를 반환한다.
+    /// Returns the current total number of Entries.
     fn entry_count(&self, layout: &SubtableLayout) -> usize {
         let bits = self.unary(layout);
         (128 - bits.leading_zeros() as usize) - layout.unary_count
     }
 
-    /// unary 그룹이 사용하는 Entry slot의 반열린 범위를 반환한다.
+    /// Returns the half-open Entry-slot range used by a unary group.
     fn bounds(&self, layout: &SubtableLayout, unary_index: usize) -> (usize, usize) {
         unary_bounds(self.unary(layout), unary_index)
     }
 
-    /// 지정한 slot의 필드들을 SubtableEntry로 풀어서 반환한다.
+    /// Unpacks the fields at a slot into a SubtableEntry.
     fn entry(&self, layout: &SubtableLayout, entry_slot: usize) -> SubtableEntry {
         SubtableEntry {
             unary_index: self.unary_index_at(layout, entry_slot),
@@ -627,7 +627,7 @@ impl Subtable {
         }
     }
 
-    /// 지정한 slot의 fingerprint를 읽는다.
+    /// Reads the fingerprint at a slot.
     fn fingerprint(&self, layout: &SubtableLayout, entry_slot: usize) -> u32 {
         get_bits(
             &self.bytes,
@@ -636,7 +636,7 @@ impl Subtable {
         ) as u32
     }
 
-    /// 지정한 slot의 value를 읽는다.
+    /// Reads the value at a slot.
     fn value(&self, layout: &SubtableLayout, entry_slot: usize) -> u32 {
         get_bits(
             &self.bytes,
@@ -645,7 +645,7 @@ impl Subtable {
         ) as u32
     }
 
-    /// 지정한 slot의 crumb를 읽는다.
+    /// Reads the crumb at a slot.
     fn crumb(&self, layout: &SubtableLayout, entry_slot: usize) -> u8 {
         if layout.crumb_bits == 0 {
             0
@@ -658,7 +658,7 @@ impl Subtable {
         }
     }
 
-    /// Entry slot이 속한 unary 그룹 번호를 복원한다.
+    /// Recovers the unary-group index containing an Entry slot.
     fn unary_index_at(&self, layout: &SubtableLayout, entry_slot: usize) -> usize {
         let bits = self.unary(layout);
         debug_assert!(entry_slot < self.entry_count(layout));
@@ -667,7 +667,7 @@ impl Subtable {
         entry_bit - entry_slot
     }
 
-    /// Entry의 fingerprint, value, crumb를 지정한 slot에 쓴다.
+    /// Writes an Entry's fingerprint, value, and crumb to a slot.
     fn write_entry(&mut self, layout: &SubtableLayout, entry_slot: usize, entry: SubtableEntry) {
         set_bits(
             &mut self.bytes,
@@ -691,7 +691,7 @@ impl Subtable {
         }
     }
 
-    /// 지정한 slot의 Entry 필드를 0으로 덮는다.
+    /// Clears the Entry fields at a slot to zero.
     fn clear_entry(&mut self, layout: &SubtableLayout, entry_slot: usize) {
         self.write_entry(
             layout,
@@ -705,7 +705,7 @@ impl Subtable {
         );
     }
 
-    /// Front에 Entry를 넣고 가득 찼다면 끝에서 밀려난 Entry를 반환한다.
+    /// Inserts an Entry into Front and returns the last overflow Entry when full.
     fn insert_front(
         &mut self,
         layout: &SubtableLayout,
@@ -728,7 +728,7 @@ impl Subtable {
         overflow
     }
 
-    /// Back에 Entry를 넣고 가득 찼으면 변경 없이 false를 반환한다.
+    /// Inserts an Entry into Back, or returns false without changes when full.
     fn insert_back(&mut self, layout: &SubtableLayout, entry: SubtableEntry) -> bool {
         let entry_count = self.entry_count(layout);
         if entry_count == layout.entry_capacity {
@@ -744,7 +744,7 @@ impl Subtable {
         true
     }
 
-    /// unary 그룹에서 fingerprint와 선택적인 crumb가 같은 slot들을 반환한다.
+    /// Returns slots in a unary group matching a fingerprint and optional crumb.
     fn matching_entry_slots<'a>(
         &'a self,
         layout: &'a SubtableLayout,
@@ -756,7 +756,7 @@ impl Subtable {
         self.matching_entry_slots_in_range(layout, start..end, fingerprint, crumb)
     }
 
-    /// 지정된 slot 범위에서 fingerprint와 crumb가 같은 slot들을 반환한다.
+    /// Returns slots in a range matching a fingerprint and crumb.
     fn matching_entry_slots_in_range<'a>(
         &'a self,
         layout: &'a SubtableLayout,
@@ -770,7 +770,7 @@ impl Subtable {
         })
     }
 
-    /// 지정한 crumb를 가진 첫 Entry의 slot과 내용을 반환한다.
+    /// Returns the slot and contents of the first Entry with a specified crumb.
     fn first_with_crumb(
         &self,
         layout: &SubtableLayout,
@@ -781,7 +781,7 @@ impl Subtable {
         Some((entry_slot, self.entry(layout, entry_slot)))
     }
 
-    /// 지정한 slot을 제거하고 뒤 Entry들을 앞으로 당긴다.
+    /// Removes a slot and shifts subsequent Entries forward.
     fn remove_at(
         &mut self,
         layout: &SubtableLayout,
@@ -799,7 +799,7 @@ impl Subtable {
         removed
     }
 
-    /// unary bit열에 Entry를 뜻하는 0 bit 하나를 삽입한다.
+    /// Inserts one zero bit representing an Entry into the unary bit string.
     fn unary_insert(&mut self, layout: &SubtableLayout, unary_index: usize, entry_slot: usize) {
         let bits = self.unary(layout);
         let bit_index = unary_index + entry_slot;
@@ -816,7 +816,7 @@ impl Subtable {
         self.store_unary(layout, shifted);
     }
 
-    /// unary bit열에서 제거된 Entry의 0 bit 하나를 없앤다.
+    /// Removes the zero bit for a deleted Entry from the unary bit string.
     fn unary_remove(&mut self, layout: &SubtableLayout, unary_index: usize, entry_slot: usize) {
         let bits = self.unary(layout);
         let bit_index = unary_index + entry_slot;
@@ -827,7 +827,7 @@ impl Subtable {
     }
 }
 
-/// `bits`에서 0부터 센 `rank`번째 1 bit 위치를 반환한다.
+/// Returns the position of the zero-based `rank`th set bit in `bits`.
 fn select_one(bits: u128, rank: usize) -> usize {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("bmi2") {
@@ -837,7 +837,7 @@ fn select_one(bits: u128, rank: usize) -> usize {
     select_one_scalar(bits, rank)
 }
 
-/// 낮은 1 bit를 rank개 지운 뒤 다음 1 bit 위치를 반환한다.
+/// Clears the lowest `rank` set bits and returns the position of the next set bit.
 fn select_one_scalar(mut bits: u128, rank: usize) -> usize {
     for _ in 0..rank {
         bits &= bits - 1;
@@ -845,7 +845,7 @@ fn select_one_scalar(mut bits: u128, rank: usize) -> usize {
     bits.trailing_zeros() as usize
 }
 
-/// x86 BMI2의 PDEP 명령으로 rank번째 1 bit 위치를 찾는다.
+/// Finds the `rank`th set bit with the x86 BMI2 PDEP instruction.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi2")]
 unsafe fn select_one_bmi2(bits: u128, rank: usize) -> usize {
@@ -861,7 +861,7 @@ unsafe fn select_one_bmi2(bits: u128, rank: usize) -> usize {
     }
 }
 
-/// 가장 낮은 `bits`개 bit만 1인 mask를 만든다.
+/// Creates a mask with only the lowest `bits` bits set.
 fn low_mask(bits: usize) -> u128 {
     if bits == 128 {
         u128::MAX
@@ -870,7 +870,7 @@ fn low_mask(bits: usize) -> u128 {
     }
 }
 
-/// 낮은 `bits`개 bit만 1인 u32 mask를 만든다.
+/// Creates a u32 mask with only the lowest `bits` bits set.
 fn u32_mask(bits: usize) -> u32 {
     if bits == u32::BITS as usize {
         u32::MAX
@@ -879,7 +879,7 @@ fn u32_mask(bits: usize) -> u32 {
     }
 }
 
-/// unary bit열에서 지정한 그룹의 Entry slot 범위를 계산한다.
+/// Computes the Entry-slot range for a group in a unary bit string.
 fn unary_bounds(bits: u128, unary_index: usize) -> (usize, usize) {
     let end = select_one(bits, unary_index) - unary_index;
     let start = if unary_index == 0 {
@@ -890,7 +890,7 @@ fn unary_bounds(bits: u128, unary_index: usize) -> (usize, usize) {
     (start, end)
 }
 
-/// byte 배열의 임의 bit 위치에서 width만큼 읽는다.
+/// Reads `width` bits at an arbitrary bit offset in a byte array.
 fn get_bits(bytes: &[u8], bit: usize, width: usize) -> u64 {
     if width == 0 {
         return 0;
@@ -909,7 +909,7 @@ fn get_bits(bytes: &[u8], bit: usize, width: usize) -> u64 {
     (u64::from_le_bytes(word) >> shift) & mask
 }
 
-/// byte 배열의 임의 bit 위치에 value의 낮은 width bit를 기록한다.
+/// Writes the lowest `width` bits of a value at an arbitrary bit offset in a byte array.
 fn set_bits(bytes: &mut [u8], bit: usize, width: usize, value: u64) {
     if width == 0 {
         return;
