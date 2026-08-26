@@ -1,6 +1,6 @@
 {
   "name": "openkache",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "license": "Apache-2.0",
   "description": "Promise-based OpenKache client for Node.js, Bun, and Deno with a runtime-neutral structured-value codec.",
   "keywords": [
@@ -57,7 +57,7 @@
     "release:verify": "bun pm pack --dry-run && bun run scripts/check-publish.ts",
     "release:smoke": "bun run scripts/release-smoke.ts",
     "release:check": "bun run build:package && bun run release:verify",
-    "release:dry-run": "bun run release:check && bun publish --dry-run --access public --tag latest --ignore-scripts",
+    "release:dry-run": "bun run release:check && bun run release:smoke",
     "release:publish": "bun run scripts/publish-typescript.ts"
   },
   "devDependencies": {

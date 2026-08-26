@@ -71,6 +71,34 @@ jobs:
             echo "pyproject.toml version does not match the release input." >&2
             exit 1
           fi
+          if ! pypi_status="$(
+            curl --silent --show-error --location --retry 2 --retry-all-errors \
+              --connect-timeout 10 --max-time 30 \
+              --user-agent "openkache-release/openkache/${RELEASE_VERSION}" \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://pypi.org/pypi/openkache/${RELEASE_VERSION}/json"
+          )"; then
+            echo "Could not query PyPI for openkache@${RELEASE_VERSION}." >&2
+            echo "Why: PyPI files are immutable and publication cannot safely continue without proving this version is unused." >&2
+            echo "Fix: restore PyPI registry access, then rerun the release guard." >&2
+            exit 1
+          fi
+          case "${pypi_status}" in
+            404)
+              ;;
+            200)
+              echo "openkache@${RELEASE_VERSION} already exists on PyPI." >&2
+              echo "Why: PyPI files are immutable and cannot be overwritten." >&2
+              echo "Fix: choose the next unused version, update pyproject.toml and its python-v<version> tag, then rerun the workflow." >&2
+              exit 1
+              ;;
+            *)
+              echo "PyPI returned HTTP ${pypi_status} while checking openkache@${RELEASE_VERSION}." >&2
+              echo "Why: the release guard could not prove that the immutable version is available." >&2
+              echo "Fix: investigate PyPI registry access and rerun the release guard; do not bypass this guard." >&2
+              exit 1
+              ;;
+          esac
           if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
             echo "The release checkout is dirty; refusing to continue." >&2
             exit 1
