@@ -1,50 +1,48 @@
-# OpenKache Benchmark
+# OpenKache SSD GET-Throughput Benchmark
 
-This document defines the public benchmark environment and comparison methodology for OpenKache. Benchmark results and graphs will be updated here as measurements are finalized.
+## Summary
 
-## Environment
+| System | GET throughput | Load tool |
+|---|---:|---|
+| OpenKache | 97,887 ops/s | memtier (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
+| MySQL 8.4.11 | 16,295 ops/s | sysbench |
 
-- Host: ServerOptima KVM VPS (AMD EPYC 7763 Plan 2)
-- CPU / Memory: 6 vCPU / 20 GB
-- Storage: 300 GB NVMe SSD RAID 10
-- OS: Ubuntu 24.04 LTS
-- Network path: loopback (`127.0.0.1`)
+OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. On the
+same machine, the single-core fio 4 KiB random-read ceiling is 128,820 IOPS,
+and OpenKache reaches 76% of that ceiling with a single storage core.
 
-Loopback is used to remove external network variance and focus the comparison on request processing, memory use, and storage behavior.
+## Test Environment
 
-## Systems
+serveroptima1:
 
-- OpenKache
-- Redis
-- Dragonfly
-- KeyDB
-- Apache Kvrocks
-- PostgreSQL
-- MySQL
-- SQLite
-- DuckDB
+- CPU: AMD EPYC 7773X, 6 vCPU
+- RAM: 19.5 GiB
+- Storage: /dev/sda1, ext4, SSD
+- Kernel: 6.8
+- Date: 2026-08-26
 
-Redis-compatible systems are exercised through RESP. Other systems use an equivalent benchmark adapter with the same logical key-value operations and workload parameters where applicable.
+## Workload
 
-## Workloads
+- Record: 32-byte key + 100-byte random value
+- GET-only point lookups over the prefilled key range
 
-Comparisons keep the following parameters aligned as closely as each system allows:
+## Measurement Method
 
-- key size
-- value size
-- dataset size
-- GET / SET ratio
-- concurrency
-- warm-up and measurement duration
+memtier speaks only the RESP protocol, so measuring every system with memtier
+would be unfair to the SQL databases. Each system was therefore driven by a
+tool that speaks its own native protocol — memtier (RESP) for OpenKache,
+pgbench for PostgreSQL, and sysbench for MySQL. In every run the database was
+pinned to CPU cores 0–1 and the load generator to cores 2–5.
 
-## Metrics
+For PostgreSQL and MySQL, parameters were swept to find the configuration with
+the highest throughput.
 
-- throughput (operations/sec)
-- average latency
-- p99 latency
-- memory usage
-- storage write volume
+PostgreSQL: swept shared_buffers over 128 / 256 / 512 MB and client count over
+16 / 24 / 32 / 48, selecting shared_buffers 256 MB with 24 clients. Prepared
+statements (`-M prepared`) were used, jit and autovacuum were disabled, and
+ANALYZE was run right after prefill.
 
-## Results
-
-Benchmark tables and graphs will be added here as the final measurement set is completed.
+MySQL: swept innodb_buffer_pool_size over 128 / 256 / 512 MB and threads over
+8 / 16 / 32 / 64, selecting a 512 MB buffer pool with 16 threads. Prepared
+statements were used.
