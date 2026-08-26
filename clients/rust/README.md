@@ -14,31 +14,11 @@ Rust 1.85 or newer and a native C linker are required.
 ```bash
 # OpenKache client
 cargo add openkache
-
-# Tokio, for the standalone example's #[tokio::main]
-cargo add tokio --features macros,rt-multi-thread
 ```
 
 The default `quic-quinn` client uses Tokio internally, so an active Tokio
-runtime is required for `Client`.
-`openkache` already brings Tokio into the dependency graph; add Tokio directly
-only when your application needs the `#[tokio::main]` macro. If the application
-already uses Tokio, skip the second command. `CompioClient` uses the optional
-Compio runtime instead.
-To use Compio instead of Tokio, disable the default feature and select
-`quic-compio`:
-
-```bash
-cargo add openkache --no-default-features --features quic-compio
-cargo add compio --no-default-features --features net,runtime,time
-```
-
-Native value helpers require Serde. Add it with derive support when defining
-your own stored types:
-
-```bash
-cargo add serde --features derive
-```
+runtime is required for `Client`. The example below uses `#[tokio::main]`; use
+the runtime setup already used by your application.
 
 ## Quick start
 
@@ -66,32 +46,20 @@ this example only with a local development server.
 values directly and convert them to `Value`; construct an explicit variant
 when float width, raw bits, or model map keys matter.
 
-When Tokio is not part of an application, enable `quic-compio` and use the
-equivalent `CompioClient` facade:
-
-```rust
-use compio::runtime::Runtime;
-use openkache::{CompioClient, Value};
-
-let runtime = Runtime::new()?;
-runtime.block_on(async {
-    let client = CompioClient::connect("127.0.0.1:4433").await?;
-    client.set("hello", Value::text("from compio")).await?;
-    client.close().await
-})?;
-```
-
-Both clients use OpenKache's structured value format.
+The Rust client uses OpenKache's structured value format.
 
 ## Native Rust values
 
 `Client::set_native` and `Client::get_native` use Serde while retaining the
-same lossless structured-value format as `set` and `get`:
+same lossless structured-value format as `set` and `get`. The Serde traits and
+derive macros are re-exported by `openkache`, so an application does not need a
+separate direct Serde dependency for this example:
 
 ```rust
-use serde::{Deserialize, Serialize};
+use openkache::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(crate = "openkache::serde")]
 struct User {
     id: u64,
     name: String,
@@ -108,10 +76,18 @@ Serde serialization happens before write admission, so
 `Error::NativeSerialize` cannot produce an unknown mutation. A value that does
 not match the requested native type returns `Error::NativeDeserialize`.
 
+`set_native` stores the structured model as `StructuredValue-CBOR-v1`, not as
+an opaque Rust-specific payload. Python and JavaScript clients can therefore
+read a value written by `set_native` as a structured object, array, scalar, or
+null. Keep the schema within the cross-language value model; opaque bytes,
+unsupported map keys, and serializer-specific representations remain
+application-owned.
+
 For a non-Serde structured serializer, implement `ValueCodec<T>` or construct
 one with `FunctionCodec::new(encode, decode)` and use `set_with`/`get_with`.
-Opaque formats are intentionally not interpreted by the client: encode them
-yourself and store the resulting bytes with `Value::bytes` through `set`.
+This path does not require the application's code to depend on Serde. Opaque
+formats are intentionally not interpreted by the client: encode them yourself
+and store the resulting bytes with `Value::bytes` through `set`.
 
 ## Reference
 
