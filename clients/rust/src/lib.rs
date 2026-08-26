@@ -30,6 +30,7 @@ mod maintained {
 
     pub use super::internal_value::{
         Error as ValueError, Float, FloatWidth, Integer, Limits as ValueLimits, Sign, Value,
+        ValueKind,
     };
     pub use super::native::{FunctionCodec, SerdeCodec, ValueCodec};
     pub use core::KeyError;
