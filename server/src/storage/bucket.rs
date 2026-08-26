@@ -1,4 +1,4 @@
-//! 4KiB Bucket의 저장 형식과 Bucket 안에서 수행하는 연산이다.
+//! Storage format and operations for a 4 KiB Bucket.
 
 use super::StorageKey;
 use std::mem::MaybeUninit;
@@ -19,12 +19,12 @@ const ITEM_FIXED_BYTES: usize = KEY_SUFFIX_BYTES + VALUE_KIND_BYTES;
 const TOMBSTONE: u8 = 0;
 const LIVE_VALUE: u8 = 1;
 
-/// Bucket에서 읽은 값이다.
+/// A value read from a Bucket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BucketValue<'a> {
-    /// 삭제됐음을 나타내는 Item이다.
+    /// An Item marking a deleted value.
     Tombstone,
-    /// Bucket 안에 저장된 value를 빌려준다.
+    /// A borrowed value stored in the Bucket.
     Value(&'a [u8]),
 }
 
@@ -38,59 +38,59 @@ impl BucketValue<'_> {
     }
 }
 
-/// 20비트 목차 하나를 CPU에서 사용하기 위해 풀어 놓은 임시값이다.
-/// Bucket 안에는 이 struct가 아니라 `8비트 key prefix + 12비트 offset`만 저장된다.
+/// A temporary CPU representation of one unpacked 20-bit index entry.
+/// The Bucket stores only an `8-bit key prefix + 12-bit offset`, not this struct.
 #[derive(Clone, Copy)]
 struct BucketIndexEntry {
     key_prefix: u8,
     item_byte_offset: u16,
 }
 
-/// direct I/O 한 페이지와 크기 및 정렬이 같은 Bucket이다.
+/// A Bucket with the size and alignment of one direct I/O page.
 ///
-/// 앞에서는 Item 개수와 20비트 목차가 자라고, 뒤에서는 Item 본문이 역방향으로 자란다.
+/// The Item count and 20-bit index grow from the front, while Item bodies grow backward from the end.
 #[repr(C, align(4096))]
 pub(crate) struct Bucket {
     bytes: [u8; BUCKET_BYTES],
 }
 
 impl Bucket {
-    /// Item이 없는 0으로 초기화된 Bucket을 만든다.
+    /// Creates a zero-initialized Bucket containing no Items.
     pub(crate) const fn new() -> Self {
         Self {
             bytes: [0; BUCKET_BYTES],
         }
     }
 
-    /// Compio가 Bucket 전체를 읽거나 쓸 때 사용하는 byte 영역이다.
+    /// Returns the byte region Compio uses to read or write the entire Bucket.
     pub(crate) const fn as_bytes(&self) -> &[u8; BUCKET_BYTES] {
         &self.bytes
     }
 
-    /// Compio가 SSD에서 Bucket 전체를 채울 때 사용하는 byte 영역이다.
+    /// Returns the byte region Compio fills with an entire Bucket from the SSD.
     pub(crate) const fn as_bytes_mut(&mut self) -> &mut [u8; BUCKET_BYTES] {
         &mut self.bytes
     }
 
-    /// 현재 들어 있는 Item 개수를 반환한다.
+    /// Returns the current number of Items.
     pub(crate) const fn item_count(&self) -> usize {
         self.bytes[0] as usize
     }
 
-    /// 목차와 Item 본문이 실제로 차지하는 byte 수를 반환한다.
+    /// Returns the bytes occupied by the index and Item bodies.
     pub(crate) fn used_bytes(&self) -> usize {
         let item_count = self.item_count();
         Self::index_end(item_count) + BUCKET_BYTES - self.items_start(item_count)
     }
 
-    /// 이 value의 목차와 본문이 현재 남은 공간에 들어가는지 확인한다.
+    /// Checks whether the index entry and body for this value fit in the remaining space.
     pub(crate) fn can_append(&self, value: BucketValue<'_>) -> bool {
         let item_count = self.item_count();
         item_count < u8::MAX as usize && self.can_fit(item_count, value.encoded_len())
     }
 
-    /// key와 value를 Bucket 뒤쪽에 복사하고 20비트 목차를 추가한다.
-    /// 공간이 부족하면 Bucket을 바꾸지 않고 false를 반환한다.
+    /// Copies a key and value to the back of the Bucket and adds a 20-bit index entry.
+    /// Returns false without modifying the Bucket when space is insufficient.
     pub(crate) fn append(&mut self, storage_key: &StorageKey, value: BucketValue<'_>) -> bool {
         let item_count = self.item_count();
         let item_len = value.encoded_len();
@@ -112,14 +112,14 @@ impl Bucket {
         true
     }
 
-    /// 가장 최근에 들어간 같은 key를 찾아 Bucket 안의 value를 빌려준다.
+    /// Finds the newest Item with the same key and borrows its value from the Bucket.
     pub(crate) fn get(&self, storage_key: &StorageKey) -> Option<BucketValue<'_>> {
         let item_slot = self.find_item_slot(storage_key)?;
         self.value_at(item_slot)
     }
 
-    /// 가장 최근의 같은 key Item 하나를 새 값으로 바꾸고 크기 차이만큼 본문을 민다.
-    /// 더 큰 Item이 4KiB에 들어가지 않으면 원본을 유지한다.
+    /// Replaces the newest Item with the same key and shifts bodies by the size difference.
+    /// Preserves the original Item when a larger replacement cannot fit in 4 KiB.
     pub(crate) fn replace(
         &mut self,
         storage_key: &StorageKey,
@@ -181,7 +181,7 @@ impl Bucket {
         true
     }
 
-    /// 가장 최근의 같은 key Item 하나를 제거하고 아래쪽 Item들을 한 번 밀어 붙인다.
+    /// Removes the newest Item with the same key and compacts the following Items once.
     pub(crate) fn remove(&mut self, storage_key: &StorageKey) -> bool {
         let Some(removed_slot) = self.find_item_slot(storage_key) else {
             return false;
@@ -368,7 +368,8 @@ impl IoBuf for Bucket {
 impl IoBufMut for Bucket {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let bytes = self.as_bytes_mut();
-        // SAFETY: u8와 MaybeUninit<u8>는 크기와 정렬이 같고 Bucket 전체가 쓰기 가능하다.
+        // SAFETY: u8 and MaybeUninit<u8> have identical size and alignment, and the
+        // entire Bucket is writable.
         unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast(), bytes.len()) }
     }
 }

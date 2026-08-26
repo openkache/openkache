@@ -1,5 +1,5 @@
-// 1. packet 을 resp 형태로 하나 읽어내기 -> resp_status ?
-// 2. sqe 로 read sq 제출
+// 1. Read one packet as a RESP message -> resp_status?
+// 2. Submit a read SQE.
 // 3. sock
 
 use crate::resp::{ResponseToWrite, StatefulRespParser};
@@ -10,11 +10,11 @@ use std::net::TcpStream;
 pub(super) const WRITE_IOVEC_CAPACITY: usize = 128 * 3;
 
 pub(super) struct WriteState {
-    pub(super) pending: VecDeque<ResponseToWrite>, // 아직 완전히 전송되지 않은 RESP 응답들
+    pub(super) pending: VecDeque<ResponseToWrite>, // RESP responses not yet fully transmitted
     pub(super) completed_out_of_order: BTreeMap<u64, ResponseToWrite>,
     pub(super) next_response_sequence: u64,
-    pub(super) front_bytes_sent: usize, // pending.front()에서 이미 전송된 바이트 수
-    pub(super) in_flight: bool,         // 현재 Send SQE를 제출했고 아직 CQE를 받지 않은 상태
+    pub(super) front_bytes_sent: usize, // Bytes already sent from pending.front()
+    pub(super) in_flight: bool,         // A send SQE is awaiting its CQE
     pub(super) in_flight_iovecs: Vec<libc::iovec>,
 }
 
