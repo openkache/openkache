@@ -51,15 +51,17 @@ The Rust client uses OpenKache's structured value format.
 ## Serde Rust values
 
 `Client::set_serde` and `Client::get_serde` use Serde while retaining the
-same lossless structured-value format as `set` and `get`. The Serde traits and
-derive macros are re-exported by `openkache`, so an application does not need a
-separate direct Serde dependency for this example:
+same lossless structured-value format as `set` and `get`. Add Serde to the
+application when defining types for these helpers:
+
+```bash
+cargo add serde --features derive
+```
 
 ```rust
-use openkache::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(crate = "openkache::serde")]
 struct User {
     id: u64,
     name: String,
@@ -86,15 +88,73 @@ application-owned.
 ### Structured codecs with `get_with` and `set_with`
 
 For a non-Serde structured serializer, implement `ValueCodec<T>` or construct
-one with `FunctionCodec::new(encode, decode)`. The functions below are
-application-owned mappings between a type and structured `Value` entries:
+one with `FunctionCodec::new(encode, decode)`. This complete example maps a
+`Point` struct to a structured `Value` map:
+
+`FunctionCodec` is a small adapter around two application functions:
+`encode(&T) -> Result<Value, EncodeError>` runs before a write is admitted, and
+`decode(Value) -> Result<T, DecodeError>` runs after a value is retrieved. The
+client does not inspect or invoke the application's serializer; it only stores
+the resulting structured `Value`. An encode failure is returned as
+`Error::CodecEncode`, and a decode failure as `Error::CodecDecode`.
 
 ```rust
-use openkache::{FunctionCodec, Value};
+use openkache::{Client, FunctionCodec, Value};
 
+#[derive(Debug, PartialEq)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn encode_point(point: &Point) -> Result<Value, &'static str> {
+    Value::map(vec![
+        (Value::text("x"), Value::integer(point.x)),
+        (Value::text("y"), Value::integer(point.y)),
+    ])
+    .map_err(|_| "point fields must be unique scalar keys")
+}
+
+fn decode_point(value: Value) -> Result<Point, &'static str> {
+    let entries = match value {
+        Value::Map(entries) => entries,
+        _ => return Err("expected a point object"),
+    };
+    let mut x = None;
+    let mut y = None;
+    for (key, value) in entries {
+        let key = match key {
+            Value::TextString(key) => key,
+            _ => return Err("point fields must be text keys"),
+        };
+        let value = match value {
+            Value::Integer(value) => value.as_i128().ok_or("point must fit in i128")?,
+            _ => return Err("point fields must be integers"),
+        };
+        match key.as_str() {
+            "x" => x = Some(value),
+            "y" => y = Some(value),
+            _ => return Err("unknown point field"),
+        }
+    }
+    Ok(Point {
+        x: x.ok_or("missing x")?,
+        y: y.ok_or("missing y")?,
+    })
+}
+
+# async fn example() -> openkache::Result<()> {
+let client = Client::connect("127.0.0.1:4433").await?;
+let point = Point { x: 3, y: 4 };
 let point_codec = FunctionCodec::new(encode_point, decode_point);
 client.set_with("point:1", &point, &point_codec).await?;
-let point = client.get_with::<Point, _>("point:1", &point_codec).await?;
+assert_eq!(
+    client.get_with("point:1", &point_codec).await?,
+    openkache::GetResult::Found(point),
+);
+# client.close().await?;
+# Ok(())
+# }
 ```
 
 Opaque formats are intentionally not interpreted by the client: encode them
@@ -173,8 +233,14 @@ write. Serde serialization completes before network admission.
 ### `client.get_with` and `client.set_with`
 
 Use an application-provided `ValueCodec<T>` for a non-Serde structured format.
-The codec operates on `Value`, so it does not alter wire admission or mutation
-semantics.
+`FunctionCodec::new(encode, decode)` is the convenient form when two functions
+are enough; implement `ValueCodec<T>` directly when the codec needs state or
+more control. The codec operates on `Value`, so it does not alter wire
+admission or mutation semantics. Encoding happens before admission, so a
+codec error cannot produce `Error::UnknownMutation`; decoding happens after
+retrieval and leaves `GetResult::Missing` unchanged. The value type is normally
+inferred from the codec, so no turbofish is needed. If inference is ambiguous,
+annotate the result as `GetResult<Point>`.
 
 ### `client.delete(key)`
 

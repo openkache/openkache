@@ -18,11 +18,6 @@ mod internal_value;
 
 mod native;
 
-/// Serde is re-exported so native value types can derive its traits without
-/// adding a second direct dependency in the application.
-pub extern crate serde;
-pub use serde::{Deserialize, Serialize};
-
 mod maintained {
     use std::fmt;
 
