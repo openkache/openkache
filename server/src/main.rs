@@ -1,5 +1,5 @@
 #[cfg(all(feature = "alloc-mimalloc", feature = "alloc-jemalloc"))]
-compile_error!("allocator feature는 하나만 선택해야 합니다");
+compile_error!("only one allocator feature may be enabled");
 
 #[cfg(all(feature = "alloc-mimalloc", not(feature = "alloc-jemalloc")))]
 #[global_allocator]
@@ -25,16 +25,19 @@ use std::net::TcpListener;
 use std::{env, io, mem, thread};
 
 use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
-// 네트워크 만들고
-// storage 만들고
-// 네트워크랑 storage 사이에 spsc 만들고
+// Create the network layer.
+// Create storage.
+// Create SPSC queues between the network and storage layers.
 
-// 이 아래는 network.run()
-// sqe - > accept 새로 client
-// sqe 읽은거 보고서 차례대로 하나식 resp 파싱 -> box 로 key or value 파싱 -> request -> spsc 에  push 하기
-// 어떤 조건이 맞춰지면 그만 읽고 (ex 더 읽을게 없음. or 아무거나 response spsc 꽉참 등등)
-// 그때 response spsc -> client vecdeque 에 넣어주기. (여기 모두 zero copy) + value 를 Arc 로 할지 말지 고민. 우선은 Arc로..
-// sqe 에 새로 내보낼거 write_state client vecdeque +  새로 read 할거 보내야 하는데 bucket write_pos 부터로 잡고 만약 꽉찼으면 마지막 read_pos 까지 shift
+// Everything below is handled by network.run().
+// An accept SQE creates a new client.
+// Parse each completed read SQE as RESP, box the key or value, create a request,
+// and push it to the SPSC queue.
+// Stop reading when no input remains or a response SPSC queue is full.
+// Move responses from the SPSC queue into the client's VecDeque without copying.
+// Values currently use Arc-backed ownership.
+// Submit queued writes and reads, starting at the buffer write position and
+// shifting up to the last read position when the buffer is full.
 
 fn pin_current_thread(cpu: usize) -> io::Result<()> {
     let mut cpu_set: libc::cpu_set_t = unsafe { mem::zeroed() };

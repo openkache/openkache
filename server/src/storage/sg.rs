@@ -1,18 +1,18 @@
-//! 연속된 4KiB Bucket들을 소유하고 key의 Bucket 후보를 고르는 mutable SG다.
+//! A mutable SG that owns contiguous 4 KiB Buckets and selects Bucket candidates for keys.
 
 use super::StorageKey;
 use super::bucket::{BUCKET_BYTES, Bucket, BucketValue};
 
-/// 아직 SSD에 flush되지 않아 Item을 추가하거나 교체할 수 있는 SG다.
+/// An SG that has not yet been flushed to SSD, so Items can still be added or replaced.
 pub(crate) struct MutableSg {
-    /// SG를 이루는 연속된 4KiB Bucket 배열이다.
+    /// The contiguous array of 4 KiB Buckets that forms the SG.
     buckets: Box<[Bucket]>,
-    /// key 하나가 선택할 수 있는 Bucket hash 후보 개수다.
+    /// Number of Bucket hash candidates available to each key.
     bucket_choice_count: u8,
 }
 
 impl MutableSg {
-    /// 빈 Bucket들을 하나의 고정 크기 연속 배열로 할당한다.
+    /// Allocates empty Buckets as one fixed-size contiguous array.
     pub(crate) fn new(bucket_count: usize, bucket_choice_count: u8) -> Self {
         assert!(bucket_count > 0, "an SG must contain at least one Bucket");
         assert!(
@@ -30,8 +30,8 @@ impl MutableSg {
         }
     }
 
-    /// 후보 Bucket 중 Item이 들어갈 수 있는 가장 덜 찬 Bucket에 추가한다.
-    /// 선택한 Bucket을 다시 찾을 수 있는 hash choice 번호를 반환한다.
+    /// Inserts an Item into the least-filled candidate Bucket with sufficient space.
+    /// Returns the hash choice used to locate the selected Bucket again.
     pub(crate) fn insert(
         &mut self,
         storage_key: &StorageKey,
@@ -58,7 +58,7 @@ impl MutableSg {
         Some(bucket_choice)
     }
 
-    /// hash choice가 지정한 Bucket에서 full StorageKey를 확인하고 값을 반환한다.
+    /// Verifies the full StorageKey in the Bucket selected by the hash choice and returns its value.
     pub(crate) fn get(
         &self,
         storage_key: &StorageKey,
@@ -71,7 +71,7 @@ impl MutableSg {
         self.buckets[bucket_index].get(storage_key)
     }
 
-    /// hash choice가 지정한 Bucket에서 같은 key의 값을 교체한다.
+    /// Replaces a value with the same key in the Bucket selected by the hash choice.
     pub(crate) fn replace(
         &mut self,
         storage_key: &StorageKey,
@@ -85,7 +85,7 @@ impl MutableSg {
         self.buckets[bucket_index].replace(storage_key, replacement)
     }
 
-    /// hash choice가 지정한 Bucket에서 같은 key의 Item 하나를 제거한다.
+    /// Removes one Item with the same key from the Bucket selected by the hash choice.
     pub(crate) fn remove(&mut self, storage_key: &StorageKey, bucket_choice: u8) -> bool {
         if bucket_choice >= self.bucket_choice_count {
             return false;
@@ -94,21 +94,22 @@ impl MutableSg {
         self.buckets[bucket_index].remove(storage_key)
     }
 
-    /// io_uring write에 그대로 넘길 수 있는 연속된 SG byte 영역을 반환한다.
+    /// Returns the contiguous SG byte region that can be passed directly to an io_uring write.
     pub(crate) fn as_bytes(&self) -> &[u8] {
         let byte_len = self.buckets.len() * BUCKET_BYTES;
-        // SAFETY: Bucket은 정확히 4KiB이고 padding 없이 연속 할당되어 있다.
+        // SAFETY: Each Bucket is exactly 4 KiB and the Buckets are allocated
+        // contiguously without padding.
         unsafe { std::slice::from_raw_parts(self.buckets.as_ptr().cast(), byte_len) }
     }
 
-    /// 할당은 그대로 두고 모든 Bucket을 비운다.
+    /// Clears every Bucket while retaining the allocation.
     pub(crate) fn clear(&mut self) {
         for bucket in &mut self.buckets {
             *bucket = Bucket::new();
         }
     }
 
-    /// StorageKey와 hash choice로 이 SG 안의 Bucket index를 계산한다.
+    /// Computes a Bucket index within this SG from a StorageKey and hash choice.
     pub(crate) fn bucket_index_for_choice(
         &self,
         storage_key: &StorageKey,

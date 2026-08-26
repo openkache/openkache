@@ -4,12 +4,12 @@
       value_bytes  = "hello"
       ending_bytes = "\r\n"
 
-  GET 없는 키:
+  GET missing key:
       header_bytes = "$-1\r\n"
       value_bytes  = None
       ending_bytes = ""
 
-  SET 성공:
+  Successful SET:
       header_bytes = "+OK\r\n"
       value_bytes  = None
       ending_bytes = ""
@@ -56,7 +56,7 @@ $5\r\nvalue\r\n
 pub(super) struct StatefulRespParser {
     state: State,
     arg_count: usize,   // 3
-    args: Vec<Vec<u8>>, // ["SET", "key"] -> len(args) == arg_count 에서 break
+    args: Vec<Vec<u8>>, // ["SET", "key"] -> break when len(args) == arg_count
     current_arg: CurrentArg,
 }
 

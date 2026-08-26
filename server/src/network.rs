@@ -218,7 +218,7 @@ impl Network {
             return;
         }
 
-        // SAFETY: accept CQE가 반환한 새 FD의 소유권을 TcpStream으로 옮긴다.
+        // SAFETY: Transfer ownership of the new FD returned by the accept CQE to TcpStream.
         let stream = unsafe { TcpStream::from_raw_fd(accepted_fd) };
 
         if self.clients.len() == MAX_CLIENTS {

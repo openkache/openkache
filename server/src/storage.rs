@@ -37,7 +37,7 @@ const STORAGE_FILE_PATH: &str = "openkache.data";
 const SG_BYTES: u64 = (BUCKETS_PER_SG * BUCKET_BYTES) as u64;
 const STORAGE_FILE_BYTES: u64 = STORAGE_SG_COUNT as u64 * SG_BYTES;
 
-/// Storage와 Bucket 안에서 사용하는 고정 크기 key다.
+/// A fixed-size key used by Storage and Bucket.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StorageKey([u8; STORAGE_KEY_BYTES]);
@@ -198,7 +198,7 @@ impl Storage {
         }
     }
 
-    /// await이 없는 구간이다. 관찰한 위치를 조건부로 바꾸고 필요하면 oldest를 flush한다.
+    /// An await-free section that conditionally updates the observed location and flushes the oldest SG when needed.
     fn commit_set(
         &mut self,
         key: &StorageKey,
@@ -290,7 +290,7 @@ impl Storage {
         }
     }
 
-    /// await 전에 관찰한 table 위치가 그대로일 때 Entry 하나만 제거한다.
+    /// Removes one entry only when its table location is unchanged from before the await.
     fn commit_delete(
         &mut self,
         key: &StorageKey,
@@ -302,8 +302,8 @@ impl Storage {
                 return CommitDelete::Retry;
             }
 
-            // Mutable SG의 바이트는 다시 SET할 때 같은 bucket에서 과거 값과
-            // 충돌하지 않도록 회수한다. SSD/Flushing SG는 table에서만 제거한다.
+            // Reclaim bytes from a Mutable SG so a later SET cannot conflict with
+            // the stale value in the same bucket. SSD and Flushing SGs only lose the table entry.
             self.remove_from_mutable_sg(previous, key);
             return CommitDelete::Finished(observation.existed);
         }
@@ -455,7 +455,7 @@ struct WorkerHandle(NonNull<WorkerState>);
 
 impl WorkerHandle {
     fn access<R>(self, operation: impl FnOnce(&mut WorkerState) -> R) -> R {
-        // SAFETY: WorkerState는 고정된 Box 안에 있고 같은 storage thread에서만 접근한다.
+        // SAFETY: WorkerState remains in a pinned Box and is accessed only by its storage thread.
         unsafe { operation(&mut *self.0.as_ptr()) }
     }
 }
