@@ -59,6 +59,9 @@ release:
 export SERVER_RELEASE_VERSION=0.1.0
 ```
 
+For a server-only release, skip the client manifest, registry, build, tag, and
+consumer commands below and run only the blocks marked **server-only**.
+
 ## 1. Prepare the release (stop before publication)
 
 All commands in this section run from a clean checkout of the public
@@ -206,7 +209,7 @@ tar -tzf "target/package/openkache-${RELEASE_VERSION}.crate" \
 tar -tzf "target/package/openkache-${RELEASE_VERSION}.crate" \
   | grep -F "openkache-${RELEASE_VERSION}/src/lib.rs"
 
-# Rust server: run the same checks without uploading anything.
+# Rust server (server-only): run the same checks without uploading anything.
 cargo metadata \
   --manifest-path server/Cargo.toml \
   --locked \
