@@ -59,7 +59,7 @@ cargo add serde --features derive
 ```
 
 ```rust
-use openkache::Client;
+use openkache::{Client, GetResult};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -73,11 +73,22 @@ async fn example() -> openkache::Result<()> {
     client
         .set_serde("user:1", &User { id: 7, name: "Ada".into() })
         .await?;
-    let user = client.get_serde::<User>("user:1").await?;
+    let result: GetResult<User> = client.get_serde("user:1").await?;
+    let user: User = match result {
+        GetResult::Found(user) => user,
+        GetResult::Missing => {
+            return Err(openkache::Error::Core("user is missing".into()));
+        }
+    };
+    assert_eq!(user.id, 7);
+    assert_eq!(user.name, "Ada");
     client.close().await?;
     Ok(())
 }
 ```
+
+`get_serde` returns `Result<GetResult<T>>`; in this example, `T` is `User`,
+so a hit is `GetResult::Found(User)`.
 
 `GetResult::Missing` remains distinct from a stored `null`; a stored `null`
 decodes as `None` for `Option<T>`. Integers are range-checked, floating-point
