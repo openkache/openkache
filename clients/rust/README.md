@@ -68,13 +68,15 @@ struct User {
     name: String,
 }
 
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-client.set_serde("user:1", &User { id: 7, name: "Ada".into() }).await?;
-let user = client.get_serde::<User>("user:1").await?;
-# client.close().await?;
-# Ok(())
-# }
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client
+        .set_serde("user:1", &User { id: 7, name: "Ada".into() })
+        .await?;
+    let user = client.get_serde::<User>("user:1").await?;
+    client.close().await?;
+    Ok(())
+}
 ```
 
 `GetResult::Missing` remains distinct from a stored `null`; a stored `null`
@@ -146,18 +148,18 @@ fn decode_point(value: Value) -> Result<Point, &'static str> {
     })
 }
 
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-let point = Point { x: 3, y: 4 };
-let point_codec = FunctionCodec::new(encode_point, decode_point);
-client.set_with("point:1", &point, &point_codec).await?;
-assert_eq!(
-    client.get_with("point:1", &point_codec).await?,
-    openkache::GetResult::Found(point),
-);
-# client.close().await?;
-# Ok(())
-# }
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    let point = Point { x: 3, y: 4 };
+    let point_codec = FunctionCodec::new(encode_point, decode_point);
+    client.set_with("point:1", &point, &point_codec).await?;
+    assert_eq!(
+        client.get_with("point:1", &point_codec).await?,
+        openkache::GetResult::Found(point),
+    );
+    client.close().await?;
+    Ok(())
+}
 ```
 
 ## Custom binary payloads
@@ -186,32 +188,33 @@ struct Session {
     flags: u8,
 }
 
-# fn invalid_data(message: &'static str) -> Box<dyn std::error::Error> {
-#     std::io::Error::new(std::io::ErrorKind::InvalidData, message).into()
-# }
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let client = Client::connect("127.0.0.1:4433").await?;
-let session = Session {
-    user_id: 7,
-    flags: 0b101,
-};
-let payload = bincode::serde::encode_to_vec(&session, config::standard())?;
-client
-    .set("session:1", Value::bytes(payload))
-    .await?;
+fn invalid_data(message: &'static str) -> Box<dyn std::error::Error> {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message).into()
+}
 
-let stored = client.get("session:1").await?;
-let bytes = match &stored {
-    GetResult::Found(Value::Bytes(bytes)) => bytes,
-    GetResult::Found(_) => return Err(invalid_data("expected opaque bytes")),
-    GetResult::Missing => return Err(invalid_data("session is missing")),
-};
-let (decoded, _bytes_read): (Session, usize) =
-    bincode::serde::decode_from_slice(bytes, config::standard())?;
-assert_eq!(decoded, session);
-# client.close().await?;
-# Ok(())
-# }
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    let session = Session {
+        user_id: 7,
+        flags: 0b101,
+    };
+    let payload = bincode::serde::encode_to_vec(&session, config::standard())?;
+    client
+        .set("session:1", Value::bytes(payload))
+        .await?;
+
+    let stored = client.get("session:1").await?;
+    let bytes = match &stored {
+        GetResult::Found(Value::Bytes(bytes)) => bytes,
+        GetResult::Found(_) => return Err(invalid_data("expected opaque bytes")),
+        GetResult::Missing => return Err(invalid_data("session is missing")),
+    };
+    let (decoded, _bytes_read): (Session, usize) =
+        bincode::serde::decode_from_slice(bytes, config::standard())?;
+    assert_eq!(decoded, session);
+    client.close().await?;
+    Ok(())
+}
 ```
 
 Application-owned payloads normally use ordinary `get`/`set`. A
