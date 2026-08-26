@@ -2,7 +2,9 @@ name: Release OpenKache Rust client crate
 
 # Releases are deliberately manual. Dispatch this workflow from the exact
 # client-v<version> tag only after the protected crates-io-release environment
-# has approved the run and configured the CARGO_REGISTRY_TOKEN secret.
+# has approved the run. The first publication uses its bootstrap
+# CARGO_REGISTRY_TOKEN secret; later publications use crates.io Trusted
+# Publishing through GitHub Actions OIDC.
 on:
   workflow_dispatch:
     inputs:
@@ -201,6 +203,7 @@ jobs:
     environment: crates-io-release
     permissions:
       contents: read
+      id-token: write
     timeout-minutes: 20
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -315,7 +318,19 @@ jobs:
             exit 1
           fi
 
+      - name: Authenticate with crates.io Trusted Publishing
+        id: crates-auth
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token || env.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
+          [[ -n "${CARGO_REGISTRY_TOKEN}" ]] || {
+            echo "No crates.io credential is available." >&2
+            echo "Configure crates.io Trusted Publishing or add the bootstrap CARGO_REGISTRY_TOKEN secret." >&2
+            exit 1
+          }
           cargo publish --manifest-path clients/rust/Cargo.toml --locked --token "${CARGO_REGISTRY_TOKEN}"
