@@ -393,6 +393,56 @@ let value = Value::map(vec![
 client.set("stats", value).await?;
 ```
 
+Inspect a structured value with `ValueKind` and borrowed accessors:
+
+```rust
+use openkache::{Client, GetResult, Value, ValueKind};
+
+#[tokio::main]
+async fn main() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    let profile = Value::map(vec![
+        (Value::text("name"), Value::text("Ada")),
+        (Value::text("visits"), Value::integer(3)),
+        (Value::text("active"), Value::from(true)),
+    ])
+    .map_err(|error| openkache::Error::Core(error.to_string()))?;
+    client.set("profile", profile).await?;
+
+    let result: GetResult<Value> = client.get("profile").await?;
+    let profile = match result {
+        GetResult::Found(value) => value,
+        GetResult::Missing => {
+            return Err(openkache::Error::Core("profile is missing".into()));
+        }
+    };
+    assert_eq!(profile.kind(), ValueKind::Map);
+    assert_eq!(
+        profile.map_get("name").and_then(Value::as_str),
+        Some("Ada"),
+    );
+    assert_eq!(
+        profile
+            .map_get("visits")
+            .and_then(Value::as_integer)
+            .and_then(|value| value.as_i128()),
+        Some(3),
+    );
+    assert_eq!(
+        profile.map_get("active").and_then(Value::as_bool),
+        Some(true),
+    );
+    assert_eq!(profile.map_get("name").and_then(Value::as_bool), None);
+
+    client.close().await?;
+    Ok(())
+}
+```
+
+`map_get` and the typed accessors do not coerce values: a missing key or a
+mismatched type returns `None`, so reading the text `name` with `as_bool`
+above is safe.
+
 For exact integer and float construction, use `Integer`, `Sign`,
 `Float`, and `FloatWidth`. `ValueLimits` bounds bytes, depth, item count, and
 integer magnitude. `ValueError` reports value validation and encoding errors;

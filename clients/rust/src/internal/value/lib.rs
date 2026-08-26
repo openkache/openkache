@@ -432,6 +432,33 @@ impl Float {
     }
 }
 
+/// The logical kind of a [`Value`].
+///
+/// A [`ValueKind::Float`] retains the width in the borrowed [`Float`] returned
+/// by [`Value::as_float`]. The kind intentionally describes the value family;
+/// it does not coerce integers, floats, text, or bytes into one another.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ValueKind {
+    /// A language-level undefined value.
+    Undefined,
+    /// A null value.
+    Null,
+    /// A Boolean value.
+    Boolean,
+    /// An exact arbitrary-precision integer.
+    Integer,
+    /// An IEEE-754 value whose width and raw bits are retained by [`Float`].
+    Float,
+    /// A well-formed UTF-8 string.
+    TextString,
+    /// An uninterpreted byte string.
+    Bytes,
+    /// An ordered sequence of values.
+    Array,
+    /// Ordered key/value entries.
+    Map,
+}
+
 /// A logical value in the cross-language model.
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -490,6 +517,25 @@ impl Drop for Value {
 }
 
 impl Value {
+    /// Returns the logical kind of this value.
+    ///
+    /// `Float` covers binary16, binary32, and binary64 values. Inspect the
+    /// borrowed [`Float`] from [`Value::as_float`] when the wire width or exact
+    /// IEEE-754 bits matter.
+    pub const fn kind(&self) -> ValueKind {
+        match self {
+            Self::Undefined => ValueKind::Undefined,
+            Self::Null => ValueKind::Null,
+            Self::Boolean(_) => ValueKind::Boolean,
+            Self::Integer(_) => ValueKind::Integer,
+            Self::Float(_) => ValueKind::Float,
+            Self::TextString(_) => ValueKind::TextString,
+            Self::Bytes(_) => ValueKind::Bytes,
+            Self::Array(_) => ValueKind::Array,
+            Self::Map(_) => ValueKind::Map,
+        }
+    }
+
     /// Constructs an exact arbitrary integer value.
     pub fn integer(value: impl Into<Integer>) -> Self {
         Self::Integer(value.into())
@@ -540,11 +586,195 @@ impl Value {
         Ok(Self::Map(entries))
     }
 
-    /// Returns a borrowed view of map entries.
+    /// Returns the Boolean without coercion.
+    ///
+    /// This returns `None` for every non-Boolean value. In particular, null,
+    /// integers, and non-empty strings are not treated as truthy values.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Borrows the exact arbitrary-precision integer.
+    ///
+    /// No narrowing or floating-point conversion is performed. Use
+    /// [`Integer::as_i128`] or [`Integer::as_u128`] when a bounded primitive is
+    /// required.
+    pub fn as_integer(&self) -> Option<&Integer> {
+        match self {
+            Self::Integer(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Borrows the exact IEEE-754 value.
+    ///
+    /// The returned [`Float`] preserves its binary16, binary32, or binary64
+    /// width and raw bits. This accessor does not convert to `f64`, round, or
+    /// reject non-canonical IEEE-754 bit patterns; encoding still validates
+    /// the existing [`Float`] invariant.
+    pub fn as_float(&self) -> Option<&Float> {
+        match self {
+            Self::Float(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Borrows UTF-8 text without allocating.
+    ///
+    /// Byte strings are deliberately excluded; use [`Value::as_bytes`] for
+    /// uninterpreted bytes.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::TextString(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Borrows the exact uninterpreted bytes without allocating.
+    ///
+    /// The bytes are not required to be UTF-8 and are never decoded or
+    /// normalized by this accessor.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Borrows an ordered array without cloning its children.
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Self::Array(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Borrows ordered map entries without cloning keys or values.
+    ///
+    /// Entries retain the insertion order supplied to [`Value::map`] (or
+    /// decoded from the wire).
     pub fn as_map(&self) -> Option<&[(Value, Value)]> {
         match self {
             Self::Map(entries) => Some(entries),
             _ => None,
+        }
+    }
+
+    /// Looks up a map value using model equality.
+    ///
+    /// `key` may be any type convertible to [`Value`], including text, bytes,
+    /// booleans, and integer or floating-point primitives. Matching remains
+    /// exact: an integer is not equal to a float with the same numerical
+    /// value, and text is not equal to bytes containing the same UTF-8
+    /// sequence. The map is scanned in insertion order and the returned value
+    /// is borrowed from the original entry, so this operation does not clone
+    /// map values. `None` means that this value is not a map or that no entry
+    /// has the requested key; a stored `Value::Null` is returned as `Some`.
+    pub fn map_get<K>(&self, key: K) -> Option<&Value>
+    where
+        K: Into<Value>,
+    {
+        let entries = self.as_map()?;
+        let key = key.into();
+        entries
+            .iter()
+            .find_map(|(entry_key, value)| (entry_key == &key).then_some(value))
+    }
+
+    /// Moves the exact arbitrary-precision integer out of this value.
+    ///
+    /// This avoids cloning the integer magnitude. It returns `None` for every
+    /// other kind.
+    pub fn into_integer(self) -> Option<Integer> {
+        let mut value = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `value` is kept in `ManuallyDrop`; on the matching branch
+        // the integer is read exactly once and the shell is intentionally not
+        // dropped. On the mismatch branch the original value is dropped
+        // normally, including nested containers.
+        unsafe {
+            match &mut *value {
+                Self::Integer(integer) => Some(std::ptr::read(integer)),
+                _ => {
+                    std::mem::ManuallyDrop::drop(&mut value);
+                    None
+                }
+            }
+        }
+    }
+
+    /// Moves UTF-8 text out of this value without cloning.
+    ///
+    /// It returns `None` for every other kind.
+    pub fn into_string(self) -> Option<String> {
+        let mut value = std::mem::ManuallyDrop::new(self);
+        // SAFETY: See [`Value::into_integer`]. The matching string is read
+        // exactly once and its containing shell is not dropped afterward.
+        unsafe {
+            match &mut *value {
+                Self::TextString(text) => Some(std::ptr::read(text)),
+                _ => {
+                    std::mem::ManuallyDrop::drop(&mut value);
+                    None
+                }
+            }
+        }
+    }
+
+    /// Moves uninterpreted bytes out of this value without cloning.
+    ///
+    /// It returns `None` for every other kind.
+    pub fn into_bytes(self) -> Option<Vec<u8>> {
+        let mut value = std::mem::ManuallyDrop::new(self);
+        // SAFETY: See [`Value::into_integer`]. The matching byte vector is
+        // read exactly once and its containing shell is not dropped afterward.
+        unsafe {
+            match &mut *value {
+                Self::Bytes(bytes) => Some(std::ptr::read(bytes)),
+                _ => {
+                    std::mem::ManuallyDrop::drop(&mut value);
+                    None
+                }
+            }
+        }
+    }
+
+    /// Moves an ordered array out of this value without cloning its children.
+    ///
+    /// It returns `None` for every other kind.
+    pub fn into_array(self) -> Option<Vec<Value>> {
+        let mut value = std::mem::ManuallyDrop::new(self);
+        // SAFETY: See [`Value::into_integer`]. The matching vector is read
+        // exactly once and its containing shell is not dropped afterward.
+        unsafe {
+            match &mut *value {
+                Self::Array(values) => Some(std::ptr::read(values)),
+                _ => {
+                    std::mem::ManuallyDrop::drop(&mut value);
+                    None
+                }
+            }
+        }
+    }
+
+    /// Moves an ordered map out of this value without cloning its entries.
+    ///
+    /// Entry order and the existing scalar-key validation are preserved. It
+    /// returns `None` for every other kind.
+    pub fn into_map(self) -> Option<Vec<(Value, Value)>> {
+        let mut value = std::mem::ManuallyDrop::new(self);
+        // SAFETY: See [`Value::into_integer`]. The matching vector is read
+        // exactly once and its containing shell is not dropped afterward.
+        unsafe {
+            match &mut *value {
+                Self::Map(entries) => Some(std::ptr::read(entries)),
+                _ => {
+                    std::mem::ManuallyDrop::drop(&mut value);
+                    None
+                }
+            }
         }
     }
 
