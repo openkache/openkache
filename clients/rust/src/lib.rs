@@ -16,16 +16,22 @@ mod internal_protocol;
 #[allow(dead_code, unexpected_cfgs, unused_imports)]
 mod internal_value;
 
+mod native;
+
 mod maintained {
     use std::fmt;
 
     use super::internal_core as core;
+    use super::native::{ValueCodec as ValueCodecTrait, from_value, to_value};
     use core::value::{Compression, Encryption};
     use core::{GetOutcome as CoreGetOutcome, Operation, SetOutcome as CoreSetOutcome};
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
 
     pub use super::internal_value::{
         Error as ValueError, Float, FloatWidth, Integer, Limits as ValueLimits, Sign, Value,
     };
+    pub use super::native::{FunctionCodec, SerdeCodec, ValueCodec};
     pub use core::KeyError;
     pub use core::TypedKey;
 
@@ -75,6 +81,18 @@ mod maintained {
         /// client uses unconditional writes.
         #[error("server returned an unsupported set outcome")]
         UnsupportedSetOutcome,
+        /// Serde serialization failed before the request was admitted.
+        #[error("serde serialization failed: {0}")]
+        SerdeSerialize(String),
+        /// Serde deserialization failed after the value was retrieved.
+        #[error("serde deserialization failed: {0}")]
+        SerdeDeserialize(String),
+        /// A custom [`ValueCodec`] failed before a write was admitted.
+        #[error("value codec encoding failed: {0}")]
+        CodecEncode(String),
+        /// A custom [`ValueCodec`] failed after a value was retrieved.
+        #[error("value codec decoding failed: {0}")]
+        CodecDecode(String),
     }
 
     /// Result alias for client operations.
@@ -130,9 +148,6 @@ mod maintained {
         }
     }
 
-    #[cfg(feature = "quic-compio")]
-    use core::LocalProtectedClient;
-    #[cfg(feature = "quic-quinn")]
     use core::ProtectedClient;
 
     /// A connected OpenKache client.
@@ -168,6 +183,20 @@ mod maintained {
         /// The profile intentionally disables certificate verification for
         /// local development. It still requires a TLS 1.3 handshake and never
         /// falls back to plaintext. Do not use this trust profile in production.
+        ///
+        /// # Arguments
+        ///
+        /// * `endpoint` - A `host:port` endpoint. IPv6 endpoints use
+        ///   `[host]:port`.
+        ///
+        /// # Returns
+        ///
+        /// A connected [`Client`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Core`] when parsing the endpoint, connecting, or
+        /// completing the TLS handshake fails.
         pub async fn connect(endpoint: impl AsRef<str>) -> Result<Self> {
             let endpoint = endpoint.as_ref().parse().map_err(map_core_error)?;
             let inner = ProtectedClient::builder(
@@ -250,104 +279,160 @@ mod maintained {
                 })
         }
 
-        /// Deletes one key and reports whether an item was removed.
-        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
-            self.gate0_client()
-                .await?
-                .delete(key)
-                .await
-                .map_err(map_core_error)
-                .map(|outcome| match outcome {
-                    core::DeleteOutcome::Deleted => true,
-                    core::DeleteOutcome::NotFound => false,
-                })
-        }
-
-        /// Idempotently closes the client and waits for admitted work to
-        /// settle before releasing the transport.
-        pub async fn close(&self) -> Result<()> {
-            self.inner.close().await.map_err(map_core_error)
-        }
-    }
-
-    /// A connected Gate 0 client running on Compio.
-    ///
-    /// `CompioClient` has the same operation and value contract as [`Client`],
-    /// but it does not create or require a Tokio runtime. Call it from an
-    /// active Compio runtime, for example one created with
-    /// `compio::runtime::Runtime::new()`.
-    #[cfg(feature = "quic-compio")]
-    #[derive(Clone)]
-    pub struct CompioClient {
-        inner: LocalProtectedClient,
-    }
-
-    #[cfg(feature = "quic-compio")]
-    impl CompioClient {
-        async fn gate0_client(&self) -> Result<&LocalProtectedClient> {
-            let namespace_id = self
-                .inner
-                .raw()
-                .ensure_namespace_id()
-                .await
-                .map_err(map_core_error)?;
-            if namespace_id != core::contract::GATE0_NAMESPACE_ID {
-                return Err(Error::Core(format!(
-                    "server selected namespace {namespace_id}, expected Gate 0 namespace {}",
-                    core::contract::GATE0_NAMESPACE_ID,
-                )));
-            }
-            Ok(&self.inner)
-        }
-
-        /// Connects using the fixed Gate 0 development profile on Compio.
+        /// Retrieves one value and decodes it into a Serde type.
         ///
-        /// The profile intentionally disables certificate verification for
-        /// local development. It still requires a TLS 1.3 handshake and never
-        /// falls back to plaintext. Do not use this trust profile in production.
-        pub async fn connect(endpoint: impl AsRef<str>) -> Result<Self> {
-            let endpoint = endpoint.as_ref().parse().map_err(map_core_error)?;
-            let inner = LocalProtectedClient::builder(
-                endpoint,
-                core::DataProtectionKey::from_bytes(core::contract::GATE0_ITEM_ID_ROOT),
-            )
-            .server_trust(core::ServerTrust::Insecure)
-            .compression(Compression::Disabled)
-            .encryption(Encryption::Unprotected)
-            .connect()
-            .await
-            .map_err(map_core_error)?;
-            Ok(Self { inner })
+        /// Deserialization is performed against the same lossless structured
+        /// value model as [`Client::set`]. A missing key remains
+        /// [`GetResult::Missing`], while a stored null decodes as `None` for
+        /// an `Option<T>`.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        ///
+        /// # Returns
+        ///
+        /// `Ok(GetResult::Found(value))` for a value that decodes into `T`, or
+        /// `Ok(GetResult::Missing)` when the key does not exist.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::SerdeDeserialize`] when the stored value cannot
+        /// be represented by `T`, and [`Error::Core`] for transport,
+        /// protocol, key, or value failures.
+        pub async fn get_serde<T: DeserializeOwned>(
+            &self,
+            key: impl Into<TypedKey>,
+        ) -> Result<GetResult<T>> {
+            match self.get(key).await? {
+                GetResult::Missing => Ok(GetResult::Missing),
+                GetResult::Found(value) => from_value(value)
+                    .map(GetResult::Found)
+                    .map_err(|error| Error::SerdeDeserialize(error.to_string())),
+            }
         }
 
-        /// Retrieves one lossless structured value.
-        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetResult<Value>> {
-            self.gate0_client()
-                .await?
-                .get_structured(key)
-                .await
-                .map(|outcome| match outcome {
-                    CoreGetOutcome::Found(value) => GetResult::Found(value),
-                    CoreGetOutcome::NotFound => GetResult::Missing,
-                })
-                .map_err(map_core_error)
+        /// Serializes a Serde value and stores it with an unconditional
+        /// write.
+        ///
+        /// Serde serialization completes before the request is admitted, so
+        /// a serialization error cannot produce [`Error::UnknownMutation`].
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        /// * `value` - The value to serialize.
+        ///
+        /// # Returns
+        ///
+        /// [`SetOutcome::Created`] for a new item or
+        /// [`SetOutcome::Replaced`] when an existing item is overwritten.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::SerdeSerialize`] when `value` cannot be represented
+        /// by the structured value model. Transport and protocol failures use
+        /// the same errors as [`Client::set`].
+        pub async fn set_serde<T: Serialize>(
+            &self,
+            key: impl Into<TypedKey>,
+            value: T,
+        ) -> Result<SetOutcome> {
+            let value =
+                to_value(&value).map_err(|error| Error::SerdeSerialize(error.to_string()))?;
+            self.set(key, value).await
         }
 
-        /// Stores one lossless structured value using an unconditional write.
-        pub async fn set(&self, key: impl Into<TypedKey>, value: Value) -> Result<SetOutcome> {
-            self.gate0_client()
-                .await?
-                .set_structured(key, value, core::SetOptions::new())
-                .await
-                .map_err(map_core_error)
-                .and_then(|outcome| match outcome {
-                    CoreSetOutcome::Created => Ok(SetOutcome::Created),
-                    CoreSetOutcome::Replaced => Ok(SetOutcome::Replaced),
-                    CoreSetOutcome::NotStored => Err(Error::UnsupportedSetOutcome),
-                })
+        /// Retrieves one value and decodes it with an application codec.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        /// * `codec` - The application codec used to decode the stored
+        ///   structured value.
+        ///
+        /// # Returns
+        ///
+        /// `Ok(GetResult::Found(value))` when the item exists and decodes
+        /// successfully, or `Ok(GetResult::Missing)` when it does not.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::CodecDecode`] when `codec` rejects the stored
+        /// value, or the same transport and protocol errors as [`Client::get`].
+        pub async fn get_with<T, C>(
+            &self,
+            key: impl Into<TypedKey>,
+            codec: &C,
+        ) -> Result<GetResult<T>>
+        where
+            C: ValueCodecTrait<T>,
+        {
+            match self.get(key).await? {
+                GetResult::Missing => Ok(GetResult::Missing),
+                GetResult::Found(value) => codec
+                    .decode(value)
+                    .map(GetResult::Found)
+                    .map_err(|error| Error::CodecDecode(error.to_string())),
+            }
+        }
+
+        /// Encodes a native value with an application codec and stores it with
+        /// an unconditional write.
+        ///
+        /// Encoding completes before request admission, so a codec failure
+        /// cannot produce [`Error::UnknownMutation`].
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        /// * `value` - The value to encode.
+        /// * `codec` - The application codec used to encode `value`.
+        ///
+        /// # Returns
+        ///
+        /// [`SetOutcome::Created`] for a new item or
+        /// [`SetOutcome::Replaced`] when an existing item is overwritten.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::CodecEncode`] when `codec` rejects `value`, or the
+        /// same transport and mutation errors as [`Client::set`].
+        pub async fn set_with<T, C>(
+            &self,
+            key: impl Into<TypedKey>,
+            value: &T,
+            codec: &C,
+        ) -> Result<SetOutcome>
+        where
+            C: ValueCodecTrait<T>,
+        {
+            let value = codec
+                .encode(value)
+                .map_err(|error| Error::CodecEncode(error.to_string()))?;
+            self.set(key, value).await
         }
 
         /// Deletes one key and reports whether an item was removed.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        ///
+        /// # Returns
+        ///
+        /// `Ok(true)` when an item was removed, or `Ok(false)` when the key did
+        /// not exist.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error`] when the connection, protocol, key, or mutation
+        /// operation fails.
         pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
             self.gate0_client()
                 .await?
@@ -362,15 +447,18 @@ mod maintained {
 
         /// Idempotently closes the client and waits for admitted work to
         /// settle before releasing the transport.
+        ///
+        /// # Returns
+        ///
+        /// `Ok(())` after the connection is closed.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Core`] when closing the connection fails.
         pub async fn close(&self) -> Result<()> {
             self.inner.close().await.map_err(map_core_error)
         }
     }
-
-    /// Compatibility name for callers that use the core's local-runtime
-    /// terminology. Prefer [`CompioClient`] in new code.
-    #[cfg(feature = "quic-compio")]
-    pub type LocalClient = CompioClient;
 }
 
 pub use maintained::*;
