@@ -1,5 +1,8 @@
 .direnv/
 
+# Bazel convenience symlinks generated in the workspace.
+/bazel-*
+
 *.local.*
 *_local/
 
