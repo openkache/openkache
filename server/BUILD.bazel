@@ -32,7 +32,7 @@ rust_binary(
     crate_root = "src/main.rs",
     edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache-server"),
-    deps = ["//protocol:openkache_protocol"] + cargo_deps("server"),
+    deps = cargo_deps("server"),
 )
 
 alias(

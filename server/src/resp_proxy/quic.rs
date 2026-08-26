@@ -3,7 +3,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 
 use super::resp_backend::RespBackend;
-use openkache_protocol::{
+use crate::protocol::{
     ALPN, MAX_REQUEST_FRAME_BYTES, OpaqueRequestFrame, Opcode, wire_request_layout,
 };
 use quinn::crypto::rustls::QuicServerConfig;

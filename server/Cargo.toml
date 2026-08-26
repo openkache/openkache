@@ -7,10 +7,11 @@ license = "AGPL-3.0-or-later"
 readme = "README.md"
 repository = "https://github.com/openkache/openkache"
 homepage = "https://openkache.com"
+documentation = "https://docs.rs/openkache-server"
 keywords = ["cache", "server", "quic", "resp", "openkache"]
 categories = ["database", "network-programming"]
 rust-version = "1.85"
-publish = false
+include = ["Cargo.toml", "README.md", "src/**/*.rs"]
 
 [[bin]]
 name = "openkache-server"
@@ -28,13 +29,16 @@ uring-defer-taskrun = []
 blake3 = "*"
 compio = { version = "*", features = ["fs"] }
 # Cargo.lock retains the tested release that provides the required registration API.
+crossbeam-queue = "*"
 io-uring = "*"
 libc = "*"
 mimalloc = { version = "*", optional = true }
-openkache-protocol = { version = "*", path = "../protocol" }
 quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
 slab = "*"
+smallvec = { version = "*", features = ["const_new"] }
 tikv-jemallocator = { version = "*", optional = true }
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"] }
+thiserror = "*"
+vu128 = "*"

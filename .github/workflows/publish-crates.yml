@@ -1,10 +1,10 @@
-name: Release OpenKache Rust client crate
+name: Release OpenKache Rust crates
 
 # Releases are deliberately manual. Dispatch this workflow from the exact
-# client-v<version> tag only after the protected crates-io-release environment
-# has approved the run. The first publication uses its bootstrap
-# CARGO_REGISTRY_TOKEN secret; later publications use crates.io Trusted
-# Publishing through GitHub Actions OIDC.
+# server-v<version> or client-v<version> tag only after the protected
+# crates-io-release environment has approved the run. The first publication
+# uses its bootstrap CARGO_REGISTRY_TOKEN secret; later publications use
+# crates.io Trusted Publishing through GitHub Actions OIDC.
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +13,7 @@ on:
         required: true
         type: choice
         options:
+          - server
           - client
       version:
         description: "Stable crate version copied from the selected Cargo.toml"
@@ -60,13 +61,18 @@ jobs:
         run: |
           set -euo pipefail
           case "${RELEASE_PACKAGE}" in
+            server)
+              expected_tag_prefix="server"
+              manifest_path="server/Cargo.toml"
+              crate_name="openkache-server"
+              ;;
             client)
               expected_tag_prefix="client"
               manifest_path="clients/rust/Cargo.toml"
               crate_name="openkache"
               ;;
             *)
-              echo "Package must be client." >&2
+              echo "Package must be server or client." >&2
               exit 1
               ;;
           esac
@@ -88,7 +94,7 @@ jobs:
             exit 1
           fi
           crate_version="$(
-            cargo metadata --manifest-path "${manifest_path}" --no-deps --format-version 1 |
+            cargo metadata --manifest-path "${manifest_path}" --locked --no-deps --format-version 1 |
               jq -r --arg crate_name "${crate_name}" '.packages[] | select(.name == $crate_name) | .version'
           )"
           if [[ "${crate_version}" != "${RELEASE_VERSION}" ]]; then
@@ -152,17 +158,23 @@ jobs:
         run: |
           set -euo pipefail
           case "${RELEASE_PACKAGE}" in
+            server)
+              manifest_path="server/Cargo.toml"
+              crate_name="openkache-server"
+              source_entry="src/main.rs"
+              ;;
             client)
               manifest_path="clients/rust/Cargo.toml"
               crate_name="openkache"
+              source_entry="src/lib.rs"
               ;;
             *)
-              echo "Package must be client." >&2
+              echo "Package must be server or client." >&2
               exit 1
               ;;
           esac
           crate_version="$(
-            cargo metadata --manifest-path "${manifest_path}" --no-deps --format-version 1 |
+            cargo metadata --manifest-path "${manifest_path}" --locked --no-deps --format-version 1 |
               jq -r --arg crate_name "${crate_name}" '.packages[] | select(.name == $crate_name) | .version'
           )"
           if [[ "${crate_version}" != "${RELEASE_VERSION}" ]]; then
@@ -176,8 +188,8 @@ jobs:
             exit 1
           }
           tar -tzf "${crate_path}" | grep -Fx "${crate_name}-${RELEASE_VERSION}/Cargo.toml"
-          tar -tzf "${crate_path}" | grep -F "${crate_name}-${RELEASE_VERSION}/src/lib.rs"
-          release_root="${RUNNER_TEMP}/${crate_name}-crate"
+          tar -tzf "${crate_path}" | grep -F "${crate_name}-${RELEASE_VERSION}/${source_entry}"
+          release_root="${RUNNER_TEMP}/openkache-crate"
           mkdir -p "${release_root}"
           cp "${crate_path}" "${release_root}/"
           printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\ncrate_name=%s\n' \
@@ -232,12 +244,18 @@ jobs:
         run: |
           set -euo pipefail
           case "${RELEASE_PACKAGE}" in
+            server)
+              manifest_path="server/Cargo.toml"
+              crate_name="openkache-server"
+              source_entry="src/main.rs"
+              ;;
             client)
               manifest_path="clients/rust/Cargo.toml"
               crate_name="openkache"
+              source_entry="src/lib.rs"
               ;;
             *)
-              echo "Package must be client." >&2
+              echo "Package must be server or client." >&2
               exit 1
               ;;
           esac
@@ -259,7 +277,7 @@ jobs:
             [[ -s "${crate_file}" ]]
           )
           crate_version="$(
-            cargo metadata --manifest-path "${manifest_path}" --no-deps --format-version 1 |
+            cargo metadata --manifest-path "${manifest_path}" --locked --no-deps --format-version 1 |
               jq -r --arg crate_name "${crate_name}" '.packages[] | select(.name == $crate_name) | .version'
           )"
           if [[ "${crate_version}" != "${RELEASE_VERSION}" ]]; then
@@ -304,7 +322,7 @@ jobs:
             exit 1
           }
           tar -tzf "${recreated_crate}" | grep -Fx "${crate_name}-${RELEASE_VERSION}/Cargo.toml"
-          tar -tzf "${recreated_crate}" | grep -F "${crate_name}-${RELEASE_VERSION}/src/lib.rs"
+          tar -tzf "${recreated_crate}" | grep -F "${crate_name}-${RELEASE_VERSION}/${source_entry}"
           downloaded_sha256="$(sha256sum "${downloaded_crate}" | cut -d ' ' -f 1)"
           recreated_sha256="$(sha256sum "${recreated_crate}" | cut -d ' ' -f 1)"
           if [[ "${recreated_sha256}" != "${downloaded_sha256}" ]]; then
@@ -333,4 +351,16 @@ jobs:
             echo "Configure crates.io Trusted Publishing or add the bootstrap CARGO_REGISTRY_TOKEN secret." >&2
             exit 1
           }
-          cargo publish --manifest-path clients/rust/Cargo.toml --locked --token "${CARGO_REGISTRY_TOKEN}"
+          case "${RELEASE_PACKAGE}" in
+            server)
+              manifest_path="server/Cargo.toml"
+              ;;
+            client)
+              manifest_path="clients/rust/Cargo.toml"
+              ;;
+            *)
+              echo "Package must be server or client." >&2
+              exit 1
+              ;;
+          esac
+          cargo publish --manifest-path "${manifest_path}" --locked --token "${CARGO_REGISTRY_TOKEN}"

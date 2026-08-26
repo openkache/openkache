@@ -1,62 +1,89 @@
-# OpenKache server
+# `openkache-server`
 
-The current OpenKache server is an SSD-backed cache preview for Linux. One
-process exposes Redis-compatible `GET`, `SET`, and `DEL` over RESP/TCP and the
-same operations through the OpenKache Gate 0 protocol over QUIC/UDP.
+OpenKache is a super-fast, open-source SSD cache server. `openkache-server`
+is its Linux server binary: one process exposes a Redis-compatible RESP/TCP
+endpoint and the native OpenKache/QUIC endpoint.
 
-The preview is intended for development and performance work. It generates an
-ephemeral self-signed certificate, does not authenticate clients, and recreates
-its cache file on every start.
+[crates.io](https://crates.io/crates/openkache-server) ·
+[docs.rs](https://docs.rs/openkache-server) ·
+[GitHub](https://github.com/openkache/openkache/tree/main/server)
+
+This is a preview release for local development and evaluation. It creates a
+16 GiB `openkache.data` file and truncates it when the server starts. It does
+not provide restart recovery, client authentication, or production durability
+guarantees.
+
+## Install
+
+Install the published binary with Cargo:
+
+```bash
+# Compile and install from crates.io
+cargo install openkache-server
+
+# Or use cargo-binstall if it is already part of your toolchain
+cargo binstall openkache-server
+```
+
+To build from a checkout instead:
+
+```bash
+git clone https://github.com/openkache/openkache.git
+cd openkache
+cargo install --path server --locked
+```
+
+The published archive contains the protocol code required by the server, so
+registry builds do not need the OpenKache repository, Bun, or the Smithy CLI.
+
+## Usage
+
+Run the server on the default local endpoint:
+
+```bash
+openkache-server
+# openkache-server listening on 127.0.0.1:4433 over RESP/TCP and native QUIC/UDP
+```
+
+The default configuration uses network CPU `0` and storage CPU `1`. Choose a
+different address and CPU pair with positional arguments:
+
+```bash
+openkache-server 0.0.0.0:4433 2 3
+```
+
+The server uses the same numeric address for TCP and UDP. The native endpoint
+uses TLS 1.3 with an ephemeral self-signed certificate for local development;
+use the Rust, Python, or TypeScript client examples against a local server only.
+
+## Reference
+
+The command syntax is:
+
+```text
+openkache-server [address] [network-cpu storage-cpu]
+```
+
+`address` defaults to `127.0.0.1:4433`. `network-cpu` defaults to `0`, and
+`storage-cpu` defaults to `1`. The two CPU values must be different.
+
+The RESP/TCP endpoint currently supports:
+
+- `GET key`
+- `SET key value`
+- `DEL key`
+
+The native OpenKache/QUIC endpoint currently supports `PING`, `GET`, `SET`, and
+`DELETE`. TTL overrides, conditional writes, namespace administration,
+statistics, synchronization, clustering, and restart recovery are not
+implemented by this preview.
 
 ## Requirements
 
 - Linux with `io_uring`
-- Two distinct CPUs available to the process
-- Rust and the C toolchain required by the workspace dependencies
+- two distinct CPUs available to the process
+- a Rust toolchain and native C linker when installing from source
 
-## Commands
-
-Build the server from the repository root:
-
-```bash
-cargo server-build
-```
-
-Run it on the default address with the network thread on CPU 0 and the storage
-thread on CPU 1:
-
-```bash
-cargo run --locked --package openkache-server --bin openkache-server
-```
-
-Select a different address and CPU pair with positional arguments:
-
-```bash
-cargo run --locked --package openkache-server --bin openkache-server -- \
-  0.0.0.0:4433 2 3
-```
-
-Verify the crate:
-
-```bash
-cargo test --locked --package openkache-server
-```
-
-## Runtime behavior
-
-TCP and UDP use the same numeric address. TCP accepts RESP while UDP accepts
-the native OpenKache QUIC protocol. The native adapter currently supports
-`PING`, `GET`, `SET`, `DELETE`, and the synthetic Gate 0 namespace descriptor.
-TTL overrides, conditional writes, namespace administration, statistics, and
-sync operations are not implemented.
-
-The server creates `openkache.data` in its current working directory. The file
-is fixed at 16 GiB and is truncated on startup, so this preview does not provide
-restart recovery.
-
-## Components
-
-- `network.rs`: RESP/TCP connection handling on `io_uring`
-- `resp_proxy/`: OpenKache/QUIC-to-RESP compatibility frontend
-- `storage.rs`: SSD segment-group and lookup runtime
-- `spsc.rs`: queues between the network and storage threads
+The server is intended for Linux `x86_64` and `aarch64` hosts. See the
+[repository README](https://github.com/openkache/openkache) for the container
+image and deployment notes.

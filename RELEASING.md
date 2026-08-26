@@ -1,7 +1,8 @@
-# Release OpenKache client packages
+# Release OpenKache registry packages
 
-This guide covers the Python package on PyPI, the Rust crate on crates.io,
-and the TypeScript package on npm. Every registry version is immutable.
+This guide covers the Python package on PyPI, the Rust client and server
+crates on crates.io, and the TypeScript package on npm. Every registry version
+is immutable.
 
 The release has two phases:
 
@@ -40,10 +41,22 @@ the user to choose the version before updating any manifest or tag. Never
 republish a package version that a registry has accepted, even if it was later
 yanked.
 
+The server binary has its own version in `server/Cargo.toml`. It does not need
+to match the shared client version. The first server release uses the current
+manifest version (`0.1.0`); later server releases increment that version by
+`0.0.1` unless a breaking change requires an explicit version decision.
+
 Set the version once and use it for every command below:
 
 ```bash
 export RELEASE_VERSION=0.1.4  # replace with the chosen unused version
+```
+
+The server has an independent version. Set it only when preparing a server
+release:
+
+```bash
+export SERVER_RELEASE_VERSION=0.1.0
 ```
 
 ## 1. Prepare the release (stop before publication)
@@ -148,6 +161,14 @@ workflow; a `200` means leave its existing tag alone and skip its workflow.
 Stop for any other response. If all three checks return `200`, there is
 nothing to release.
 
+For a server-only release, check the server crate separately:
+
+```bash
+check_registry \
+  "https://crates.io/api/v1/crates/openkache-server/${SERVER_RELEASE_VERSION}" \
+  "crates.io openkache-server@${SERVER_RELEASE_VERSION}"
+```
+
 Before dispatching, confirm that `pypi-release`, `crates-io-release`, and
 `npm-release` exist as protected GitHub environments with required reviewers.
 Also confirm the registry credential for the package you are about to publish:
@@ -169,7 +190,7 @@ host:
 ```bash
 set -euo pipefail
 
-# Rust: verify metadata and inspect the crate archive.
+# Rust client: verify metadata and inspect the crate archive.
 cargo metadata \
   --manifest-path clients/rust/Cargo.toml \
   --locked \
@@ -184,6 +205,22 @@ tar -tzf "target/package/openkache-${RELEASE_VERSION}.crate" \
   | grep -Fx "openkache-${RELEASE_VERSION}/Cargo.toml"
 tar -tzf "target/package/openkache-${RELEASE_VERSION}.crate" \
   | grep -F "openkache-${RELEASE_VERSION}/src/lib.rs"
+
+# Rust server: run the same checks without uploading anything.
+cargo metadata \
+  --manifest-path server/Cargo.toml \
+  --locked \
+  --no-deps \
+  --format-version 1
+cargo publish \
+  --manifest-path server/Cargo.toml \
+  --locked \
+  --dry-run
+cargo package --manifest-path server/Cargo.toml --locked
+tar -tzf "target/package/openkache-server-${SERVER_RELEASE_VERSION}.crate" \
+  | grep -Fx "openkache-server-${SERVER_RELEASE_VERSION}/Cargo.toml"
+tar -tzf "target/package/openkache-server-${SERVER_RELEASE_VERSION}.crate" \
+  | grep -F "openkache-server-${SERVER_RELEASE_VERSION}/src/main.rs"
 
 # Python: build an sdist and the wheel for the current host.
 python3 -m venv /tmp/openkache-release-venv
@@ -254,8 +291,9 @@ set -euo pipefail
 # Uncomment only the tags for packages that still need publication.
 release_tags=(
   # "python-v${RELEASE_VERSION}"
-  "client-v${RELEASE_VERSION}"
-  "typescript-v${RELEASE_VERSION}"
+  # "client-v${RELEASE_VERSION}"
+  # "typescript-v${RELEASE_VERSION}"
+  # "server-v${SERVER_RELEASE_VERSION}"
 )
 
 main_commit="$(git rev-parse HEAD)"
@@ -273,6 +311,10 @@ for tag in "${release_tags[@]}"; do
   fi
 done
 ```
+
+For a server-only release, set `SERVER_RELEASE_VERSION` to the version from
+`server/Cargo.toml` and enable only `"server-v${SERVER_RELEASE_VERSION}"` in
+the array. Do not create client tags for a server-only release.
 
 If a release workflow was fixed after a tag was created, first rerun the
 registry check for the affected package. Only when that package's version is
@@ -306,6 +348,14 @@ gh workflow run publish-crates.yml \
   --ref "client-v${RELEASE_VERSION}" \
   -f package=client \
   -f "version=${RELEASE_VERSION}" \
+  -f confirm=RELEASE
+
+# Server release (use the server-v<version> tag and its independent version).
+gh workflow run publish-crates.yml \
+  --repo openkache/openkache \
+  --ref "server-v${SERVER_RELEASE_VERSION}" \
+  -f package=server \
+  -f "version=${SERVER_RELEASE_VERSION}" \
   -f confirm=RELEASE
 
 gh workflow run publish-npm.yml \
@@ -360,13 +410,14 @@ Configure the protected environments before the first release:
 - **`npm-release`** — configure an npm Trusted Publisher for package
   `openkache`, repository `openkache`, workflow `publish-npm.yml`, and
   environment `npm-release`.
-- **`crates-io-release`** — if `openkache` has never been published, store a
-  narrowly scoped `CARGO_REGISTRY_TOKEN` environment secret for the bootstrap
-  release. crates.io Trusted Publishing cannot bootstrap a crate that has
-  never been published. After the first `openkache` version exists, configure
-  its [Trusted Publisher](https://crates.io/docs/trusted-publishing) with
-  owner `openkache`, repository `openkache`, workflow filename
-  `publish-crates.yml`, and environment `crates-io-release`.
+- **`crates-io-release`** — for each crate that has never been published,
+  store a narrowly scoped `CARGO_REGISTRY_TOKEN` environment secret for its
+  bootstrap release. crates.io Trusted Publishing cannot bootstrap an
+  unpublished crate. After the first version exists, configure that crate's
+  [Trusted Publisher](https://crates.io/docs/trusted-publishing) with owner
+  `openkache`, repository `openkache`, workflow filename
+  `publish-crates.yml`, and environment `crates-io-release`. Configure this
+  separately for `openkache` and `openkache-server`.
 
 PyPI and npm use GitHub OIDC short-lived credentials. The Rust workflow uses
 the bootstrap secret when present and otherwise obtains a short-lived
@@ -390,7 +441,7 @@ then performs the registry mutation on the tagged checkout:
 | Registry | Workflow publish step |
 | --- | --- |
 | PyPI | `pypa/gh-action-pypi-publish` uploads the sdist and six wheels. |
-| crates.io | `rust-lang/crates-io-auth-action` (after bootstrap) or the protected bootstrap secret supplies the registry token to `cargo publish --manifest-path clients/rust/Cargo.toml --locked`. |
+| crates.io | `rust-lang/crates-io-auth-action` (after bootstrap) or the protected bootstrap secret supplies the registry token to `cargo publish --manifest-path <selected crate> --locked`. |
 | npm | `bun run release:publish` publishes the assembled package with the `latest` dist-tag. |
 
 There is no separate local publish command in the normal release path. The
@@ -410,6 +461,10 @@ npm view "openkache@${RELEASE_VERSION}" version dist.integrity
 curl --fail --silent --show-error \
   "https://crates.io/api/v1/crates/openkache/${RELEASE_VERSION}" >/dev/null
 
+# Server-only registry metadata
+curl --fail --silent --show-error \
+  "https://crates.io/api/v1/crates/openkache-server/${SERVER_RELEASE_VERSION}" >/dev/null
+
 # Python
 python3 -m venv /tmp/openkache-consumer-python
 /tmp/openkache-consumer-python/bin/python -m pip install \
@@ -423,6 +478,9 @@ cargo new /tmp/openkache-consumer-rust
   cargo add "openkache@${RELEASE_VERSION}"
   cargo check
 )
+
+# Server binary (server-only release)
+cargo install --locked --version "${SERVER_RELEASE_VERSION}" openkache-server
 
 # TypeScript
 mkdir -p /tmp/openkache-consumer-typescript
