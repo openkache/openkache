@@ -97,9 +97,8 @@ client.set_with("point:1", &point, &point_codec).await?;
 let point = client.get_with::<Point, _>("point:1", &point_codec).await?;
 ```
 
-This path does not require the application's code to depend on Serde. Opaque
-formats are intentionally not interpreted by the client: encode them yourself
-and store the resulting bytes with `Value::bytes` through `set`.
+Opaque formats are intentionally not interpreted by the client: encode them
+yourself and store the resulting bytes with `Value::bytes` through `set`.
 
 ## Reference
 
