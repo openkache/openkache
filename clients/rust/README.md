@@ -160,7 +160,7 @@ assert_eq!(
 # }
 ```
 
-## Application-owned byte payloads
+## Custom binary payloads
 
 Use byte payloads when the application owns the serialized format. This example
 uses bincode 2; pin the serializer major version and configuration because the
