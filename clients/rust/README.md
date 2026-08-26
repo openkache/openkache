@@ -1,6 +1,7 @@
 # OpenKache Rust client
 
-OpenKache is a super-fast open-source SSD cache server. Use this async Rust
+OpenKache is a high-performance cache server designed from the ground up for
+modern SSDs. Use this async Rust
 client to store, read, and delete values in a few lines.
 
 [crates.io package](https://crates.io/crates/openkache) ·
@@ -14,24 +15,11 @@ Rust 1.85 or newer and a native C linker are required.
 ```bash
 # OpenKache client
 cargo add openkache
-
-# Tokio, for the standalone example's #[tokio::main]
-cargo add tokio --features macros,rt-multi-thread
 ```
 
 The default `quic-quinn` client uses Tokio internally, so an active Tokio
-runtime is required for `Client`.
-`openkache` already brings Tokio into the dependency graph; add Tokio directly
-only when your application needs the `#[tokio::main]` macro. If the application
-already uses Tokio, skip the second command. `CompioClient` uses the optional
-Compio runtime instead.
-To use Compio instead of Tokio, disable the default feature and select
-`quic-compio`:
-
-```bash
-cargo add openkache --no-default-features --features quic-compio
-cargo add compio --no-default-features --features net,runtime,time
-```
+runtime is required for `Client`. The example below uses `#[tokio::main]`; use
+the runtime setup already used by your application.
 
 ## Quick start
 
@@ -59,22 +47,186 @@ this example only with a local development server.
 values directly and convert them to `Value`; construct an explicit variant
 when float width, raw bits, or model map keys matter.
 
-When Tokio is not part of an application, enable `quic-compio` and use the
-equivalent `CompioClient` facade:
+The Rust client uses OpenKache's structured value format.
 
-```rust
-use compio::runtime::Runtime;
-use openkache::{CompioClient, Value};
+## Serde Rust values
 
-let runtime = Runtime::new()?;
-runtime.block_on(async {
-    let client = CompioClient::connect("127.0.0.1:4433").await?;
-    client.set("hello", Value::text("from compio")).await?;
-    client.close().await
-})?;
+`Client::set_serde` and `Client::get_serde` use Serde while retaining the
+same lossless structured-value format as `set` and `get`. Add Serde to the
+application when defining types for these helpers:
+
+```bash
+cargo add serde --features derive
 ```
 
-Both clients use OpenKache's structured value format.
+```rust
+use openkache::{Client, GetResult};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct User {
+    id: u64,
+    name: String,
+}
+
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client
+        .set_serde("user:1", &User { id: 7, name: "Ada".into() })
+        .await?;
+    let result: GetResult<User> = client.get_serde("user:1").await?;
+    let user: User = result.unwrap();
+    assert_eq!(user.id, 7);
+    assert_eq!(user.name, "Ada");
+    client.close().await?;
+    Ok(())
+}
+```
+
+`get_serde` returns `Result<GetResult<T>>`; in this example, `T` is `User`,
+so a hit is `GetResult::Found(User)`.
+
+`GetResult::Missing` remains distinct from a stored `null`; a stored `null`
+decodes as `None` for `Option<T>`. Integers are range-checked, floating-point
+values retain their IEEE-754 bits, and map keys must be scalar and unique.
+Serde serialization happens before write admission, so
+`Error::SerdeSerialize` cannot produce an unknown mutation. A value that does
+not match the requested type returns `Error::SerdeDeserialize`.
+
+`set_serde` stores the structured model as `StructuredValue-CBOR-v1`, not as
+an opaque Rust-specific payload. Python and JavaScript clients can therefore
+read a value written by `set_serde` as a structured object, array, scalar, or
+null. Keep the schema within the cross-language value model; opaque bytes,
+unsupported map keys, and serializer-specific representations remain
+application-owned.
+
+### Structured codecs with `get_with` and `set_with`
+
+For a non-Serde structured serializer, implement `ValueCodec<T>` or construct
+one with `FunctionCodec::new(encode, decode)`. This complete example maps a
+`Point` struct to a structured `Value` map:
+
+`FunctionCodec` is a small adapter around two application functions:
+`encode(&T) -> Result<Value, EncodeError>` runs before a write is admitted, and
+`decode(Value) -> Result<T, DecodeError>` runs after a value is retrieved. The
+client does not inspect or invoke the application's serializer; it only stores
+the resulting structured `Value`. An encode failure is returned as
+`Error::CodecEncode`, and a decode failure as `Error::CodecDecode`.
+
+```rust
+use openkache::{Client, FunctionCodec, Value};
+
+#[derive(Debug, PartialEq)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn encode_point(point: &Point) -> Result<Value, &'static str> {
+    Value::map(vec![
+        (Value::text("x"), Value::integer(point.x)),
+        (Value::text("y"), Value::integer(point.y)),
+    ])
+    .map_err(|_| "point fields must be unique scalar keys")
+}
+
+fn decode_point(value: Value) -> Result<Point, &'static str> {
+    let entries = value.as_map().ok_or("expected a point object")?;
+    let mut x = None;
+    let mut y = None;
+    for (key, value) in entries {
+        let key = match key {
+            Value::TextString(key) => key,
+            _ => return Err("point fields must be text keys"),
+        };
+        let value = match value {
+            Value::Integer(value) => value.as_i128().ok_or("point must fit in i128")?,
+            _ => return Err("point fields must be integers"),
+        };
+        match key.as_str() {
+            "x" => x = Some(value),
+            "y" => y = Some(value),
+            _ => return Err("unknown point field"),
+        }
+    }
+    Ok(Point {
+        x: x.ok_or("missing x")?,
+        y: y.ok_or("missing y")?,
+    })
+}
+
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    let point = Point { x: 3, y: 4 };
+    let point_codec = FunctionCodec::new(encode_point, decode_point);
+    client.set_with("point:1", &point, &point_codec).await?;
+    assert_eq!(
+        client.get_with("point:1", &point_codec).await?,
+        openkache::GetResult::Found(point),
+    );
+    client.close().await?;
+    Ok(())
+}
+```
+
+## Custom binary payloads
+
+Use byte payloads when the application owns the serialized format. This example
+uses bincode 2; pin the serializer major version and configuration because the
+bytes are an application schema contract:
+
+```bash
+cargo add bincode@2 --features serde
+cargo add serde --features derive
+```
+
+The client stores and returns the bytes without inspecting them; other
+language clients receive a byte value and need the same application format to
+decode it:
+
+```rust
+use bincode::config;
+use openkache::{Client, GetResult, Value};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+struct Session {
+    user_id: u64,
+    flags: u8,
+}
+
+fn invalid_data(message: &'static str) -> Box<dyn std::error::Error> {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message).into()
+}
+
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    let session = Session {
+        user_id: 7,
+        flags: 0b101,
+    };
+    let payload = bincode::serde::encode_to_vec(&session, config::standard())?;
+    client
+        .set("session:1", Value::bytes(payload))
+        .await?;
+
+    let stored = client.get("session:1").await?;
+    let bytes = match &stored {
+        GetResult::Found(Value::Bytes(bytes)) => bytes,
+        GetResult::Found(_) => return Err(invalid_data("expected opaque bytes")),
+        GetResult::Missing => return Err(invalid_data("session is missing")),
+    };
+    let (decoded, _bytes_read): (Session, usize) =
+        bincode::serde::decode_from_slice(bytes, config::standard())?;
+    assert_eq!(decoded, session);
+    client.close().await?;
+    Ok(())
+}
+```
+
+Application-owned payloads normally use ordinary `get`/`set`. A
+`ValueCodec` can wrap an opaque serializer only when it maps the encoded bytes
+to and from `Value::Bytes`; the client still does not inspect that format.
 
 ## Reference
 
@@ -125,6 +277,38 @@ Stores one value with an unconditional write.
 ```rust
 let outcome = client.set("greeting", "hello").await?;
 ```
+
+### `client.get_serde<T>(key)`
+
+Reads one value and decodes it into `T: serde::de::DeserializeOwned`.
+
+- **Returns:** `Ok(GetResult::Found(value))` for a matching stored value, or
+  `Ok(GetResult::Missing)` when the key does not exist.
+- **Errors:** `Error::SerdeDeserialize` for a type mismatch, overflow, or
+  unsupported stored value; transport and protocol failures use
+  `Error::Core`.
+
+### `client.set_serde(key, value)`
+
+Serializes `value: impl serde::Serialize` and stores it with an unconditional
+write. Serde serialization completes before network admission.
+
+- **Returns:** the same `SetOutcome` as `client.set`.
+- **Errors:** `Error::SerdeSerialize` for values that cannot be represented
+  by the structured model, or the transport and mutation errors from
+  `client.set`.
+
+### `client.get_with` and `client.set_with`
+
+Use an application-provided `ValueCodec<T>` for a non-Serde structured format.
+`FunctionCodec::new(encode, decode)` is the convenient form when two functions
+are enough; implement `ValueCodec<T>` directly when the codec needs state or
+more control. The codec operates on `Value`, so it does not alter wire
+admission or mutation semantics. Encoding happens before admission, so a
+codec error cannot produce `Error::UnknownMutation`; decoding happens after
+retrieval and leaves `GetResult::Missing` unchanged. The value type is normally
+inferred from the codec, so no turbofish is needed. If inference is ambiguous,
+annotate the result as `GetResult<Point>`.
 
 ### `client.delete(key)`
 
@@ -209,6 +393,56 @@ let value = Value::map(vec![
 client.set("stats", value).await?;
 ```
 
+Inspect a structured value with `ValueKind` and borrowed accessors:
+
+```rust
+use openkache::{Client, GetResult, Value, ValueKind};
+
+#[tokio::main]
+async fn main() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    let profile = Value::map(vec![
+        (Value::text("name"), Value::text("Ada")),
+        (Value::text("visits"), Value::integer(3)),
+        (Value::text("active"), Value::from(true)),
+    ])
+    .map_err(|error| openkache::Error::Core(error.to_string()))?;
+    client.set("profile", profile).await?;
+
+    let result: GetResult<Value> = client.get("profile").await?;
+    let profile = match result {
+        GetResult::Found(value) => value,
+        GetResult::Missing => {
+            return Err(openkache::Error::Core("profile is missing".into()));
+        }
+    };
+    assert_eq!(profile.kind(), ValueKind::Map);
+    assert_eq!(
+        profile.map_get("name").and_then(Value::as_str),
+        Some("Ada"),
+    );
+    assert_eq!(
+        profile
+            .map_get("visits")
+            .and_then(Value::as_integer)
+            .and_then(|value| value.as_i128()),
+        Some(3),
+    );
+    assert_eq!(
+        profile.map_get("active").and_then(Value::as_bool),
+        Some(true),
+    );
+    assert_eq!(profile.map_get("name").and_then(Value::as_bool), None);
+
+    client.close().await?;
+    Ok(())
+}
+```
+
+`map_get` and the typed accessors do not coerce values: a missing key or a
+mismatched type returns `None`, so reading the text `name` with `as_bool`
+above is safe.
+
 For exact integer and float construction, use `Integer`, `Sign`,
 `Float`, and `FloatWidth`. `ValueLimits` bounds bytes, depth, item count, and
 integer magnitude. `ValueError` reports value validation and encoding errors;
@@ -219,12 +453,22 @@ use `ValueError::kind()` for its stable category.
 ### Results and errors
 
 - `GetResult<T>` is `Missing` or `Found(T)`.
+- `GetResult::unwrap` and `GetResult::expect` return a found value and panic
+  when the key is missing; `unwrap_or` and `unwrap_or_else` provide fallbacks.
 - `SetOutcome` is `Created` or `Replaced`.
+- `SetOutcome::is_created` and `SetOutcome::is_replaced` inspect the write
+  outcome without matching on its variants.
 - `delete` returns `true` when an item existed and `false` otherwise.
 - `Error::UnknownMutation` means a `set` or `delete` may have reached the
   server without a confirmed result. Its `Mutation` identifies the operation;
-  do not replay it automatically.
+  do not replay it automatically. Use `Error::is_unknown_mutation`,
+  `Error::mutation`, and `Error::kind` to inspect errors without matching on
+  their payloads.
 - `Error::Core` reports connection, protocol, key, value, or server failures.
+- `Error::SerdeSerialize` and `Error::SerdeDeserialize` report Serde
+  conversion failures before and after transport, respectively.
+- `Error::CodecEncode` and `Error::CodecDecode` report application
+  `ValueCodec` failures before and after transport, respectively.
 - `Error::UnsupportedSetOutcome` reports a server result outside the
   unconditional-write API.
 

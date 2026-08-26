@@ -23,7 +23,6 @@ crate-type = ["rlib"]
 [features]
 default = ["quic-quinn"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
-quic-compio = ["dep:compio", "dep:compio-quic"]
 
 [dependencies]
 aes = { version = "=0.9.1", features = ["zeroize"] }
@@ -32,8 +31,6 @@ aes-siv = { version = "=0.8.0-rc.3", features = ["zeroize"] }
 base64 = "*"
 blake3 = { version = "*", features = ["zeroize"] }
 cmac = { version = "=0.8.0", features = ["zeroize"] }
-compio = { version = "=0.19.1", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
-compio-quic = { version = "=0.8.0", features = ["ring"], optional = true }
 crossbeam-queue = "=0.3.13"
 crossfire = "=3.1.19"
 futures-util = "=0.3.33"

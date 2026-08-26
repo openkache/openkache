@@ -1,0 +1,88 @@
+name: Engineering task
+description: Track a concrete implementation, documentation, CI, release, or benchmark task
+title: "[Task]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for work with a concrete owner, scope, and completion
+        condition. Link the relevant design or parent issue when applicable.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Server
+        - Storage
+        - Protocol
+        - Clients
+        - CLI
+        - CI and release
+        - Documentation
+        - Benchmark
+        - Security
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: State the outcome this task should deliver.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Explain why this work is needed and link relevant code, documentation, or issues.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List what is in scope and what is explicitly out of scope.
+      placeholder: |
+        In scope:
+        - ...
+
+        Out of scope:
+        - ...
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List testable conditions for completion.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Name the commands, tests, benchmark evidence, or review needed to verify the result.
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and follow-ups
+      description: Link blocking issues or record work that must happen afterward.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched the existing issues for duplicates.
+          required: true
+        - label: The acceptance criteria are specific enough to review.
+          required: true
