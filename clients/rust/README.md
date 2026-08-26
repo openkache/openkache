@@ -116,10 +116,7 @@ fn encode_point(point: &Point) -> Result<Value, &'static str> {
 }
 
 fn decode_point(value: Value) -> Result<Point, &'static str> {
-    let entries = match value {
-        Value::Map(entries) => entries,
-        _ => return Err("expected a point object"),
-    };
+    let entries = value.as_map().ok_or("expected a point object")?;
     let mut x = None;
     let mut y = None;
     for (key, value) in entries {
