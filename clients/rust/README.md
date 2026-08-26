@@ -154,8 +154,72 @@ assert_eq!(
 # }
 ```
 
-Opaque formats are intentionally not interpreted by the client: encode them
-yourself and store the resulting bytes with `Value::bytes` through `set`.
+## Opaque byte values
+
+Use opaque bytes when the application owns the serialized format, such as a
+custom binary layout, bincode, or postcard. The client stores and returns the
+bytes without inspecting them; other language clients receive a byte value and
+need the same application format to decode it. Encode before `set`, and borrow
+the returned `Value::Bytes` when decoding:
+
+```rust
+use openkache::{Client, GetResult, Value};
+
+#[derive(Debug, PartialEq)]
+struct Session {
+    user_id: u64,
+    flags: u8,
+}
+
+// A tiny application-owned binary format: big-endian user_id followed by flags.
+fn encode_session(session: &Session) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(9);
+    bytes.extend_from_slice(&session.user_id.to_be_bytes());
+    bytes.push(session.flags);
+    bytes
+}
+
+fn decode_session(bytes: &[u8]) -> Option<Session> {
+    if bytes.len() != 9 {
+        return None;
+    }
+    Some(Session {
+        user_id: u64::from_be_bytes(bytes[..8].try_into().ok()?),
+        flags: bytes[8],
+    })
+}
+
+# async fn example() -> openkache::Result<()> {
+let client = Client::connect("127.0.0.1:4433").await?;
+let session = Session {
+    user_id: 7,
+    flags: 0b101,
+};
+client
+    .set("session:1", Value::bytes(encode_session(&session)))
+    .await?;
+
+let stored = client.get("session:1").await?;
+let bytes = match &stored {
+    GetResult::Found(Value::Bytes(bytes)) => bytes,
+    GetResult::Found(_) => {
+        return Err(openkache::Error::Core("expected opaque bytes".into()));
+    }
+    GetResult::Missing => {
+        return Err(openkache::Error::Core("session is missing".into()));
+    }
+};
+let decoded = decode_session(bytes)
+    .ok_or_else(|| openkache::Error::Core("invalid session bytes".into()))?;
+assert_eq!(decoded, session);
+# client.close().await?;
+# Ok(())
+# }
+```
+
+Opaque values are not a `ValueCodec` format: do not pass them to
+`get_with`/`set_with` unless the codec explicitly converts the bytes to and
+from a structured `Value`.
 
 ## Reference
 
