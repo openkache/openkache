@@ -295,7 +295,7 @@ Configure the protected environments before the first release:
   narrowly scoped `CARGO_REGISTRY_TOKEN` environment secret. crates.io
   Trusted Publishing cannot bootstrap a crate that has never been published.
   After the first `openkache` version exists, configure its
-  [Trusted Publisher](https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html) for owner
+  [Trusted Publisher](https://crates.io/docs/trusted-publishing) for owner
   `openkache`, repository `openkache`, workflow `publish-crates.yml`, and
   environment `crates-io-release`, then remove the bootstrap secret.
 
