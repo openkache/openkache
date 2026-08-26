@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compio::buf::IoBuf;
-use compio::driver::ProactorBuilder;
+use compio::driver::{AsRawFd, ProactorBuilder};
 use compio::fs::{File, OpenOptions};
 use compio::io::{AsyncReadAtExt, AsyncWriteAtExt};
 use compio::runtime::Runtime;
@@ -723,6 +723,33 @@ fn preallocate(file: &File, len: u64) -> io::Result<()> {
     }
 }
 
+/// `IORING_ENTER_GETEVENTS`.
+const IORING_ENTER_GETEVENTS: libc::c_uint = 1;
+/// `__NR_io_uring_enter`.
+const SYS_IO_URING_ENTER: libc::c_long = 426;
+
+/// Enters the io_uring with `GETEVENTS` but submits nothing, forcing the kernel
+/// to run deferred task work and post any ready completions to the CQ. compio's
+/// non-blocking `poll_with` cannot do this once the TASKRUN flag is set (it
+/// omits `GETEVENTS` when it thinks completions are already available), so we
+/// reap directly on the ring fd. Errors are non-fatal — a failed reap just means
+/// nothing was posted this iteration and the next one retries.
+fn reap_completions(ring_fd: libc::c_int) {
+    // SAFETY: `ring_fd` is the runtime's live io_uring fd; to_submit=0 means no
+    // SQEs are consumed, so this never races compio's submission bookkeeping.
+    unsafe {
+        libc::syscall(
+            SYS_IO_URING_ENTER,
+            ring_fd,
+            0,                      // to_submit
+            0,                      // min_complete (non-blocking)
+            IORING_ENTER_GETEVENTS, // flush deferred completions into the CQ
+            std::ptr::null::<libc::c_void>(),
+            0,
+        );
+    }
+}
+
 fn run_storage_worker(
     runtime: Runtime,
     mut worker: Box<WorkerState>,
@@ -731,10 +758,13 @@ fn run_storage_worker(
     mut response_sender: Producer<StorageResponse, STORAGE_QUEUE_SLOTS>,
 ) -> io::Result<()> {
     let worker_handle = WorkerHandle(NonNull::from(worker.as_mut()));
+    let ring_fd = runtime.as_raw_fd();
 
     runtime.enter(|| {
         loop {
+            let mut popped_request = false;
             while let Some(request) = request_receiver.pop() {
+                popped_request = true;
                 let file = Rc::clone(&file);
                 runtime
                     .spawn(async move {
@@ -750,8 +780,20 @@ fn run_storage_worker(
                     .detach();
             }
 
+            let _ = popped_request;
             runtime.run();
             runtime.flush();
+            // Force-reap deferred completions before compio reads the CQ.
+            //
+            // Under `IORING_SETUP_DEFER_TASKRUN`, a completion only lands in the
+            // CQ when the ring is entered with `GETEVENTS`. compio's
+            // `poll_with(Duration::ZERO)` drops `GETEVENTS` whenever its internal
+            // `want_sqe == 0` (which is exactly the case once the kernel sets the
+            // TASKRUN flag), so a flush write that completes while the request
+            // stream is pure-CPU (SET-only) or idle is never reaped and the
+            // worker wedges. A bare `io_uring_enter(fd, 0, 0, GETEVENTS)` submits
+            // nothing and reaps everything, matching the network worker's path.
+            reap_completions(ring_fd);
             runtime.poll_with(Some(Duration::ZERO));
             runtime.run();
 
