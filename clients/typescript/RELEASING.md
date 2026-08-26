@@ -5,6 +5,13 @@ This package is published to the public npm registry with Bun. The version in
 immutable, so the publication step never changes a version after the artifact
 has been built.
 
+Python, Rust, and TypeScript releases use one shared client version. Unless the
+user requests another version, increment that shared version by `0.0.1`. If a
+change is breaking, ask the user to choose the version before editing the
+manifest or creating a tag. The repository-wide
+[release guide](../../RELEASING.md) is the source of truth for the coordinated
+release.
+
 ## Release invariants
 
 `release:verify` refuses to continue unless:
@@ -24,14 +31,14 @@ all three outputs under `target/native/` before the release verification is
 run. `release:check` performs the host build first; `release:verify` is the
 artifact-only check used after a multi-platform build has been assembled.
 
-## Next release: `0.1.1`
+## Next release: `0.1.3`
 
 Run these commands from `clients/typescript` after the public source change has
 merged:
 
 ```bash
 bun install --frozen-lockfile
-bun pm pkg set version=0.1.1
+bun pm pkg set version=0.1.3
 bun run build
 bun run typecheck
 bun run release:dry-run
@@ -39,15 +46,22 @@ bun run release:dry-run
 
 The version edit must be committed and merged before publication. Do not
 publish from a detached checkout or with a dirty worktree. The current
-`0.1.1` choice is the next unused npm version; verify the registry check again
+`0.1.3` choice is the next unused npm version; verify the registry and tag checks again
 if another release lands before this one.
 
 `release:dry-run` builds the package, prints the tarball contents, checks the
-registry for a free version, and performs Bun's own publish dry run. It does
-not require registry credentials and does not mutate npm. It also extracts the
-archive and smoke-tests the package's documented close retry behavior. On
-Linux, stage the Apple Silicon adapter first when using this command for a
-complete release check.
+registry for a free version, extracts the archive, and smoke-tests the
+package's documented close retry behavior. It does not require registry
+credentials and does not mutate npm. It intentionally stops before any
+registry publish command; the protected workflow performs the final publish.
+
+`bun run build:native` is host-specific: Linux stages the x64 and ARM64 Linux
+adapters, while Apple Silicon macOS stages the Darwin adapter. Therefore a
+Linux checkout can run the JavaScript and Linux checks locally, but
+`release:verify`, `release:smoke`, and `release:dry-run` are complete only after
+the three CI matrix artifacts have been assembled under `target/native/`.
+The release workflow performs that assembly and repeats the checks on a clean
+tagged checkout.
 
 ## Publish
 
@@ -80,8 +94,8 @@ After a successful publication, verify the registry metadata and install the
 published package from a clean consumer project:
 
 ```bash
-bun pm view openkache@0.1.1
-bun add openkache@0.1.1
+bun pm view openkache@0.1.3
+bun add openkache@0.1.3
 ```
 
 The package cannot be republished at the same version. If publication fails
