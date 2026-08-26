@@ -13,6 +13,9 @@ categories = ["database", "network-programming"]
 rust-version = "1.85"
 include = ["Cargo.toml", "README.md", "src/**/*.rs"]
 
+[package.metadata.docs.rs]
+all-features = false
+
 [[bin]]
 name = "openkache-server"
 path = "src/main.rs"
