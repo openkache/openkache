@@ -183,6 +183,20 @@ mod maintained {
         /// The profile intentionally disables certificate verification for
         /// local development. It still requires a TLS 1.3 handshake and never
         /// falls back to plaintext. Do not use this trust profile in production.
+        ///
+        /// # Arguments
+        ///
+        /// * `endpoint` - A `host:port` endpoint. IPv6 endpoints use
+        ///   `[host]:port`.
+        ///
+        /// # Returns
+        ///
+        /// A connected [`Client`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Core`] when parsing the endpoint, connecting, or
+        /// completing the TLS handshake fails.
         pub async fn connect(endpoint: impl AsRef<str>) -> Result<Self> {
             let endpoint = endpoint.as_ref().parse().map_err(map_core_error)?;
             let inner = ProtectedClient::builder(
@@ -267,10 +281,20 @@ mod maintained {
 
         /// Retrieves one value and decodes it into a Serde type.
         ///
-        /// Serialization is performed against the same lossless structured
+        /// Deserialization is performed against the same lossless structured
         /// value model as [`Client::set`]. A missing key remains
         /// [`GetResult::Missing`], while a stored null decodes as `None` for
         /// an `Option<T>`.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        ///
+        /// # Returns
+        ///
+        /// `Ok(GetResult::Found(value))` for a value that decodes into `T`, or
+        /// `Ok(GetResult::Missing)` when the key does not exist.
         ///
         /// # Errors
         ///
@@ -295,6 +319,17 @@ mod maintained {
         /// Serde serialization completes before the request is admitted, so
         /// a serialization error cannot produce [`Error::UnknownMutation`].
         ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        /// * `value` - The value to serialize.
+        ///
+        /// # Returns
+        ///
+        /// [`SetOutcome::Created`] for a new item or
+        /// [`SetOutcome::Replaced`] when an existing item is overwritten.
+        ///
         /// # Errors
         ///
         /// Returns [`Error::SerdeSerialize`] when `value` cannot be represented
@@ -311,6 +346,18 @@ mod maintained {
         }
 
         /// Retrieves one value and decodes it with an application codec.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        /// * `codec` - The application codec used to decode the stored
+        ///   structured value.
+        ///
+        /// # Returns
+        ///
+        /// `Ok(GetResult::Found(value))` when the item exists and decodes
+        /// successfully, or `Ok(GetResult::Missing)` when it does not.
         ///
         /// # Errors
         ///
@@ -339,6 +386,18 @@ mod maintained {
         /// Encoding completes before request admission, so a codec failure
         /// cannot produce [`Error::UnknownMutation`].
         ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        /// * `value` - The value to encode.
+        /// * `codec` - The application codec used to encode `value`.
+        ///
+        /// # Returns
+        ///
+        /// [`SetOutcome::Created`] for a new item or
+        /// [`SetOutcome::Replaced`] when an existing item is overwritten.
+        ///
         /// # Errors
         ///
         /// Returns [`Error::CodecEncode`] when `codec` rejects `value`, or the
@@ -359,6 +418,21 @@ mod maintained {
         }
 
         /// Deletes one key and reports whether an item was removed.
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - A text, byte, or signed integer key convertible to
+        ///   [`TypedKey`].
+        ///
+        /// # Returns
+        ///
+        /// `Ok(true)` when an item was removed, or `Ok(false)` when the key did
+        /// not exist.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error`] when the connection, protocol, key, or mutation
+        /// operation fails.
         pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<bool> {
             self.gate0_client()
                 .await?
@@ -373,6 +447,14 @@ mod maintained {
 
         /// Idempotently closes the client and waits for admitted work to
         /// settle before releasing the transport.
+        ///
+        /// # Returns
+        ///
+        /// `Ok(())` after the connection is closed.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Core`] when closing the connection fails.
         pub async fn close(&self) -> Result<()> {
             self.inner.close().await.map_err(map_core_error)
         }

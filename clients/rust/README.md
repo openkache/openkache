@@ -59,6 +59,7 @@ cargo add serde --features derive
 ```
 
 ```rust
+use openkache::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -67,8 +68,13 @@ struct User {
     name: String,
 }
 
+# async fn example() -> openkache::Result<()> {
+let client = Client::connect("127.0.0.1:4433").await?;
 client.set_serde("user:1", &User { id: 7, name: "Ada".into() }).await?;
 let user = client.get_serde::<User>("user:1").await?;
+# client.close().await?;
+# Ok(())
+# }
 ```
 
 `GetResult::Missing` remains distinct from a stored `null`; a stored `null`
@@ -154,72 +160,63 @@ assert_eq!(
 # }
 ```
 
-## Opaque byte values
+## Application-owned byte payloads
 
-Use opaque bytes when the application owns the serialized format, such as a
-custom binary layout, bincode, or postcard. The client stores and returns the
-bytes without inspecting them; other language clients receive a byte value and
-need the same application format to decode it. Encode before `set`, and borrow
-the returned `Value::Bytes` when decoding:
+Use byte payloads when the application owns the serialized format. This example
+uses bincode 2; pin the serializer major version and configuration because the
+bytes are an application schema contract:
+
+```bash
+cargo add bincode@2 --features serde
+cargo add serde --features derive
+```
+
+The client stores and returns the bytes without inspecting them; other
+language clients receive a byte value and need the same application format to
+decode it:
 
 ```rust
+use bincode::config;
 use openkache::{Client, GetResult, Value};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
 struct Session {
     user_id: u64,
     flags: u8,
 }
 
-// A tiny application-owned binary format: big-endian user_id followed by flags.
-fn encode_session(session: &Session) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(9);
-    bytes.extend_from_slice(&session.user_id.to_be_bytes());
-    bytes.push(session.flags);
-    bytes
-}
-
-fn decode_session(bytes: &[u8]) -> Option<Session> {
-    if bytes.len() != 9 {
-        return None;
-    }
-    Some(Session {
-        user_id: u64::from_be_bytes(bytes[..8].try_into().ok()?),
-        flags: bytes[8],
-    })
-}
-
-# async fn example() -> openkache::Result<()> {
+# fn invalid_data(message: &'static str) -> Box<dyn std::error::Error> {
+#     std::io::Error::new(std::io::ErrorKind::InvalidData, message).into()
+# }
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let client = Client::connect("127.0.0.1:4433").await?;
 let session = Session {
     user_id: 7,
     flags: 0b101,
 };
+let payload = bincode::serde::encode_to_vec(&session, config::standard())?;
 client
-    .set("session:1", Value::bytes(encode_session(&session)))
+    .set("session:1", Value::bytes(payload))
     .await?;
 
 let stored = client.get("session:1").await?;
 let bytes = match &stored {
     GetResult::Found(Value::Bytes(bytes)) => bytes,
-    GetResult::Found(_) => {
-        return Err(openkache::Error::Core("expected opaque bytes".into()));
-    }
-    GetResult::Missing => {
-        return Err(openkache::Error::Core("session is missing".into()));
-    }
+    GetResult::Found(_) => return Err(invalid_data("expected opaque bytes")),
+    GetResult::Missing => return Err(invalid_data("session is missing")),
 };
-let decoded = decode_session(bytes)
-    .ok_or_else(|| openkache::Error::Core("invalid session bytes".into()))?;
+let (decoded, _bytes_read): (Session, usize) =
+    bincode::serde::decode_from_slice(bytes, config::standard())?;
 assert_eq!(decoded, session);
 # client.close().await?;
 # Ok(())
 # }
 ```
 
-Opaque values are not a `ValueCodec` format: do not pass them to
-`get_with`/`set_with` unless the codec explicitly converts the bytes to and
-from a structured `Value`.
+Application-owned payloads normally use ordinary `get`/`set`. A
+`ValueCodec` can wrap an opaque serializer only when it maps the encoded bytes
+to and from `Value::Bytes`; the client still does not inspect that format.
 
 ## Reference
 
