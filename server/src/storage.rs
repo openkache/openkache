@@ -20,22 +20,19 @@ pub(crate) mod bucket;
 pub(crate) mod sg;
 pub(crate) mod table;
 
-use bucket::{BUCKET_BYTES, Bucket, BucketValue};
+pub(crate) use bucket::BUCKET_BYTES;
+use bucket::{Bucket, BucketValue};
 use sg::MutableSg;
 use table::{Table, TableConfig, TableCreateError};
 
+use crate::config::StorageConfig;
+
 const STORAGE_KEY_BYTES: usize = 32;
-const MUTABLE_SG_COUNT: usize = 3;
-const BUCKETS_PER_SG: usize = 65_536;
+/// Number of segment groups kept resident in RAM. Fixed: this multiplied by the
+/// SG size is the fixed RAM budget the memory-efficiency story depends on.
+pub(crate) const MUTABLE_SG_COUNT: usize = 3;
 const BUCKET_CHOICE_COUNT: u8 = 4;
-const BUCKET_CHOICE_BITS: u32 = BUCKET_CHOICE_COUNT.ilog2();
-const STORAGE_SG_COUNT: usize = 64;
-const TABLE_VALUE_BITS: u8 = 8;
-const TABLE_MAX_ENTRIES: usize = 625_000;
-const STORAGE_IO_QUEUE_ENTRIES: u32 = 4_096;
-const STORAGE_FILE_PATH: &str = "openkache.data";
-const SG_BYTES: u64 = (BUCKETS_PER_SG * BUCKET_BYTES) as u64;
-const STORAGE_FILE_BYTES: u64 = STORAGE_SG_COUNT as u64 * SG_BYTES;
+pub(crate) const BUCKET_CHOICE_BITS: u32 = BUCKET_CHOICE_COUNT.ilog2();
 
 /// A fixed-size key used by Storage and Bucket.
 #[repr(transparent)]
@@ -61,6 +58,10 @@ struct Storage {
     sgs: Box<[SgState]>,
     oldest_mutable_sg_index: usize,
     spare_mutable_sg: Option<MutableSg>,
+    /// Buckets per SG, from config; used for bucket index and file offsets.
+    buckets_per_sg: usize,
+    /// Bytes per SG, from config; used for file offsets.
+    sg_bytes: u64,
 }
 
 enum SgState {
@@ -81,6 +82,7 @@ impl IoBuf for FlushBuffer {
 
 struct FlushJob {
     sg_index: usize,
+    file_offset: u64,
     buffer: FlushBuffer,
 }
 
@@ -127,31 +129,33 @@ enum SetError {
 }
 
 impl Storage {
-    fn new() -> Result<Self, TableCreateError> {
+    fn new(config: &StorageConfig) -> Result<Self, TableCreateError> {
         let table = Table::new(TableConfig {
-            max_entries: TABLE_MAX_ENTRIES,
-            value_bits: TABLE_VALUE_BITS,
+            max_entries: config.table_max_entries,
+            value_bits: config.table_value_bits,
             fingerprint_bits: 8,
         })?;
-        let mut sgs = (0..STORAGE_SG_COUNT)
+        let mut sgs = (0..config.storage_sg_count)
             .map(|_| SgState::Unused)
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
         for state in &mut sgs[..MUTABLE_SG_COUNT] {
-            *state = SgState::Mutable(Self::new_mutable_sg());
+            *state = SgState::Mutable(Self::new_mutable_sg(config));
         }
 
         Ok(Self {
             table,
             sgs,
             oldest_mutable_sg_index: 0,
-            spare_mutable_sg: Some(Self::new_mutable_sg()),
+            spare_mutable_sg: Some(Self::new_mutable_sg(config)),
+            buckets_per_sg: config.buckets_per_sg,
+            sg_bytes: config.sg_bytes,
         })
     }
 
-    fn new_mutable_sg() -> MutableSg {
-        MutableSg::new(BUCKETS_PER_SG, BUCKET_CHOICE_COUNT)
+    fn new_mutable_sg(config: &StorageConfig) -> MutableSg {
+        MutableSg::new(config.buckets_per_sg, BUCKET_CHOICE_COUNT)
     }
 
     fn prepare_set(&self, key: &StorageKey) -> SetPlan {
@@ -184,7 +188,7 @@ impl Storage {
             SgState::Mutable(sg) => Self::lookup_ram(sg, key, bucket_choice),
             SgState::Flushing(buffer) => Self::lookup_ram(&buffer.0, key, bucket_choice),
             SgState::Ssd => Lookup::ReadBucket {
-                file_offset: Self::bucket_file_offset(sg_index, key, bucket_choice),
+                file_offset: self.bucket_file_offset(sg_index, key, bucket_choice),
             },
             SgState::Unused => Lookup::CandidateMiss,
         }
@@ -372,6 +376,7 @@ impl Storage {
         Ok((
             FlushJob {
                 sg_index: old_index,
+                file_offset: old_index as u64 * self.sg_bytes,
                 buffer,
             },
             new_index,
@@ -428,7 +433,7 @@ impl Storage {
         )
     }
 
-    fn bucket_file_offset(sg_index: usize, key: &StorageKey, bucket_choice: u8) -> u64 {
+    fn bucket_file_offset(&self, sg_index: usize, key: &StorageKey, bucket_choice: u8) -> u64 {
         let key_bytes = key.as_bytes();
         let first = u64::from_le_bytes(key_bytes[16..24].try_into().unwrap());
         let second = u64::from_le_bytes(key_bytes[24..32].try_into().unwrap());
@@ -439,8 +444,8 @@ impl Storage {
                 first.wrapping_add(u64::from(choice).wrapping_mul(second.rotate_left(32) | 1))
             }
         };
-        let bucket_index = hash as usize % BUCKETS_PER_SG;
-        sg_index as u64 * SG_BYTES + bucket_index as u64 * BUCKET_BYTES as u64
+        let bucket_index = hash as usize % self.buckets_per_sg;
+        sg_index as u64 * self.sg_bytes + bucket_index as u64 * BUCKET_BYTES as u64
     }
 }
 
@@ -593,6 +598,25 @@ async fn execute_set(
     }
 }
 
+/// Forces the oldest mutable SG to flush to SSD and awaits its completion, so a
+/// benchmark can push data to disk without waiting for the SGs to fill. Rotate
+/// errors (SSD full, a flush already in flight) become a graceful reply rather
+/// than a fatal worker error.
+async fn execute_flush(worker: WorkerHandle, file: Rc<File>) -> io::Result<Reply> {
+    let rotation = worker.access(|worker| worker.storage.rotate_mutable());
+    match rotation {
+        Ok((flush_job, _new_mutable_sg_index)) => {
+            // Await completion: complete_flush restores the single spare SG, so
+            // the reply means "on SSD" and the next FLUSH can proceed.
+            flush_sg(worker, file, flush_job).await;
+            Ok(Reply::Flush(Ok(())))
+        }
+        Err(SetError::SsdCapacityReached) => Ok(Reply::Flush(Err("SSD capacity reached"))),
+        Err(SetError::FlushStillInFlight) => Ok(Reply::Flush(Err("a flush is already in flight"))),
+        Err(_) => Ok(Reply::Flush(Err("cannot flush"))),
+    }
+}
+
 async fn execute_delete(
     worker: WorkerHandle,
     file: Rc<File>,
@@ -609,7 +633,7 @@ async fn execute_delete(
 }
 
 async fn flush_sg(worker: WorkerHandle, file: Rc<File>, flush: FlushJob) {
-    let file_offset = flush.sg_index as u64 * SG_BYTES;
+    let file_offset = flush.file_offset;
     let mut file = &*file;
     let (result, returned_buffer) = file
         .write_all_at(flush.buffer, file_offset)
@@ -642,6 +666,7 @@ async fn execute_request(
             execute_set(worker, file, StorageKey::from_key(&key), value).await?
         }
         Command::Delete { key } => execute_delete(worker, file, StorageKey::from_key(&key)).await?,
+        Command::Flush => execute_flush(worker, file).await?,
     };
 
     Ok(StorageResponse {
@@ -651,10 +676,10 @@ async fn execute_request(
     })
 }
 
-fn create_runtime() -> io::Result<Runtime> {
+fn create_runtime(config: &StorageConfig) -> io::Result<Runtime> {
     let mut proactor = ProactorBuilder::new();
     proactor
-        .capacity(STORAGE_IO_QUEUE_ENTRIES)
+        .capacity(config.io_queue_entries)
         .single_issuer(true)
         .defer_taskrun(true)
         .taskrun_flag(true);
@@ -664,7 +689,7 @@ fn create_runtime() -> io::Result<Runtime> {
     runtime.build()
 }
 
-fn open_storage_file(runtime: &Runtime) -> io::Result<Rc<File>> {
+fn open_storage_file(runtime: &Runtime, config: &StorageConfig) -> io::Result<Rc<File>> {
     runtime.block_on(async {
         let file = OpenOptions::new()
             .read(true)
@@ -672,11 +697,30 @@ fn open_storage_file(runtime: &Runtime) -> io::Result<Rc<File>> {
             .create(true)
             .truncate(true)
             .custom_flags(libc::O_DIRECT)
-            .open(STORAGE_FILE_PATH)
+            .open(&config.storage_file_path)
             .await?;
-        file.set_len(STORAGE_FILE_BYTES).await?;
+        if config.preallocate_file {
+            // Reserve physical blocks so the backing file is contiguous, for
+            // sequential-write and DLWA measurements on real NVMe.
+            preallocate(&file, config.storage_file_bytes)?;
+        } else {
+            // Sparse: sets the logical size only; blocks are allocated on first
+            // write to each SG offset.
+            file.set_len(config.storage_file_bytes).await?;
+        }
         Ok(Rc::new(file))
     })
+}
+
+fn preallocate(file: &File, len: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `fd` is a valid open descriptor for the lifetime of this call.
+    let result = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as libc::off_t) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 fn run_storage_worker(
@@ -729,12 +773,13 @@ fn run_storage_worker(
 }
 
 pub(crate) fn run(
+    config: StorageConfig,
     request_receiver: Consumer<StorageRequest, STORAGE_QUEUE_SLOTS>,
     response_sender: Producer<StorageResponse, STORAGE_QUEUE_SLOTS>,
 ) -> io::Result<()> {
-    let runtime = create_runtime()?;
-    let file = open_storage_file(&runtime)?;
-    let storage = Storage::new()
+    let runtime = create_runtime(&config)?;
+    let file = open_storage_file(&runtime, &config)?;
+    let storage = Storage::new(&config)
         .map_err(|error| io::Error::other(format!("failed to create storage: {error:?}")))?;
     let worker = Box::new(WorkerState {
         storage,
