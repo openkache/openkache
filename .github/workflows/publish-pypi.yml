@@ -167,11 +167,11 @@ jobs:
             platform_tag: manylinux_2_38_aarch64
             native_library: libopenkache_client_python_native.so
           - name: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             platform_tag: macosx_*_x86_64
             native_library: libopenkache_client_python_native.dylib
           - name: macos-arm64
-            runner: macos-14
+            runner: macos-15
             platform_tag: macosx_*_arm64
             native_library: libopenkache_client_python_native.dylib
           - name: windows-x86_64
@@ -223,6 +223,19 @@ jobs:
           r=roots[0];
           [shutil.move(str(c),str(d/c.name)) for c in r.iterdir()];
           r.rmdir()'
+
+      - name: Use packaged Rust contract snapshots
+        working-directory: ${{ runner.temp }}/openkache-python-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The source distribution carries generated Rust snapshots for
+          # consumers that do not have the repository's Bun/Smithy toolchain.
+          # Remove repository generator inputs so both Rust build scripts use
+          # those snapshots on every release runner, including Windows.
+          rm -f clients/generate.ts
+          rm -f protocol/generate.ts protocol/wire.ts protocol/wire_spec.ts
+          rm -rf protocol/model
 
       - name: Build native adapter
         working-directory: ${{ runner.temp }}/openkache-python-source

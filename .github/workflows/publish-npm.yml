@@ -165,7 +165,7 @@ jobs:
             artifact: openkache-client.linux-arm64-gnu.node
             target: aarch64-unknown-linux-gnu
           - name: darwin-arm64
-            runner: macos-14
+            runner: macos-15
             artifact: openkache-client.darwin-arm64.node
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
