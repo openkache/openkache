@@ -95,6 +95,53 @@ mod maintained {
         CodecDecode(String),
     }
 
+    /// Stable high-level category for a client error.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ErrorKind {
+        /// A mutation may have taken effect, but its result is unknown.
+        UnknownMutation,
+        /// A connection, protocol, key, or value operation failed.
+        Core,
+        /// The server returned an unsupported set outcome.
+        UnsupportedSetOutcome,
+        /// Serde serialization failed before a request was admitted.
+        SerdeSerialize,
+        /// Serde deserialization failed after a value was retrieved.
+        SerdeDeserialize,
+        /// A value codec failed before a write was admitted.
+        CodecEncode,
+        /// A value codec failed after a value was retrieved.
+        CodecDecode,
+    }
+
+    impl Error {
+        /// Returns the stable category for this error.
+        pub const fn kind(&self) -> ErrorKind {
+            match self {
+                Self::UnknownMutation { .. } => ErrorKind::UnknownMutation,
+                Self::Core(_) => ErrorKind::Core,
+                Self::UnsupportedSetOutcome => ErrorKind::UnsupportedSetOutcome,
+                Self::SerdeSerialize(_) => ErrorKind::SerdeSerialize,
+                Self::SerdeDeserialize(_) => ErrorKind::SerdeDeserialize,
+                Self::CodecEncode(_) => ErrorKind::CodecEncode,
+                Self::CodecDecode(_) => ErrorKind::CodecDecode,
+            }
+        }
+
+        /// Returns whether this error reports an unknown mutation outcome.
+        pub const fn is_unknown_mutation(&self) -> bool {
+            matches!(self, Self::UnknownMutation { .. })
+        }
+
+        /// Returns the mutation whose outcome is unknown, if any.
+        pub const fn mutation(&self) -> Option<Mutation> {
+            match self {
+                Self::UnknownMutation { operation } => Some(*operation),
+                _ => None,
+            }
+        }
+    }
+
     /// Result alias for client operations.
     pub type Result<T> = std::result::Result<T, Error>;
 
@@ -117,12 +164,64 @@ mod maintained {
             matches!(self, Self::Missing)
         }
 
+        /// Returns the found value.
+        ///
+        /// # Panics
+        ///
+        /// Panics if this lookup is [`GetResult::Missing`].
+        #[track_caller]
+        pub fn unwrap(self) -> T {
+            self.expect("called `GetResult::unwrap()` on a missing value")
+        }
+
+        /// Returns the found value.
+        ///
+        /// # Panics
+        ///
+        /// Panics if this lookup is [`GetResult::Missing`], with `message`.
+        #[track_caller]
+        pub fn expect(self, message: &str) -> T {
+            match self {
+                Self::Missing => panic!("{message}"),
+                Self::Found(value) => value,
+            }
+        }
+
+        /// Returns the found value, or `default` when the lookup is missing.
+        pub fn unwrap_or(self, default: T) -> T {
+            match self {
+                Self::Missing => default,
+                Self::Found(value) => value,
+            }
+        }
+
+        /// Returns the found value, or computes a default when the lookup is
+        /// missing.
+        pub fn unwrap_or_else(self, function: impl FnOnce() -> T) -> T {
+            match self {
+                Self::Missing => function(),
+                Self::Found(value) => value,
+            }
+        }
+
         /// Applies a function only when the lookup found an item.
         pub fn map<U>(self, function: impl FnOnce(T) -> U) -> GetResult<U> {
             match self {
                 Self::Missing => GetResult::Missing,
                 Self::Found(value) => GetResult::Found(function(value)),
             }
+        }
+    }
+
+    impl SetOutcome {
+        /// Returns whether this outcome created a new item.
+        pub const fn is_created(self) -> bool {
+            matches!(self, Self::Created)
+        }
+
+        /// Returns whether this outcome replaced an existing item.
+        pub const fn is_replaced(self) -> bool {
+            matches!(self, Self::Replaced)
         }
     }
 
