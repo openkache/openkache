@@ -82,16 +82,19 @@ The server requires `io_uring_setup`, `io_uring_enter`, and
 examples use `seccomp=unconfined` as a compatibility fallback; use a narrowly
 scoped profile when running outside an isolated development environment.
 
-## Tags and publication
+## References and publication
 
-| Tag | Meaning |
+| Reference | Meaning |
 | --- | --- |
 | `edge` | Latest successful `main` build; mutable rolling preview |
-| `@sha256:<digest>` | Immutable multi-platform manifest reference |
+| `ghcr.io/openkache/openkache@sha256:<digest>` | Immutable multi-platform manifest reference |
 
 Pull requests build without publishing. Pushes to `main` publish the `edge`
 multi-platform manifest with provenance and an SBOM. The workflow rejects stale
-reruns so an older commit cannot move `edge` backwards.
+reruns at both publish checkpoints, so a rerun for a commit that is no longer
+the current `main` commit cannot intentionally move `edge` backwards. Existing
+tags from earlier workflow runs remain available as historical references but
+are not updated by new builds.
 
 The Nix toolchain inputs used by `server/Dockerfile` are locked in
 `server/flake.lock` and updated by the scheduled container-input workflow.
