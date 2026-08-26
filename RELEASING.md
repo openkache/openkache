@@ -61,12 +61,16 @@ gh workflow run publish-server-binaries.yml \
   -f confirm=RELEASE
 ```
 
-The workflow refuses an existing GitHub Release with the same tag, verifies
-ELF/Mach-O architecture and Linux static-linking properties, and publishes
-per-archive `.sha256` files plus the aggregate `SHA256SUMS`. SHA-256 detects
-transfer corruption; it is not a signature or provenance attestation. These
-archives remain preview artifacts and must not be described as production
-support until a separate signing and provenance policy is in place.
+The workflow pins every build and publish checkout to the dispatch commit,
+refreshes the remote tag immediately before publication, and aborts if the tag
+moved during the run. It refuses an existing GitHub Release with the same tag
+and fails closed when the GitHub API cannot prove that the release is absent.
+The workflow verifies ELF/Mach-O architecture and Linux static-linking
+properties, then publishes per-archive `.sha256` files plus the aggregate
+`SHA256SUMS`. SHA-256 detects transfer corruption; it is not a signature or
+provenance attestation. These archives remain preview artifacts and must not be
+described as production support until a separate signing and provenance policy
+is in place.
 
 ## Choose the release version
 

@@ -35,7 +35,7 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -112,7 +112,7 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -245,7 +245,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openkache-server-binary-${{ matrix.asset_suffix }}
-          path: ${{ runner.temp }}/openkache-server-dist/*
+          path: ${{ runner.temp }}/openkache-server-dist/*.tar.gz*
           if-no-files-found: error
           retention-days: 14
 
@@ -261,9 +261,25 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Re-verify the release tag
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin \
+            "refs/tags/${SOURCE_REF_NAME}:refs/tags/${SOURCE_REF_NAME}"
+          resolved_tag="$(git rev-parse "${SOURCE_REF_NAME}^{commit}")"
+          if [[ "${resolved_tag}" != "${SOURCE_SHA}" ]]; then
+            echo "Release tag ${SOURCE_REF_NAME} moved to ${resolved_tag} during the workflow." >&2
+            echo "Why: published archives must remain attached to the exact source commit that passed the guard." >&2
+            echo "Fix: restore the tag to ${SOURCE_SHA} or start a new release workflow for the intended tag." >&2
+            exit 1
+          fi
 
       - name: Download staged binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -321,12 +337,22 @@ jobs:
       - name: Refuse to overwrite an existing release
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+          if release_response="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${SOURCE_REF_NAME}" 2>/dev/null
+          )"; then
             echo "Release ${GITHUB_REF_NAME} already exists." >&2
             echo "Why: release assets are immutable once published." >&2
             echo "Fix: choose a new server version and create a matching server-v<version> tag." >&2
+            exit 1
+          fi
+          release_status="$(jq -r '.status // empty' <<<"${release_response}" 2>/dev/null || true)"
+          if [[ "${release_status}" != "404" ]]; then
+            echo "Could not prove that release ${SOURCE_REF_NAME} is absent (HTTP ${release_status:-unknown})." >&2
+            echo "Why: publication must stop when GitHub release state cannot be checked safely." >&2
+            echo "Fix: restore GitHub API access and rerun the release workflow." >&2
             exit 1
           fi
 
