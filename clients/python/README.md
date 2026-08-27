@@ -150,7 +150,10 @@ if removed:
 
 ### `client.close()`
 
-Closes the connection and returns `None`. Calling it more than once is safe.
+Explicitly and gracefully closes the connection and returns `None`. The call
+waits for native operations already in flight, rejects later operations, and
+is safe to repeat. Treat this as the normative lifecycle boundary and call it
+when the client is no longer needed.
 
 ```python
 client.close()
@@ -158,6 +161,11 @@ client.close()
 
 The client also supports `with Client.connect(address)`, which closes the
 connection automatically when the block exits.
+
+If a client is abandoned without an explicit close, the private native handle
+has a nondeterministic, best-effort `__del__` fallback. It cannot report
+completion or shutdown errors and may run much later (or not at all), so it
+does not replace `close()` or the `with` context manager.
 
 ### Keys
 

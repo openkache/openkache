@@ -102,6 +102,12 @@ raw SET policy flags, structured calls, scoped calls, and namespace control
 operations do not have request-handle entry points in ABI v1, so the adapter
 drains a safe synchronous completion boundary before returning.
 
+`Close` is the normative lifecycle boundary: call it explicitly and observe
+its returned error after admitted operations drain. If a `Client` becomes
+unreachable first, the Go runtime may invoke a best-effort finalizer that
+discards shutdown errors; finalization is nondeterministic and may not run, so
+it is not a replacement for `Close`.
+
 ## Configuration
 
 - `Certificate` accepts one DER certificate or a PEM trust chain.

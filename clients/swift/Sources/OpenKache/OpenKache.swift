@@ -1049,6 +1049,8 @@ private func deleteOutcome(
 /// Actor-isolated Swift client over the shared Rust core.
 public actor OpenKacheClient {
     private var native: NativeHandle?
+    private var activeOperations = 0
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
     private init(native: NativeHandle) {
         self.native = native
@@ -1241,15 +1243,31 @@ public actor OpenKacheClient {
         guard let native else {
             return .closed
         }
+        activeOperations += 1
+        defer { endOperation() }
         let value = await Task.detached(priority: nil) {
             nativeConnectionState(native.pointer)
         }.value
         return OpenKacheConnectionState(rawValue: value) ?? .unknown
     }
 
-    /// Permanently closes this client. Repeated calls are safe.
-    public func close() {
+    /// Permanently and gracefully closes this client.
+    ///
+    /// New operations are rejected immediately. The returned operation waits
+    /// for work already admitted through this actor to finish before
+    /// releasing this actor's native reference. If `raw()` produced a
+    /// sharing client, that actor retains the underlying connection until it
+    /// is also closed or deallocated. If a caller abandons the actor without
+    /// calling `close`, `NativeHandle.deinit` remains a nondeterministic,
+    /// best-effort fallback and cannot report completion or errors.
+    public func close() async {
         native = nil
+        guard activeOperations != 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            closeWaiters.append(continuation)
+        }
     }
 
     /// Returns an exact-item-ID client sharing this native connection.
@@ -1267,9 +1285,8 @@ public actor OpenKacheClient {
     private func perform<T: Sendable>(
         _ operation: @escaping @Sendable (NativeHandle) throws -> T
     ) async throws -> T {
-        guard let native else {
-            throw OpenKacheError("client is closed")
-        }
+        let native = try beginOperation()
+        defer { endOperation() }
         return try await Task.detached(priority: nil) {
             try operation(native)
         }.value
@@ -1278,10 +1295,29 @@ public actor OpenKacheClient {
     private func performAsync<T: Sendable>(
         _ operation: @escaping @Sendable (NativeHandle) async throws -> T
     ) async throws -> T {
+        let native = try beginOperation()
+        defer { endOperation() }
+        return try await operation(native)
+    }
+
+    private func beginOperation() throws -> NativeHandle {
         guard let native else {
             throw OpenKacheError("client is closed")
         }
-        return try await operation(native)
+        activeOperations += 1
+        return native
+    }
+
+    private func endOperation() {
+        activeOperations -= 1
+        guard activeOperations == 0 else {
+            return
+        }
+        let waiters = closeWaiters
+        closeWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
 }
@@ -1292,6 +1328,8 @@ public actor OpenKacheClient {
 /// application-key-derived and do not receive the protected value format.
 public actor OpenKacheRawClient {
     private var native: NativeHandle?
+    private var activeOperations = 0
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
     fileprivate init(native: NativeHandle) {
         self.native = native
@@ -1449,23 +1487,38 @@ public actor OpenKacheRawClient {
         guard let native else {
             return .closed
         }
+        activeOperations += 1
+        defer { endOperation() }
         let value = await Task.detached(priority: nil) {
             nativeConnectionState(native.pointer)
         }.value
         return OpenKacheConnectionState(rawValue: value) ?? .unknown
     }
 
-    /// Permanently closes this client. Repeated calls are safe.
-    public func close() {
+    /// Permanently and gracefully closes this client.
+    ///
+    /// New operations are rejected immediately. The returned operation waits
+    /// for work already admitted through this actor to finish before
+    /// releasing this actor's native reference. The underlying connection is
+    /// released when no sharing client retains it. If a caller abandons the
+    /// actor without calling `close`, `NativeHandle.deinit` remains a
+    /// nondeterministic, best-effort fallback and cannot report completion or
+    /// errors.
+    public func close() async {
         native = nil
+        guard activeOperations != 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            closeWaiters.append(continuation)
+        }
     }
 
     private func perform<T: Sendable>(
         _ operation: @escaping @Sendable (NativeHandle) throws -> T
     ) async throws -> T {
-        guard let native else {
-            throw OpenKacheError("client is closed")
-        }
+        let native = try beginOperation()
+        defer { endOperation() }
         return try await Task.detached(priority: nil) {
             try operation(native)
         }.value
@@ -1474,10 +1527,29 @@ public actor OpenKacheRawClient {
     private func performAsync<T: Sendable>(
         _ operation: @escaping @Sendable (NativeHandle) async throws -> T
     ) async throws -> T {
+        let native = try beginOperation()
+        defer { endOperation() }
+        return try await operation(native)
+    }
+
+    private func beginOperation() throws -> NativeHandle {
         guard let native else {
             throw OpenKacheError("client is closed")
         }
-        return try await operation(native)
+        activeOperations += 1
+        return native
+    }
+
+    private func endOperation() {
+        activeOperations -= 1
+        guard activeOperations == 0 else {
+            return
+        }
+        let waiters = closeWaiters
+        closeWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func validateItemID(_ itemID: Data) throws {

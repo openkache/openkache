@@ -549,8 +549,11 @@ type nativeClient interface {
 
 // Client is a concurrency-safe protected OpenKache client.
 //
-// A client may be used by multiple goroutines. Close is permanent and waits
-// for native calls already in flight before releasing the native library.
+// A client may be used by multiple goroutines. Close is the normative,
+// permanent lifecycle boundary and waits for native calls already in flight
+// before releasing the native library. If the client becomes unreachable
+// without an explicit Close, a runtime finalizer makes a best-effort fallback;
+// finalizer timing is nondeterministic and its error is discarded.
 type Client struct {
 	mu     sync.RWMutex
 	native nativeClient
@@ -1110,7 +1113,10 @@ func (c *Client) ConnectionState() ConnectionState {
 	}
 }
 
-// Close permanently closes the client. Repeated calls are safe.
+// Close gracefully and permanently closes the client. Repeated calls are safe;
+// the call waits for native work already in flight. Callers should invoke and
+// observe Close explicitly rather than relying on the nondeterministic runtime
+// finalizer fallback.
 func (c *Client) Close() error {
 	if c == nil {
 		return nil

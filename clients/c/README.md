@@ -21,6 +21,15 @@ Pointers and lengths are explicit; result payloads are borrowed until
 with `openkache_client_gate0_result_take_client` before
 `openkache_client_gate0_close`.
 
+## Client lifetime
+
+Call `openkache_client_gate0_close` explicitly after the last operation and
+ensure no operation is using the handle when it runs. The close function frees
+the native worker; discard the handle afterwards and do not call it again.
+Explicit close is the normative lifecycle boundary for C. C has no destructor
+or finalizer, so an abandoned handle has no automatic best-effort fallback and
+leaks native resources until process teardown.
+
 `gate0_get`, `gate0_set`, and `gate0_delete_value` accept one canonical
 StructuredValue-CBOR key item, so integer, text, and byte keys use the same
 wire representation across native adapters.  A mutating timeout after worker

@@ -127,7 +127,12 @@ def _delete_result(kind: object) -> bool:
 
 
 class OpenKacheClient:
-    """Synchronous structured-value client with a deliberately small API."""
+    """Synchronous structured-value client with a deliberately small API.
+
+    ``close`` is the normative lifecycle boundary. If an application abandons
+    the facade, the private native handle has only a nondeterministic,
+    best-effort finalizer fallback.
+    """
 
     def __init__(self, native: _NativeClient) -> None:
         self._native = native
@@ -269,7 +274,12 @@ class OpenKacheClient:
         return _delete_result(kind)
 
     def close(self) -> None:
-        """Release the native connection; repeated calls are harmless."""
+        """Gracefully release the native connection.
+
+        The call waits for native operations already in flight and is safe to
+        repeat. It is the only lifecycle path whose completion the caller can
+        observe; garbage collection is only a best-effort fallback.
+        """
 
         if self._closed:
             return

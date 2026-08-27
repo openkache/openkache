@@ -1117,9 +1117,9 @@ class NativeClient:
                 self._api.client_free(handle)
 
     def __del__(self) -> None:
-        # Explicit ``close`` remains the deterministic lifecycle API, but a
-        # best-effort finalizer prevents an abandoned native worker from
-        # surviving ordinary reference-counted interpreter shutdown.
+        # Explicit ``close`` remains the deterministic lifecycle API. This
+        # finalizer is only a nondeterministic, best-effort fallback; it cannot
+        # report shutdown errors to an application.
         try:
             self.close()
         except Exception:

@@ -8,6 +8,13 @@ namespace OpenKache;
 /// <summary>
 /// An asynchronous, thread-safe client for the OpenKache protocol.
 /// </summary>
+/// <remarks>
+/// <see cref="DisposeAsync"/> is the normative lifecycle boundary: it rejects
+/// new work, waits for admitted operations to settle, and then releases the
+/// native worker. If a client is abandoned without disposal, the native handle
+/// has a nondeterministic, best-effort finalizer fallback; it cannot report
+/// completion or shutdown errors.
+/// </remarks>
 public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
 {
     private readonly NativeClient _nativeClient;
@@ -236,8 +243,14 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     }
 
     /// <summary>
-    /// Closes the shared-core worker and releases its native resources.
+    /// Gracefully closes the shared-core worker and releases its native resources.
     /// </summary>
+    /// <remarks>
+    /// This operation is idempotent. It waits for admitted operations before
+    /// freeing the native handle; callers should use <c>await using</c> or
+    /// explicitly await this method. Garbage collection is only a
+    /// nondeterministic best-effort fallback.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

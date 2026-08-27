@@ -77,12 +77,19 @@ impl NativeClient {
         Ok(outcome == DeleteOutcome::Deleted)
     }
 
-    /// Closes the native connection. Repeated calls are safe.
+    /// Closes the native connection. Repeated calls are safe; a failed close
+    /// leaves the shared client available for a later retry.
     #[napi]
     pub async fn close(&self) -> Result<()> {
-        let client = self.take_client()?;
+        let client = self
+            .client
+            .read()
+            .map_err(|_| state_error("native client state lock is poisoned"))?
+            .as_ref()
+            .map(Arc::clone);
         if let Some(client) = client {
             client.close().await.map_err(native_core_error)?;
+            self.take_client()?;
         }
         Ok(())
     }

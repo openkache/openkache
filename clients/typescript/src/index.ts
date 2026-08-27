@@ -186,6 +186,11 @@ const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
  * `delete`, and `close`. The development profile uses TLS 1.3 with server
  * certificate verification disabled; this is development only — do not use
  * this trust profile in production.
+ *
+ * Call `close()` explicitly and await its promise when the client is no longer
+ * needed. A `FinalizationRegistry` invokes the private synchronous `close_now`
+ * primitive only as a nondeterministic, best-effort fallback; it cannot wait
+ * for or report asynchronous shutdown.
  */
 export class OpenKacheClient {
   readonly #native_client: Native_Client
@@ -360,12 +365,17 @@ export class OpenKacheClient {
   }
 
   /**
-   * Closes the connection. Repeated calls complete successfully.
+   * Gracefully closes the connection. Repeated calls share one completion
+   * promise and complete successfully after native resources are released.
    *
    * If native shutdown rejects, the rejected promise is discarded so a later
    * call retries shutdown. Operations remain closed after the first attempt.
    *
    * @returns A promise resolved after native resource release.
+   *
+   * Callers must await this method for deterministic shutdown. Garbage
+   * collection is only a best-effort fallback through the private
+   * synchronous `close_now` primitive.
    */
   close(): Promise<void> {
     if (this.#lifecycle.close_promise !== undefined) {
