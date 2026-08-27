@@ -1,6 +1,6 @@
 name: Feature request
 description: Propose a user-facing capability or compatibility improvement
-title: "[Feature]: "
+title: "[Feature] "
 labels:
   - enhancement
 body:
