@@ -338,10 +338,11 @@ client.close().await?;
 ```
 
 `Client` is cloneable and clones share one connection. Dropping a clone only
-releases that clone; dropping the final clone performs a synchronous,
-best-effort transport close and does not wait for admitted operations. Call
-`client.close().await?` when graceful draining and a reported close error are
-required.
+releases that clone; dropping the final clone triggers best-effort abortive
+transport cleanup without waiting for admitted operations or transport
+shutdown. Cleanup may continue asynchronously, and its errors cannot be
+reported from `Drop`. Call `client.close().await?` when graceful draining and a
+reported close error are required.
 
 ### Keys
 

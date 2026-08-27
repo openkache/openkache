@@ -90,8 +90,9 @@ contract header is supplied by each package build.
 
 `close` is the explicit graceful lifecycle path: it rejects new admission,
 waits for already admitted operations, and then closes the transport.
-`Core<C>` also has a synchronous `Drop` fallback for the final shared owner;
-that fallback cannot await the drain and may interrupt admitted work. The
+`Core<C>` also performs best-effort abortive transport cleanup when the final
+shared owner is dropped; that fallback cannot await the drain or transport
+shutdown, cannot report cleanup errors, and may interrupt admitted work. The
 cloneable raw and protected clients therefore rely on callers to invoke
 `close().await` when graceful completion matters. If a Rust close future is
 canceled after it starts draining, the same abortive fallback publishes the

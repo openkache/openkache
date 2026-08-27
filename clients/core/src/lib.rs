@@ -497,9 +497,9 @@ impl<C: ClientConnection> Drop for PendingRequestReservation<'_, C> {
 ///
 /// Without this guard, cancellation after `close_requested` becomes true
 /// would leave every later close caller waiting for a terminal state that no
-/// task can publish. The synchronous fallback is intentionally abortive: a
-/// caller that cancels graceful close has chosen not to wait for admitted
-/// operations.
+/// task can publish. The fallback is intentionally abortive: a caller that
+/// cancels graceful close has chosen not to wait for admitted operations or
+/// transport shutdown, and cleanup errors cannot be reported from this guard.
 struct CloseFallback<'a, C: ClientConnection> {
     core: &'a Core<C>,
     completed: bool,
@@ -1445,9 +1445,9 @@ impl<C: ClientConnection> Core<C> {
 
 impl<C: ClientConnection> Drop for Core<C> {
     fn drop(&mut self) {
-        // `Drop` cannot await the admitted-request drain.  Close the
-        // underlying transport synchronously as a best-effort abortive
-        // fallback when the final shared client handle goes away.
+        // `Drop` cannot await the admitted-request drain or transport
+        // shutdown. Trigger best-effort abortive cleanup when the final shared
+        // client handle goes away; cleanup errors cannot be reported here.
         let connection = match self.connection.get_mut() {
             Ok(connection) => connection,
             Err(poisoned) => poisoned.into_inner(),

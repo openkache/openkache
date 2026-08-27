@@ -95,15 +95,16 @@ best-effort fallback for abandoned clients. Such implicit cleanup MUST be
 idempotent and MUST NOT wait for asynchronous work, surface an error, or be
 required for a successful application shutdown. It may run much later, or not
 at all, depending on the host runtime. A finalizer MUST therefore use the
-client's synchronous abort/close-now primitive when one exists, rather than
-trying to start or block an asynchronous runtime.
+client's abort/close-now primitive that does not await asynchronous work when
+one exists, rather than trying to start or block an asynchronous runtime.
 
 The Rust client deliberately follows ownership semantics: its cloneable public
 facades do not implement `Drop`, because dropping one clone cannot safely close
-the shared connection owned by another clone. The shared core closes its
-transport synchronously only when the final owner is dropped; callers that need
-graceful draining MUST call `Client::close().await` (or the corresponding raw
-client method) explicitly.
+the shared connection owned by another clone. The shared core triggers
+best-effort abortive transport cleanup only when the final owner is dropped;
+that path does not await transport shutdown or report its errors. Callers that
+need graceful draining MUST call `Client::close().await` (or the corresponding
+raw client method) explicitly.
 
 ### Lookup and mutation outcomes
 

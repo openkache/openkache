@@ -178,10 +178,11 @@ mod maintained {
     /// local development TLS profile described in [`Client::connect`].
     ///
     /// Cloning a client shares its connection and lifecycle state. Dropping a
-    /// clone only releases that handle; dropping the final clone synchronously
-    /// closes the transport as a best-effort abortive fallback. It does not
-    /// wait for admitted operations to finish. Call [`Client::close`] and
-    /// await it when graceful shutdown is required.
+    /// clone only releases that handle; dropping the final clone triggers
+    /// best-effort abortive transport cleanup without waiting for admitted
+    /// operations or transport shutdown. Cleanup may continue asynchronously,
+    /// and its errors cannot be reported from `Drop`. Call [`Client::close`]
+    /// and await it when graceful shutdown is required.
     #[cfg(feature = "quic-quinn")]
     #[derive(Clone)]
     pub struct Client {
@@ -478,8 +479,9 @@ mod maintained {
         /// arriving after a completed shutdown return `Ok(())`.
         ///
         /// Dropping a [`Client`] cannot await this drain. Dropping the final
-        /// clone instead performs a synchronous, best-effort abortive
-        /// transport close that may interrupt admitted work. Await this
+        /// clone instead triggers best-effort abortive transport cleanup
+        /// without waiting for transport shutdown; it may interrupt admitted
+        /// work, and cleanup errors cannot be reported from `Drop`. Await this
         /// method whenever graceful completion is required. If this future is
         /// canceled after it starts draining, it performs the same abortive
         /// fallback so later close callers cannot remain stuck waiting for a
