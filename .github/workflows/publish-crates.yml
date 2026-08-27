@@ -45,7 +45,7 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -143,7 +143,7 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -223,9 +223,25 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Re-verify the release tag
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin \
+            "refs/tags/${SOURCE_REF_NAME}:refs/tags/${SOURCE_REF_NAME}"
+          resolved_tag="$(git rev-parse "${SOURCE_REF_NAME}^{commit}")"
+          if [[ "${resolved_tag}" != "${SOURCE_SHA}" ]]; then
+            echo "Release tag ${SOURCE_REF_NAME} moved to ${resolved_tag} during the workflow." >&2
+            echo "Why: the published crate must come from the exact source commit that passed the guard." >&2
+            echo "Fix: restore the tag to ${SOURCE_SHA} or start a new release workflow for the intended tag." >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:

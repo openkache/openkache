@@ -20,10 +20,10 @@ Install the crate from crates.io, or use `cargo-binstall` when it is available:
 
 ```bash
 # Build and install from crates.io
-cargo install openkache-server
+cargo install --locked openkache-server
 
 # Install with cargo-binstall
-cargo binstall openkache-server
+cargo binstall --locked openkache-server
 ```
 
 To build from a checkout instead:
@@ -43,7 +43,7 @@ Run the server on its default local endpoint:
 
 ```bash
 openkache-server
-# openkache-server listening on 127.0.0.1:4433 over RESP/TCP and native QUIC/UDP
+# listening on 127.0.0.1:4433 over RESP/TCP and native QUIC/UDP
 ```
 
 On Linux, choose a different address and network/storage CPU pair:

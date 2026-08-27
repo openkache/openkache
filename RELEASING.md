@@ -37,7 +37,8 @@ The `openkache-server` crate and downloadable server archives share
 `server-v<version>` tag. The crate is published by `publish-crates.yml`; the
 archives are published by `publish-server-binaries.yml`. They are separate
 workflow runs and separate protected approvals, so you can release either one
-or both from the same tag.
+or both from the same tag. Check crates.io and the GitHub Release independently
+and dispatch only the workflow whose target is still unused.
 
 The binary workflow builds and checks immutable archives for Linux x86_64,
 Linux aarch64, and Apple Silicon macOS. Linux archives are static musl
@@ -184,9 +185,34 @@ For a server release, check the server crate separately:
 #### Server registry check
 
 ```bash
+set -euo pipefail
+
+check_registry() {
+  local url="$1"
+  local label="$2"
+  local http_code
+  if ! http_code="$(
+      curl --silent --show-error --location --retry 2 --retry-all-errors \
+        --connect-timeout 10 --max-time 30 \
+        --user-agent "openkache-release-preflight" \
+        --output /dev/null --write-out '%{http_code}' "$url"
+    )"; then
+    echo "$label registry check failed" >&2
+    return 1
+  fi
+  case "$http_code" in
+    404) echo "$label is not published; prepare its workflow" ;;
+    200) echo "$label is already published; skip its workflow" ;;
+    *) echo "$label registry check returned HTTP $http_code" >&2; return 1 ;;
+  esac
+}
+
 check_registry \
   "https://crates.io/api/v1/crates/openkache-server/${SERVER_RELEASE_VERSION}" \
   "crates.io openkache-server@${SERVER_RELEASE_VERSION}"
+check_registry \
+  "https://api.github.com/repos/openkache/openkache/releases/tags/server-v${SERVER_RELEASE_VERSION}" \
+  "GitHub server-v${SERVER_RELEASE_VERSION} release"
 ```
 
 Before dispatching, confirm that `pypi-release`, `crates-io-release`,
@@ -290,6 +316,10 @@ hosted runners:
 - TypeScript: JavaScript and declarations plus Linux x64/arm64 and Apple
   Silicon macOS native adapters.
 
+The crates workflow pins every checkout to the dispatch commit and rechecks
+the remote release tag immediately before publication. The binary workflow
+uses the same source-pinning and tag-recheck guard.
+
 Python wheel jobs compile the native adapter from the generated Rust snapshots
 already included in the source distribution. They intentionally remove the
 repository generator inputs before compiling, so the cross-platform release
@@ -384,7 +414,7 @@ gh workflow run publish-crates.yml \
   -f "version=${RELEASE_VERSION}" \
   -f confirm=RELEASE
 
-# Server release (use the server-v<version> tag and its independent version).
+# Server crate (run only when its crates.io check returned 404).
 gh workflow run publish-crates.yml \
   --repo openkache/openkache \
   --ref "server-v${SERVER_RELEASE_VERSION}" \
@@ -392,6 +422,7 @@ gh workflow run publish-crates.yml \
   -f "version=${SERVER_RELEASE_VERSION}" \
   -f confirm=RELEASE
 
+# Server archives (run only when the GitHub Release check returned 404).
 gh workflow run publish-server-binaries.yml \
   --repo openkache/openkache \
   --ref "server-v${SERVER_RELEASE_VERSION}" \
