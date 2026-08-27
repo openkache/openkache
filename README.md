@@ -9,33 +9,7 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring` · Apple Silicon
 [![Build](https://img.shields.io/badge/build-preview-orange.svg)](https://github.com/openkache/openkache/actions)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 
-<img src="docs/assets/openkache-architecture.png" alt="OpenKache Architecture"/>
-
 </div>
-
-Unless a section is explicitly marked as a target or draft, this README
-describes the current public preview. The protocol, client-format, security,
-and storage design documents are target contracts; their implementations may
-temporarily lag during the migration.
-
-## What works today
-
-The current server is a two-thread SSD cache prototype:
-
-- RESP `GET`, `SET`, and `DEL` over TCP
-- Gate 0 `PING`, `GET`, `SET`, and `DELETE` over OpenKache/QUIC
-- one network thread and one storage thread (Linux pins them to distinct CPUs;
-  macOS delegates placement to the scheduler)
-- a fixed 16 GiB `openkache.data` file backed by the platform async-I/O driver
-- Rust and multi-language SDKs built on the shared client core
-- `linux/amd64` and `linux/arm64` container publication
-- downloadable Linux static-musl and Apple Silicon macOS server archives
-
-This is not a production release. The server recreates its cache file on
-startup, generates an ephemeral self-signed certificate, and does not
-authenticate clients. TTL overrides, conditional writes, namespace
-administration, statistics, synchronization, clustering, and restart recovery
-are not implemented by the current server.
 
 ## Benchmarks
 
@@ -69,7 +43,15 @@ p99 it is 3.0× and 3.3× lower.
 OpenKache reaches this by aggregating many individual writes into sequential
 segment-group writes to the SSD, instead of issuing one storage write per key.
 
+## Architecture
+
+<div align="center">
+
+<img src="docs/assets/openkache-architecture.png" alt="OpenKache Architecture"/>
+
 <img src="docs/assets/segment-group-write-aggregation.png" alt="Individual Writes vs. Segment Group Aggregation"/>
+
+</div>
 
 ## Quick start
 
