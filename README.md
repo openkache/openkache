@@ -9,14 +9,7 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 [![Build](https://img.shields.io/badge/build-preview-orange.svg)](https://github.com/openkache/openkache/actions)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 
-<img src="docs/assets/openkache-architecture.png" alt="OpenKache Architecture"/>
-
 </div>
-
-Unless a section is explicitly marked as a target or draft, this README
-describes the current public preview. The protocol, client-format, security,
-and storage design documents are target contracts; their implementations may
-temporarily lag during the migration.
 
 ## What works today
 
@@ -34,6 +27,12 @@ startup, generates an ephemeral self-signed certificate, and does not
 authenticate clients. TTL overrides, conditional writes, namespace
 administration, statistics, synchronization, clustering, and restart recovery
 are not implemented by the current server.
+
+<div align="center">
+
+<img src="docs/assets/openkache-architecture.png" alt="OpenKache Architecture"/>
+
+</div>
 
 ## Benchmarks
 
