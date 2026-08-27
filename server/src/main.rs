@@ -10,6 +10,7 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod client;
+mod config;
 mod network;
 mod resp;
 mod resp_proxy;
@@ -18,8 +19,10 @@ mod storage;
 mod storage_message;
 
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::{env, io, mem, thread};
 
+use config::Config;
 use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
 // Create the network layer.
 // Create storage.
@@ -69,19 +72,39 @@ fn parse_cpu(value: Option<String>, default: usize, role: &str) -> io::Result<us
     })
 }
 
+fn usage_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "usage: openkache-server [--config <path>] [address] [network-cpu storage-cpu]",
+    )
+}
+
 fn main() -> io::Result<()> {
+    // Pull an optional `--config <path>` out first, leaving the positional args
+    // (address, network-cpu, storage-cpu) unchanged for backward compatibility.
+    let mut config_path: Option<PathBuf> = None;
+    let mut positional = Vec::new();
     let mut arguments = env::args().skip(1);
-    let address = arguments
+    while let Some(argument) = arguments.next() {
+        if argument == "--config" {
+            let path = arguments.next().ok_or_else(usage_error)?;
+            config_path = Some(PathBuf::from(path));
+        } else {
+            positional.push(argument);
+        }
+    }
+
+    let config = Config::load(config_path.as_deref())?;
+
+    let mut positional = positional.into_iter();
+    let address = positional
         .next()
         .unwrap_or_else(|| "127.0.0.1:4433".to_owned());
-    let network_cpu = parse_cpu(arguments.next(), 0, "network")?;
-    let storage_cpu = parse_cpu(arguments.next(), 1, "storage")?;
+    let network_cpu = parse_cpu(positional.next(), 0, "network")?;
+    let storage_cpu = parse_cpu(positional.next(), 1, "storage")?;
 
-    if arguments.next().is_some() || network_cpu == storage_cpu {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "usage: openkache-server [address] [network-cpu storage-cpu]",
-        ));
+    if positional.next().is_some() || network_cpu == storage_cpu {
+        return Err(usage_error());
     }
 
     network::install_signal_handlers()?;
@@ -100,7 +123,7 @@ fn main() -> io::Result<()> {
             .name("storage".into())
             .spawn(move || -> io::Result<()> {
                 pin_current_thread(storage_cpu)?;
-                storage::run(request_consumer, response_producer)
+                storage::run(config, request_consumer, response_producer)
             })?;
 
     pin_current_thread(network_cpu)?;
