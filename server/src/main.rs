@@ -84,6 +84,8 @@ fn main() -> io::Result<()> {
         ));
     }
 
+    network::install_signal_handlers()?;
+
     let tcp_listener = TcpListener::bind(&address)?;
     let tcp_address = tcp_listener.local_addr()?;
     let udp_socket = std::net::UdpSocket::bind(tcp_address)?;
