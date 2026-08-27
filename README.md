@@ -121,6 +121,20 @@ docker run --rm \
   localhost/openkache:dev
 ```
 
+Run the published preview image without authenticating to GHCR:
+
+```bash
+podman run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:edge
+```
+
+`edge` follows the latest successful build from `main`. For reproducible
+deployments, pin the multi-platform manifest by its `sha256` digest instead of
+using the rolling tag.
+
 The default container command pins the network thread to CPU 0 and the storage
 thread to CPU 1. Override the command when the container CPU set uses different
 IDs. See the [container guide](./docs/container-image.md) for details.
