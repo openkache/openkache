@@ -9,6 +9,8 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring` · Apple Silicon
 [![Build](https://img.shields.io/badge/build-preview-orange.svg)](https://github.com/openkache/openkache/actions)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 
+<img src="docs/assets/openkache-architecture.png" alt="OpenKache Architecture"/>
+
 </div>
 
 Unless a section is explicitly marked as a target or draft, this README
@@ -34,6 +36,40 @@ startup, generates an ephemeral self-signed certificate, and does not
 authenticate clients. TTL overrides, conditional writes, namespace
 administration, statistics, synchronization, clustering, and restart recovery
 are not implemented by the current server.
+
+## Benchmarks
+
+Measured on a 6 vCPU AMD EPYC 7773X host (SSD, kernel 6.8) over loopback, with
+32-byte keys and 100-byte values. Each system is driven by a load tool speaking
+its own native protocol. Full methodology in [BENCHMARK.md](./BENCHMARK.md).
+
+**GET throughput**
+
+| System | GET throughput | Load tool |
+|---|---:|---|
+| OpenKache | **97,887 ops/s** | memtier (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
+| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+
+OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL, reaching
+76% of the machine's single-core 4 KiB random-read ceiling (128,820 IOPS) with
+a single storage core.
+
+**GET latency (one request at a time)**
+
+| System | avg | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|
+| OpenKache | **238.7 µs** | 229 µs | 386 µs | 1376 µs |
+| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
+| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
+
+Average GET latency is 1.6× lower than MySQL and 2.3× lower than PostgreSQL; at
+p99 it is 3.0× and 3.3× lower.
+
+OpenKache reaches this by aggregating many individual writes into sequential
+segment-group writes to the SSD, instead of issuing one storage write per key.
+
+<img src="docs/assets/segment-group-write-aggregation.png" alt="Individual Writes vs. Segment Group Aggregation"/>
 
 ## Quick start
 

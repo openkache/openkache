@@ -12,9 +12,18 @@ pub(crate) struct StorageRequest {
 }
 
 pub(crate) enum Command {
-    Get { key: Box<[u8]> },
-    Set { key: Box<[u8]>, value: Arc<[u8]> },
-    Delete { key: Box<[u8]> },
+    Get {
+        key: Box<[u8]>,
+    },
+    Set {
+        key: Box<[u8]>,
+        value: Arc<[u8]>,
+    },
+    Delete {
+        key: Box<[u8]>,
+    },
+    /// Benchmark-only: force one oldest mutable SG to flush to SSD now.
+    Flush,
 }
 
 pub(crate) struct StorageResponse {
@@ -27,4 +36,7 @@ pub(crate) enum Reply {
     Get(Option<Arc<[u8]>>),
     SetOk,
     Delete(bool),
+    /// `Ok` when a SG was flushed; `Err` carries a human-readable reason
+    /// (e.g. SSD capacity reached, a flush already in flight).
+    Flush(Result<(), &'static str>),
 }

@@ -10,6 +10,7 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod client;
+mod config;
 mod network;
 mod resp;
 mod resp_proxy;
@@ -18,11 +19,13 @@ mod storage;
 mod storage_message;
 
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::{env, io, thread};
 
 #[cfg(target_os = "linux")]
 use std::mem;
 
+use config::{Config, StorageConfig};
 use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
 // Create the network layer.
 // Create storage.
@@ -74,6 +77,14 @@ fn parse_cpu(value: Option<String>, default: usize, role: &str) -> io::Result<us
     })
 }
 
+fn usage_error() -> io::Error {
+    #[cfg(target_os = "linux")]
+    let usage = "usage: openkache-server [--config <path>] [address] [network-cpu storage-cpu]";
+    #[cfg(target_os = "macos")]
+    let usage = "usage: openkache-server [--config <path>] [address]";
+    io::Error::new(io::ErrorKind::InvalidInput, usage)
+}
+
 #[derive(Clone, Copy)]
 enum ThreadPlacement {
     #[cfg(target_os = "linux")]
@@ -87,18 +98,33 @@ enum ThreadPlacement {
 
 struct ServerConfig {
     address: String,
+    storage: StorageConfig,
     placement: ThreadPlacement,
 }
 
 impl ServerConfig {
     fn parse(mut arguments: impl Iterator<Item = String>) -> io::Result<Self> {
-        let address = arguments
+        let mut config_path: Option<PathBuf> = None;
+        let mut positional = Vec::new();
+        while let Some(argument) = arguments.next() {
+            if argument == "--config" {
+                let path = arguments.next().ok_or_else(usage_error)?;
+                config_path = Some(PathBuf::from(path));
+            } else {
+                positional.push(argument);
+            }
+        }
+
+        let storage = Config::load(config_path.as_deref())?;
+        let mut positional = positional.into_iter();
+        let address = positional
             .next()
             .unwrap_or_else(|| "127.0.0.1:4433".to_owned());
 
         Ok(Self {
             address,
-            placement: ThreadPlacement::parse(&mut arguments)?,
+            storage,
+            placement: ThreadPlacement::parse(&mut positional)?,
         })
     }
 
@@ -107,8 +133,11 @@ impl ServerConfig {
         request_consumer: spsc::Consumer<StorageRequest, STORAGE_QUEUE_SLOTS>,
         response_producer: spsc::Producer<StorageResponse, STORAGE_QUEUE_SLOTS>,
     ) -> io::Result<thread::JoinHandle<io::Result<()>>> {
-        self.placement
-            .spawn_storage_thread(request_consumer, response_producer)
+        self.placement.spawn_storage_thread(
+            self.storage.clone(),
+            request_consumer,
+            response_producer,
+        )
     }
 
     fn log_listening(&self, tcp_address: std::net::SocketAddr) {
@@ -154,6 +183,7 @@ impl ThreadPlacement {
     #[cfg(target_os = "linux")]
     fn spawn_storage_thread(
         self,
+        config: StorageConfig,
         request_consumer: spsc::Consumer<StorageRequest, STORAGE_QUEUE_SLOTS>,
         response_producer: spsc::Producer<StorageResponse, STORAGE_QUEUE_SLOTS>,
     ) -> io::Result<thread::JoinHandle<io::Result<()>>> {
@@ -163,13 +193,14 @@ impl ThreadPlacement {
             .name("storage".into())
             .spawn(move || {
                 pin_current_thread(storage_cpu)?;
-                storage::run(request_consumer, response_producer)
+                storage::run(config, request_consumer, response_producer)
             })
     }
 
     #[cfg(target_os = "macos")]
     fn spawn_storage_thread(
         self,
+        config: StorageConfig,
         request_consumer: spsc::Consumer<StorageRequest, STORAGE_QUEUE_SLOTS>,
         response_producer: spsc::Producer<StorageResponse, STORAGE_QUEUE_SLOTS>,
     ) -> io::Result<thread::JoinHandle<io::Result<()>>> {
@@ -177,7 +208,7 @@ impl ThreadPlacement {
 
         thread::Builder::new()
             .name("storage".into())
-            .spawn(move || storage::run(request_consumer, response_producer))
+            .spawn(move || storage::run(config, request_consumer, response_producer))
     }
 
     #[cfg(target_os = "linux")]
