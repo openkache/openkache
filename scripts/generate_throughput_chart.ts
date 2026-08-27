@@ -116,7 +116,7 @@ const LAYOUTS: Record<Chart_Kind, Chart_Layout> = {
 
 function usage(): string {
   return [
-    "Usage: bun scripts/generate_throughput_chart.ts [options]",
+    "Usage (from the repository root): ./scripts/generate_throughput_chart.ts [options]",
     "",
     "Options:",
     "  --benchmark <path>    Read throughput values from BENCHMARK.md.",
