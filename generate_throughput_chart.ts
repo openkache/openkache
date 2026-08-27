@@ -43,7 +43,7 @@ interface Chart_Options {
 }
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
-const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, "..")
+const REPOSITORY_ROOT = SCRIPT_DIRECTORY
 const DEFAULT_BENCHMARK_PATH = resolve(REPOSITORY_ROOT, "BENCHMARK.md")
 const DEFAULT_OUTPUT_DIRECTORY = resolve(REPOSITORY_ROOT, "_local", "benchmark-charts")
 const THROUGHPUT_SECTION_TITLE = "## Throughput (GET)"
@@ -116,7 +116,7 @@ const LAYOUTS: Record<Chart_Kind, Chart_Layout> = {
 
 function usage(): string {
   return [
-    "Usage (from the repository root): ./scripts/generate_throughput_chart.ts [options]",
+    "Usage (from the benchmark report directory): ./generate_throughput_chart.ts [options]",
     "",
     "Options:",
     "  --benchmark <path>    Read throughput values from BENCHMARK.md.",
