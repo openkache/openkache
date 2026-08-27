@@ -24,6 +24,19 @@ use std::{env, io, thread};
 use std::mem;
 
 use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
+// Create the network layer.
+// Create storage.
+// Create SPSC queues between the network and storage layers.
+
+// Everything below is handled by network.run().
+// An accept SQE creates a new client.
+// Parse each completed read SQE as RESP, box the key or value, create a request,
+// and push it to the SPSC queue.
+// Stop reading when no input remains or a response SPSC queue is full.
+// Move responses from the SPSC queue into the client's VecDeque without copying.
+// Values currently use Arc-backed ownership.
+// Submit queued writes and reads, starting at the buffer write position and
+// shifting up to the last read position when the buffer is full.
 
 #[cfg(target_os = "linux")]
 fn pin_current_thread(cpu: usize) -> io::Result<()> {
