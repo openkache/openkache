@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 use std::io;
 
-use openkache_protocol::compat_v1::{
+use crate::protocol::compat_v1::{
     POLICY_EVICTION_OVERRIDE, POLICY_EXPIRATION_OVERRIDE, POLICY_NO_EXPIRY,
 };
-use openkache_protocol::request_fields::{op_delete, op_get, op_set};
-use openkache_protocol::{
+use crate::protocol::request_fields::{op_delete, op_get, op_set};
+use crate::protocol::{
     MAX_OPERATION_REQUEST_FIELDS, Opcode, RequestFieldProjection, Response, Status,
     project_request_frame, wire_request_layout,
 };

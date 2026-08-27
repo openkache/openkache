@@ -142,6 +142,18 @@ client.close().await?;
 The Gate 0 SDK intentionally disables certificate verification for local
 development. It still uses TLS 1.3 over QUIC and never falls back to plaintext.
 
+### Install the server
+
+The server is published for Linux and Apple Silicon macOS as
+[`openkache-server`](https://crates.io/crates/openkache-server):
+
+```bash
+cargo install --locked openkache-server
+```
+
+See the [`openkache-server` guide](server/README.md) for prebuilt archives,
+source installation, the command reference, and current preview limitations.
+
 ### Try a client
 
 The examples in the client READMEs use the local development TLS profile. It

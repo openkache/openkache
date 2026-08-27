@@ -1707,18 +1707,21 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "compio",
+ "crossbeam-queue",
  "io-uring",
  "libc",
  "mimalloc",
- "openkache-protocol",
  "quinn",
  "rcgen",
  "rustls",
  "serde",
  "slab",
+ "smallvec",
+ "thiserror",
  "tikv-jemallocator",
  "tokio",
  "toml",
+ "vu128",
 ]
 
 [[package]]

@@ -12,6 +12,10 @@ static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemall
 mod client;
 mod config;
 mod network;
+// The registry package vendors generated protocol code so it can build without
+// the private protocol generator. Lint that source in its canonical crate.
+#[allow(clippy::all, dead_code, unused_imports)]
+mod protocol;
 mod resp;
 mod resp_proxy;
 mod spsc;
