@@ -12,8 +12,8 @@ its cache file on every start.
 ## Requirements
 
 - Linux with `io_uring`, or Apple Silicon macOS
-- Two distinct CPU IDs available to the process (Linux pins the workers;
-  macOS leaves placement to the scheduler)
+- Linux: two distinct CPU IDs available to the process; macOS: thread
+  placement is delegated to the scheduler
 - Rust and the C toolchain required by the workspace dependencies when building
   from source
 
@@ -32,22 +32,37 @@ For a release archive, extract it and run the included `openkache-server`
 executable directly. Linux archives are static musl binaries; the macOS
 archive is an arm64 Mach-O binary:
 
+Linux:
+
 ```bash
 ./openkache-server 127.0.0.1:4433 0 1
 ```
 
-Run it on the default address with CPU arguments 0 and 1 (Linux pins the
-workers; macOS leaves placement to the scheduler):
+macOS:
+
+```bash
+./openkache-server 127.0.0.1:4433
+```
+
+Run it on the default address. Linux pins the network and storage workers to
+CPU 0 and CPU 1; macOS delegates placement to the scheduler:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-Select a different address and CPU pair with positional arguments:
+On Linux, select a different address and CPU pair with positional arguments:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server -- \
   0.0.0.0:4433 2 3
+```
+
+On macOS, select a different address without CPU arguments:
+
+```bash
+cargo run --locked --package openkache-server --bin openkache-server -- \
+  0.0.0.0:4433
 ```
 
 Verify the crate:

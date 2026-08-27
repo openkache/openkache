@@ -3,8 +3,8 @@
 ## Requirements
 
 - Linux with `io_uring`, or Apple Silicon macOS
-- two distinct CPU IDs available to the process (Linux pins the workers;
-  macOS leaves placement to the scheduler)
+- Linux with two distinct CPU IDs; Apple Silicon macOS delegates thread
+  placement to the scheduler
 - Rust and the native build tools required by the workspace dependencies when
   building from source
 
@@ -19,16 +19,23 @@ From the repository root:
 cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-The default command binds `127.0.0.1:4433` and uses CPU arguments 0 and 1.
-Linux pins networking and storage to those CPUs; macOS leaves placement to the
-scheduler. TCP accepts RESP commands while UDP accepts the OpenKache Gate 0
-protocol over QUIC.
+The default command binds `127.0.0.1:4433`. Linux pins networking and storage
+to CPU 0 and CPU 1; macOS delegates thread placement to the scheduler. TCP
+accepts RESP commands while UDP accepts the OpenKache Gate 0 protocol over
+QUIC.
 
-Choose another address and CPU pair with positional arguments:
+On Linux, choose another address and CPU pair with positional arguments:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server -- \
   0.0.0.0:4433 2 3
+```
+
+On macOS, choose another address without CPU arguments:
+
+```bash
+cargo run --locked --package openkache-server --bin openkache-server -- \
+  0.0.0.0:4433
 ```
 
 The process creates a fixed 16 GiB `openkache.data` file in its working

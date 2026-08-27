@@ -62,14 +62,7 @@ fn pin_current_thread(cpu: usize) -> io::Result<()> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn pin_current_thread(_cpu: usize) -> io::Result<()> {
-    // macOS does not expose Linux's pthread affinity API. The Apple Silicon
-    // build keeps the same CLI contract but lets the scheduler place both
-    // preview threads.
-    Ok(())
-}
-
+#[cfg(target_os = "linux")]
 fn parse_cpu(value: Option<String>, default: usize, role: &str) -> io::Result<usize> {
     value.map_or(Ok(default), |value| {
         value.parse().map_err(|_| {
@@ -86,15 +79,31 @@ fn main() -> io::Result<()> {
     let address = arguments
         .next()
         .unwrap_or_else(|| "127.0.0.1:4433".to_owned());
-    let network_cpu = parse_cpu(arguments.next(), 0, "network")?;
-    let storage_cpu = parse_cpu(arguments.next(), 1, "storage")?;
 
-    if arguments.next().is_some() || network_cpu == storage_cpu {
+    #[cfg(target_os = "linux")]
+    let (network_cpu, storage_cpu) = {
+        let network_cpu = parse_cpu(arguments.next(), 0, "network")?;
+        let storage_cpu = parse_cpu(arguments.next(), 1, "storage")?;
+
+        if arguments.next().is_some() || network_cpu == storage_cpu {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: openkache-server [address] [network-cpu storage-cpu]",
+            ));
+        }
+
+        (network_cpu, storage_cpu)
+    };
+
+    #[cfg(target_os = "macos")]
+    if arguments.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: openkache-server [address] [network-cpu storage-cpu]",
+            "usage: openkache-server [address]",
         ));
     }
+
+    network::install_signal_handlers()?;
 
     let tcp_listener = TcpListener::bind(&address)?;
     let tcp_address = tcp_listener.local_addr()?;
@@ -109,14 +118,21 @@ fn main() -> io::Result<()> {
         thread::Builder::new()
             .name("storage".into())
             .spawn(move || -> io::Result<()> {
+                #[cfg(target_os = "linux")]
                 pin_current_thread(storage_cpu)?;
                 storage::run(request_consumer, response_producer)
             })?;
 
+    #[cfg(target_os = "linux")]
     pin_current_thread(network_cpu)?;
 
+    #[cfg(target_os = "linux")]
     eprintln!(
         "openkache-server listening on {tcp_address} over RESP/TCP and native QUIC/UDP; network CPU={network_cpu}, storage CPU={storage_cpu}"
+    );
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "openkache-server listening on {tcp_address} over RESP/TCP and native QUIC/UDP; thread placement delegated to the macOS scheduler"
     );
 
     let mut network = network::Network::new(tcp_listener, request_producer, response_consumer)?;

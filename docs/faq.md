@@ -27,9 +27,10 @@ unimplemented.
 
 ### What does the server require?
 
-The server supports Linux with `io_uring` and Apple Silicon macOS. Both
-platforms require two distinct CPU IDs; Linux pins one thread to the network
-CPU and one to storage, while macOS leaves placement to the scheduler.
+The server supports Linux with `io_uring` and Apple Silicon macOS. Linux
+requires two distinct CPU IDs and pins one thread to the network CPU and one to
+storage. macOS accepts no CPU arguments and delegates thread placement to the
+scheduler.
 
 ### Which ports and protocols does it use?
 

@@ -22,7 +22,8 @@ The current server is a two-thread SSD cache prototype:
 
 - RESP `GET`, `SET`, and `DEL` over TCP
 - Gate 0 `PING`, `GET`, `SET`, and `DELETE` over OpenKache/QUIC
-- one network thread and one storage thread (Linux pins them to distinct CPUs)
+- one network thread and one storage thread (Linux pins them to distinct CPUs;
+  macOS delegates placement to the scheduler)
 - a fixed 16 GiB `openkache.data` file backed by the platform async-I/O driver
 - Rust and multi-language SDKs built on the shared client core
 - `linux/amd64` and `linux/arm64` container publication
@@ -39,24 +40,31 @@ are not implemented by the current server.
 Requirements:
 
 - Linux with `io_uring`, or Apple Silicon macOS
-- two distinct CPU IDs (Linux pins the workers; macOS leaves placement to the
-  scheduler)
+- Linux with two distinct CPU IDs; Apple Silicon macOS delegates thread
+  placement to the scheduler
 - Rust plus the native toolchain required by the workspace dependencies when
   building from source
 
-Run on `127.0.0.1:4433` using the default CPU arguments 0 and 1 (Linux pins
-the workers; macOS leaves placement to the scheduler):
+Run on `127.0.0.1:4433`. Linux uses the default CPU arguments 0 and 1; macOS
+delegates thread placement to the scheduler:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-The server uses the same numeric address for RESP/TCP and OpenKache/QUIC. To
-select a different address and CPU pair:
+The server uses the same numeric address for RESP/TCP and OpenKache/QUIC. On
+Linux, select a different address and CPU pair:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server -- \
   0.0.0.0:4433 2 3
+```
+
+On macOS, select a different address without CPU arguments:
+
+```bash
+cargo run --locked --package openkache-server --bin openkache-server -- \
+  0.0.0.0:4433
 ```
 
 The cache file is created in the process working directory and truncated each
@@ -158,6 +166,20 @@ docker run --rm \
   --volume openkache-data:/var/lib/openkache \
   localhost/openkache:dev
 ```
+
+Run the published preview image without authenticating to GHCR:
+
+```bash
+podman run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:edge
+```
+
+`edge` follows the latest successful build from `main`. For reproducible
+deployments, pin the multi-platform manifest by its `sha256` digest instead of
+using the rolling tag.
 
 The default container command pins the network thread to CPU 0 and the storage
 thread to CPU 1. Override the command when the container CPU set uses different

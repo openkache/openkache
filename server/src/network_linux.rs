@@ -103,6 +103,10 @@ impl Network {
             std::array::from_fn(|_| MaybeUninit::uninit());
 
         loop {
+            if super::shutdown_requested() {
+                break;
+            }
+
             if !self.multishot_accept_is_active {
                 self.try_queue_multishot_accept();
             }

@@ -78,7 +78,16 @@ impl Network {
         local
             .run_until(async move {
                 loop {
-                    let (stream, peer) = listener.accept().await?;
+                    if super::shutdown_requested() {
+                        break;
+                    }
+                    let (stream, peer) =
+                        match tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                            .await
+                        {
+                            Ok(result) => result?,
+                            Err(_) => continue,
+                        };
                     let client_id = {
                         let mut state = state.borrow_mut();
                         if state.active_clients.len() >= MAX_CLIENTS {

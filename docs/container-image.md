@@ -30,6 +30,25 @@ docker run --rm \
   localhost/openkache:dev
 ```
 
+The published image is available without registry authentication:
+
+```bash
+podman run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:edge
+```
+
+`edge` is a rolling preview tag that advances only after a successful `main`
+build. A rerun for a commit that is no longer the current `main` commit fails
+before it can update the tag. Pin the multi-platform manifest digest for
+reproducible deployments:
+
+```bash
+ghcr.io/openkache/openkache@sha256:<multi-platform-manifest-digest>
+```
+
 The image listens on `0.0.0.0:4433`, with networking pinned to CPU 0 and
 storage pinned to CPU 1. Override the command when the container receives a
 different CPU set:
@@ -63,16 +82,19 @@ The server requires `io_uring_setup`, `io_uring_enter`, and
 examples use `seccomp=unconfined` as a compatibility fallback; use a narrowly
 scoped profile when running outside an isolated development environment.
 
-## Tags and publication
+## References and publication
 
-| Tag | Meaning |
+| Reference | Meaning |
 | --- | --- |
-| `main` | Current `main` build |
-| `sha-<commit>` | Immutable source revision |
-| `1.2.3`, `1.2`, `1` | Tags generated from `v1.2.3` |
+| `edge` | Latest successful `main` build; mutable rolling preview |
+| `ghcr.io/openkache/openkache@sha256:<digest>` | Immutable multi-platform manifest reference |
 
-Pull requests build without publishing. Pushes to `main` and matching version
-tags publish a multi-platform manifest with provenance and an SBOM.
+Pull requests build without publishing. Pushes to `main` publish the `edge`
+multi-platform manifest with provenance and an SBOM. The workflow rejects stale
+reruns at both publish checkpoints, so a rerun for a commit that is no longer
+the current `main` commit cannot intentionally move `edge` backwards. Existing
+tags from earlier workflow runs remain available as historical references but
+are not updated by new builds.
 
 The Nix toolchain inputs used by `server/Dockerfile` are locked in
 `server/flake.lock` and updated by the scheduled container-input workflow.
