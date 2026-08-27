@@ -35,8 +35,6 @@ openkache-protocol = { version = "*", path = "../protocol" }
 quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
-serde = { version = "*", features = ["derive"] }
 slab = "*"
-toml = "*"
 tikv-jemallocator = { version = "*", optional = true }
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"] }

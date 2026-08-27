@@ -205,8 +205,6 @@ impl StatefulRespParser {
                                     self.arg_count == 2
                                 } else if command_name.eq_ignore_ascii_case(b"SET") {
                                     self.arg_count == 3
-                                } else if command_name.eq_ignore_ascii_case(b"FLUSH") {
-                                    self.arg_count == 1
                                 } else {
                                     return Err("unsupported command");
                                 };
@@ -255,18 +253,6 @@ fn command_from_args(
 ) -> Result<Command, &'static str> {
     let mut args = args.into_iter();
     let command_name = args.next().ok_or("missing command name")?;
-
-    // FLUSH takes no key or value; handle it before the key is required.
-    if command_name.eq_ignore_ascii_case(b"FLUSH") {
-        if set_value.is_some() {
-            return Err("FLUSH cannot have a value");
-        }
-        if args.next().is_some() {
-            return Err("too many command arguments");
-        }
-        return Ok(Command::Flush);
-    }
-
     let key = args.next().ok_or("missing key")?;
 
     if args.next().is_some() {
@@ -336,16 +322,6 @@ pub(crate) fn make_response_to_write(reply: Reply) -> ResponseToWrite {
             } else {
                 DELETE_NOT_FOUND_RESPONSE_BYTES
             }),
-            value_bytes: None,
-            ending_bytes: &[],
-        },
-        Reply::Flush(Ok(())) => ResponseToWrite {
-            header_bytes: Cow::Borrowed(SET_OK_RESPONSE_BYTES),
-            value_bytes: None,
-            ending_bytes: &[],
-        },
-        Reply::Flush(Err(reason)) => ResponseToWrite {
-            header_bytes: Cow::Owned(format!("-ERR {reason}\r\n").into_bytes()),
             value_bytes: None,
             ending_bytes: &[],
         },
