@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compio::buf::IoBuf;
-use compio::driver::{AsRawFd, ProactorBuilder};
+#[cfg(target_os = "linux")]
+use compio::driver::AsRawFd;
+use compio::driver::ProactorBuilder;
 use compio::fs::{File, OpenOptions};
 use compio::io::{AsyncReadAtExt, AsyncWriteAtExt};
 use compio::runtime::Runtime;
@@ -690,19 +692,25 @@ fn create_runtime(config: &StorageConfig) -> io::Result<Runtime> {
 }
 
 fn open_storage_file(runtime: &Runtime, config: &StorageConfig) -> io::Result<Rc<File>> {
+    #[cfg(target_os = "linux")]
+    let direct_io_flags = libc::O_DIRECT;
+    #[cfg(target_os = "macos")]
+    let direct_io_flags = 0;
+
     runtime.block_on(async {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
-            .custom_flags(libc::O_DIRECT)
+            .custom_flags(direct_io_flags)
             .open(&config.storage_file_path)
             .await?;
         if config.preallocate_file {
             // Reserve physical blocks so the backing file is contiguous, for
             // sequential-write and DLWA measurements on real NVMe.
             preallocate(&file, config.storage_file_bytes)?;
+            file.set_len(config.storage_file_bytes).await?;
         } else {
             // Sparse: sets the logical size only; blocks are allocated on first
             // write to each SG offset.
@@ -712,6 +720,7 @@ fn open_storage_file(runtime: &Runtime, config: &StorageConfig) -> io::Result<Rc
     })
 }
 
+#[cfg(target_os = "linux")]
 fn preallocate(file: &File, len: u64) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     // SAFETY: `fd` is a valid open descriptor for the lifetime of this call.
@@ -723,9 +732,51 @@ fn preallocate(file: &File, len: u64) -> io::Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn preallocate(file: &File, len: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut store = libc::fstore_t {
+        fst_flags: libc::F_ALLOCATECONTIG,
+        fst_posmode: libc::F_PEOFPOSMODE,
+        fst_offset: 0,
+        fst_length: len as libc::off_t,
+        fst_bytesalloc: 0,
+    };
+
+    // SAFETY: `fd` is a valid open descriptor and `store` points to writable
+    // storage for the duration of this synchronous fcntl call.
+    let mut result = unsafe {
+        libc::fcntl(
+            file.as_raw_fd(),
+            libc::F_PREALLOCATE,
+            &mut store as *mut libc::fstore_t,
+        )
+    };
+    if result == -1 {
+        // Contiguous allocation is best-effort on APFS; fall back to any
+        // available extents before reporting a genuine allocation failure.
+        store.fst_flags = libc::F_ALLOCATEALL;
+        result = unsafe {
+            libc::fcntl(
+                file.as_raw_fd(),
+                libc::F_PREALLOCATE,
+                &mut store as *mut libc::fstore_t,
+            )
+        };
+    }
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// `IORING_ENTER_GETEVENTS`.
+#[cfg(target_os = "linux")]
 const IORING_ENTER_GETEVENTS: libc::c_uint = 1;
 /// `__NR_io_uring_enter`.
+#[cfg(target_os = "linux")]
 const SYS_IO_URING_ENTER: libc::c_long = 426;
 
 /// Enters the io_uring with `GETEVENTS` but submits nothing, forcing the kernel
@@ -734,6 +785,7 @@ const SYS_IO_URING_ENTER: libc::c_long = 426;
 /// omits `GETEVENTS` when it thinks completions are already available), so we
 /// reap directly on the ring fd. Errors are non-fatal — a failed reap just means
 /// nothing was posted this iteration and the next one retries.
+#[cfg(target_os = "linux")]
 fn reap_completions(ring_fd: libc::c_int) {
     // SAFETY: `ring_fd` is the runtime's live io_uring fd; to_submit=0 means no
     // SQEs are consumed, so this never races compio's submission bookkeeping.
@@ -758,6 +810,7 @@ fn run_storage_worker(
     mut response_sender: Producer<StorageResponse, STORAGE_QUEUE_SLOTS>,
 ) -> io::Result<()> {
     let worker_handle = WorkerHandle(NonNull::from(worker.as_mut()));
+    #[cfg(target_os = "linux")]
     let ring_fd = runtime.as_raw_fd();
 
     runtime.enter(|| {
@@ -783,17 +836,20 @@ fn run_storage_worker(
             let _ = popped_request;
             runtime.run();
             runtime.flush();
-            // Force-reap deferred completions before compio reads the CQ.
-            //
-            // Under `IORING_SETUP_DEFER_TASKRUN`, a completion only lands in the
-            // CQ when the ring is entered with `GETEVENTS`. compio's
-            // `poll_with(Duration::ZERO)` drops `GETEVENTS` whenever its internal
-            // `want_sqe == 0` (which is exactly the case once the kernel sets the
-            // TASKRUN flag), so a flush write that completes while the request
-            // stream is pure-CPU (SET-only) or idle is never reaped and the
-            // worker wedges. A bare `io_uring_enter(fd, 0, 0, GETEVENTS)` submits
-            // nothing and reaps everything, matching the network worker's path.
-            reap_completions(ring_fd);
+            #[cfg(target_os = "linux")]
+            {
+                // Force-reap deferred completions before compio reads the CQ.
+                //
+                // Under `IORING_SETUP_DEFER_TASKRUN`, a completion only lands in the
+                // CQ when the ring is entered with `GETEVENTS`. compio's
+                // `poll_with(Duration::ZERO)` drops `GETEVENTS` whenever its internal
+                // `want_sqe == 0` (which is exactly the case once the kernel sets the
+                // TASKRUN flag), so a flush write that completes while the request
+                // stream is pure-CPU (SET-only) or idle is never reaped and the
+                // worker wedges. A bare `io_uring_enter(fd, 0, 0, GETEVENTS)` submits
+                // nothing and reaps everything, matching the network worker's path.
+                reap_completions(ring_fd);
+            }
             runtime.poll_with(Some(Duration::ZERO));
             runtime.run();
 

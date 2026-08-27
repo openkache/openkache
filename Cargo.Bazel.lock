@@ -1,5 +1,5 @@
 {
-  "checksum": "ff5aa8ff54b4e16968ca62b868ee60d2c303b57d5b20555a0145732ebd1e1010",
+  "checksum": "178f864c6e21785dc9e397c6524f84c64c49cf7030e6c947196c88b33364352b",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -10219,9 +10219,9 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "openkache 0.1.0": {
+    "openkache 0.1.3": {
       "name": "openkache",
-      "version": "0.1.0",
+      "version": "0.1.3",
       "package_url": "https://github.com/openkache/openkache",
       "repository": null,
       "targets": [
@@ -10245,7 +10245,6 @@
         ],
         "crate_features": {
           "common": [
-            "quic-compio",
             "default",
             "quic-quinn"
           ],
@@ -10276,14 +10275,6 @@
             {
               "id": "cmac 0.8.0",
               "target": "cmac"
-            },
-            {
-              "id": "compio 0.19.1",
-              "target": "compio"
-            },
-            {
-              "id": "compio-quic 0.8.0",
-              "target": "compio_quic"
             },
             {
               "id": "crossbeam-queue 0.3.13",
@@ -10361,7 +10352,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "0.1.0"
+        "version": "0.1.3"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -10830,10 +10821,6 @@
               "target": "compio"
             },
             {
-              "id": "io-uring 0.7.13",
-              "target": "io_uring"
-            },
-            {
               "id": "libc 0.2.189",
               "target": "libc"
             },
@@ -10858,7 +10845,14 @@
               "target": "tokio"
             }
           ],
-          "selects": {}
+          "selects": {
+            "cfg(target_os = \"linux\")": [
+              {
+                "id": "io-uring 0.7.13",
+                "target": "io_uring"
+              }
+            ]
+          }
         },
         "edition": "2024",
         "version": "0.1.0"
@@ -19891,7 +19885,7 @@
   "binary_crates": [],
   "workspace_members": {
     "direct-cargo-bazel-deps 0.0.1": "",
-    "openkache 0.1.0": "clients/rust",
+    "openkache 0.1.3": "clients/rust",
     "openkache-cli 0.1.0": "clients/cli",
     "openkache-client-core 0.1.0": "clients/core",
     "openkache-client-napi 0.1.0": "clients/typescript/native",
@@ -20038,6 +20032,11 @@
     "cfg(target_os = \"android\")": [],
     "cfg(target_os = \"haiku\")": [],
     "cfg(target_os = \"hermit\")": [],
+    "cfg(target_os = \"linux\")": [
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-nixos-gnu"
+    ],
     "cfg(target_os = \"macos\")": [
       "aarch64-apple-darwin"
     ],
