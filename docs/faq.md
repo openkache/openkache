@@ -5,9 +5,9 @@
 ### What is OpenKache?
 
 OpenKache is a high-performance cache server designed from the ground up for
-modern SSDs. The current Linux preview exposes Redis-compatible `GET`, `SET`,
-and `DEL` over RESP/TCP and the Gate 0 `PING`, `GET`, `SET`, and `DELETE`
-operations over OpenKache/QUIC.
+modern SSDs. The current Linux and Apple Silicon macOS preview exposes
+Redis-compatible `GET`, `SET`, and `DEL` over RESP/TCP and the Gate 0 `PING`,
+`GET`, `SET`, and `DELETE` operations over OpenKache/QUIC.
 
 ### How is it different from Redis?
 
@@ -27,8 +27,10 @@ unimplemented.
 
 ### What does the server require?
 
-The server requires Linux with `io_uring` and two distinct CPUs. One thread is
-pinned to the network CPU and one to the storage CPU.
+The server supports Linux with `io_uring` and Apple Silicon macOS. Linux
+requires two distinct CPU IDs and pins one thread to the network CPU and one to
+storage. macOS accepts no CPU arguments and delegates thread placement to the
+scheduler.
 
 ### Which ports and protocols does it use?
 

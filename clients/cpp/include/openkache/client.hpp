@@ -331,6 +331,10 @@ struct Connect_Options {
 };
 
 /// Synchronous RAII C++20 adapter for the five-operation Gate 0 facade.
+///
+/// Call `close()` explicitly when the client is no longer needed. The
+/// destructor is only a best-effort fallback for abandoned owners: it cannot
+/// report failures and its execution timing follows normal C++ destruction.
 class Client {
 public:
   Client() noexcept = default;
@@ -375,7 +379,12 @@ public:
 
   explicit operator bool() const noexcept { return client_ != nullptr; }
 
-  /// Idempotently closes the connection and releases the native worker.
+  /// Explicitly closes the connection and releases the native worker.
+  ///
+  /// This is the normative lifecycle boundary. The operation is idempotent;
+  /// callers must not race it with `get`, `set`, or `remove`. The destructor
+  /// invokes the same no-throw path only as a best-effort fallback when the
+  /// caller does not close explicitly.
   void close() noexcept {
     if (client_ != nullptr) {
       openkache_client_gate0_close(client_);

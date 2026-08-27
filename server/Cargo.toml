@@ -33,15 +33,19 @@ blake3 = "*"
 compio = { version = "*", features = ["fs"] }
 # Cargo.lock retains the tested release that provides the required registration API.
 crossbeam-queue = "*"
-io-uring = "*"
 libc = "*"
 mimalloc = { version = "*", optional = true }
 quinn = { version = "*", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
+serde = { version = "*", features = ["derive"] }
 slab = "*"
 smallvec = { version = "*", features = ["const_new"] }
 tikv-jemallocator = { version = "*", optional = true }
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"] }
 thiserror = "*"
+toml = "*"
 vu128 = "*"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "*"

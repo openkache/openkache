@@ -176,6 +176,13 @@ mod maintained {
     ///
     /// Values use the OpenKache structured value format. Connections use the
     /// local development TLS profile described in [`Client::connect`].
+    ///
+    /// Cloning a client shares its connection and lifecycle state. Dropping a
+    /// clone only releases that handle; dropping the final clone triggers
+    /// best-effort abortive transport cleanup without waiting for admitted
+    /// operations or transport shutdown. Cleanup may continue asynchronously,
+    /// and its errors cannot be reported from `Drop`. Call [`Client::close`]
+    /// and await it when graceful shutdown is required.
     #[cfg(feature = "quic-quinn")]
     #[derive(Clone)]
     pub struct Client {
@@ -462,8 +469,23 @@ mod maintained {
                 })
         }
 
-        /// Idempotently closes the client and waits for admitted work to
-        /// settle before releasing the transport.
+        /// Gracefully and idempotently closes the shared client connection.
+        ///
+        /// This is the explicit shutdown path: it rejects new operations,
+        /// waits for all operations already admitted to settle, and then
+        /// releases the transport. Repeated or concurrent calls, including
+        /// calls through clones, wait for the same terminal state. The call
+        /// that performs shutdown reports any core close error; calls
+        /// arriving after a completed shutdown return `Ok(())`.
+        ///
+        /// Dropping a [`Client`] cannot await this drain. Dropping the final
+        /// clone instead triggers best-effort abortive transport cleanup
+        /// without waiting for transport shutdown; it may interrupt admitted
+        /// work, and cleanup errors cannot be reported from `Drop`. Await this
+        /// method whenever graceful completion is required. If this future is
+        /// canceled after it starts draining, it performs the same abortive
+        /// fallback so later close callers cannot remain stuck waiting for a
+        /// terminal state.
         ///
         /// # Returns
         ///

@@ -139,13 +139,21 @@ if (removed) {
 
 ### `client.close()`
 
-Closes the connection. Repeated calls complete successfully.
+Gracefully closes the connection. Repeated calls share one promise and
+complete successfully after native resources are released; operations already
+admitted to the native client are drained before that promise resolves.
+Explicitly await this method whenever the client is no longer needed.
 
 - **Returns:** `Promise<void>`.
 
 ```javascript
 await client.close()
 ```
+
+The client registers a `FinalizationRegistry` fallback that invokes a private
+synchronous close-now primitive if the object is abandoned. Finalization is
+nondeterministic, cannot report errors, and may never run; it is not a
+replacement for awaiting `close()`.
 
 ### Keys
 

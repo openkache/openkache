@@ -1,6 +1,8 @@
 name: Engineering task
 description: Track a concrete implementation, documentation, CI, release, or benchmark task
-title: "[Task]: "
+title: "[Task] "
+labels:
+  - task
 body:
   - type: markdown
     attributes:
