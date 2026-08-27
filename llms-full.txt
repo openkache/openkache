@@ -2,17 +2,18 @@
 
 OpenKache is a high-performance cache server designed from the ground up for
 modern SSDs. The current public preview is an experimental Rust server for
-Linux. Unless a section is explicitly marked as a target or draft, repository
-documentation describes the current public preview. Protocol, client-format,
-security, and storage design documents are target contracts and may lead the
-implementation during migration.
+Linux and Apple Silicon macOS. Unless a section is explicitly marked as a
+target or draft, repository documentation describes the current public preview.
+Protocol, client-format, security, and storage design documents are target
+contracts and may lead the implementation during migration.
 
 ## Current server
 
 - RESP `GET`, `SET`, and `DEL` over TCP.
 - Gate 0 `PING`, `GET`, `SET`, and `DELETE` over QUIC/UDP.
-- One network thread and one storage thread pinned to distinct CPUs.
-- A fixed 16 GiB `openkache.data` file accessed with Linux `io_uring`.
+- One network thread and one storage thread (Linux pins them to distinct CPUs;
+  macOS delegates placement to the scheduler).
+- A fixed 16 GiB `openkache.data` file accessed with the platform I/O driver.
 - The same numeric listen address for TCP and UDP; default `127.0.0.1:4433`.
 
 The server is not production-ready. It truncates the cache file on every
@@ -23,8 +24,8 @@ implemented by the current server.
 
 ## Build and run
 
-Requirements are Linux with `io_uring`, two distinct CPUs, Rust, and the native
-toolchain used by workspace dependencies.
+Requirements are Linux with `io_uring` and two distinct CPUs, or Apple Silicon
+macOS, plus Rust and the native toolchain used by workspace dependencies.
 
 ```bash
 cargo check --locked
@@ -32,12 +33,20 @@ cargo test --locked --package openkache-server
 cargo run --locked --package openkache-server --bin openkache-server
 ```
 
-The default arguments listen on `127.0.0.1:4433`, pin networking to CPU 0, and
-pin storage to CPU 1. Override them with positional arguments:
+The default arguments listen on `127.0.0.1:4433`. Linux pins networking to CPU 0
+and storage to CPU 1; macOS delegates thread placement to the scheduler.
+On Linux, override the address and CPU pair with positional arguments:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server -- \
   0.0.0.0:4433 2 3
+```
+
+On macOS, select a different address without CPU arguments:
+
+```bash
+cargo run --locked --package openkache-server --bin openkache-server -- \
+  0.0.0.0:4433
 ```
 
 ## Container

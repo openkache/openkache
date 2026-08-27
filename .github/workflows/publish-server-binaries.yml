@@ -1,0 +1,372 @@
+name: Release OpenKache server binaries
+
+# Binary releases are deliberately manual. Dispatch this workflow from the
+# exact server-v<version> tag after the release environment has approved the
+# immutable source state.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable server version copied from server/Cargo.toml"
+        required: true
+        type: string
+      confirm:
+        description: 'Type RELEASE to build and publish this immutable version'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-binaries-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_CONFIRM: ${{ inputs.confirm }}
+
+jobs:
+  guard:
+    name: Verify tag, version, and clean source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Reject an unconfirmed or mismatched release
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_TYPE: ${{ github.ref_type }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_CONFIRM}" != "RELEASE" ]]; then
+            echo "The confirmation input must be exactly RELEASE." >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Version must be a stable three-part SemVer value." >&2
+            exit 1
+          fi
+          expected_tag="server-v${RELEASE_VERSION}"
+          if [[ "${SOURCE_REF_TYPE}" != "tag" || "${SOURCE_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Dispatch this workflow from ${expected_tag}; got ${SOURCE_REF_TYPE}:${SOURCE_REF_NAME}." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "${expected_tag}^{commit}")" != "${SOURCE_SHA}" ]]; then
+            echo "The selected tag does not resolve to the workflow commit." >&2
+            exit 1
+          fi
+          server_version="$(
+            cargo metadata \
+              --manifest-path server/Cargo.toml \
+              --locked \
+              --no-deps \
+              --format-version 1 |
+              jq -r '.packages[] | select(.name == "openkache-server") | .version'
+          )"
+          if [[ "${server_version}" != "${RELEASE_VERSION}" ]]; then
+            echo "server/Cargo.toml version ${server_version} does not match ${RELEASE_VERSION}." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The release checkout is dirty; refusing to continue." >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset_suffix: linux-x86_64-musl
+            platform: linux
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset_suffix: linux-aarch64-musl
+            platform: linux
+          - name: darwin-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            asset_suffix: macos-arm64
+            platform: darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned Nix toolchain
+        if: matrix.platform == 'linux'
+        uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3.21.9
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: matrix.platform == 'darwin'
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build the Linux static binary
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          nix-shell --pure server/container.nix \
+            --argstr target "${{ matrix.target }}" \
+            --run "cargo server-build --target ${{ matrix.target }}"
+
+      - name: Build the Apple Silicon binary
+        if: matrix.platform == 'darwin'
+        run: |
+          set -euo pipefail
+          cargo build \
+            --locked \
+            --release \
+            --target "${{ matrix.target }}" \
+            --package openkache-server \
+            --bin openkache-server
+
+      - name: Verify and package the binary
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          binary="target/${TARGET}/release/openkache-server"
+          [[ -x "${binary}" ]] || {
+            echo "Missing executable ${binary}." >&2
+            echo "Why: release assets must come from the exact target-specific build output." >&2
+            echo "Fix: inspect the target build command and ensure openkache-server was compiled in release mode." >&2
+            exit 1
+          }
+
+          if [[ "${ASSET_SUFFIX}" == linux-* ]]; then
+            file_output="$(file "${binary}")"
+            case "${TARGET}" in
+              x86_64-unknown-linux-musl)
+                grep -Eiq 'ELF 64-bit.*(x86-64|x86_64)' <<<"${file_output}" || {
+                  echo "Unexpected x86_64 artifact description: ${file_output}" >&2
+                  exit 1
+                }
+                ;;
+              aarch64-unknown-linux-musl)
+                grep -Eiq 'ELF 64-bit.*(ARM aarch64|aarch64)' <<<"${file_output}" || {
+                  echo "Unexpected aarch64 artifact description: ${file_output}" >&2
+                  exit 1
+                }
+                ;;
+              *)
+                echo "Unsupported Linux target ${TARGET}." >&2
+                exit 1
+                ;;
+            esac
+            grep -Eiq 'static-pie linked|statically linked' <<<"${file_output}" || {
+              echo "Linux artifact is not reported as statically linked: ${file_output}" >&2
+              echo "Why: Linux distribution artifacts must not depend on the host glibc runtime." >&2
+              echo "Fix: rebuild through server/container.nix with its pinned musl Clang toolchain." >&2
+              exit 1
+            }
+            if readelf -d "${binary}" | grep -q '(NEEDED)'; then
+              echo "Linux artifact declares a dynamic dependency." >&2
+              echo "Why: the published Linux contract is a self-contained musl executable." >&2
+              echo "Fix: inspect the linker selected by server/container.nix and rebuild." >&2
+              exit 1
+            fi
+            if readelf -l "${binary}" | grep -q 'INTERP'; then
+              echo "Linux artifact declares a dynamic interpreter." >&2
+              echo "Why: static Linux assets must not require a host loader." >&2
+              echo "Fix: rebuild with the target musl linker rather than a GNU linker." >&2
+              exit 1
+            fi
+            ldd_output="$(ldd "${binary}" 2>&1 || true)"
+            if ! grep -Eiq 'statically linked|not a dynamic executable' <<<"${ldd_output}" \
+              || grep -Eq '=>|\.so([[:space:]]|$)|not found' <<<"${ldd_output}"; then
+              echo "ldd did not confirm a static Linux artifact: ${ldd_output}" >&2
+              echo "Why: a release binary with a runtime library dependency is not portable across Linux hosts." >&2
+              echo "Fix: rebuild with the pinned target-specific musl toolchain." >&2
+              exit 1
+            fi
+          else
+            file_output="$(file "${binary}")"
+            grep -Eiq 'Mach-O 64-bit executable arm64' <<<"${file_output}" || {
+              echo "Unexpected Apple Silicon artifact description: ${file_output}" >&2
+              echo "Why: this asset must run on arm64 macOS without Rosetta translation." >&2
+              echo "Fix: build on the native macos-15 runner with target aarch64-apple-darwin." >&2
+              exit 1
+            }
+          fi
+
+          release_root="${RUNNER_TEMP}/openkache-server-dist"
+          archive_name="openkache-server-${RELEASE_VERSION}-${ASSET_SUFFIX}.tar.gz"
+          package_root="${release_root}/openkache-server-${RELEASE_VERSION}-${ASSET_SUFFIX}"
+          mkdir -p "${package_root}"
+          install -m 0755 "${binary}" "${package_root}/openkache-server"
+          install -m 0644 README.md "${package_root}/README.md"
+          install -m 0644 LICENSE "${package_root}/LICENSE"
+          printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\ntarget=%s\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" "${TARGET}" \
+            > "${package_root}/RELEASE-METADATA"
+          tar -C "${release_root}" -czf "${release_root}/${archive_name}" \
+            "$(basename "${package_root}")"
+          if [[ "${ASSET_SUFFIX}" == linux-* ]]; then
+            (
+              cd "${release_root}"
+              sha256sum "${archive_name}" > "${archive_name}.sha256"
+            )
+          else
+            (
+              cd "${release_root}"
+              shasum -a 256 "${archive_name}" > "${archive_name}.sha256"
+            )
+          fi
+
+      - name: Upload staged binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-server-binary-${{ matrix.asset_suffix }}
+          path: ${{ runner.temp }}/openkache-server-dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release assets
+    needs: [guard, build]
+    runs-on: ubuntu-24.04
+    environment: server-release
+    permissions:
+      contents: write
+    timeout-minutes: 20
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Re-verify the release tag
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin \
+            "refs/tags/${SOURCE_REF_NAME}:refs/tags/${SOURCE_REF_NAME}"
+          resolved_tag="$(git rev-parse "${SOURCE_REF_NAME}^{commit}")"
+          if [[ "${resolved_tag}" != "${SOURCE_SHA}" ]]; then
+            echo "Release tag ${SOURCE_REF_NAME} moved to ${resolved_tag} during the workflow." >&2
+            echo "Why: published archives must remain attached to the exact source commit that passed the guard." >&2
+            echo "Fix: restore the tag to ${SOURCE_SHA} or start a new release workflow for the intended tag." >&2
+            exit 1
+          fi
+
+      - name: Download staged binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: openkache-server-binary-*
+          path: ${{ runner.temp }}/openkache-server-release
+          merge-multiple: true
+
+      - name: Verify checksums and create release manifest
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-server-release"
+          mapfile -t checksums < <(find "${release_root}" -maxdepth 1 -type f -name '*.tar.gz.sha256' -print | sort)
+          [[ "${#checksums[@]}" -eq 3 ]] || {
+            echo "Expected three platform checksum files, found ${#checksums[@]}." >&2
+            echo "Why: one Linux x86_64, one Linux aarch64, and one Apple Silicon asset are required." >&2
+            echo "Fix: inspect the failed build matrix entry and rerun the release workflow." >&2
+            exit 1
+          }
+          for checksum in "${checksums[@]}"; do
+            (
+              cd "${release_root}"
+              sha256sum --check "$(basename "${checksum}")"
+            )
+          done
+          mapfile -t archives < <(find "${release_root}" -maxdepth 1 -type f -name '*.tar.gz' -print | sort)
+          [[ "${#archives[@]}" -eq 3 ]] || {
+            echo "Expected three platform archives, found ${#archives[@]}." >&2
+            exit 1
+          }
+          (
+            cd "${release_root}"
+            sha256sum "${archives[@]##*/}" > SHA256SUMS
+          )
+          printf 'source_commit=%s\nsource_tag=%s\nserver_version=%s\n' \
+            "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
+            > "${release_root}/RELEASE-METADATA"
+          cat > "${release_root}/RELEASE-NOTES.md" <<EOF
+          ## OpenKache server ${RELEASE_VERSION}
+
+          These preview assets were built from \`${SOURCE_SHA}\` and the exact
+          \`${SOURCE_REF_NAME}\` tag.
+
+          - Linux x86_64 and aarch64 archives are statically linked musl binaries.
+          - macOS is an Apple Silicon (\`arm64\`) native binary.
+          - Verify \`SHA256SUMS\` before extracting an archive.
+
+          The server is a preview and retains the runtime and storage limitations
+          documented in the bundled \`README.md\`.
+          EOF
+
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if release_response="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${SOURCE_REF_NAME}" 2>/dev/null
+          )"; then
+            echo "Release ${GITHUB_REF_NAME} already exists." >&2
+            echo "Why: release assets are immutable once published." >&2
+            echo "Fix: choose a new server version and create a matching server-v<version> tag." >&2
+            exit 1
+          fi
+          release_status="$(jq -r '.status // empty' <<<"${release_response}" 2>/dev/null || true)"
+          if [[ "${release_status}" != "404" ]]; then
+            echo "Could not prove that release ${SOURCE_REF_NAME} is absent (HTTP ${release_status:-unknown})." >&2
+            echo "Why: publication must stop when GitHub release state cannot be checked safely." >&2
+            echo "Fix: restore GitHub API access and rerun the release workflow." >&2
+            exit 1
+          fi
+
+      - name: Publish the immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-server-release"
+          gh release create "${{ github.ref_name }}" \
+            --verify-tag \
+            --title "OpenKache server ${RELEASE_VERSION}" \
+            --notes-file "${release_root}/RELEASE-NOTES.md" \
+            "${release_root}"/*.tar.gz \
+            "${release_root}"/*.tar.gz.sha256 \
+            "${release_root}/SHA256SUMS" \
+            "${release_root}/RELEASE-METADATA"
