@@ -3,6 +3,7 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use io_uring::{IoUring, cqueue, opcode, squeue, types};
 use slab::Slab;
@@ -27,6 +28,28 @@ const WRITE_CQE: u64 = 2;
 const PROVIDED_BUFFER_GROUP_ID: u16 = 0;
 const PROVIDED_BUFFER_COUNT: u16 = 2_048;
 const PROVIDED_BUFFER_SIZE: usize = 4 * 1_024;
+
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn signal_handler(_signal: libc::c_int) {
+    // Signal handlers may only perform async-signal-safe operations. The
+    // atomic flag lets the network loop perform the actual shutdown.
+    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn install_signal_handlers() -> io::Result<()> {
+    SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
+
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        let handler = signal_handler as *const () as libc::sighandler_t;
+        let previous_handler = unsafe { libc::signal(signal, handler) };
+        if previous_handler == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
+}
 
 fn create_io_uring() -> io::Result<IoUring> {
     #[cfg(not(any(
@@ -103,6 +126,10 @@ impl Network {
             std::array::from_fn(|_| MaybeUninit::uninit());
 
         loop {
+            if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                break;
+            }
+
             if !self.multishot_accept_is_active {
                 self.try_queue_multishot_accept();
             }

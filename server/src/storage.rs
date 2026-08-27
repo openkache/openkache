@@ -671,6 +671,7 @@ fn open_storage_file(runtime: &Runtime) -> io::Result<Rc<File>> {
             .write(true)
             .create(true)
             .truncate(true)
+            .custom_flags(libc::O_DIRECT)
             .open(STORAGE_FILE_PATH)
             .await?;
         file.set_len(STORAGE_FILE_BYTES).await?;
