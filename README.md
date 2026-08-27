@@ -144,15 +144,15 @@ development. It still uses TLS 1.3 over QUIC and never falls back to plaintext.
 
 ### Install the server
 
-The Linux server binary is published as
+The server is published for Linux and Apple Silicon macOS as
 [`openkache-server`](https://crates.io/crates/openkache-server):
 
 ```bash
-cargo install openkache-server
+cargo install --locked openkache-server
 ```
 
-See the [`openkache-server` guide](server/README.md) for the command reference,
-source installation, and current preview limitations.
+See the [`openkache-server` guide](server/README.md) for prebuilt archives,
+source installation, the command reference, and current preview limitations.
 
 ### Try a client
 
