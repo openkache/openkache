@@ -66,35 +66,37 @@ p99 it is 3.0× and 3.3× lower.
 
 </div>
 
-**Why is OpenKache fast?** Because it never hops between cores.
+**Why is OpenKache fast? Because a request never leaves the core it landed on.**
 
-Most servers let a thread pool roam across cores. That is not free — lock
-contention, mutexes, context switches, and the synchronization and copy cost
-paid every time a cache line bounces from one core to another. The heavier the
-load, the more this overhead eats into throughput.
+Most servers scatter work across a thread pool that roams between cores. That is
+not free. Every time a request hops cores you pay for it: lock contention,
+mutexes, context switches, and cache lines ping-ponging between caches, each one
+forcing a synchronization and a copy. Under load it is this coordination
+overhead, not the actual work, that caps throughput.
 
-OpenKache takes a **thread-per-core (shared-nothing)** design. Each worker is
-pinned to a single core, owns its own data, and shares no state — so there are
-no locks. This is the same design TigerBeetle, ScyllaDB, and Redis converged on
-to squeeze every drop out of the hardware. The network path and the storage
-path each own a core, and they communicate through exactly one **lock-free SPSC
-queue**. RESP parsing never blocks disk I/O.
+OpenKache refuses to pay. Each decision below deletes an entire class of that cost:
 
-Redis runs commands on a single core. OpenKache keeps the same shared-nothing
-principle but shards workers across cores, so throughput scales with the
-hardware instead of hitting a single-core ceiling — and with no shared locks,
-adding a core adds no contention.
+| Design choice | The cost it deletes | Grounded in |
+|---|---|---|
+| **Thread-per-core, shared-nothing** | Lock contention, context switches, cross-core cache-line bouncing | [KVell (SOSP '19)](https://dl.acm.org/doi/10.1145/3341301.3359628) |
+| **Segment-group sequential writes** | Random-write IOPS, flash write amplification | [FairyWren (OSDI '24)](https://www.usenix.org/conference/osdi24/presentation/mcallister) |
+| **`io_uring` + direct I/O** | System-call overhead, kernel page-cache copies | — |
+| **Written in Rust** | GC pauses; data races caught by the compiler, not in production | — |
 
-Values live on the SSD; keys live in a compact RAM index (compressed key →
-segment offset). And just as a subway moves more people than a car, OpenKache
-batches writes from many keys into a single sequential **segment-group** flush
-instead of one SSD write per key, using the drive's sequential bandwidth to the
-fullest — on Linux, submitting that I/O through `io_uring` to erase even the
-system-call overhead.
+KVell's lesson is blunt: on a modern SSD the bottleneck is no longer the disk.
+It is the CPU. So OpenKache pins each worker to its own core, hands it its own
+data, and lets it run without a single lock. The network worker and the storage
+worker each own a core and speak through one lock-free SPSC queue, so parsing
+never blocks disk I/O and disk I/O never blocks parsing.
 
-All of it is written in **Rust**: no GC pauses, data races ruled out at compile
-time, C-level control in hand. There is no room for a garbage-collection pause
-on the fast path.
+FairyWren makes the second point: a flash cache burns its lifespan on small
+random writes. So OpenKache never issues one. It batches many keys into a single
+sequential **segment-group** flush, a subway carrying a full train instead of
+one car per passenger, riding the SSD's sequential bandwidth to the ceiling.
+
+**Rust makes this safe to push to the limit: bare-metal control with no garbage
+collector to stall the hot path, and data races caught by the compiler, not in
+production.**
 
 See [docs/architecture.md](./docs/architecture.md) for the full design.
 
