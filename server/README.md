@@ -9,6 +9,10 @@ The preview is intended for development and performance work. It generates an
 ephemeral self-signed certificate, does not authenticate clients, and recreates
 its cache file on every start.
 
+The optimized server and every published performance result are Linux-only.
+Apple Silicon macOS uses a deliberately unoptimized portability path for local
+functional development; do not compare its throughput or latency with Linux.
+
 ## Requirements
 
 - Linux with `io_uring`, or Apple Silicon macOS
@@ -17,8 +21,9 @@ its cache file on every start.
 - Rust and the C toolchain required by the workspace dependencies when building
   from source
 
-Prebuilt archives for Linux x86_64, Linux aarch64, and Apple Silicon macOS are
-listed in the [repository README](../README.md#download-server-binaries).
+Server releases provide Linux x86_64/aarch64 archives and Debian packages plus
+an Apple Silicon macOS archive and Homebrew formula. See the
+[repository README](../README.md#quick-start) for installation commands.
 
 ## Commands
 
@@ -86,9 +91,9 @@ Linux uses the `io_uring` network frontend and direct-I/O storage path. Apple
 Silicon macOS uses Tokio's native polling frontend and buffered file I/O; this
 fallback keeps the protocol contract but is not a Linux throughput comparison.
 
-The server creates `openkache.data` in its current working directory. The file
-is fixed at 16 GiB and is truncated on startup, so this preview does not provide
-restart recovery.
+The server creates `openkache.data` in its current working directory. The
+default sparse file is 256 MiB and is truncated on startup, so this preview does
+not provide restart recovery.
 
 ## Components
 

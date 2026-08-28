@@ -135,16 +135,19 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset_suffix: linux-x86_64-musl
             platform: linux
+            deb_arch: amd64
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             asset_suffix: linux-aarch64-musl
             platform: linux
+            deb_arch: arm64
           - name: darwin-arm64
             runner: macos-15
             target: aarch64-apple-darwin
             asset_suffix: macos-arm64
             platform: darwin
+            deb_arch: ""
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -154,6 +157,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - uses: ./.github/actions/setup-smithy-codegen
 
       - name: Download the server notice
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -177,7 +182,7 @@ jobs:
           set -euo pipefail
           nix-shell --pure server/container.nix \
             --argstr target "${{ matrix.target }}" \
-            --run "cargo server-build --target ${{ matrix.target }}"
+            --run "cargo build --locked --release --target ${{ matrix.target }} --package openkache-server --bin openkache-server --package openkache-cli --bin openkache-cli"
 
       - name: Build the Apple Silicon binary
         if: matrix.platform == 'darwin'
@@ -188,7 +193,9 @@ jobs:
             --release \
             --target "${{ matrix.target }}" \
             --package openkache-server \
-            --bin openkache-server
+            --bin openkache-server \
+            --package openkache-cli \
+            --bin openkache-cli
 
       - name: Verify and package the binary
         env:
@@ -199,10 +206,17 @@ jobs:
         run: |
           set -euo pipefail
           binary="target/${TARGET}/release/openkache-server"
+          cli_binary="target/${TARGET}/release/openkache-cli"
           [[ -x "${binary}" ]] || {
             echo "Missing executable ${binary}." >&2
             echo "Why: release assets must come from the exact target-specific build output." >&2
             echo "Fix: inspect the target build command and ensure openkache-server was compiled in release mode." >&2
+            exit 1
+          }
+          [[ -x "${cli_binary}" ]] || {
+            echo "Missing executable ${cli_binary}." >&2
+            echo "Why: each package must include a client that can verify the server immediately." >&2
+            echo "Fix: build openkache-cli for the same release target as openkache-server." >&2
             exit 1
           }
 
@@ -252,12 +266,37 @@ jobs:
               echo "Fix: rebuild with the pinned target-specific musl toolchain." >&2
               exit 1
             fi
+            cli_file_output="$(file "${cli_binary}")"
+            grep -Eiq 'ELF 64-bit.*(x86-64|x86_64|ARM aarch64|aarch64)' <<<"${cli_file_output}" || {
+              echo "Unexpected CLI artifact description: ${cli_file_output}" >&2
+              exit 1
+            }
+            grep -Eiq 'static-pie linked|statically linked' <<<"${cli_file_output}" || {
+              echo "Linux CLI is not reported as statically linked: ${cli_file_output}" >&2
+              exit 1
+            }
+            if readelf -d "${cli_binary}" | grep -q '(NEEDED)' \
+              || readelf -l "${cli_binary}" | grep -q 'INTERP'; then
+              echo "Linux CLI declares a dynamic runtime dependency." >&2
+              exit 1
+            fi
+            cli_ldd_output="$(ldd "${cli_binary}" 2>&1 || true)"
+            if ! grep -Eiq 'statically linked|not a dynamic executable' <<<"${cli_ldd_output}" \
+              || grep -Eq '=>|\.so([[:space:]]|$)|not found' <<<"${cli_ldd_output}"; then
+              echo "ldd did not confirm a static Linux CLI: ${cli_ldd_output}" >&2
+              exit 1
+            fi
           else
             file_output="$(file "${binary}")"
             grep -Eiq 'Mach-O 64-bit executable arm64' <<<"${file_output}" || {
               echo "Unexpected Apple Silicon artifact description: ${file_output}" >&2
               echo "Why: this asset must run on arm64 macOS without Rosetta translation." >&2
               echo "Fix: build on the native macos-15 runner with target aarch64-apple-darwin." >&2
+              exit 1
+            }
+            cli_file_output="$(file "${cli_binary}")"
+            grep -Eiq 'Mach-O 64-bit executable arm64' <<<"${cli_file_output}" || {
+              echo "Unexpected Apple Silicon CLI artifact description: ${cli_file_output}" >&2
               exit 1
             }
           fi
@@ -267,6 +306,7 @@ jobs:
           package_root="${release_root}/openkache-server-${RELEASE_VERSION}-${ASSET_SUFFIX}"
           mkdir -p "${package_root}"
           install -m 0755 "${binary}" "${package_root}/openkache-server"
+          install -m 0755 "${cli_binary}" "${package_root}/openkache-cli"
           install -m 0644 README.md "${package_root}/README.md"
           install -m 0644 LICENSE "${package_root}/LICENSE"
           install -m 0644 \
@@ -290,11 +330,64 @@ jobs:
             )
           fi
 
+      - name: Build and install-test the Debian package
+        if: matrix.platform == 'linux'
+        env:
+          TARGET: ${{ matrix.target }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-server-dist"
+          deb_path="$(
+            packaging/debian/build-deb.sh \
+              "${RELEASE_VERSION}" \
+              "${DEB_ARCH}" \
+              "target/${TARGET}/release/openkache-server" \
+              "target/${TARGET}/release/openkache-cli" \
+              "${release_root}"
+          )"
+          dpkg-deb --info "${deb_path}"
+          sudo apt-get install --no-install-recommends -y "${deb_path}"
+          dpkg-query --show --showformat='${Status} ${Version} ${Architecture}\n' openkache \
+            | grep -Fx "install ok installed ${RELEASE_VERSION} ${DEB_ARCH}"
+          openkache-cli --help >/dev/null
+          test -f /etc/openkache/openkache.toml
+          test -f /usr/lib/systemd/system/openkache.service
+          packaging/debian/smoke-test.sh \
+            /usr/bin/openkache-server \
+            /usr/bin/openkache-cli \
+            127.0.0.1:14433 \
+            "${RUNNER_TEMP}/openkache-debian-smoke"
+          sudo apt-get remove -y openkache
+
+      - name: Install and smoke-test through Homebrew
+        if: matrix.platform == 'darwin'
+        env:
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          release_root="${RUNNER_TEMP}/openkache-server-dist"
+          archive_name="openkache-server-${RELEASE_VERSION}-${ASSET_SUFFIX}.tar.gz"
+          archive="${release_root}/${archive_name}"
+          archive_sha256="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          formula="${RUNNER_TEMP}/openkache.rb"
+          packaging/homebrew/render-formula.sh \
+            "${RELEASE_VERSION}" \
+            "file://${archive}" \
+            "${archive_sha256}" \
+            "${formula}"
+          brew install --formula --build-from-source "${formula}"
+          brew test openkache
+          brew uninstall --formula openkache
+
       - name: Upload staged binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openkache-server-binary-${{ matrix.asset_suffix }}
-          path: ${{ runner.temp }}/openkache-server-dist/*.tar.gz*
+          path: |
+            ${{ runner.temp }}/openkache-server-dist/*.tar.gz*
+            ${{ runner.temp }}/openkache-server-dist/*.deb*
           if-no-files-found: error
           retention-days: 14
 
@@ -344,14 +437,21 @@ jobs:
         run: |
           set -euo pipefail
           release_root="${RUNNER_TEMP}/openkache-server-release"
-          mapfile -t checksums < <(find "${release_root}" -maxdepth 1 -type f -name '*.tar.gz.sha256' -print | sort)
-          [[ "${#checksums[@]}" -eq 3 ]] || {
-            echo "Expected three platform checksum files, found ${#checksums[@]}." >&2
+          mapfile -t archive_checksums < <(find "${release_root}" -maxdepth 1 -type f -name '*.tar.gz.sha256' -print | sort)
+          [[ "${#archive_checksums[@]}" -eq 3 ]] || {
+            echo "Expected three platform checksum files, found ${#archive_checksums[@]}." >&2
             echo "Why: one Linux x86_64, one Linux aarch64, and one Apple Silicon asset are required." >&2
             echo "Fix: inspect the failed build matrix entry and rerun the release workflow." >&2
             exit 1
           }
-          for checksum in "${checksums[@]}"; do
+          mapfile -t deb_checksums < <(find "${release_root}" -maxdepth 1 -type f -name '*.deb.sha256' -print | sort)
+          [[ "${#deb_checksums[@]}" -eq 2 ]] || {
+            echo "Expected two Debian checksum files, found ${#deb_checksums[@]}." >&2
+            echo "Why: amd64 and arm64 Debian packages are both required." >&2
+            echo "Fix: inspect the failed Linux package build and rerun the workflow." >&2
+            exit 1
+          }
+          for checksum in "${archive_checksums[@]}" "${deb_checksums[@]}"; do
             (
               cd "${release_root}"
               sha256sum --check "$(basename "${checksum}")"
@@ -362,13 +462,25 @@ jobs:
             echo "Expected three platform archives, found ${#archives[@]}." >&2
             exit 1
           }
+          mapfile -t deb_packages < <(find "${release_root}" -maxdepth 1 -type f -name '*.deb' -print | sort)
+          [[ "${#deb_packages[@]}" -eq 2 ]] || {
+            echo "Expected two Debian packages, found ${#deb_packages[@]}." >&2
+            exit 1
+          }
           (
             cd "${release_root}"
-            sha256sum "${archives[@]##*/}" > SHA256SUMS
+            sha256sum "${archives[@]##*/}" "${deb_packages[@]##*/}" > SHA256SUMS
           )
           printf 'source_commit=%s\nsource_tag=%s\nserver_version=%s\n' \
             "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
             > "${release_root}/RELEASE-METADATA"
+          macos_archive="openkache-server-${RELEASE_VERSION}-macos-arm64.tar.gz"
+          macos_sha256="$(sha256sum "${release_root}/${macos_archive}" | awk '{print $1}')"
+          packaging/homebrew/render-formula.sh \
+            "${RELEASE_VERSION}" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${SOURCE_REF_NAME}/${macos_archive}" \
+            "${macos_sha256}" \
+            "${release_root}/openkache.rb"
           cat > "${release_root}/RELEASE-NOTES.md" <<EOF
           ## OpenKache server ${RELEASE_VERSION}
 
@@ -376,7 +488,8 @@ jobs:
           \`${SOURCE_REF_NAME}\` tag.
 
           - Linux x86_64 and aarch64 archives are statically linked musl binaries.
-          - macOS is an Apple Silicon (\`arm64\`) native binary.
+          - Linux amd64 and arm64 \`.deb\` packages install the server, CLI, and optional systemd unit.
+          - macOS is an Apple Silicon (\`arm64\`) native binary with an accompanying Homebrew formula.
           - Verify \`SHA256SUMS\` before extracting an archive.
 
           The server is a preview and retains the runtime and storage limitations
@@ -417,5 +530,8 @@ jobs:
             --notes-file "${release_root}/RELEASE-NOTES.md" \
             "${release_root}"/*.tar.gz \
             "${release_root}"/*.tar.gz.sha256 \
+            "${release_root}"/*.deb \
+            "${release_root}"/*.deb.sha256 \
+            "${release_root}/openkache.rb" \
             "${release_root}/SHA256SUMS" \
             "${release_root}/RELEASE-METADATA"

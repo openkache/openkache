@@ -8,8 +8,9 @@
 - Rust and the native build tools required by the workspace dependencies when
   building from source
 
-Prebuilt archives are available for [Linux x86_64, Linux aarch64, and Apple
-Silicon macOS](../README.md#download-server-binaries).
+Server releases provide Linux x86_64/aarch64 archives and Debian packages plus
+an Apple Silicon macOS archive and Homebrew formula. See the
+[repository quick start](../README.md#quick-start) for installation commands.
 
 ## Run the server
 
@@ -38,11 +39,13 @@ cargo run --locked --package openkache-server --bin openkache-server -- \
   0.0.0.0:4433
 ```
 
-The process creates a fixed 16 GiB `openkache.data` file in its working
-directory. The current preview truncates that file on every start.
+The process creates a default 256 MiB sparse `openkache.data` file in its
+working directory. The current preview truncates that file on every start.
 
 On Linux the server uses `io_uring`; the Apple Silicon build uses Tokio's
-native polling fallback.
+native polling fallback and buffered file I/O. The macOS path is intentionally
+unoptimized and exists for functional development; performance claims apply
+only to Linux.
 
 ## Use the Rust client
 
