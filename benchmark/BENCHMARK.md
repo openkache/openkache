@@ -1,7 +1,5 @@
 # OpenKache Benchmark
 
-Values in parentheses are ratios relative to OpenKache (1×).
-
 ## Throughput (GET)
 
 | System | GET throughput | Load tool |
@@ -10,9 +8,8 @@ Values in parentheses are ratios relative to OpenKache (1×).
 | PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
 | MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. On the
-same machine, the single-core fio 4 KiB random-read ceiling is 128,820 IOPS,
-and OpenKache reaches 76% of that ceiling with a single storage core.
+OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. OpenKache
+reaches 76% of the hardware limit (128,820 IOPS, measured with fio).
 
 ## Latency (GET, single request at a time)
 
@@ -21,9 +18,6 @@ and OpenKache reaches 76% of that ceiling with a single storage core.
 | OpenKache | 238.7 µs (1×) | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
 | MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
 | PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
-
-OpenKache's average GET latency is 1.6× lower than MySQL and 2.3× lower than
-PostgreSQL; at p99 it is 3.0× and 3.3× lower.
 
 ## Test Environment
 

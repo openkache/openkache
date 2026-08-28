@@ -30,11 +30,9 @@
 
 ## 벤치마크
 
-6 vCPU AMD EPYC 7773X 호스트(SSD, kernel 6.8)의 loopback 환경에서 32바이트
-key와 100바이트 value로 측정했다. 각 시스템은 자체 프로토콜을 사용하는 load tool로
-구동했다. 전체 방법론은 [benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)에 정리했다.
-
-괄호 안 수치는 OpenKache를 1×로 둔 상대 배수다.
+벤치마크는 [serveroptima1](./benchmark/BENCHMARK.md#test-environment)의 loopback에서
+실행했다. 각 시스템은 자체 프로토콜을 사용하는 load tool로 구동했다. 전체
+방법론은 [benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)에 정리했다.
 
 **GET 처리량**
 
@@ -44,8 +42,8 @@ key와 100바이트 value로 측정했다. 각 시스템은 자체 프로토콜�
 | PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
 | MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르다. 단일 storage core로
-머신의 단일 core 4 KiB random read 한계치(128,820 IOPS)의 76%에 도달한다.
+OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르다. OpenKache는 하드웨어
+한계값의 76%(fio로 측정한 128,820 IOPS)에 도달한다.
 
 **GET 지연시간 (요청을 한 번에 하나씩 처리)**
 
@@ -54,9 +52,6 @@ OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르다. 단일 stora
 | OpenKache | **238.7 µs (1×)** | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
 | MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
 | PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
-
-평균 GET latency는 MySQL보다 1.6배, PostgreSQL보다 2.3배 낮다. p99에서는
-각각 3.0배, 3.3배 낮다.
 
 ## 아키텍처
 
