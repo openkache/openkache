@@ -65,31 +65,26 @@ OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르며, 단일 스�
 
 </div>
 
-**OpenKache는 왜 빠른가?** 코어를 넘나들지 않기 때문입니다.
+> **request는 처음 배정된 core를 벗어나지 않는다.**
 
-대부분의 서버는 스레드 풀이 코어 사이를 오가며 일합니다. 그 대가는 공짜가 아닙니다 — 락
-경합, 뮤텍스, 컨텍스트 스위치, 그리고 캐시 라인이 코어 사이를 튕겨 다닐 때마다 치르는
-동기화·복사 비용. 부하가 높아질수록 바로 이 비용이 처리량을 갉아먹습니다.
+요즘 SSD에선 병목이 disk가 아니라 CPU다. OpenKache는 모든 core를 놀리지 않고, work를 core
+사이로 옮기는 데 드는 비용을 아예 없앤다.
 
-OpenKache는 **thread-per-core(shared-nothing)** 설계를 택합니다. 각 워커는 하나의 코어에
-고정되고, 자기 데이터만 소유하며, 공유 상태가 없으니 락도 없습니다. 이것은
-TigerBeetle·ScyllaDB·Redis가 하드웨어를 끝까지 짜내기 위해 수렴한 바로 그 설계입니다.
-네트워크 경로와 스토리지 경로는 각자 코어를 소유하고, 둘 사이는 오직 **락 프리 SPSC 큐**
-하나로만 통신합니다. 그래서 RESP 파싱이 디스크 I/O를 막는 일은 결코 없습니다.
+**Thread-per-core, shared-nothing.** worker 하나가 core 하나와 자기 data를 독점한다. lock도,
+context switch도, core 사이를 오가는 cache line도 없다.
+([KVell, SOSP '19](https://dl.acm.org/doi/10.1145/3341301.3359628))
 
-Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같은 shared-nothing 원칙을
-코어별 샤딩으로 확장해, 처리량이 단일 코어 천장에 갇히지 않고 하드웨어를 따라 확장됩니다 —
-공유 락이 없으니 코어를 더해도 경합이 따라붙지 않습니다.
+**worker 둘, lock-free queue 하나.** network worker와 storage worker가 각자 core를 잡고 SPSC
+queue 하나로만 대화한다. parsing이 disk I/O를 막지 않고, disk I/O도 parsing을 막지 않는다.
 
-값은 SSD에, 키는 RAM의 압축 인덱스(압축 키 → 세그먼트 오프셋)에 둡니다. 그리고 지하철이
-자가용보다 많은 사람을 실어 나르듯, 여러 키의 쓰기를 키마다 하나씩 쓰는 대신 **세그먼트
-그룹** 하나의 순차 flush로 묶어 SSD의 순차 대역폭을 끝까지 씁니다 — Linux에서는
-`io_uring`으로 시스템 콜마저 지워가며.
+**순차 segment-group write.** flash는 작은 random write로 수명을 깎아먹는다. 그래서 OpenKache는
+그런 write를 아예 안 한다. 여러 key를 순차 flush 한 번으로 묶는다.
+([FairyWren, OSDI '24](https://www.usenix.org/conference/osdi24/presentation/mcallister))
 
-이 모든 것을 **Rust**로 씁니다. GC 멈춤 없이, 데이터 경쟁을 컴파일 타임에 배제한 채, C
-수준의 제어를 손에 쥐고. 빠른 경로에 GC 일시정지가 끼어들 자리는 없습니다.
+**Rust로 짰다.** hot path를 멈춰 세울 GC가 없다. data race는 production이 아니라 compiler가
+잡는다.
 
-전체 설계는 [docs/architecture.md](./docs/architecture.md) 참고. (한국어 번역 준비 중)
+전체 설계는 [docs/architecture.ko.md](./docs/architecture.ko.md)에 있다.
 
 ## 빠른 시작
 

@@ -64,28 +64,25 @@ OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即
 
 </div>
 
-**OpenKache 为什么快?** 因为它从不在核心之间跳转。
+> **一个请求从不离开它最初落到的 core。**
 
-大多数服务器让线程池在核心之间游走。这个代价并不便宜 —— 锁竞争、互斥量、上下文切换,以及
-每当缓存行在核心之间弹跳时都要付出的同步与拷贝成本。负载越重,这些开销就越是吞噬吞吐量。
+在现代 SSD 上,瓶颈是 CPU,不是磁盘。OpenKache 让每个 core 都忙起来,绝不为在 core 之间搬运
+工作而付费。
 
-OpenKache 采用 **thread-per-core(shared-nothing,无共享)** 设计。每个工作线程被绑定到
-单个核心,只拥有自己的数据,不共享任何状态 —— 因此没有锁。这正是 TigerBeetle、ScyllaDB、
-Redis 为榨干硬件性能而共同收敛到的设计。网络路径与存储路径各自独占一个核心,两者之间只通过
-一条 **无锁 SPSC 队列** 通信。RESP 解析绝不会阻塞磁盘 I/O。
+**Thread-per-core, shared-nothing(无共享)。** 每个 worker 独占一个 core 和自己的数据。没有 lock,
+没有 context switch,没有在 core 之间弹跳的 cache line。
+(参照 [KVell, SOSP '19](https://dl.acm.org/doi/10.1145/3341301.3359628))
 
-Redis 在单一核心上执行命令。OpenKache 保持同样的无共享原则,但将工作线程按核心分片,使吞吐量
-随硬件扩展,而不是停在单核天花板上 —— 由于没有共享锁,增加核心也不会带来竞争。
+**两个 worker,一条 lock-free queue。** network worker 和 storage worker 各占一个 core,只通过
+一条 SPSC queue 对话。解析不会阻塞磁盘 I/O,磁盘 I/O 也不会阻塞解析。
 
-值存放在 SSD 上,键存放在 RAM 的紧凑索引中(压缩键 → 段偏移)。正如地铁比汽车运送更多乘客,
-OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)** 刷写,而不是每个键单独写
-一次 SSD,从而最大限度地利用磁盘的顺序带宽 —— 在 Linux 上,通过 `io_uring` 提交这些 I/O,
-连系统调用开销也一并抹去。
+**顺序 segment-group 写入。** flash 会因小的随机写而折损寿命,所以 OpenKache 从不发出这样的写。
+它把多个 key 合并成一次顺序 flush。
+(参照 [FairyWren, OSDI '24)](https://www.usenix.org/conference/osdi24/presentation/mcallister))
 
-这一切都用 **Rust** 编写:没有 GC 停顿,数据竞争在编译期被排除,同时握有 C 级别的控制力。
-快路径上没有任何垃圾回收停顿的容身之处。
+**用 Rust 编写。** 没有 GC 来拖慢 hot path。data race 由 compiler 捕获,而不是在 production 中。
 
-完整设计见 [docs/architecture.md](./docs/architecture.md)。(中文翻译准备中)
+完整设计见 [docs/architecture.zh.md](./docs/architecture.zh.md)。
 
 ## 快速开始
 

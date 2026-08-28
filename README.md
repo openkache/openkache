@@ -66,35 +66,25 @@ p99 it is 3.0× and 3.3× lower.
 
 </div>
 
-**Why is OpenKache fast?** Because it never hops between cores.
+> **A request never leaves the core it landed on.**
 
-Most servers let a thread pool roam across cores. That is not free — lock
-contention, mutexes, context switches, and the synchronization and copy cost
-paid every time a cache line bounces from one core to another. The heavier the
-load, the more this overhead eats into throughput.
+On a modern SSD the bottleneck is the CPU, not the disk. OpenKache keeps every
+core busy and never pays to move work between them.
 
-OpenKache takes a **thread-per-core (shared-nothing)** design. Each worker is
-pinned to a single core, owns its own data, and shares no state — so there are
-no locks. This is the same design TigerBeetle, ScyllaDB, and Redis converged on
-to squeeze every drop out of the hardware. The network path and the storage
-path each own a core, and they communicate through exactly one **lock-free SPSC
-queue**. RESP parsing never blocks disk I/O.
+**Thread-per-core, shared-nothing.** Each worker owns one core and its own
+data. No locks, no context switches, no cache lines bouncing between cores.
+Following [KVell (SOSP '19)](https://dl.acm.org/doi/10.1145/3341301.3359628).
 
-Redis runs commands on a single core. OpenKache keeps the same shared-nothing
-principle but shards workers across cores, so throughput scales with the
-hardware instead of hitting a single-core ceiling — and with no shared locks,
-adding a core adds no contention.
+**Two workers, one lock-free queue.** The network worker and the storage worker
+each own a core and talk through a single SPSC queue. Parsing never blocks disk
+I/O; disk I/O never blocks parsing.
 
-Values live on the SSD; keys live in a compact RAM index (compressed key →
-segment offset). And just as a subway moves more people than a car, OpenKache
-batches writes from many keys into a single sequential **segment-group** flush
-instead of one SSD write per key, using the drive's sequential bandwidth to the
-fullest — on Linux, submitting that I/O through `io_uring` to erase even the
-system-call overhead.
+**Sequential segment-group writes.** Flash dies from small random writes, so
+OpenKache never issues one. It batches many keys into one sequential flush.
+Following [FairyWren (OSDI '24)](https://www.usenix.org/conference/osdi24/presentation/mcallister).
 
-All of it is written in **Rust**: no GC pauses, data races ruled out at compile
-time, C-level control in hand. There is no room for a garbage-collection pause
-on the fast path.
+**Written in Rust.** No garbage collector to stall the hot path. Data races
+caught by the compiler, not in production.
 
 See [docs/architecture.md](./docs/architecture.md) for the full design.
 
