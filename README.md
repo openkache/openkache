@@ -158,7 +158,9 @@ install the server and CLI. The formula test starts the server and exercises
 VERSION="${SERVER_VERSION:-0.1.0}"
 BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
 curl --fail --location --remote-name "${BASE}/openkache.rb"
-brew install --formula ./openkache.rb
+brew tap-new openkache/local
+install -m 0644 openkache.rb "$(brew --repository openkache/local)/Formula/openkache.rb"
+brew install openkache/local/openkache
 openkache-server
 ```
 
