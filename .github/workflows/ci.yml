@@ -23,6 +23,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       typescript: ${{ steps.filter.outputs.typescript }}
+      server_package: ${{ steps.filter.outputs.server_package }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,6 +61,18 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'clients/typescript/**'
+            server_package:
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/publish-server-binaries.yml'
+              - '.github/actions/**'
+              - 'protocol/**'
+              - 'server/**'
+              - 'clients/cli/**'
+              - 'clients/core/**'
+              - 'clients/value/**'
+              - 'packaging/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
 
   backend:
     name: Backend (Rust + Python)
@@ -214,11 +227,76 @@ jobs:
         working-directory: clients/typescript
         run: bun run build:native
 
+  macos-server-package:
+    name: Apple Silicon Homebrew smoke test
+    needs: changes
+    if: needs.changes.outputs.server_package == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-smithy-codegen
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Test and build the Apple Silicon server package
+        run: |
+          set -euo pipefail
+          cargo test --locked --package openkache-server
+          cargo build \
+            --locked \
+            --release \
+            --target aarch64-apple-darwin \
+            --package openkache-server \
+            --bin openkache-server \
+            --package openkache-cli \
+            --bin openkache-cli
+
+      - name: Install with Homebrew and run client-server smoke test
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          version="$(
+            cargo metadata \
+              --manifest-path server/Cargo.toml \
+              --locked \
+              --no-deps \
+              --format-version 1 \
+              | jq -r '.packages[] | select(.name == "openkache-server") | .version'
+          )"
+          package_root="${RUNNER_TEMP}/openkache-server-${version}-macos-arm64"
+          archive="${RUNNER_TEMP}/openkache-server-${version}-macos-arm64.tar.gz"
+          mkdir -p "${package_root}"
+          install -m 0755 \
+            target/aarch64-apple-darwin/release/openkache-server \
+            "${package_root}/openkache-server"
+          install -m 0755 \
+            target/aarch64-apple-darwin/release/openkache-cli \
+            "${package_root}/openkache-cli"
+          tar -C "${RUNNER_TEMP}" -czf "${archive}" "$(basename "${package_root}")"
+          archive_sha256="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          formula="${RUNNER_TEMP}/openkache.rb"
+          packaging/homebrew/render-formula.sh \
+            "${version}" \
+            "file://${archive}" \
+            "${archive_sha256}" \
+            "${formula}"
+          brew install --formula --build-from-source "${formula}"
+          brew test openkache
+          brew uninstall --formula openkache
+
   ci-gate:
     name: CI gate
     runs-on: ubuntu-24.04
     timeout-minutes: 1
-    needs: [changes, backend, typescript]
+    needs: [changes, backend, typescript, macos-server-package]
     if: always()
     steps:
       - name: Check all required jobs passed
@@ -229,6 +307,7 @@ jobs:
           # Gate fails if any job was cancelled or failed
           backend="${{ needs.backend.result }}"
           typescript="${{ needs.typescript.result }}"
+          macos_server_package="${{ needs.macos-server-package.result }}"
 
           if [[ "$backend" == "failure" || "$backend" == "cancelled" ]]; then
             echo "Backend job failed or was cancelled"
@@ -240,6 +319,10 @@ jobs:
             exit 1
           fi
 
+          if [[ "$macos_server_package" == "failure" || "$macos_server_package" == "cancelled" ]]; then
+            echo "Apple Silicon server package job failed or was cancelled"
+            exit 1
+          fi
+
           echo "All CI jobs passed or were skipped"
           exit 0
-

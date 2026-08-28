@@ -27,6 +27,7 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 - [Project status](#project-status)
 - [Contributing](#contributing)
 - [License](#license)
+- [Third-party attributions](#third-party-attributions)
 
 ## Benchmarks
 

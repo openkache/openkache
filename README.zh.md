@@ -27,6 +27,7 @@
 - [项目状态](#项目状态)
 - [参与贡献](#参与贡献)
 - [许可证](#许可证)
+- [第三方归属声明](#第三方归属声明)
 
 ## 基准测试
 
@@ -318,3 +319,13 @@ cargo server-build --features alloc-mimalloc
 [GNU Affero 通用公共许可证 v3.0 或更高版本](./LICENSE)授权。[`clients/`](./clients/) 下的
 客户端 SDK 与 [`protocol/`](./protocol/) 下的共享协议依据 Apache License 2.0 授权;详见各
 目录下的 `LICENSE` 文件。
+
+## 第三方归属声明
+
+发布归档、容器镜像和客户端软件包包含根据锁定的 Cargo 依赖关系图生成的
+`THIRD-PARTY-NOTICES.txt`。该文件保留上游许可证、声明和归属文本;OpenKache 自身的
+许可证位于相邻的 `LICENSE` 文件中。
+
+没有独立上游许可证文件的条目会被标记为需要维护者审查。若声明中仍包含
+`LEGAL REVIEW REQUIRED`,请勿重新分发该构件。发布检查和各构件的具体说明见
+[`RELEASING.md`](./RELEASING.md)。
