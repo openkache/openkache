@@ -1,0 +1,11 @@
+Package: openkache
+Version: @VERSION@
+Section: database
+Priority: optional
+Architecture: @ARCH@
+Maintainer: OpenKache maintainers <maintainers@openkache.com>
+Homepage: https://github.com/openkache/openkache
+Description: SSD-backed cache server and command-line client
+ OpenKache exposes Redis-compatible GET, SET, and DEL over RESP/TCP and the
+ OpenKache Gate 0 protocol over QUIC/UDP. The package includes the preview
+ server, interactive CLI, configuration example, and an optional systemd unit.
