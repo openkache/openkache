@@ -39,9 +39,9 @@ its own native protocol. Full methodology in [BENCHMARK.md](./BENCHMARK.md).
 
 | System | GET throughput | Load tool |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | memtier (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
-| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+| OpenKache | **97,887 ops/s** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
 
 OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL, reaching
 76% of the machine's single-core 4 KiB random-read ceiling (128,820 IOPS) with

@@ -4,9 +4,9 @@
 
 | System | GET throughput | Load tool |
 |---|---:|---|
-| OpenKache | 97,887 ops/s | memtier (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
-| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+| OpenKache | 97,887 ops/s | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
 
 OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. On the
 same machine, the single-core fio 4 KiB random-read ceiling is 128,820 IOPS,
@@ -45,19 +45,21 @@ serveroptima1:
 
 ### Throughput
 
-memtier speaks only the RESP protocol, so measuring every system with memtier
-would be unfair to the SQL databases. Each system was therefore driven by a
-tool that speaks its own native protocol — memtier (RESP) for OpenKache,
-pgbench for PostgreSQL, and sysbench for MySQL. In every run the database was
-pinned to CPU cores 0–1 and the load generator to cores 2–5.
+All three systems were driven by kvbench, a custom load generator that speaks
+each system's native protocol: RESP for OpenKache, the PostgreSQL wire protocol
+for PostgreSQL, and the MySQL wire protocol for MySQL. Using a single tool
+across all three systems keeps the client-side code path, key distribution, and
+measurement logic identical — only the wire protocol changes per backend. In
+every run the database was pinned to CPU cores 0–1 and the load generator to
+cores 2–5. kvbench source is under `bench/kvbench/`.
 
-For PostgreSQL and MySQL, parameters were swept to find the configuration with
-the highest throughput.
+For PostgreSQL and MySQL, server parameters were swept to find the configuration
+with the highest throughput.
 
 PostgreSQL: swept shared_buffers over 128 / 256 / 512 MB and client count over
 16 / 24 / 32 / 48, selecting shared_buffers 256 MB with 24 clients. Prepared
-statements (`-M prepared`) were used, jit and autovacuum were disabled, and
-ANALYZE was run right after prefill.
+statements were used, jit and autovacuum were disabled, and ANALYZE was run
+right after prefill.
 
 MySQL: swept innodb_buffer_pool_size over 128 / 256 / 512 MB and threads over
 8 / 16 / 32 / 64, selecting a 512 MB buffer pool with 16 threads. Prepared
@@ -65,9 +67,9 @@ statements were used.
 
 ### Latency
 
-All three systems were driven by one load generator (kvbench) speaking each
-system's native protocol — RESP for OpenKache, the PostgreSQL wire protocol,
-and the MySQL wire protocol. The database was pinned to CPU cores 0–1 and the
-load generator to cores 2–5. The generator used a single connection and sent
-one request at a time, so each sample is the full end-to-end latency of one
-query with no queueing.
+All three systems were driven by kvbench speaking each system's native protocol
+— RESP for OpenKache, the PostgreSQL wire protocol for PostgreSQL, and the
+MySQL wire protocol for MySQL. The database was pinned to CPU cores 0–1 and the
+load generator to cores 2–5. The generator used a single connection and sent one
+request at a time, so each sample is the full end-to-end latency of one query
+with no queueing. kvbench source is under `bench/kvbench/`.

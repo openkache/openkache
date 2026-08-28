@@ -1,0 +1,33 @@
+# Standalone crate: kept out of the top-level openkache workspace so the
+# benchmark load generator builds independently of the server/client build.
+[workspace]
+
+[package]
+name = "kvbench"
+version = "0.1.0"
+edition = "2021"
+description = "Native multi-protocol GET-throughput load generator for SSD-backed KV benchmarks"
+
+[[bin]]
+name = "kvbench"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+
+# PostgreSQL: pure-Rust wire protocol, NoTls (no OpenSSL) -> musl-static clean.
+tokio-postgres = "0.7"
+
+# MySQL/MariaDB: default-features off + "minimal-rust" gives the pure-Rust flate2
+# backend (flate2/rust_backend) and pulls in NO TLS stack (neither native-tls nor
+# rustls), so nothing links OpenSSL or system libz -> musl-static clean.
+mysql_async = { version = "0.36", default-features = false, features = ["minimal-rust"] }
+
+# For pipelining postgres queries on one connection (FuturesUnordered).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

@@ -39,9 +39,9 @@
 
 | 시스템 | GET 처리량 | 로드 툴 |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | memtier (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
-| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+| OpenKache | **97,887 ops/s** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
 
 OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르며, 단일 스토리지 코어로 머신의
 단일 코어 4 KiB 랜덤 읽기 한계치(128,820 IOPS)의 76%에 도달합니다.

@@ -39,9 +39,9 @@
 
 | 系统 | GET 吞吐量 | 负载工具 |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | memtier (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
-| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+| OpenKache | **97,887 ops/s** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
 
 OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即可达到该机器单核
 4 KiB 随机读取上限(128,820 IOPS)的 76%。
