@@ -105,7 +105,7 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
   const field_codecs = (fields: readonly Wire_Operation_Field_Plan[]): string => {
     const codecs = fields.flatMap((field) => field.codecs ?? [])
     const unique = [...new Set(codecs)]
-    return unique.length === 0 ? "—" : unique.map((codec) => `\`${codec}\``).join(", ")
+    return unique.length === 0 ? "N/A" : unique.map((codec) => `\`${codec}\``).join(", ")
   }
   const rows = operations
     .map((operation) => {

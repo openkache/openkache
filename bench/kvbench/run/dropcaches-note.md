@@ -32,7 +32,7 @@ with `diskstats.sh sda1` sampled before/after the workload (sectors_read
 should climb).
 
 Note: `MemorySwapMax=0` is also set so evicted anonymous pages cannot go to
-swap — pressure stays on file cache eviction / SSD reads, not swap.
+swap; pressure stays on file cache eviction / SSD reads, not swap.
 
 ## cpuset is NOT unprivileged here (why cg-run.sh uses taskset)
 

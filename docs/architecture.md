@@ -19,7 +19,7 @@ A conventional server hands requests to a thread pool whose threads migrate
 across cores. Every migration has a cost: lock contention, mutex ownership
 transfer, context switches, and cache lines bouncing between cores, each of
 which forces synchronization and copying. Under load, that coordination
-overhead — not the actual work — becomes the bottleneck.
+overhead, not the actual work, becomes the bottleneck.
 
 OpenKache pins each worker to a single core. A worker owns its data and shares
 no mutable state with other workers, so there are no locks on the hot path. This
@@ -56,7 +56,7 @@ working set can far exceed available RAM.
 
 Writing one key at a time to an SSD wastes the drive: small random writes run
 far below its sequential ceiling. OpenKache instead batches writes from many
-keys into a single sequential **segment-group** flush — like a subway moving
+keys into a single sequential **segment-group** flush, like a subway moving
 many riders in one trip rather than each in a separate car. The SSD sees large
 sequential writes and runs near its bandwidth limit.
 
@@ -68,17 +68,17 @@ page cache so the cache manages its own memory.
 
 The server exposes the same numeric address over two transports:
 
-- **RESP over TCP** — Redis-compatible `GET`/`SET`/`DEL`, so existing Redis
+- **RESP over TCP:** Redis-compatible `GET`/`SET`/`DEL`, so existing Redis
   tooling and clients work unchanged.
-- **OpenKache Gate 0 over QUIC/UDP** — the native protocol, running TLS 1.3 over
+- **OpenKache Gate 0 over QUIC/UDP:** the native protocol, running TLS 1.3 over
   QUIC. A compatibility frontend bridges QUIC to the same storage engine.
 
 ## Why Rust
 
 The entire server is written in Rust. There is no garbage collector, so no GC
 pause can interrupt the fast path. The ownership and borrow model rules out data
-races at compile time — which matters most precisely because the design leans on
-core-local ownership and lock-free queues. And Rust keeps C-level control over
+races at compile time. This matters most because the design leans on core-local
+ownership and lock-free queues. And Rust keeps C-level control over
 memory layout and system calls, so the hardware-focused design above is
 expressible without giving up safety.
 
@@ -91,8 +91,8 @@ targeting developer ergonomics and correctness rather than peak throughput.
 
 ## Related documents
 
-- [ROADMAP.md](../ROADMAP.md) — where this design is headed
-- [server/README.md](../server/README.md) — the server implementation and
+- [ROADMAP.md](../ROADMAP.md): where this design is headed
+- [server/README.md](../server/README.md): the server implementation and
   operation subset
-- [protocol/README.md](../protocol/README.md) — the wire protocol and generated
+- [protocol/README.md](../protocol/README.md): the wire protocol and generated
   contract

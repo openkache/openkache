@@ -508,10 +508,10 @@ next frame.
 <!-- openkache:generated-protocol-operation-table:start -->
 | Opcode | Name | Request layout | Response payload | Request codecs | Response codecs |
 |---|---|---|---|---|---|
-| `01` | `PING` | opcode + request ID | opaque payload | — | — |
-| `02` | `GET` | opcode + request ID + namespaceId (8 bytes) + u8 length(itemId) + itemId | opaque payload | — | — |
-| `03` | `SET` | opcode + request ID + namespaceId (8 bytes) + packed(condition, expirationMode, evictionMode) + u8 length(itemId) + vu128 length(value) + if expirationMode=explicit_ttl: vu128(ttlMilliseconds) + itemId | empty | — | — |
-| `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 length(itemId) + itemId | empty | — | — |
+| `01` | `PING` | opcode + request ID | opaque payload | N/A | N/A |
+| `02` | `GET` | opcode + request ID + namespaceId (8 bytes) + u8 length(itemId) + itemId | opaque payload | N/A | N/A |
+| `03` | `SET` | opcode + request ID + namespaceId (8 bytes) + packed(condition, expirationMode, evictionMode) + u8 length(itemId) + vu128 length(value) + if expirationMode=explicit_ttl: vu128(ttlMilliseconds) + itemId | empty | N/A | N/A |
+| `04` | `DELETE` | opcode + request ID + namespaceId (8 bytes) + u8 length(itemId) + itemId | empty | N/A | N/A |
 <!-- openkache:generated-protocol-operation-table:end -->
 
 In the `SET` row, `vu128 length(value)` is the length prefix for the trailing
