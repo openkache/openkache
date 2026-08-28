@@ -156,7 +156,16 @@ const LICENSE_SELECTIONS: Readonly<Record<string, string>> = {
   "zstd-pure-rs": "BSD-3-Clause",
 }
 
-const LICENSE_FILE_NAME = /^(?:license|licence|copying|notice|notices|authors|copyright|unlicense)(?:[._-].*)?$/iu
+/**
+ * Conventional names used for license, notice, copyright, and patent files.
+ *
+ * SPDX/reuse projects often use short names inside `LICENSES/`, which are
+ * handled separately below.  The prefix also covers common aggregate files
+ * such as `THIRD-PARTY-NOTICES` without treating unrelated source files as
+ * legal text.
+ */
+const LICENSE_FILE_NAME =
+  /^(?:(?:third[._ -]?party[._ -]?)?(?:licenses?|licences?|copying(?:[0-9]+)?|notices?|authors?|copyright|unlicenses?|patents?))(?:[._-].*)?$/iu
 const CRATES_IO_SOURCE_PREFIX =
   "registry+https://github.com/rust-lang/crates.io-index"
 
@@ -178,6 +187,18 @@ function fail(message: string): never {
 
 function normalize_text(content: string): string {
   return content.replace(/\r\n?/gu, "\n")
+}
+
+function decode_license_text(bytes: Uint8Array, file_path: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+  } catch (error) {
+    fail(
+      `License or notice file ${file_path} is not valid UTF-8: ${
+        error instanceof Error ? error.message : String(error)
+      }.`,
+    )
+  }
 }
 
 /**
@@ -368,7 +389,7 @@ export function collect_license_files(
       if (bytes.includes(0)) continue
       files.push({
         path: relative_path,
-        content: normalize_text(bytes.toString("utf8")),
+        content: normalize_text(decode_license_text(bytes, relative_path)),
       })
     }
   }
@@ -425,7 +446,12 @@ function package_notice(candidate: Cargo_Package): Notice_Package {
       }
       license_files.push({
         path: declared_license_relative_path,
-        content: normalize_text(declared_license_bytes.toString("utf8")),
+        content: normalize_text(
+          decode_license_text(
+            declared_license_bytes,
+            declared_license_relative_path,
+          ),
+        ),
       })
       license_files.sort((left, right) => compare_strings(left.path, right.path))
     }
