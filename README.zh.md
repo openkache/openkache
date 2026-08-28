@@ -89,13 +89,10 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 
 ## 快速开始
 
-OpenKache 针对 **Linux** 进行优化和基准测试。高性能 `io_uring` 网络前端、直接 I/O
-存储路径以及 CPU 绑定运行时均为 Linux 专用。Apple Silicon macOS 提供一个有意不做性能
-优化的可移植性预览版本,使用 Tokio 轮询与缓冲文件 I/O,仅用于功能开发而非性能比较。
-Windows 没有原生服务器;WSL2 使用 Linux 构建,并要求内核允许 `io_uring`。
+OpenKache 针对 **Linux** 进行优化和基准测试。
 
-连接客户端之前,请先启动服务器。按顺序选择第一个适合当前环境的方法:容器镜像、Homebrew
-或 APT 软件包、发布归档,或 Cargo。
+- **Windows：** 建议使用 WSL2。
+- **macOS：** 仅用于功能开发，不用于性能比较。
 
 Linux 要求:
 
@@ -104,104 +101,32 @@ Linux 要求:
 
 ### 容器镜像
 
-无需向 GHCR 认证即可运行已发布的预览镜像:
-
 ```bash
 podman run --rm \
+  --network host \
   --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-`edge` 标签跟随 `main` 分支最近一次成功的构建。若需要可重现的部署,请使用多平台镜像清单的
-`sha256` 摘要来固定版本,而不要使用会滚动更新的标签。
-
-如需在本地构建镜像,请在仓库根目录运行:
-
-```bash
-docker build --file server/Dockerfile --tag localhost/openkache:dev .
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  --volume openkache-data:/var/lib/openkache \
-  localhost/openkache:dev
-```
-
-默认的容器命令将网络线程固定在 CPU 0,存储线程固定在 CPU 1。如果容器的 CPU 集合使用不同的
-编号,请覆盖该命令。详见[容器指南](./docs/container-image.md)。
-
 ### Homebrew（Apple Silicon macOS）
 
-下载对应发布中附带的 formula,再由 Homebrew 安装服务器与 CLI。Formula 测试会启动
-服务器,并通过 `openkache-cli` 执行 `PING`、`SET`、`GET` 和 `DELETE`。
-
 ```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-curl --fail --location --remote-name "${BASE}/openkache.rb"
-brew tap-new openkache/local
-install -m 0644 openkache.rb "$(brew --repository openkache/local)/Formula/openkache.rb"
-brew install openkache/local/openkache
+brew install openkache
 openkache-server
 ```
-
-macOS 服务器有意保持未优化状态。它保留供本地功能开发使用的协议契约,但所有已发布的
-性能结果都仅针对 Linux 服务器。
 
 ### APT 软件包（Ubuntu、Debian 与 WSL2）
 
-下载与机器 Debian 架构匹配的软件包并使用 APT 安装。软件包包含服务器、CLI、配置文件
-和仅监听回环地址的 systemd unit;服务不会自动启用。
-
 ```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-ARCH="$(dpkg --print-architecture)"
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-PACKAGE="openkache_${VERSION}_${ARCH}.deb"
-curl --fail --location --remote-name "${BASE}/${PACKAGE}"
-sudo apt install "./${PACKAGE}"
+sudo apt install openkache
 openkache-server
-```
-
-在 systemd 主机上,可运行 `sudo systemctl enable --now openkache` 启动可选服务。在没有
-systemd 的 WSL2 中,以前台方式运行 `openkache-server`。
-
-### Linux 发布归档
-
-当 `server-v<version>` 发布后,从 [GitHub Releases](https://github.com/openkache/openkache/releases)
-下载适合 Linux 环境的归档。将 `SERVER_VERSION` 设为已发布版本,然后验证并运行归档:
-
-```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-PLATFORM="linux-x86_64-musl" # arm64 使用 linux-aarch64-musl
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"
-curl --fail --location --remote-name "${BASE}/${ARCHIVE}"
-curl --fail --location --remote-name "${BASE}/SHA256SUMS"
-grep -F " ${ARCHIVE}" SHA256SUMS | sha256sum --check
-tar -xzf "${ARCHIVE}"
-"./openkache-server-${VERSION}-${PLATFORM}/openkache-server"
 ```
 
 ### Cargo
 
-从源码构建还需要 Rust 以及工作区依赖所需的原生工具链。使用 CPU 0 和 1 在
-`127.0.0.1:4433` 上运行服务器:
-
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
 ```
-
-服务器对 RESP/TCP 和 OpenKache/QUIC 使用同一个数字地址。若要选择不同的地址和 CPU 组合:
-
-```bash
-cargo run --locked --package openkache-server --bin openkache-server -- \
-  0.0.0.0:4433 2 3
-```
-
-缓存文件在进程的工作目录中创建,并在服务器每次启动时被截断重置。
 
 ## 连接客户端
 
