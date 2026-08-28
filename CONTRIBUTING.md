@@ -28,6 +28,17 @@ storage or wire-format contract, explain why in the issue and pull request.
 Create a topic branch from `main` and keep unrelated work out of the pull
 request.
 
+Install git hooks so they run automatically on each commit:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+The `pre-commit` hook enforces trilingual documentation sync (English, Korean,
+Chinese). If you edit a document that comes in all three languages, the hook
+will reject your commit unless you update all three. See
+[scripts/README.md](./scripts/README.md) for details.
+
 ## Check your work
 
 Run these commands from the repository root before opening a pull request:
