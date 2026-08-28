@@ -10,9 +10,11 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs"
@@ -365,11 +367,14 @@ function dependency_closure(
  *
  * @param package_root - Root of the unpacked dependency source tree.
  * @returns Deterministically ordered license and notice files.
+ * @throws {Error} When a legal file is invalid UTF-8, binary, or escapes the
+ * package source tree through a symlink.
  */
 export function collect_license_files(
   package_root: string,
 ): readonly Package_License_File[] {
   const files: Package_License_File[] = []
+  const real_package_root = realpathSync(package_root)
   const pending_directories = [package_root]
   while (pending_directories.length > 0) {
     const directory = pending_directories.pop()
@@ -381,7 +386,6 @@ export function collect_license_files(
         pending_directories.push(entry_path)
         continue
       }
-      if (!entry.isFile()) continue
       const relative_path = relative(package_root, entry_path)
         .split("\\")
         .join("/")
@@ -390,10 +394,52 @@ export function collect_license_files(
         .slice(0, -1)
         .some((segment) => /^licenses?$/iu.test(segment))
       if (!in_license_directory && !LICENSE_FILE_NAME.test(entry.name)) continue
-      const file_stats = statSync(entry_path)
+      const entry_stats = lstatSync(entry_path)
+      let content_path = entry_path
+      if (entry_stats.isSymbolicLink()) {
+        let real_content_path: string
+        try {
+          real_content_path = realpathSync(entry_path)
+        } catch (error) {
+          fail(
+            `License or notice file ${relative_path} is a broken symlink: ${
+              error instanceof Error ? error.message : String(error)
+            }.`,
+          )
+        }
+        const real_relative_path = relative(
+          real_package_root,
+          real_content_path,
+        )
+        if (
+          isAbsolute(real_relative_path) ||
+          real_relative_path === ".." ||
+          real_relative_path.startsWith("../") ||
+          real_relative_path.startsWith("..\\")
+        ) {
+          fail(
+            `License or notice file ${relative_path} points outside the package source tree.`,
+          )
+        }
+        content_path = real_content_path
+      } else if (!entry_stats.isFile()) {
+        fail(
+          `License or notice path ${relative_path} is not a regular file.`,
+        )
+      }
+      const file_stats = statSync(content_path)
+      if (!file_stats.isFile()) {
+        fail(
+          `License or notice path ${relative_path} does not resolve to a regular file.`,
+        )
+      }
       if (file_stats.size === 0) continue
-      const bytes = readFileSync(entry_path)
-      if (bytes.includes(0)) continue
+      const bytes = readFileSync(content_path)
+      if (bytes.includes(0)) {
+        fail(
+          `License or notice file ${relative_path} contains NUL bytes and cannot be reproduced as text.`,
+        )
+      }
       files.push({
         path: relative_path,
         content: normalize_text(decode_license_text(bytes, relative_path)),
@@ -439,8 +485,29 @@ function package_notice(candidate: Cargo_Package): Notice_Package {
         `${candidate.name}@${candidate.version} declares a missing license file: ${candidate.license_file}.`,
       )
     }
+    const real_package_root = realpathSync(package_root)
+    const real_declared_license_path = realpathSync(declared_license_path)
+    const real_declared_relative_path = relative(
+      real_package_root,
+      real_declared_license_path,
+    )
+    if (
+      isAbsolute(real_declared_relative_path) ||
+      real_declared_relative_path === ".." ||
+      real_declared_relative_path.startsWith("../") ||
+      real_declared_relative_path.startsWith("..\\")
+    ) {
+      fail(
+        `${candidate.name}@${candidate.version} declares a license file that points outside its source tree: ${candidate.license_file}.`,
+      )
+    }
+    if (!statSync(real_declared_license_path).isFile()) {
+      fail(
+        `${candidate.name}@${candidate.version} declares a license path that is not a regular file: ${candidate.license_file}.`,
+      )
+    }
     if (!license_files.some((file) => file.path === declared_license_relative_path)) {
-      const declared_license_bytes = readFileSync(declared_license_path)
+      const declared_license_bytes = readFileSync(real_declared_license_path)
       if (declared_license_bytes.length === 0) {
         fail(
           `${candidate.name}@${candidate.version} declares an empty license file: ${candidate.license_file}.`,
@@ -549,6 +616,7 @@ function render_package(package_: Notice_Package): string {
     ...(selection === undefined
       ? []
       : [`- OpenKache selected terms: ${selection}`]),
+    `- Cargo source: ${package_.source}`,
     `- Source: ${source}`,
     ...(package_.license_file === undefined
       ? []
@@ -592,6 +660,8 @@ function render_package(package_: Notice_Package): string {
  * @param artifact_name - Artifact whose dependency graph is represented.
  * @param packages - Sorted dependency metadata and upstream legal files.
  * @returns Complete notice text with attribution headers and package sections.
+ * @throws {Error} When a deliberate OR-license selection is no longer offered
+ * by a dependency's SPDX expression.
  */
 export function render_notice(
   artifact_name: Artifact_Name,
@@ -636,6 +706,13 @@ function output_notice(output_path: string, content: string): void {
   writeFileSync(output_path, content, "utf8")
 }
 
+/**
+ * Parses CLI arguments and writes one generated notice bundle.
+ *
+ * @returns A zero exit code after successful generation.
+ * @throws {Error} When Cargo metadata, dependency sources, or output handling
+ * cannot complete safely.
+ */
 export async function main(): Promise<number> {
   const parsed_arguments = await yargs(hideBin(Bun.argv))
     .scriptName("generate-third-party-notices")
