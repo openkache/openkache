@@ -93,124 +93,43 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같�
 
 ## 빠른 시작
 
-OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크합니다. 고성능 `io_uring` 네트워크
-프론트엔드, 다이렉트 I/O 스토리지 경로, CPU 고정 런타임은 Linux 전용입니다. Apple
-Silicon macOS에는 Tokio polling과 buffered file I/O를 사용하는 의도적으로 비최적화된
-이식성 프리뷰가 있으며, 성능 비교가 아닌 기능 개발용입니다. Windows 네이티브 서버는
-없고, WSL2는 `io_uring`을 허용하는 커널에서 Linux 빌드를 사용합니다.
+OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크합니다.
 
-클라이언트를 연결하기 전에 먼저 서버를 실행하세요. 환경에 맞는 첫 번째 방법을 선택합니다:
-컨테이너 이미지, Homebrew 또는 APT 패키지, 릴리스 아카이브, Cargo 순입니다.
+- **Windows:** WSL2 사용을 권장합니다.
+- **macOS:** 기능 개발용이며 성능 비교에는 적합하지 않습니다.
 
 Linux 요구사항:
 
 - `io_uring`을 지원하는 Linux
 - 프로세스가 쓸 수 있는 서로 다른 CPU 2개
 
-### 컨테이너 이미지
+### Docker
 
-GHCR 인증 없이 게시된 프리뷰 이미지를 실행합니다:
+이미지를 내려받는다:
 
 ```bash
-podman run --rm \
+docker pull ghcr.io/openkache/openkache:edge
+```
+
+서버를 실행한다:
+
+```bash
+docker run --rm \
+  --network host \
   --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-`edge` 태그는 `main` 브랜치의 가장 최근 성공한 빌드를 따라갑니다. 재현 가능한 배포가
-필요하다면 계속 바뀌는 태그 대신 멀티플랫폼 매니페스트를 `sha256` 다이제스트로 고정하세요.
+### 내려받아 실행하기
 
-이미지를 로컬에서 빌드하려면 저장소 루트에서 실행합니다:
-
-```bash
-docker build --file server/Dockerfile --tag localhost/openkache:dev .
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  --volume openkache-data:/var/lib/openkache \
-  localhost/openkache:dev
-```
-
-기본 컨테이너 커맨드는 네트워크 스레드를 CPU 0번에, 스토리지 스레드를 CPU 1번에
-고정합니다. 컨테이너의 CPU 세트가 다른 ID를 사용한다면 커맨드를 재정의하세요. 자세한
-내용은 [컨테이너 가이드](./docs/container-image.md)를 참고하세요.
-
-### Homebrew (Apple Silicon macOS)
-
-해당 릴리스에 첨부된 formula를 내려받아 Homebrew로 서버와 CLI를 설치합니다. Formula
-테스트는 서버를 시작한 뒤 `openkache-cli`로 `PING`, `SET`, `GET`, `DELETE`를 실행합니다.
-
-```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-curl --fail --location --remote-name "${BASE}/openkache.rb"
-brew tap-new openkache/local
-install -m 0644 openkache.rb "$(brew --repository openkache/local)/Formula/openkache.rb"
-brew install openkache/local/openkache
-openkache-server
-```
-
-macOS 서버는 의도적으로 최적화하지 않았습니다. 로컬 기능 개발을 위한 프로토콜 계약은
-유지하지만, 게시된 모든 성능 수치는 Linux 서버를 기준으로 합니다.
-
-### APT 패키지 (Ubuntu, Debian, WSL2)
-
-머신의 Debian 아키텍처에 맞는 패키지를 내려받아 APT로 설치합니다. 패키지에는 서버,
-CLI, 설정 파일, loopback 전용 systemd unit이 들어 있으며 서비스는 자동 활성화하지
-않습니다.
-
-```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-ARCH="$(dpkg --print-architecture)"
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-PACKAGE="openkache_${VERSION}_${ARCH}.deb"
-curl --fail --location --remote-name "${BASE}/${PACKAGE}"
-sudo apt install "./${PACKAGE}"
-openkache-server
-```
-
-systemd 호스트에서는 `sudo systemctl enable --now openkache`로 선택적 서비스를 시작할 수
-있습니다. systemd가 없는 WSL2에서는 `openkache-server`를 foreground로 실행합니다.
-
-### Linux 릴리스 아카이브
-
-`server-v<version>` 릴리스가 게시되면 [GitHub Releases](https://github.com/openkache/openkache/releases)에서
-Linux 환경에 맞는 아카이브를 다운로드합니다. `SERVER_VERSION`을 게시된 버전으로 지정한
-후 아카이브를 검증하고 실행하세요:
-
-```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-PLATFORM="linux-x86_64-musl" # arm64에서는 linux-aarch64-musl 사용
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"
-curl --fail --location --remote-name "${BASE}/${ARCHIVE}"
-curl --fail --location --remote-name "${BASE}/SHA256SUMS"
-grep -F " ${ARCHIVE}" SHA256SUMS | sha256sum --check
-tar -xzf "${ARCHIVE}"
-"./openkache-server-${VERSION}-${PLATFORM}/openkache-server"
-```
+OpenKache는 아직 정식 릴리스 전이다. [server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0)에서
+소스를 내려받아 압축을 풀고 아래 Cargo 명령으로 실행한다.
 
 ### Cargo
-
-소스에서 빌드하려면 Rust와 워크스페이스 의존성이 요구하는 네이티브 툴체인도 필요합니다.
-CPU 0번과 1번을 사용해 서버를 `127.0.0.1:4433`에서 실행합니다:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
 ```
-
-서버는 RESP/TCP와 OpenKache/QUIC에 동일한 숫자 주소를 사용합니다. 다른 주소와 CPU 쌍을
-선택하려면:
-
-```bash
-cargo run --locked --package openkache-server --bin openkache-server -- \
-  0.0.0.0:4433 2 3
-```
-
-캐시 파일은 프로세스 작업 디렉터리에 생성되며 서버가 시작될 때마다 초기화됩니다.
 
 ## 클라이언트 연결
 

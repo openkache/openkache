@@ -1,6 +1,6 @@
 [package]
 name = "openkache-server"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 description = "SSD-backed cache server with RESP/TCP and native OpenKache/QUIC frontends"
 license = "AGPL-3.0-or-later"

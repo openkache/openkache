@@ -100,131 +100,44 @@ See [docs/architecture.md](./docs/architecture.md) for the full design.
 
 ## Quick start
 
-OpenKache is optimized and benchmarked for **Linux**. Its high-performance
-`io_uring` network frontend, direct-I/O storage path, and CPU-pinned runtime are
-Linux-only. Apple Silicon macOS has a deliberately unoptimized portability
-preview that uses Tokio polling and buffered file I/O; it is intended for
-functional development, not performance comparisons. Windows has no native
-server; WSL2 uses the Linux build and requires a kernel that permits `io_uring`.
+OpenKache is optimized and benchmarked for **Linux**.
 
-Start the server before connecting a client. Choose the first option that fits
-your environment: container image, Homebrew or APT package, release archive,
-or Cargo.
+- **Windows:** WSL2 is recommended.
+- **macOS:** Intended for functional development, not performance comparisons.
 
 Linux requirements:
 
 - Linux with `io_uring`
 - two distinct CPUs available to the process
 
-### Container image
+### Docker
 
-Run the published preview image without authenticating to GHCR:
+Download the image:
 
 ```bash
-podman run --rm \
+docker pull ghcr.io/openkache/openkache:edge
+```
+
+Run the server:
+
+```bash
+docker run --rm \
+  --network host \
   --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-`edge` follows the latest successful build from `main`. For reproducible
-deployments, pin the multi-platform manifest by its `sha256` digest instead of
-using the rolling tag.
+### Download and run
 
-To build the image locally, run from the repository root:
-
-```bash
-docker build --file server/Dockerfile --tag localhost/openkache:dev .
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  --volume openkache-data:/var/lib/openkache \
-  localhost/openkache:dev
-```
-
-The default container command pins the network thread to CPU 0 and the storage
-thread to CPU 1. Override the command when the container CPU set uses different
-IDs. See the [container guide](./docs/container-image.md) for details.
-
-### Homebrew (Apple Silicon macOS)
-
-Download the formula attached to the matching release, then let Homebrew
-install the server and CLI. The formula test starts the server and exercises
-`PING`, `SET`, `GET`, and `DELETE` through `openkache-cli`.
-
-```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-curl --fail --location --remote-name "${BASE}/openkache.rb"
-brew tap-new openkache/local
-install -m 0644 openkache.rb "$(brew --repository openkache/local)/Formula/openkache.rb"
-brew install openkache/local/openkache
-openkache-server
-```
-
-The macOS server is intentionally unoptimized. It preserves the protocol for
-local functional development, but every published performance claim refers to
-the Linux server.
-
-### APT package (Ubuntu, Debian, and WSL2)
-
-Download the package for the machine's Debian architecture and install it with
-APT. The package includes the server, CLI, configuration, and a loopback-only
-systemd unit; the service is not enabled automatically.
-
-```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-ARCH="$(dpkg --print-architecture)"
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-PACKAGE="openkache_${VERSION}_${ARCH}.deb"
-curl --fail --location --remote-name "${BASE}/${PACKAGE}"
-sudo apt install "./${PACKAGE}"
-openkache-server
-```
-
-On a systemd host, start the optional service with
-`sudo systemctl enable --now openkache`. On WSL2 without systemd, run
-`openkache-server` in the foreground.
-
-### Linux release archive
-
-When a `server-v<version>` release is available, download the matching Linux
-archive from [GitHub Releases](https://github.com/openkache/openkache/releases).
-Set `SERVER_VERSION` to the published version, then verify and run the archive:
-
-```bash
-VERSION="${SERVER_VERSION:-0.1.0}"
-PLATFORM="linux-x86_64-musl" # use linux-aarch64-musl on arm64
-BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
-ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"
-curl --fail --location --remote-name "${BASE}/${ARCHIVE}"
-curl --fail --location --remote-name "${BASE}/SHA256SUMS"
-grep -F " ${ARCHIVE}" SHA256SUMS | sha256sum --check
-tar -xzf "${ARCHIVE}"
-"./openkache-server-${VERSION}-${PLATFORM}/openkache-server"
-```
+OpenKache has not published a stable release yet. Download the source from
+[server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0),
+extract it, and run the Cargo command below.
 
 ### Cargo
-
-Building from source also requires Rust and the native toolchain used by the
-workspace dependencies. Run the server on `127.0.0.1:4433` using CPUs 0 and 1:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
 ```
-
-The server uses the same numeric address for RESP/TCP and OpenKache/QUIC. To
-select a different address and CPU pair:
-
-```bash
-cargo run --locked --package openkache-server --bin openkache-server -- \
-  0.0.0.0:4433 2 3
-```
-
-The cache file is created in the process working directory and truncated each
-time the server starts.
 
 ## Connect a client
 
