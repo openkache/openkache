@@ -98,6 +98,6 @@ or static native library is supplied.
 The maintained C facade fixes TLS 1.3, ALPN `openkache/1`,
 `X25519MLKEM768`, and the `DevelopmentTrust` profile.  DevelopmentTrust
 disables certificate and hostname verification but retains TLS encryption and
-does not permit plaintext fallback.  It is **development only — do not use
+does not permit plaintext fallback.  It is **development only: do not use
 this trust profile in production**.  Production trust roots and certificate
 configuration require a future facade revision.

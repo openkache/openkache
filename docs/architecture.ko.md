@@ -16,7 +16,7 @@ OpenKache는 SSD 우선(SSD-first) 캐시 서버입니다. SSD를 인메모리 �
 
 전형적인 서버는 요청을 스레드 풀에 넘기고, 그 스레드들은 코어 사이를 옮겨 다닙니다. 옮길 때마다
 비용이 듭니다: 락 경합, 뮤텍스 소유권 이전, 컨텍스트 스위치, 그리고 코어 사이를 튕겨 다니는
-캐시 라인 — 각각이 동기화와 복사를 강제합니다. 부하가 걸리면 실제 작업이 아니라 이 조율
+캐시 라인입니다. 각각이 동기화와 복사를 강제합니다. 부하가 걸리면 실제 작업이 아니라 이 조율
 오버헤드가 병목이 됩니다.
 
 OpenKache는 각 워커를 하나의 코어에 고정합니다. 워커는 자기 데이터를 소유하고 다른 워커와 가변
@@ -50,7 +50,7 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 shar
 
 SSD에 키를 하나씩 쓰는 것은 드라이브를 낭비합니다: 작은 랜덤 쓰기는 순차 한계보다 한참
 아래에서 돕니다. 대신 OpenKache는 여러 키의 쓰기를 하나의 순차 **세그먼트 그룹** flush로
-묶습니다 — 지하철이 여러 승객을 한 번에 나르지, 각자 따로 차로 가지 않듯이. SSD는 큰 순차
+묶습니다. 지하철이 여러 승객을 한 번에 나르지, 각자 따로 차로 가지 않듯이. SSD는 큰 순차
 쓰기를 보고 대역폭 한계에 가깝게 돕니다.
 
 Linux에서는 스토리지 워커가 이 I/O를 다이렉트 I/O와 함께 **`io_uring`**으로 제출합니다. 이는
@@ -61,9 +61,9 @@ Linux에서는 스토리지 워커가 이 I/O를 다이렉트 I/O와 함께 **`i
 
 서버는 같은 숫자 주소를 두 개의 전송으로 노출합니다:
 
-- **RESP over TCP** — Redis 호환 `GET`/`SET`/`DEL`, 그래서 기존 Redis 도구와 클라이언트가
+- **RESP over TCP:** Redis 호환 `GET`/`SET`/`DEL`, 그래서 기존 Redis 도구와 클라이언트가
   그대로 동작합니다.
-- **OpenKache Gate 0 over QUIC/UDP** — 네이티브 프로토콜로, QUIC 위에서 TLS 1.3을 돌립니다.
+- **OpenKache Gate 0 over QUIC/UDP:** 네이티브 프로토콜로, QUIC 위에서 TLS 1.3을 돌립니다.
   호환성 프론트엔드가 QUIC를 같은 스토리지 엔진에 연결합니다.
 
 ## 왜 Rust인가
@@ -82,6 +82,6 @@ Linux가 주 플랫폼입니다: `io_uring` 네트워크 프론트엔드와 다�
 
 ## 관련 문서
 
-- [ROADMAP.ko.md](../ROADMAP.ko.md) — 이 설계가 향하는 방향
-- [server/README.md](../server/README.md) — 서버 구현과 오퍼레이션 하위 집합
-- [protocol/README.md](../protocol/README.md) — 와이어 프로토콜과 생성된 계약
+- [ROADMAP.ko.md](../ROADMAP.ko.md): 이 설계가 향하는 방향
+- [server/README.md](../server/README.md): 서버 구현과 오퍼레이션 하위 집합
+- [protocol/README.md](../protocol/README.md): 와이어 프로토콜과 생성된 계약

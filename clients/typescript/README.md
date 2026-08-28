@@ -165,10 +165,10 @@ by the native adapters.
 
 Each operation accepts one of these key types:
 
-- `string` — UTF-8 text, including empty strings.
-- `Uint8Array` — exact bytes, including empty bytes.
-- `number` — a finite safe integer other than `-0`.
-- `bigint` — a signed 64-bit integer.
+- `string`: UTF-8 text, including empty strings.
+- `Uint8Array`: exact bytes, including empty bytes.
+- `number`: a finite safe integer other than `-0`.
+- `bigint`: a signed 64-bit integer.
 
 Fractions, `NaN`, infinities, unsafe numbers, objects, arrays, booleans, and
 strings containing unpaired UTF-16 surrogates are rejected.
@@ -232,11 +232,11 @@ or NaN payloads matter.
 
 ### Errors
 
-- `OpenKacheError` — validation, connection, protocol, server, or value
+- `OpenKacheError`: validation, connection, protocol, server, or value
   failure. Inspect its `kind` property for the stable category.
-- `OpenKacheUnknownMutationError` — a mutation may have reached the server
+- `OpenKacheUnknownMutationError`: a mutation may have reached the server
   without a confirmed result; do not replay it automatically.
-- `StructuredValueError` — invalid structured-value input or a local codec
+- `StructuredValueError`: invalid structured-value input or a local codec
   failure. Its `kind` property identifies the category.
 
 The public type aliases are `ClientKey`, `NativeValue`, `SetOutcome`,

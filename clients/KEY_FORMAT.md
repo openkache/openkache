@@ -1,4 +1,4 @@
-# OpenKache Client Key Contract — Version 1 Gate 0
+# OpenKache Client Key Contract: Version 1 Gate 0
 
 > **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
 >

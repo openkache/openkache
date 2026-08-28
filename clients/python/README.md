@@ -243,13 +243,13 @@ limit failures. Its `kind` property is a `ValueErrorKind`.
 
 ### Errors
 
-- `OpenKacheError` — connection, protocol, server, or operation failure.
-- `OpenKacheValueError` — invalid key or value supplied by the caller.
-- `OpenKacheUnknownMutationError` — a mutation may have reached the server
+- `OpenKacheError`: connection, protocol, server, or operation failure.
+- `OpenKacheValueError`: invalid key or value supplied by the caller.
+- `OpenKacheUnknownMutationError`: a mutation may have reached the server
   without a confirmed result; do not replay it automatically.
-- `OpenKacheIncompatibleServerError` — the server returned an outcome that
+- `OpenKacheIncompatibleServerError`: the server returned an outcome that
   this client does not support.
-- `StructuredValueError` — invalid structured-value data or resource limits.
+- `StructuredValueError`: invalid structured-value data or resource limits.
 
 Strings must contain well-formed Unicode. Unpaired UTF-16 surrogate code units
 are rejected.
