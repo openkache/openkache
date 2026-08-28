@@ -21,13 +21,11 @@
 - [连接客户端](#连接客户端)
 - [容器镜像](#容器镜像)
 - [路线图](#路线图)
-- [构建与验证](#构建与验证)
-- [客户端包](#客户端包)
-- [仓库结构](#仓库结构)
-- [项目状态](#项目状态)
 - [参与贡献](#参与贡献)
 - [许可证](#许可证)
 - [第三方归属声明](#第三方归属声明)
+
+---
 
 ## 基准测试
 
@@ -55,6 +53,8 @@ OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即
 | PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
 
 平均 GET 延迟比 MySQL 低 1.6 倍,比 PostgreSQL 低 2.3 倍;在 p99 上分别低 3.0 倍和 3.3 倍。
+
+---
 
 ## 架构
 
@@ -86,6 +86,8 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 快路径上没有任何垃圾回收停顿的容身之处。
 
 完整设计见 [docs/architecture.md](./docs/architecture.md)。(中文翻译准备中)
+
+---
 
 ## 快速开始
 
@@ -127,10 +129,15 @@ OpenKache 尚未发布正式版本。从 [server-v0.1.0](https://github.com/open
 cargo run --locked --package openkache-server --bin openkache-server
 ```
 
+---
+
 ## 连接客户端
 
 服务器运行后,用你选择的语言连接。所有客户端指南都默认使用 `127.0.0.1:4433` 作为本地端点,
 并列出各自语言的完整公开 API。
+
+受维护的客户端包共享同一套协议与值格式(value-format)源码。Rust、TypeScript、Python、
+.NET、Go、C、C++、Swift 等绑定的当前状态见 [clients/README.md](./clients/README.md)。
 
 | 包 | 安装 | 文档 | 源码 |
 |---|---|---|---|
@@ -143,16 +150,16 @@ Rust SDK 速览:
 ```rust
 use openkache::{Client, Value};
 
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-client.set("greeting", Value::text("hello")).await?;
-assert_eq!(
-    client.get("greeting").await?.unwrap(),
-    Value::text("hello"),
-);
-client.close().await?;
-# Ok(())
-# }
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client.set("greeting", Value::text("hello")).await?;
+    assert_eq!(
+        client.get("greeting").await?.unwrap(),
+        Value::text("hello"),
+    );
+    client.close().await?;
+    Ok(())
+}
 ```
 
 从源码构建的 [`openkache-cli`](clients/cli/README.md) 是 Bash 友好的选项,默认使用同样固定的
@@ -166,8 +173,7 @@ openkache-cli get hello
 当需要证书根、双向 TLS、客户端侧值保护,或仅为兼容性而设的 TTL/条件写入时,请使用
 `openkache-cli --profile configured`。
 
-> **本地开发信任配置。** 默认的 Gate 0 配置用于本地开发:它在 QUIC 之上使用 TLS 1.3 且绝不
-> 回退到明文,但不验证服务器证书。请勿将这种信任配置用于生产流量。
+---
 
 ## 路线图
 
@@ -180,58 +186,7 @@ openkache-cli get hello
 
 详情见 [ROADMAP.md](./ROADMAP.md)。(中文翻译准备中)
 
-## 构建与验证
-
-```bash
-cargo check --locked
-cargo test --locked --package openkache-server
-cargo server-build
-```
-
-根 Cargo 工作区在同一个锁文件下管理协议、服务器、共享客户端核心、Rust SDK、CLI 以及原生
-TypeScript 适配器。
-
-服务器分配器(allocator)相关实验作为可选功能提供:
-
-```bash
-cargo server-build --features alloc-jemalloc
-cargo server-build --features alloc-mimalloc
-```
-
-不要同时启用这两个分配器功能。
-
-## 客户端包
-
-受维护的客户端包共享同一套协议与值格式(value-format)源码。Rust、TypeScript、Python、
-.NET、Go、C、C++、Swift 等绑定的当前状态见 [clients/README.md](./clients/README.md)。
-
-当前服务器的兼容性前端仅支持上文列出的 Gate 0 操作子集。目标契约(target contract)中描述的
-更广泛 API,可能会先出现在生成的客户端中,而服务器尚未实现。
-
-## 仓库结构
-
-| 路径 | 内容 |
-| --- | --- |
-| `server/` | 当前的 SSD 缓存服务器与容器定义 |
-| `protocol/` | 共享的传输模型、生成的契约与编解码器 |
-| `clients/` | 客户端 SDK 与原生适配器 |
-| `docs/` | 当前的使用指南以及明确标识的目标文档 |
-
-当前的服务器实现见 [server/README.md](./server/README.md)。协议细节见
-[protocol/README.md](./protocol/README.md)。
-
-## 项目状态
-
-| 组件 | 状态 |
-| --- | --- |
-| RESP/TCP 服务器 | 预览版 |
-| OpenKache/QUIC Gate 0 服务器 | 预览版 |
-| SSD 存储与删除 | 预览版 |
-| 重启恢复 | 未实现 |
-| 生产环境认证 | 未实现 |
-| 客户端 SDK | 预览版;详见各包状态 |
-| 容器镜像 | 支持 Linux amd64/arm64 |
-| 集群 | 尚未开始 |
+---
 
 ## 参与贡献
 
@@ -239,12 +194,16 @@ cargo server-build --features alloc-mimalloc
 - [社区准则](./COMMUNITY_GUIDELINES.md)
 - [行为准则](./CODE_OF_CONDUCT.md)
 
+---
+
 ## 许可证
 
 除非另有说明,OpenKache 依据
 [GNU Affero 通用公共许可证 v3.0 或更高版本](./LICENSE)授权。[`clients/`](./clients/) 下的
 客户端 SDK 与 [`protocol/`](./protocol/) 下的共享协议依据 Apache License 2.0 授权;详见各
 目录下的 `LICENSE` 文件。
+
+---
 
 ## 第三方归属声明
 
