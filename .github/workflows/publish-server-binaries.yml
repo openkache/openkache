@@ -84,9 +84,48 @@ jobs:
             exit 1
           fi
 
+  notice:
+    name: Generate third-party notices
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Generate the locked server notice
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          bun install --cwd scripts --frozen-lockfile --production
+          mkdir -p "${RUNNER_TEMP}/openkache-server-notice"
+          ./scripts/generate-third-party-notices.ts \
+            --artifact server \
+            --output "${RUNNER_TEMP}/openkache-server-notice/THIRD-PARTY-NOTICES.txt"
+
+      - name: Upload the server notice
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-server-third-party-notice
+          path: ${{ runner.temp }}/openkache-server-notice/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+          retention-days: 14
+
   build:
     name: Build ${{ matrix.name }}
-    needs: guard
+    needs: [guard, notice]
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +154,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Download the server notice
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openkache-server-third-party-notice
+          path: ${{ runner.temp }}/openkache-server-notice
 
       - name: Install the pinned Nix toolchain
         if: matrix.platform == 'linux'
@@ -224,6 +269,10 @@ jobs:
           install -m 0755 "${binary}" "${package_root}/openkache-server"
           install -m 0644 README.md "${package_root}/README.md"
           install -m 0644 LICENSE "${package_root}/LICENSE"
+          install -m 0644 \
+            "${RUNNER_TEMP}/openkache-server-notice/THIRD-PARTY-NOTICES.txt" \
+            "${package_root}/THIRD-PARTY-NOTICES.txt"
+          test -s "${package_root}/THIRD-PARTY-NOTICES.txt"
           printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\ntarget=%s\n' \
             "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" "${TARGET}" \
             > "${package_root}/RELEASE-METADATA"

@@ -116,6 +116,19 @@ jobs:
 
       - uses: ./.github/actions/setup-smithy-codegen
 
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Generate the locked TypeScript notice
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          bun install --cwd scripts --frozen-lockfile --production
+          ./scripts/generate-third-party-notices.ts \
+            --artifact typescript \
+            --output clients/typescript/THIRD-PARTY-NOTICES.txt
+
       - name: Build and type-check the package
         working-directory: clients/typescript
         run: |
@@ -133,12 +146,19 @@ jobs:
           release_root="${RUNNER_TEMP}/openkache-typescript-dist"
           mkdir -p "${release_root}/dist"
           cp -R clients/typescript/dist/. "${release_root}/dist/"
+          install -m 0644 \
+            clients/typescript/THIRD-PARTY-NOTICES.txt \
+            "${release_root}/THIRD-PARTY-NOTICES.txt"
+          test -s "${release_root}/THIRD-PARTY-NOTICES.txt"
           printf 'source_commit=%s\nsource_tag=%s\npackage_version=%s\n' \
             "${SOURCE_SHA}" "${SOURCE_REF_NAME}" "${RELEASE_VERSION}" \
             > "${release_root}/RELEASE-METADATA"
           (
             cd "${release_root}"
-            find dist -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+            {
+              sha256sum THIRD-PARTY-NOTICES.txt
+              find dist -type f -print0 | sort -z | xargs -0 sha256sum
+            } > SHA256SUMS
           )
 
       - name: Upload JavaScript artifact
@@ -310,6 +330,8 @@ jobs:
           done
           mkdir -p clients/typescript/dist clients/typescript/target/native
           cp -R "${release_root}/openkache-typescript-dist/dist/." clients/typescript/dist/
+          cp "${release_root}/openkache-typescript-dist/THIRD-PARTY-NOTICES.txt" \
+            clients/typescript/THIRD-PARTY-NOTICES.txt
           for native_root in \
             openkache-typescript-native-linux-x64 \
             openkache-typescript-native-linux-arm64 \

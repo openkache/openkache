@@ -63,6 +63,18 @@ header-only or otherwise link-incomplete Gate 0 package. The installed package
 includes the selected native library and forwards its transitive system
 libraries through the exported target.
 
+Release installations also include `THIRD-PARTY-NOTICES.txt` under
+`share/doc/OpenKacheClient`. When building from a checkout, stage it before
+installing (run these commands from the repository root):
+
+```bash
+cargo fetch --locked
+bun install --cwd scripts --frozen-lockfile --production
+./scripts/generate-third-party-notices.ts \
+  --artifact cmake \
+  --output clients/THIRD-PARTY-NOTICES.txt
+```
+
 The configure/build pair is the C17 package smoke check.  It regenerates the
 Smithy projection, compiles the forwarding library, and validates the imported
 C target; the generated projection is copied into the install tree so the

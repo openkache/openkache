@@ -1,5 +1,6 @@
 include README.md
 include LICENSE
+include THIRD-PARTY-NOTICES.txt
 include pyproject.toml
 include setup.py
 recursive-include examples *.py

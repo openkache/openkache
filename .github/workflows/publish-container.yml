@@ -7,8 +7,10 @@ on:
       - ".github/workflows/publish-container.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "LICENSE"
       - "clients/**"
       - "protocol/**"
+      - "scripts/**"
       - "server/**"
   push:
     branches: [main]

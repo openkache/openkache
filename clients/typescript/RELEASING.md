@@ -37,6 +37,7 @@ Run these commands from `clients/typescript` after the public source change has
 merged:
 
 ```bash
+bun install --cwd ../../scripts --frozen-lockfile --production
 bun install --frozen-lockfile
 bun pm pkg set version=0.1.3
 bun run build

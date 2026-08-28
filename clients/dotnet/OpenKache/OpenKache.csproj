@@ -17,7 +17,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="generated_local/**/*.cs" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
     <None Include="../README.md" Pack="true" PackagePath="/" />
+    <None Include="THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="/" />
   </ItemGroup>
   <Target Name="GenerateSmithyContract" BeforeTargets="CoreCompile">
     <Exec
@@ -27,5 +29,10 @@
     <ItemGroup>
       <Compile Include="generated_local/**/*.cs" />
     </ItemGroup>
+  </Target>
+  <Target Name="GenerateThirdPartyNotice" BeforeTargets="Build;GenerateNuspec">
+    <Exec
+      Command="bun &quot;$(MSBuildThisFileDirectory)../../../scripts/generate-third-party-notices.ts&quot; --root &quot;$(MSBuildThisFileDirectory)../../..&quot; --artifact dotnet --output &quot;$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.txt&quot;"
+    />
   </Target>
 </Project>

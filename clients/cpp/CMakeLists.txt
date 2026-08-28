@@ -96,6 +96,12 @@ install(
     "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
 )
+if(OPENKACHE_CLIENT_THIRD_PARTY_NOTICES)
+  install(
+    FILES "${OPENKACHE_CLIENT_THIRD_PARTY_NOTICES}"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
+  )
+endif()
 install(
   EXPORT openkache_client_cpp_targets
   FILE OpenKacheClientCppTargets.cmake

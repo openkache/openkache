@@ -27,6 +27,7 @@ compatibility status.
 Run from the public repository root:
 
 ```bash
+bun install --cwd scripts --frozen-lockfile --production
 dotnet build clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 dotnet pack clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 ```

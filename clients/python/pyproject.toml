@@ -31,7 +31,15 @@ Repository = "https://github.com/openkache/openkache"
 Issues = "https://github.com/openkache/openkache/issues"
 
 [tool.setuptools.package-data]
-openkache = ["LICENSE", "py.typed", "*.dll", "*.dylib", "*.so", "_generated/*.py"]
+openkache = [
+  "LICENSE",
+  "THIRD-PARTY-NOTICES.txt",
+  "py.typed",
+  "*.dll",
+  "*.dylib",
+  "*.so",
+  "_generated/*.py",
+]
 
 [tool.setuptools]
 include-package-data = true

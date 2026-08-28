@@ -123,6 +123,16 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Generate the locked Python notice
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path clients/python/native/Cargo.toml
+          bun install --cwd scripts --frozen-lockfile --production
+          ./scripts/generate-third-party-notices.ts \
+            --artifact python \
+            --output clients/python/THIRD-PARTY-NOTICES.txt
+
       - name: Install package builders
         run: python3 -m pip install --disable-pip-version-check --upgrade build twine
 
@@ -141,6 +151,9 @@ jobs:
             echo "Expected exactly one source distribution." >&2
             exit 1
           }
+          tar -tzf \
+            "${RUNNER_TEMP}/openkache-python-dist/openkache-${RELEASE_VERSION}.tar.gz" |
+            grep -Fx "openkache-${RELEASE_VERSION}/THIRD-PARTY-NOTICES.txt"
           python3 -m twine check "${RUNNER_TEMP}"/openkache-python-dist/*
 
       - name: Upload source distribution
@@ -270,6 +283,8 @@ jobs:
           pattern=f"openkache-{version}-py3-none-{platform}.whl";
           wheels=sorted(d.glob(pattern));
           assert len(wheels)==1,f"expected one wheel, found {len(wheels)}: {wheels}";
+          import zipfile;
+          assert any(name.endswith("/openkache/THIRD-PARTY-NOTICES.txt") for name in zipfile.ZipFile(wheels[0]).namelist()),"wheel is missing openkache/THIRD-PARTY-NOTICES.txt";
           subprocess.run([sys.executable,"-m","twine","check",*map(str,wheels)],check=True)'
 
       - name: Upload platform wheel
@@ -318,6 +333,23 @@ jobs:
             find "${DIST_ROOT}" -maxdepth 1 -type f -print >&2
             exit 1
           }
+          tar -tzf "${DIST_ROOT}/openkache-${RELEASE_VERSION}.tar.gz" |
+            grep -Fx "openkache-${RELEASE_VERSION}/THIRD-PARTY-NOTICES.txt"
+          for wheel in "${DIST_ROOT}"/openkache-"${RELEASE_VERSION}"-py3-none-*.whl; do
+            python3 - "${wheel}" <<'PY'
+          import sys
+          import zipfile
+
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              if not any(
+                  name.endswith("/openkache/THIRD-PARTY-NOTICES.txt")
+                  for name in archive.namelist()
+              ):
+                  raise SystemExit(
+                      f"{sys.argv[1]} is missing openkache/THIRD-PARTY-NOTICES.txt"
+                  )
+          PY
+          done
           python3 -m pip install --disable-pip-version-check --upgrade twine
           python3 -m twine check "${DIST_ROOT}"/openkache-*
 
