@@ -377,9 +377,13 @@ jobs:
             "file://${archive}" \
             "${archive_sha256}" \
             "${formula}"
-          brew install --formula --build-from-source "${formula}"
-          brew test openkache
+          brew tap-new openkache/local
+          tap_formula="$(brew --repository openkache/local)/Formula/openkache.rb"
+          install -m 0644 "${formula}" "${tap_formula}"
+          brew install --formula --build-from-source openkache/local/openkache
+          brew test openkache/local/openkache
           brew uninstall --formula openkache
+          brew untap openkache/local
 
       - name: Upload staged binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

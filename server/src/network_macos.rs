@@ -37,7 +37,7 @@ struct NetworkState {
 }
 
 pub(crate) struct Network {
-    listener: TcpListener,
+    listener: Option<StdTcpListener>,
     state: Rc<RefCell<NetworkState>>,
 }
 
@@ -49,7 +49,7 @@ impl Network {
     ) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         Ok(Self {
-            listener: TcpListener::from_std(listener)?,
+            listener: Some(listener),
             state: Rc::new(RefCell::new(NetworkState {
                 request_sender,
                 response_receiver,
@@ -65,15 +65,21 @@ impl Network {
             .enable_all()
             .build()
             .map_err(io::Error::other)?;
-        runtime.block_on(self.run_async())
+        let listener = self
+            .listener
+            .take()
+            .ok_or_else(|| io::Error::other("macOS network frontend was already started"))?;
+        runtime.block_on(async {
+            let listener = TcpListener::from_std(listener)?;
+            self.run_async(listener).await
+        })
     }
 
-    async fn run_async(&mut self) -> io::Result<()> {
+    async fn run_async(&mut self, listener: TcpListener) -> io::Result<()> {
         let local = LocalSet::new();
         let response_state = Rc::clone(&self.state);
         local.spawn_local(pump_storage_responses(response_state));
 
-        let listener = &self.listener;
         let state = Rc::clone(&self.state);
         local
             .run_until(async move {
