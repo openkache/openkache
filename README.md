@@ -248,7 +248,9 @@ a release.
 If a registry archive omits a separate license file, the generated entry
 retains the package's license declaration, authors, and upstream URL and
 explicitly flags that condition. Those entries require a maintainer/legal
-review against the upstream source before distributing a release.
+review against the upstream source before distributing a release; do not
+approve or publish an artifact while its notice contains
+`LEGAL REVIEW REQUIRED`.
 
 To regenerate a bundle from a public checkout, run these commands from the
 repository root:

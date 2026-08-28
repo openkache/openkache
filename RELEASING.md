@@ -217,6 +217,16 @@ host:
 ```bash
 set -euo pipefail
 
+# Generate the dependency notice used by the Rust crate. The other package
+# commands below invoke their own packaging hooks, but all use this same
+# locked generator and should be run after these preparation steps.
+cargo fetch --locked
+cargo fetch --locked --manifest-path clients/python/native/Cargo.toml
+bun install --cwd scripts --frozen-lockfile --production
+./scripts/generate-third-party-notices.ts \
+  --artifact rust \
+  --output clients/rust/THIRD-PARTY-NOTICES.txt
+
 # Rust: verify metadata and inspect the crate archive.
 cargo metadata \
   --manifest-path clients/rust/Cargo.toml \
@@ -226,12 +236,15 @@ cargo metadata \
 cargo publish \
   --manifest-path clients/rust/Cargo.toml \
   --locked \
-  --dry-run
-cargo package --manifest-path clients/rust/Cargo.toml --locked
+  --dry-run \
+  --allow-dirty
+cargo package --manifest-path clients/rust/Cargo.toml --locked --allow-dirty
 tar -tzf "target/package/openkache-${RELEASE_VERSION}.crate" \
   | grep -Fx "openkache-${RELEASE_VERSION}/Cargo.toml"
 tar -tzf "target/package/openkache-${RELEASE_VERSION}.crate" \
   | grep -F "openkache-${RELEASE_VERSION}/src/lib.rs"
+tar -tzf "target/package/openkache-${RELEASE_VERSION}.crate" \
+  | grep -Fx "openkache-${RELEASE_VERSION}/THIRD-PARTY-NOTICES.txt"
 
 # Python: build an sdist and the wheel for the current host.
 python3 -m venv /tmp/openkache-release-venv
@@ -251,12 +264,18 @@ mkdir -p /tmp/openkache-python-dist
 (
   cd clients/typescript
   bun install --frozen-lockfile
-  bun run build
+  bun run build:package
   bun run typecheck
-  bun run build:native
   bun pm pack --dry-run
 )
 ```
+
+The generated notices may contain a `LEGAL REVIEW REQUIRED` section when a
+registry archive does not include a separate upstream license file. Inspect
+the package-specific notice files before dispatching a release; do not approve
+the protected publication environment until every such entry has been checked
+against its upstream source. The notice bundle does not replace notices for a
+container base image or system libraries supplied by the host.
 
 The release workflows build the complete platform matrix on clean GitHub
 hosted runners:
@@ -397,8 +416,10 @@ Before approving a package, open its workflow run and verify:
 - the manifest version matches the workflow input;
 - the registry availability guard passed;
 - the complete artifact set was uploaded;
-- `RELEASE-METADATA` names the expected source tag and commit; and
-- `SHA256SUMS` validates every staged artifact.
+- `RELEASE-METADATA` names the expected source tag and commit;
+- `SHA256SUMS` validates every staged artifact; and
+- each `THIRD-PARTY-NOTICES.txt` has been inspected, with no unresolved
+  `LEGAL REVIEW REQUIRED` entries.
 
 Configure the protected environments before the first release:
 

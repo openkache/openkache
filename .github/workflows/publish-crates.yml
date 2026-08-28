@@ -182,6 +182,13 @@ jobs:
             echo "${manifest_path} version does not match the release input." >&2
             exit 1
           fi
+          # The ignored generated notice is intentionally dirty for Cargo.
+          # Reject every other tracked or non-ignored change before packaging.
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The package checkout contains changes beyond the generated notice." >&2
+            git status --short --untracked-files=all >&2
+            exit 1
+          fi
           cargo package --manifest-path "${manifest_path}" --locked --allow-dirty
           crate_path="target/package/${crate_name}-${RELEASE_VERSION}.crate"
           [[ -s "${crate_path}" ]] || {
@@ -324,6 +331,12 @@ jobs:
           esac
           # cargo publish repackages the checkout; prove its deterministic
           # archive matches the staged artifact before allowing publication.
+          # The ignored generated notice is the only expected dirty file.
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The publish checkout contains changes beyond the generated notice." >&2
+            git status --short --untracked-files=all >&2
+            exit 1
+          fi
           rm -rf target/package
           cargo package --manifest-path "${manifest_path}" --locked --allow-dirty
           recreated_crate="target/package/${crate_file}"

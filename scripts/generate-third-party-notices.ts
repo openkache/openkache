@@ -177,7 +177,28 @@ function fail(message: string): never {
 }
 
 function normalize_text(content: string): string {
-  return content.replace(/\r\n?/gu, "\n").replace(/\n*$/u, "\n")
+  return content.replace(/\r\n?/gu, "\n")
+}
+
+/**
+ * Chooses a fenced Markdown delimiter that cannot occur as a complete line
+ * inside the reproduced upstream text.
+ *
+ * License files are copied as data, not parsed as Markdown. A dependency can
+ * nevertheless contain backtick runs (for example, a notice with a Markdown
+ * example), so a fixed three-backtick fence could terminate the rendered
+ * block early. One extra backtick beyond the longest run keeps the text
+ * faithful while preserving a readable fenced block.
+ *
+ * @param content - Normalized upstream license or notice text.
+ * @returns A backtick fence of safe length for the content.
+ */
+function markdown_fence(content: string): string {
+  let longest_run = 0
+  for (const match of content.matchAll(/`+/gu)) {
+    longest_run = Math.max(longest_run, match[0].length)
+  }
+  return "`".repeat(Math.max(3, longest_run + 1))
 }
 
 function license_expression_offers(
@@ -519,13 +540,14 @@ function render_package(package_: Notice_Package): string {
       "line endings normalized:",
   )
   for (const license_file of package_.license_files) {
+    const fence = markdown_fence(license_file.content)
     lines.push(
       "",
       `### ${license_file.path}`,
       "",
-      "```text",
-      license_file.content.trimEnd(),
-      "```",
+      `${fence}text`,
+      license_file.content,
+      fence,
     )
   }
   return `${lines.join("\n")}\n`

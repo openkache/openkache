@@ -3,7 +3,9 @@ project(openkache_client_cpp VERSION 0.1.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
+set(_openkache_client_cpp_adds_c FALSE)
 if(NOT TARGET OpenKache::ClientC)
+  set(_openkache_client_cpp_adds_c TRUE)
   add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/../c"
     "${CMAKE_CURRENT_BINARY_DIR}/openkache_client_c"
@@ -96,7 +98,7 @@ install(
     "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
 )
-if(OPENKACHE_CLIENT_THIRD_PARTY_NOTICES)
+if(OPENKACHE_CLIENT_THIRD_PARTY_NOTICES AND NOT _openkache_client_cpp_adds_c)
   install(
     FILES "${OPENKACHE_CLIENT_THIRD_PARTY_NOTICES}"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
