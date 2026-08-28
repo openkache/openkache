@@ -21,6 +21,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 
+/** Names of release dependency graphs supported by the notice generator. */
 export type Artifact_Name =
   | "server"
   | "client"
@@ -77,6 +78,7 @@ type Package_License_File = {
   readonly content: string
 }
 
+/** Dependency metadata and reproduced legal files rendered in a notice. */
 export type Notice_Package = {
   readonly name: string
   readonly version: string
@@ -584,6 +586,13 @@ function render_package(package_: Notice_Package): string {
   return `${lines.join("\n")}\n`
 }
 
+/**
+ * Renders a deterministic third-party notice for one artifact graph.
+ *
+ * @param artifact_name - Artifact whose dependency graph is represented.
+ * @param packages - Sorted dependency metadata and upstream legal files.
+ * @returns Complete notice text with attribution headers and package sections.
+ */
 export function render_notice(
   artifact_name: Artifact_Name,
   packages: readonly Notice_Package[],
