@@ -39,6 +39,7 @@
     "target/native/openkache-client.linux-arm64-gnu.node",
     "target/native/openkache-client.linux-x64-gnu.node",
     "LICENSE",
+    "THIRD-PARTY-NOTICES.txt",
     "README.md"
   ],
   "publishConfig": {
@@ -47,7 +48,8 @@
   "scripts": {
     "build": "./scripts/build-typescript.ts",
     "build:native": "./scripts/build-native.ts",
-    "build:package": "bun run build && bun run build:native",
+    "build:notice": "bun ../../scripts/generate-third-party-notices.ts --artifact typescript --output THIRD-PARTY-NOTICES.txt",
+    "build:package": "bun run build && bun run build:native && bun run build:notice",
     "generate": "OPENKACHE_GENERATION_TARGET=typescript bun ../generate.ts",
     "pack:check": "bun run build:package && bun pm pack --dry-run",
     "prepublishOnly": "bun run build:package",

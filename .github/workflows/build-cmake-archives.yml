@@ -98,11 +98,26 @@ jobs:
 
       - uses: ./.github/actions/setup-smithy-codegen
 
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
       - name: Install Clang/LLVM toolchain
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y clang llvm
+
+      - name: Generate the locked client notice
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          bun install --cwd scripts --frozen-lockfile --production
+          notice_root="${RUNNER_TEMP}/openkache-cmake-notice"
+          mkdir -p "${notice_root}"
+          ./scripts/generate-third-party-notices.ts \
+            --artifact cmake \
+            --output "${notice_root}/THIRD-PARTY-NOTICES.txt"
 
       - name: Build the native core used by the CMake packages
         run: |
@@ -118,11 +133,14 @@ jobs:
           smoke_root="${RUNNER_TEMP}/openkache-cmake-smoke"
           mkdir -p "${smoke_root}"
           native_core="${GITHUB_WORKSPACE}/target/release/libopenkache_client_core.a"
+          notice_path="${RUNNER_TEMP}/openkache-cmake-notice/THIRD-PARTY-NOTICES.txt"
           cmake -S clients/c -B "${smoke_root}/c-build" \
-            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}"
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}" \
+            -DOPENKACHE_CLIENT_THIRD_PARTY_NOTICES="${notice_path}"
           cmake --build "${smoke_root}/c-build"
           cmake -S clients/cpp -B "${smoke_root}/cpp-build" \
-            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}"
+            -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC="${native_core}" \
+            -DOPENKACHE_CLIENT_THIRD_PARTY_NOTICES="${notice_path}"
           cmake --build "${smoke_root}/cpp-build"
           install_root="${smoke_root}/install"
           cmake --install "${smoke_root}/cpp-build" --prefix "${install_root}"
@@ -192,12 +210,29 @@ jobs:
           )
           c_prefix="openkache-client-c-${RELEASE_VERSION}"
           c_archive="${release_root}/${c_prefix}.tar.gz"
+          c_tar="${release_root}/${c_prefix}.tar"
           git archive --format=tar --prefix="${c_prefix}/" "${SOURCE_SHA}" \
-            clients/c "${support_paths[@]}" | gzip -n > "${c_archive}"
+            clients/c "${support_paths[@]}" > "${c_tar}"
+          source_epoch="$(git show -s --format=%ct "${SOURCE_SHA}")"
+          tar --append --file="${c_tar}" \
+            --mtime="@${source_epoch}" \
+            --owner=0 --group=0 --numeric-owner \
+            --transform="s,^,${c_prefix}/clients/," \
+            -C "${RUNNER_TEMP}/openkache-cmake-notice" \
+            THIRD-PARTY-NOTICES.txt
+          gzip -n "${c_tar}"
           cpp_prefix="openkache-client-cpp-${RELEASE_VERSION}"
           cpp_archive="${release_root}/${cpp_prefix}.tar.gz"
+          cpp_tar="${release_root}/${cpp_prefix}.tar"
           git archive --format=tar --prefix="${cpp_prefix}/" "${SOURCE_SHA}" \
-            clients/c clients/cpp "${support_paths[@]}" | gzip -n > "${cpp_archive}"
+            clients/c clients/cpp "${support_paths[@]}" > "${cpp_tar}"
+          tar --append --file="${cpp_tar}" \
+            --mtime="@${source_epoch}" \
+            --owner=0 --group=0 --numeric-owner \
+            --transform="s,^,${cpp_prefix}/clients/," \
+            -C "${RUNNER_TEMP}/openkache-cmake-notice" \
+            THIRD-PARTY-NOTICES.txt
+          gzip -n "${cpp_tar}"
           for archive in "${c_archive}" "${cpp_archive}"; do
             [[ -s "${archive}" ]] || {
               echo "Archive was empty: ${archive}" >&2
@@ -205,6 +240,8 @@ jobs:
             }
             tar -tzf "${archive}" | grep -F "CMakeLists.txt"
             tar -tzf "${archive}" | grep -F "clients/generate.ts"
+            tar -tzf "${archive}" | grep -Fx \
+              "$(basename "${archive}" .tar.gz)/clients/THIRD-PARTY-NOTICES.txt"
             if tar -tzf "${archive}" | grep -Eq '(^|/)\.git(/|$)'; then
               echo "Archive contains repository metadata." >&2
               exit 1
@@ -226,6 +263,8 @@ jobs:
           extracted_install="${extract_root}/cpp-install"
           cmake --install "${extract_root}/cpp-build" \
             --prefix "${extracted_install}"
+          test -s \
+            "${extracted_install}/share/doc/OpenKacheClient/THIRD-PARTY-NOTICES.txt"
           cmake -S "${RUNNER_TEMP}/openkache-cmake-smoke/consumer" \
             -B "${extract_root}/consumer-build" \
             -DCMAKE_PREFIX_PATH="${extracted_install}"

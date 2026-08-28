@@ -58,6 +58,12 @@ and interoperability rules are documented separately:
 - [Protocol specification](../protocol/SPEC.md)
 - [Canonical fixtures](fixtures/)
 
+The released Rust, Python, TypeScript, and .NET client packages, plus the C
+and C++ CMake installations, carry a `THIRD-PARTY-NOTICES.txt` bundle
+alongside their Apache-2.0 `LICENSE`. The bundle covers the locked Rust code
+linked by that artifact; it is generated during packaging so its contents match
+the release dependency graph.
+
 ## Other packages
 
 These packages are available for compatibility, native integration, or future

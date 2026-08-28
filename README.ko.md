@@ -27,6 +27,7 @@
 - [프로젝트 상태](#프로젝트-상태)
 - [기여하기](#기여하기)
 - [라이선스](#라이선스)
+- [서드파티 저작권 고지](#서드파티-저작권-고지)
 
 ## 벤치마크
 
@@ -330,3 +331,13 @@ cargo server-build --features alloc-mimalloc
 [GNU Affero General Public License v3.0 이상](./LICENSE) 하에 라이선스가 부여됩니다.
 [`clients/`](./clients/) 아래의 클라이언트 SDK와 [`protocol/`](./protocol/) 아래의 공유
 프로토콜은 Apache License 2.0을 따릅니다. 각 디렉터리의 `LICENSE` 파일을 참고하세요.
+
+## 서드파티 저작권 고지
+
+릴리스 아카이브, 컨테이너 이미지, 클라이언트 패키지에는 잠긴 Cargo 의존성 그래프에서
+생성한 `THIRD-PARTY-NOTICES.txt`가 포함됩니다. 이 파일은 업스트림 라이선스, 고지,
+저작자 표시 문구를 보존하며 OpenKache 자체 라이선스는 인접한 `LICENSE` 파일에 있습니다.
+
+별도의 업스트림 라이선스 파일이 없는 항목은 유지관리자 검토 대상으로 표시됩니다. 고지에
+`LEGAL REVIEW REQUIRED`가 남아 있는 아티팩트는 재배포하지 마세요. 릴리스 검사와
+아티팩트별 지침은 [`RELEASING.md`](./RELEASING.md)를 참고하세요.

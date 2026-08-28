@@ -42,6 +42,21 @@ set(
   CACHE STRING
   "pkg-config library name without the lib prefix or file extension"
 )
+set(
+  OPENKACHE_CLIENT_THIRD_PARTY_NOTICES
+  ""
+  CACHE FILEPATH
+  "Generated third-party license and notice bundle installed with the client"
+)
+if(
+  "${OPENKACHE_CLIENT_THIRD_PARTY_NOTICES}" STREQUAL ""
+  AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../THIRD-PARTY-NOTICES.txt"
+)
+  set(
+    OPENKACHE_CLIENT_THIRD_PARTY_NOTICES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../THIRD-PARTY-NOTICES.txt"
+  )
+endif()
 
 if(OPENKACHE_CLIENT_NATIVE_LIBRARY)
   if(
@@ -315,6 +330,26 @@ install(
     "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
 )
+if(OPENKACHE_CLIENT_THIRD_PARTY_NOTICES)
+  if(NOT EXISTS "${OPENKACHE_CLIENT_THIRD_PARTY_NOTICES}")
+    message(
+      FATAL_ERROR
+      "OPENKACHE_CLIENT_THIRD_PARTY_NOTICES does not exist: "
+      "${OPENKACHE_CLIENT_THIRD_PARTY_NOTICES}. Generate it with "
+      "scripts/generate-third-party-notices.ts before packaging."
+    )
+  endif()
+  install(
+    FILES "${OPENKACHE_CLIENT_THIRD_PARTY_NOTICES}"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/OpenKacheClient"
+  )
+else()
+  message(
+    WARNING
+    "Third-party notices are not staged. Set "
+    "OPENKACHE_CLIENT_THIRD_PARTY_NOTICES when installing a release package."
+  )
+endif()
 install(
   FILES "${_openkache_client_generated_contract}"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/openkache"

@@ -19,6 +19,7 @@ const EXPECTED_ARCHIVE_ENTRIES = [
   "package/target/native/openkache-client.linux-arm64-gnu.node",
   "package/target/native/openkache-client.darwin-arm64.node",
   "package/LICENSE",
+  "package/THIRD-PARTY-NOTICES.txt",
   "package/README.md",
 ] as const
 

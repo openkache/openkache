@@ -25,6 +25,7 @@ const EXPECTED_FILES = [
   "target/native/openkache-client.linux-arm64-gnu.node",
   "target/native/openkache-client.darwin-arm64.node",
   "LICENSE",
+  "THIRD-PARTY-NOTICES.txt",
   "README.md",
 ] as const
 

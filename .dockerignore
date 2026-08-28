@@ -5,5 +5,7 @@ target
 **/target
 _local
 **/generated_local
+**/THIRD-PARTY-NOTICES.txt
 clients/typescript/node_modules
+scripts/node_modules
 clients/typescript/dist

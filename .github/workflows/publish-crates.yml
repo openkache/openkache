@@ -145,6 +145,19 @@ jobs:
         with:
           toolchain: stable
 
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Generate the locked Rust notice
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          bun install --cwd scripts --frozen-lockfile --production
+          ./scripts/generate-third-party-notices.ts \
+            --artifact rust \
+            --output clients/rust/THIRD-PARTY-NOTICES.txt
+
       - name: Verify crate metadata and package archive
         env:
           SOURCE_SHA: ${{ github.sha }}
@@ -169,7 +182,14 @@ jobs:
             echo "${manifest_path} version does not match the release input." >&2
             exit 1
           fi
-          cargo package --manifest-path "${manifest_path}" --locked
+          # The ignored generated notice is intentionally dirty for Cargo.
+          # Reject every other tracked or non-ignored change before packaging.
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The package checkout contains changes beyond the generated notice." >&2
+            git status --short --untracked-files=all >&2
+            exit 1
+          fi
+          cargo package --manifest-path "${manifest_path}" --locked --allow-dirty
           crate_path="target/package/${crate_name}-${RELEASE_VERSION}.crate"
           [[ -s "${crate_path}" ]] || {
             echo "cargo package did not produce ${crate_path}." >&2
@@ -177,6 +197,8 @@ jobs:
           }
           tar -tzf "${crate_path}" | grep -Fx "${crate_name}-${RELEASE_VERSION}/Cargo.toml"
           tar -tzf "${crate_path}" | grep -F "${crate_name}-${RELEASE_VERSION}/src/lib.rs"
+          tar -tzf "${crate_path}" | grep -Fx \
+            "${crate_name}-${RELEASE_VERSION}/THIRD-PARTY-NOTICES.txt"
           release_root="${RUNNER_TEMP}/${crate_name}-crate"
           mkdir -p "${release_root}"
           cp "${crate_path}" "${release_root}/"
@@ -218,6 +240,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Generate the locked Rust notice
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          bun install --cwd scripts --frozen-lockfile --production
+          ./scripts/generate-third-party-notices.ts \
+            --artifact rust \
+            --output clients/rust/THIRD-PARTY-NOTICES.txt
 
       - name: Download crate archive
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -296,8 +331,14 @@ jobs:
           esac
           # cargo publish repackages the checkout; prove its deterministic
           # archive matches the staged artifact before allowing publication.
+          # The ignored generated notice is the only expected dirty file.
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "The publish checkout contains changes beyond the generated notice." >&2
+            git status --short --untracked-files=all >&2
+            exit 1
+          fi
           rm -rf target/package
-          cargo package --manifest-path "${manifest_path}" --locked
+          cargo package --manifest-path "${manifest_path}" --locked --allow-dirty
           recreated_crate="target/package/${crate_file}"
           [[ -s "${recreated_crate}" ]] || {
             echo "cargo package did not recreate ${crate_file}." >&2
@@ -305,6 +346,8 @@ jobs:
           }
           tar -tzf "${recreated_crate}" | grep -Fx "${crate_name}-${RELEASE_VERSION}/Cargo.toml"
           tar -tzf "${recreated_crate}" | grep -F "${crate_name}-${RELEASE_VERSION}/src/lib.rs"
+          tar -tzf "${recreated_crate}" | grep -Fx \
+            "${crate_name}-${RELEASE_VERSION}/THIRD-PARTY-NOTICES.txt"
           downloaded_sha256="$(sha256sum "${downloaded_crate}" | cut -d ' ' -f 1)"
           recreated_sha256="$(sha256sum "${recreated_crate}" | cut -d ' ' -f 1)"
           if [[ "${recreated_sha256}" != "${downloaded_sha256}" ]]; then
@@ -333,4 +376,4 @@ jobs:
             echo "Configure crates.io Trusted Publishing or add the bootstrap CARGO_REGISTRY_TOKEN secret." >&2
             exit 1
           }
-          cargo publish --manifest-path clients/rust/Cargo.toml --locked --token "${CARGO_REGISTRY_TOKEN}"
+          cargo publish --manifest-path clients/rust/Cargo.toml --locked --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"

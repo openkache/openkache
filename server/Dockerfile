@@ -27,7 +27,9 @@ RUN case "${TARGETARCH}" in \
 # manifests are copied because Cargo resolves the complete workspace even
 # though only the server package is compiled.
 COPY Cargo.toml Cargo.lock ./
+COPY LICENSE LICENSE
 COPY .cargo/config.toml .cargo/config.toml
+COPY scripts/package.json scripts/bun.lock scripts/generate-third-party-notices.ts scripts/
 COPY protocol/Cargo.toml protocol/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
 COPY clients/core/Cargo.toml clients/core/Cargo.toml
@@ -79,10 +81,14 @@ RUN --mount=type=cache,id=openkache-cargo-registry,target=/root/.cargo/registry,
       *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     nix-shell --pure server/container.nix --argstr target "${target}" --run \
-      "cargo server-build --target ${target}"; \
+      "cargo server-build --target ${target}; \
+       bun install --cwd scripts --frozen-lockfile --production; \
+       bun ./scripts/generate-third-party-notices.ts \
+         --artifact server --output /out/THIRD-PARTY-NOTICES.txt"; \
     install -D -m 0755 \
       "target/${target}/release/openkache-server" \
       /out/openkache-server; \
+    install -D -m 0644 LICENSE /out/LICENSE; \
     install -d -m 0750 /out/var/lib/openkache
 
 # A static musl binary lets the final image contain no shell, package manager,
@@ -104,6 +110,8 @@ LABEL org.opencontainers.image.title="OpenKache server" \
       org.opencontainers.image.version="${VERSION}"
 
 COPY --from=builder --chown=65532:65532 /out/openkache-server /usr/local/bin/openkache-server
+COPY --from=builder --chown=65532:65532 /out/LICENSE /usr/share/doc/openkache/LICENSE
+COPY --from=builder --chown=65532:65532 /out/THIRD-PARTY-NOTICES.txt /usr/share/doc/openkache/THIRD-PARTY-NOTICES.txt
 COPY --from=builder --chown=65532:65532 /out/var/lib/openkache /var/lib/openkache
 
 WORKDIR /var/lib/openkache

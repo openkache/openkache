@@ -37,6 +37,9 @@ For a release archive, extract it and run the included `openkache-server`
 executable directly. Linux archives are static musl binaries; the macOS
 archive is an arm64 Mach-O binary:
 
+Release archives include `LICENSE` and the generated
+`THIRD-PARTY-NOTICES.txt` next to the executable.
+
 Linux:
 
 ```bash
