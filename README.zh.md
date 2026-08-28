@@ -89,42 +89,41 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 
 ## 快速开始
 
-OpenKache 针对 **Linux** 进行优化和基准测试。
+OpenKache 针对 **Linux** 进行优化，所有性能数据也在 Linux 上测得。Apple Silicon
+macOS 支持功能开发。Windows 请使用 WSL2。
 
-- **Windows：** 建议使用 WSL2。
-- **macOS：** 仅用于功能开发，不用于性能比较。
+Linux 需要 `io_uring` 和两个可用 CPU。
 
-Linux 要求:
-
-- 支持 `io_uring` 的 Linux
-- 进程可用的两个不同 CPU
-
-### Docker
-
-下载镜像：
-
-```bash
-docker pull ghcr.io/openkache/openkache:edge
-```
-
-运行服务器：
+### Docker (Linux)
 
 ```bash
 docker run --rm \
-  --network host \
   --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-### 下载并运行
+`seccomp=unconfined` 允许容器使用 `io_uring`。
 
-OpenKache 尚未发布正式版本。从 [server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0)
-下载并解压源码，然后运行下方的 Cargo 命令。
+### Cargo (Linux 和 macOS)
 
-### Cargo
+安装 Rust、Bun、Smithy CLI 和 C toolchain，然后在仓库根目录构建 release binary：
 
 ```bash
-cargo run --locked --package openkache-server --bin openkache-server
+cargo build --locked --release --package openkache-server --bin openkache-server
+```
+
+在 Linux 上为网络和存储指定不同 CPU 后运行：
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433 0 1
+```
+
+在 Apple Silicon macOS 上运行时不传 CPU 参数：
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433
 ```
 
 ## 连接客户端

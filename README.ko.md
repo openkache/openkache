@@ -93,42 +93,42 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같�
 
 ## 빠른 시작
 
-OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크합니다.
+OpenKache는 **Linux**에 맞춰 최적화했고 모든 성능 수치를 Linux에서 측정했다.
+Apple Silicon macOS는 기능 개발용으로 지원한다. Windows에서는 WSL2를 사용한다.
 
-- **Windows:** WSL2 사용을 권장합니다.
-- **macOS:** 기능 개발용이며 성능 비교에는 적합하지 않습니다.
+Linux에서는 `io_uring`과 사용 가능한 CPU 2개가 필요하다.
 
-Linux 요구사항:
-
-- `io_uring`을 지원하는 Linux
-- 프로세스가 쓸 수 있는 서로 다른 CPU 2개
-
-### Docker
-
-이미지를 내려받는다:
-
-```bash
-docker pull ghcr.io/openkache/openkache:edge
-```
-
-서버를 실행한다:
+### Docker (Linux)
 
 ```bash
 docker run --rm \
-  --network host \
   --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-### 내려받아 실행하기
+`seccomp=unconfined`은 container에서 `io_uring`을 쓰기 위해 필요하다.
 
-OpenKache는 아직 정식 릴리스 전이다. [server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0)에서
-소스를 내려받아 압축을 풀고 아래 Cargo 명령으로 실행한다.
+### Cargo (Linux·macOS)
 
-### Cargo
+Rust, Bun, Smithy CLI, C toolchain을 설치한 뒤 저장소 루트에서 release binary를
+빌드한다.
 
 ```bash
-cargo run --locked --package openkache-server --bin openkache-server
+cargo build --locked --release --package openkache-server --bin openkache-server
+```
+
+Linux에서는 network와 storage에 서로 다른 CPU를 지정해 실행한다.
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433 0 1
+```
+
+Apple Silicon macOS에서는 CPU 번호 없이 실행한다.
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433
 ```
 
 ## 클라이언트 연결

@@ -100,43 +100,42 @@ See [docs/architecture.md](./docs/architecture.md) for the full design.
 
 ## Quick start
 
-OpenKache is optimized and benchmarked for **Linux**.
+OpenKache is optimized and benchmarked on **Linux**. Apple Silicon macOS is
+supported for functional development. Use WSL2 on Windows.
 
-- **Windows:** WSL2 is recommended.
-- **macOS:** Intended for functional development, not performance comparisons.
+Linux requires `io_uring` and two available CPUs.
 
-Linux requirements:
-
-- Linux with `io_uring`
-- two distinct CPUs available to the process
-
-### Docker
-
-Download the image:
-
-```bash
-docker pull ghcr.io/openkache/openkache:edge
-```
-
-Run the server:
+### Docker (Linux)
 
 ```bash
 docker run --rm \
-  --network host \
   --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-### Download and run
+`seccomp=unconfined` allows the container to use `io_uring`.
 
-OpenKache has not published a stable release yet. Download the source from
-[server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0),
-extract it, and run the Cargo command below.
+### Cargo (Linux and macOS)
 
-### Cargo
+Install Rust, Bun, Smithy CLI, and a C toolchain. Then build the release binary
+from the repository root:
 
 ```bash
-cargo run --locked --package openkache-server --bin openkache-server
+cargo build --locked --release --package openkache-server --bin openkache-server
+```
+
+Run it on Linux with separate network and storage CPUs:
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433 0 1
+```
+
+Run it on Apple Silicon macOS without CPU arguments:
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433
 ```
 
 ## Connect a client
