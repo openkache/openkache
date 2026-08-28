@@ -79,6 +79,18 @@ jobs:
             echo "server/Cargo.toml version ${server_version} does not match ${RELEASE_VERSION}." >&2
             exit 1
           fi
+          cli_version="$(
+            cargo metadata \
+              --manifest-path clients/cli/Cargo.toml \
+              --locked \
+              --no-deps \
+              --format-version 1 |
+              jq -r '.packages[] | select(.name == "openkache-cli") | .version'
+          )"
+          if [[ "${cli_version}" != "${RELEASE_VERSION}" ]]; then
+            echo "clients/cli/Cargo.toml version ${cli_version} does not match ${RELEASE_VERSION}." >&2
+            exit 1
+          fi
           if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
             echo "The release checkout is dirty; refusing to continue." >&2
             exit 1
