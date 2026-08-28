@@ -103,10 +103,18 @@ Linux 요구사항:
 - `io_uring`을 지원하는 Linux
 - 프로세스가 쓸 수 있는 서로 다른 CPU 2개
 
-### 컨테이너 이미지
+### Docker
+
+이미지를 내려받는다:
 
 ```bash
-podman run --rm \
+docker pull ghcr.io/openkache/openkache:edge
+```
+
+서버를 실행한다:
+
+```bash
+docker run --rm \
   --network host \
   --security-opt seccomp=unconfined \
   ghcr.io/openkache/openkache:edge
@@ -114,21 +122,8 @@ podman run --rm \
 
 ### 릴리스 아카이브
 
-```bash
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) PLATFORM="linux-x86_64-musl" ;;
-  Linux-aarch64|Linux-arm64) PLATFORM="linux-aarch64-musl" ;;
-  Darwin-arm64) PLATFORM="macos-arm64" ;;
-  *) echo "지원하지 않는 플랫폼입니다" >&2; exit 1 ;;
-esac
-ARCHIVE="openkache-server-0.1.1-${PLATFORM}.tar.gz"
-curl --fail --location --remote-name \
-  "https://github.com/openkache/openkache/releases/download/server-v0.1.1/${ARCHIVE}"
-tar -xzf "${ARCHIVE}"
-"./${ARCHIVE%.tar.gz}/openkache-server"
-```
-
-압축 파일에는 `openkache-cli`도 들어 있습니다.
+[GitHub Releases](https://github.com/openkache/openkache/releases)에서 운영체제와 CPU에 맞는 파일을
+내려받아 압축을 풀고 `openkache-server`를 실행한다. 같은 폴더에 `openkache-cli`도 들어 있다.
 
 ### Cargo
 

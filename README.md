@@ -110,10 +110,18 @@ Linux requirements:
 - Linux with `io_uring`
 - two distinct CPUs available to the process
 
-### Container image
+### Docker
+
+Download the image:
 
 ```bash
-podman run --rm \
+docker pull ghcr.io/openkache/openkache:edge
+```
+
+Run the server:
+
+```bash
+docker run --rm \
   --network host \
   --security-opt seccomp=unconfined \
   ghcr.io/openkache/openkache:edge
@@ -121,21 +129,8 @@ podman run --rm \
 
 ### Release archive
 
-```bash
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) PLATFORM="linux-x86_64-musl" ;;
-  Linux-aarch64|Linux-arm64) PLATFORM="linux-aarch64-musl" ;;
-  Darwin-arm64) PLATFORM="macos-arm64" ;;
-  *) echo "Unsupported platform" >&2; exit 1 ;;
-esac
-ARCHIVE="openkache-server-0.1.1-${PLATFORM}.tar.gz"
-curl --fail --location --remote-name \
-  "https://github.com/openkache/openkache/releases/download/server-v0.1.1/${ARCHIVE}"
-tar -xzf "${ARCHIVE}"
-"./${ARCHIVE%.tar.gz}/openkache-server"
-```
-
-The archive also includes `openkache-cli`.
+Download the archive for your platform from [GitHub Releases](https://github.com/openkache/openkache/releases),
+extract it, and run `openkache-server`. The archive also includes `openkache-cli`.
 
 ### Cargo
 

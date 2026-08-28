@@ -99,10 +99,18 @@ Linux 要求:
 - 支持 `io_uring` 的 Linux
 - 进程可用的两个不同 CPU
 
-### 容器镜像
+### Docker
+
+下载镜像：
 
 ```bash
-podman run --rm \
+docker pull ghcr.io/openkache/openkache:edge
+```
+
+运行服务器：
+
+```bash
+docker run --rm \
   --network host \
   --security-opt seccomp=unconfined \
   ghcr.io/openkache/openkache:edge
@@ -110,21 +118,8 @@ podman run --rm \
 
 ### 发布归档
 
-```bash
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) PLATFORM="linux-x86_64-musl" ;;
-  Linux-aarch64|Linux-arm64) PLATFORM="linux-aarch64-musl" ;;
-  Darwin-arm64) PLATFORM="macos-arm64" ;;
-  *) echo "不支持的平台" >&2; exit 1 ;;
-esac
-ARCHIVE="openkache-server-0.1.1-${PLATFORM}.tar.gz"
-curl --fail --location --remote-name \
-  "https://github.com/openkache/openkache/releases/download/server-v0.1.1/${ARCHIVE}"
-tar -xzf "${ARCHIVE}"
-"./${ARCHIVE%.tar.gz}/openkache-server"
-```
-
-归档中也包含 `openkache-cli`。
+从 [GitHub Releases](https://github.com/openkache/openkache/releases) 下载适合当前系统和 CPU 的文件，
+解压后运行 `openkache-server`。同一目录中也包含 `openkache-cli`。
 
 ### Cargo
 
