@@ -27,8 +27,8 @@ three consistently.
 
 ## Test Environment
 
-serveroptima1:
-
+- Host: serveroptima1
+- Provider: [ServerOptima](https://www.serveroptima.com/)
 - CPU: AMD EPYC 7773X, 6 vCPU
 - RAM: 19.5 GiB
 - Storage: /dev/sda1, ext4, SSD
