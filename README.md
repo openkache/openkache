@@ -13,6 +13,21 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 
 </div>
 
+## Table of contents
+
+- [Benchmarks](#benchmarks)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Connect a client](#connect-a-client)
+- [Container image](#container-image)
+- [Roadmap](#roadmap)
+- [Build and verify](#build-and-verify)
+- [Client packages](#client-packages)
+- [Repository layout](#repository-layout)
+- [Project status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Benchmarks
 
 Measured on a 6 vCPU AMD EPYC 7773X host (SSD, kernel 6.8) over loopback, with
