@@ -99,14 +99,18 @@ See [docs/architecture.md](./docs/architecture.md) for the full design.
 
 ## Quick start
 
-OpenKache targets **Linux** as its primary platform: the `io_uring` network
-frontend and the direct-I/O storage path require it. macOS and Windows/WSL
-support is on the [roadmap](#roadmap).
+OpenKache is optimized and benchmarked for **Linux**. Its high-performance
+`io_uring` network frontend, direct-I/O storage path, and CPU-pinned runtime are
+Linux-only. Apple Silicon macOS has a deliberately unoptimized portability
+preview that uses Tokio polling and buffered file I/O; it is intended for
+functional development, not performance comparisons. Windows has no native
+server; WSL2 uses the Linux build and requires a kernel that permits `io_uring`.
 
 Start the server before connecting a client. Choose the first option that fits
-your environment: container image, published release, or Cargo.
+your environment: container image, Homebrew or APT package, release archive,
+or Cargo.
 
-Common requirements:
+Linux requirements:
 
 - Linux with `io_uring`
 - two distinct CPUs available to the process
@@ -143,14 +147,52 @@ The default container command pins the network thread to CPU 0 and the storage
 thread to CPU 1. Override the command when the container CPU set uses different
 IDs. See the [container guide](./docs/container-image.md) for details.
 
-### GitHub release
+### Homebrew (Apple Silicon macOS)
+
+Download the formula attached to the matching release, then let Homebrew
+install the server and CLI. The formula test starts the server and exercises
+`PING`, `SET`, `GET`, and `DELETE` through `openkache-cli`.
+
+```bash
+VERSION="${SERVER_VERSION:-0.1.0}"
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+curl --fail --location --remote-name "${BASE}/openkache.rb"
+brew install --formula ./openkache.rb
+openkache-server
+```
+
+The macOS server is intentionally unoptimized. It preserves the protocol for
+local functional development, but every published performance claim refers to
+the Linux server.
+
+### APT package (Ubuntu, Debian, and WSL2)
+
+Download the package for the machine's Debian architecture and install it with
+APT. The package includes the server, CLI, configuration, and a loopback-only
+systemd unit; the service is not enabled automatically.
+
+```bash
+VERSION="${SERVER_VERSION:-0.1.0}"
+ARCH="$(dpkg --print-architecture)"
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+PACKAGE="openkache_${VERSION}_${ARCH}.deb"
+curl --fail --location --remote-name "${BASE}/${PACKAGE}"
+sudo apt install "./${PACKAGE}"
+openkache-server
+```
+
+On a systemd host, start the optional service with
+`sudo systemctl enable --now openkache`. On WSL2 without systemd, run
+`openkache-server` in the foreground.
+
+### Linux release archive
 
 When a `server-v<version>` release is available, download the matching Linux
 archive from [GitHub Releases](https://github.com/openkache/openkache/releases).
 Set `SERVER_VERSION` to the published version, then verify and run the archive:
 
 ```bash
-VERSION="${SERVER_VERSION:?set SERVER_VERSION to a published version}"
+VERSION="${SERVER_VERSION:-0.1.0}"
 PLATFORM="linux-x86_64-musl" # use linux-aarch64-musl on arm64
 BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
 ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"

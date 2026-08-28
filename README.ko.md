@@ -13,6 +13,21 @@
 
 </div>
 
+## 목차
+
+- [벤치마크](#벤치마크)
+- [아키텍처](#아키텍처)
+- [빠른 시작](#빠른-시작)
+- [클라이언트 연결](#클라이언트-연결)
+- [컨테이너 이미지](#컨테이너-이미지)
+- [로드맵](#로드맵)
+- [빌드 및 검증](#빌드-및-검증)
+- [클라이언트 패키지](#클라이언트-패키지)
+- [저장소 구조](#저장소-구조)
+- [프로젝트 상태](#프로젝트-상태)
+- [기여하기](#기여하기)
+- [라이선스](#라이선스)
+
 ## 벤치마크
 
 6 vCPU AMD EPYC 7773X 호스트(SSD, 커널 6.8)에서 루프백 환경으로 측정했으며, 32바이트
@@ -77,14 +92,16 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같�
 
 ## 빠른 시작
 
-OpenKache는 **Linux**를 주 플랫폼으로 삼습니다: `io_uring` 네트워크 프론트엔드와 다이렉트
-I/O 스토리지 경로가 Linux를 필요로 합니다. macOS·Windows/WSL 지원은 [로드맵](#로드맵)에
-있습니다.
+OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크합니다. 고성능 `io_uring` 네트워크
+프론트엔드, 다이렉트 I/O 스토리지 경로, CPU 고정 런타임은 Linux 전용입니다. Apple
+Silicon macOS에는 Tokio polling과 buffered file I/O를 사용하는 의도적으로 비최적화된
+이식성 프리뷰가 있으며, 성능 비교가 아닌 기능 개발용입니다. Windows 네이티브 서버는
+없고, WSL2는 `io_uring`을 허용하는 커널에서 Linux 빌드를 사용합니다.
 
 클라이언트를 연결하기 전에 먼저 서버를 실행하세요. 환경에 맞는 첫 번째 방법을 선택합니다:
-컨테이너 이미지, 게시된 릴리스, Cargo 순입니다.
+컨테이너 이미지, Homebrew 또는 APT 패키지, 릴리스 아카이브, Cargo 순입니다.
 
-공통 요구사항:
+Linux 요구사항:
 
 - `io_uring`을 지원하는 Linux
 - 프로세스가 쓸 수 있는 서로 다른 CPU 2개
@@ -120,14 +137,49 @@ docker run --rm \
 고정합니다. 컨테이너의 CPU 세트가 다른 ID를 사용한다면 커맨드를 재정의하세요. 자세한
 내용은 [컨테이너 가이드](./docs/container-image.md)를 참고하세요.
 
-### GitHub 릴리스
+### Homebrew (Apple Silicon macOS)
+
+해당 릴리스에 첨부된 formula를 내려받아 Homebrew로 서버와 CLI를 설치합니다. Formula
+테스트는 서버를 시작한 뒤 `openkache-cli`로 `PING`, `SET`, `GET`, `DELETE`를 실행합니다.
+
+```bash
+VERSION="${SERVER_VERSION:-0.1.0}"
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+curl --fail --location --remote-name "${BASE}/openkache.rb"
+brew install --formula ./openkache.rb
+openkache-server
+```
+
+macOS 서버는 의도적으로 최적화하지 않았습니다. 로컬 기능 개발을 위한 프로토콜 계약은
+유지하지만, 게시된 모든 성능 수치는 Linux 서버를 기준으로 합니다.
+
+### APT 패키지 (Ubuntu, Debian, WSL2)
+
+머신의 Debian 아키텍처에 맞는 패키지를 내려받아 APT로 설치합니다. 패키지에는 서버,
+CLI, 설정 파일, loopback 전용 systemd unit이 들어 있으며 서비스는 자동 활성화하지
+않습니다.
+
+```bash
+VERSION="${SERVER_VERSION:-0.1.0}"
+ARCH="$(dpkg --print-architecture)"
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+PACKAGE="openkache_${VERSION}_${ARCH}.deb"
+curl --fail --location --remote-name "${BASE}/${PACKAGE}"
+sudo apt install "./${PACKAGE}"
+openkache-server
+```
+
+systemd 호스트에서는 `sudo systemctl enable --now openkache`로 선택적 서비스를 시작할 수
+있습니다. systemd가 없는 WSL2에서는 `openkache-server`를 foreground로 실행합니다.
+
+### Linux 릴리스 아카이브
 
 `server-v<version>` 릴리스가 게시되면 [GitHub Releases](https://github.com/openkache/openkache/releases)에서
 Linux 환경에 맞는 아카이브를 다운로드합니다. `SERVER_VERSION`을 게시된 버전으로 지정한
 후 아카이브를 검증하고 실행하세요:
 
 ```bash
-VERSION="${SERVER_VERSION:?set SERVER_VERSION to a published version}"
+VERSION="${SERVER_VERSION:-0.1.0}"
 PLATFORM="linux-x86_64-musl" # arm64에서는 linux-aarch64-musl 사용
 BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
 ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"
