@@ -1,6 +1,6 @@
 # Contributing to OpenKache
 
-**English** · [한국어](./CONTRIBUTING.ko.md)
+**English** | [한국어](./CONTRIBUTING.ko.md)
 
 OpenKache is a performance-focused cache server, and the work that moves it
 forward reflects that: a reproducible bug report, a benchmark that isolates a
@@ -19,7 +19,7 @@ For installation, usage, and current support boundaries, start with the
 and the [FAQ](./docs/faq.md). Most "how do I…" questions are answered there.
 
 GitHub issues are for **reproducible bugs and specific, actionable feature
-requests** — not general questions or usage help. Blank issues are disabled;
+requests**, not general questions or usage help. Blank issues are disabled;
 please use one of the [issue templates](https://github.com/openkache/openkache/issues/new/choose).
 
 ## Reporting a bug
@@ -28,7 +28,7 @@ Search [existing issues](https://github.com/openkache/openkache/issues) first,
 then open a [bug report](https://github.com/openkache/openkache/issues/new/choose)
 with the smallest case that reproduces the problem. Include:
 
-- the version or commit, and the platform (Linux kernel and `io_uring`
+- the version or commit and the platform (Linux kernel and `io_uring`
   availability, macOS preview, or WSL2);
 - the exact commands, configuration, and CPU assignment used to start the
   server and drive the load;
@@ -46,9 +46,9 @@ see [SECURITY_MODEL.md](./SECURITY_MODEL.md) for the project's trust boundaries.
 
 ## Proposing a change
 
-For a **substantial change** — new storage or wire-format behavior, a protocol
+For a **substantial change** (new storage or wire-format behavior, a protocol
 addition, an operational default, or anything that affects compatibility,
-performance, or security — open an issue first and agree on the approach before
+performance, or security) open an issue first and agree on the approach before
 writing code. Describe the problem and why it matters; a use case is what makes
 a feature worth accepting. This saves you from writing a change that has to be
 redesigned in review.
@@ -74,8 +74,8 @@ Install the git hooks once per clone:
 ```
 
 The `pre-commit` hook enforces trilingual documentation sync (English, Korean,
-Chinese). If you edit a document that ships in all three languages — such as
-`README.md` — the hook rejects the commit unless the `.ko` and `.zh` versions
+Chinese). If you edit a document that ships in all three languages, such as
+`README.md`, the hook rejects the commit unless the `.ko` and `.zh` versions
 are updated to match. See [scripts/README.md](./scripts/README.md) for the
 registered document sets and the emergency `--no-verify` bypass.
 
@@ -104,15 +104,15 @@ OPENKACHE_GENERATION_TARGET=rust-snapshots OPENKACHE_GENERATION_CHECK=1 ./client
 ```
 
 If a check cannot run in your environment, say so in the pull request rather
-than skipping it silently. Add whatever validation is relevant to the change —
-in particular, a reproduction for a bug fix or a measurement for a performance
+than skipping it silently. Add whatever validation is relevant to the change,
+in particular a reproduction for a bug fix or a measurement for a performance
 claim.
 
 ## Commit messages
 
 Write a short imperative subject that says what changed. The history uses
 [Conventional Commits](https://www.conventionalcommits.org/) prefixes
-(`feat`, `fix`, `docs`, `ci`, `chore`, …), often with an optional scope, for
+(`feat`, `fix`, `docs`, `ci`, `chore`), often with an optional scope, for
 example `fix(server): recover the segment index on restart`. Keep the body for
 the reasoning and any tradeoffs.
 
@@ -139,7 +139,7 @@ An automated CLA check runs on pull requests. If it asks you to sign, follow
 its link before the contribution is merged; it uses the Apache Contributor
 License Agreement template. Sign only for work you have the right to submit,
 and if you contribute on behalf of an organization, confirm you are authorized
-to do so. The CLA works alongside — it does not replace — the license on the
+to do so. The CLA works alongside (it does not replace) the license on the
 files you change.
 
 ## Licensing
