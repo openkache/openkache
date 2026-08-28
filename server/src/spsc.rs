@@ -1,3 +1,12 @@
+//! Lock-free single-producer, single-consumer (SPSC) ring buffer.
+//!
+//! This is the only channel between the network thread and the storage thread.
+//! With exactly one producer and one consumer, no locks or CAS loops are needed:
+//! ownership of a slot transfers via a single Release store of `tail` (producer)
+//! paired with an Acquire load (consumer), and vice versa for `head`. The head
+//! and tail counters sit on separate cache lines, and each endpoint caches the
+//! other's counter, so the common case touches no shared atomic at all.
+
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -60,6 +69,9 @@ pub(crate) fn channel<T, const N: usize>() -> (Producer<T, N>, Consumer<T, N>) {
 impl<T, const N: usize> Producer<T, N> {
     /** Checks for a free slot, refreshing the cached head only when necessary. */
     pub(crate) fn has_capacity(&mut self) -> bool {
+        // `tail` is owned by this producer, so a Relaxed load suffices. Only when
+        // the cached head says we look full do we pay for an Acquire load to see
+        // if the consumer has since advanced — avoiding a shared read per call.
         let tail = self.ring.tail.0.load(Ordering::Relaxed);
         let next = (tail + 1) % N;
         if next != self.head_cache {
@@ -73,6 +85,8 @@ impl<T, const N: usize> Producer<T, N> {
     pub(crate) fn push(&mut self, value: T) -> Result<(), T> {
         let tail = self.ring.tail.0.load(Ordering::Relaxed);
         let next = (tail + 1) % N;
+        // Re-check the real head only when the cache says full, so a full ring is
+        // the only case that reads the shared atomic.
         if next == self.head_cache {
             self.head_cache = self.ring.head.0.load(Ordering::Acquire);
             if next == self.head_cache {
@@ -91,6 +105,10 @@ impl<T, const N: usize> Producer<T, N> {
 impl<T, const N: usize> Consumer<T, N> {
     /** Retrieves the next value and advances head, or returns `None` when empty. */
     pub(crate) fn pop(&mut self) -> Option<T> {
+        // Symmetric to the producer: `head` is ours (Relaxed), and we only pay for
+        // an Acquire load of `tail` — which synchronizes with the producer's
+        // Release store and makes the written value visible — when the ring looks
+        // empty against the cached tail.
         let head = self.ring.head.0.load(Ordering::Relaxed);
         if head == self.tail_cache {
             self.tail_cache = self.ring.tail.0.load(Ordering::Acquire);
