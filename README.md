@@ -40,20 +40,51 @@ a single storage core.
 Average GET latency is 1.6× lower than MySQL and 2.3× lower than PostgreSQL; at
 p99 it is 3.0× and 3.3× lower.
 
-OpenKache reaches this by aggregating many individual writes into sequential
-segment-group writes to the SSD, instead of issuing one storage write per key.
-
 ## Architecture
 
 <div align="center">
 
 <img src="docs/assets/openkache-architecture.png" alt="OpenKache Architecture"/>
 
-<img src="docs/assets/segment-group-write-aggregation.png" alt="Individual Writes vs. Segment Group Aggregation"/>
-
 </div>
 
+**Why is OpenKache fast?** Because it never hops between cores.
+
+Most servers let a thread pool roam across cores. That is not free — lock
+contention, mutexes, context switches, and the synchronization and copy cost
+paid every time a cache line bounces from one core to another. The heavier the
+load, the more this overhead eats into throughput.
+
+OpenKache takes a **thread-per-core (shared-nothing)** design. Each worker is
+pinned to a single core, owns its own data, and shares no state — so there are
+no locks. This is the same design TigerBeetle, ScyllaDB, and Redis converged on
+to squeeze every drop out of the hardware. The network path and the storage
+path each own a core, and they communicate through exactly one **lock-free SPSC
+queue**. RESP parsing never blocks disk I/O.
+
+Redis runs commands on a single core. OpenKache keeps the same shared-nothing
+principle but shards workers across cores, so throughput scales with the
+hardware instead of hitting a single-core ceiling — and with no shared locks,
+adding a core adds no contention.
+
+Values live on the SSD; keys live in a compact RAM index (compressed key →
+segment offset). And just as a subway moves more people than a car, OpenKache
+batches writes from many keys into a single sequential **segment-group** flush
+instead of one SSD write per key, using the drive's sequential bandwidth to the
+fullest — on Linux, submitting that I/O through `io_uring` to erase even the
+system-call overhead.
+
+All of it is written in **Rust**: no GC pauses, data races ruled out at compile
+time, C-level control in hand. There is no room for a garbage-collection pause
+on the fast path.
+
+See [docs/architecture.md](./docs/architecture.md) for the full design.
+
 ## Quick start
+
+OpenKache targets **Linux** as its primary platform: the `io_uring` network
+frontend and the direct-I/O storage path require it. macOS and Windows/WSL
+support is on the [roadmap](#roadmap).
 
 Requirements:
 
@@ -61,7 +92,7 @@ Requirements:
 - two distinct CPUs available to the process
 - Rust plus the native toolchain required by the workspace dependencies
 
-Run on `127.0.0.1:4433` using CPUs 0 and 1:
+Run the server on `127.0.0.1:4433` using CPUs 0 and 1:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
@@ -78,7 +109,19 @@ cargo run --locked --package openkache-server --bin openkache-server -- \
 The cache file is created in the process working directory and truncated each
 time the server starts.
 
-### Use the Rust SDK
+## Connect a client
+
+With the server running, connect from your language of choice. All client
+guides use `127.0.0.1:4433` as the default local endpoint and list the complete
+public API for their language.
+
+| Package | Install | Documentation | Source |
+|---|---|---|---|
+| TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [client README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
+| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
+| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [client README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
+
+The Rust SDK in a nutshell:
 
 ```rust
 use openkache::{Client, Value};
@@ -95,28 +138,8 @@ client.close().await?;
 # }
 ```
 
-The Gate 0 SDK intentionally disables certificate verification for local
-development. It still uses TLS 1.3 over QUIC and never falls back to plaintext.
-
-### Try a client
-
-The examples in the client READMEs use the local development TLS profile. It
-does not verify the server certificate, so use it only with a local development
-server; do not reuse this trust profile for production traffic.
-
-| Package | Install | Documentation | Source |
-|---|---|---|---|
-| TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [client README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
-| Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
-| Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [client README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
-
-All three client guides use `127.0.0.1:4433` as the default local endpoint.
-They also list alternative package managers and the complete public API for
-their language.
-
-The source-built [`openkache-cli`](clients/cli/README.md) uses the same fixed
-Gate 0 profile by default. It is the Bash-friendly option for the Rust client
-and the native QUIC frontend of `my-ideal-prototype`:
+The source-built [`openkache-cli`](clients/cli/README.md) is the Bash-friendly
+option, using the same fixed Gate 0 profile by default:
 
 ```bash
 openkache-cli set hello "from cli"
@@ -124,10 +147,15 @@ openkache-cli get hello
 ```
 
 Use `openkache-cli --profile configured` when certificate roots, mutual TLS,
-client-side value protection, or compatibility-only TTL/conditional writes
-are required.
+client-side value protection, or compatibility-only TTL/conditional writes are
+required.
 
-### Container image
+> **Local development trust profile.** The default Gate 0 profile is for local
+> development: it uses TLS 1.3 over QUIC and never falls back to plaintext, but
+> it does not verify the server certificate. Do not reuse this trust profile for
+> production traffic.
+
+## Container image
 
 Build locally from the repository root:
 
@@ -158,6 +186,17 @@ using the rolling tag.
 The default container command pins the network thread to CPU 0 and the storage
 thread to CPU 1. Override the command when the container CPU set uses different
 IDs. See the [container guide](./docs/container-image.md) for details.
+
+## Roadmap
+
+| Milestone | Status | Focus |
+|---|---|---|
+| SSD storage & dual-protocol server | 🚧 In progress | Segment-group writes, RESP/TCP + QUIC Gate 0 |
+| Production hardening | 🔜 Next | Restart recovery, reproducible benchmarks, fuzzing, CI/CD |
+| Security & correctness | 📅 Planned | Auth/mTLS, value-protection profiles, full protocol surface |
+| Scale & reach | 📅 Planned | Clustering, cross-platform servers, general availability |
+
+Full detail in [ROADMAP.md](./ROADMAP.md).
 
 ## Build and verify
 
