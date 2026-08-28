@@ -24,6 +24,10 @@ from setuptools.command.sdist import sdist as _sdist
 PACKAGE_ROOT = Path(__file__).resolve().parent
 NATIVE_ROOT = PACKAGE_ROOT / "native"
 PUBLIC_ROOT = PACKAGE_ROOT.parent.parent
+THIRD_PARTY_NOTICE_FILENAME = "THIRD-PARTY-NOTICES.txt"
+THIRD_PARTY_NOTICE_GENERATOR = (
+    PUBLIC_ROOT / "scripts" / "generate-third-party-notices.ts"
+)
 PROTOCOL_ROOT = PUBLIC_ROOT / "protocol"
 if not PROTOCOL_ROOT.is_dir():
     PROTOCOL_ROOT = PACKAGE_ROOT / "protocol"
@@ -55,6 +59,59 @@ def generated_module_paths() -> tuple[Path, ...]:
 
     generated_root = PACKAGE_ROOT / "src" / "openkache" / "_generated"
     return tuple(generated_root / module for module in GENERATED_MODULES)
+
+
+def copy_third_party_notice(destination: Path) -> None:
+    """Copy or generate the locked dependency notice into a package tree.
+
+    A source distribution already contains the notice at its top level, so
+    consumers building from an sdist do not need Bun. Direct checkout builds
+    invoke the public Bun generator and keep the result in the build staging
+    directory.
+    """
+
+    if THIRD_PARTY_NOTICE_GENERATOR.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                [
+                    os.environ.get("BUN", "bun"),
+                    str(THIRD_PARTY_NOTICE_GENERATOR),
+                    "--root",
+                    str(PUBLIC_ROOT),
+                    "--artifact",
+                    "python",
+                    "--output",
+                    str(destination),
+                ],
+                cwd=PUBLIC_ROOT,
+                env=os.environ.copy(),
+                check=True,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                "Python package builds require Bun to generate the third-party "
+                "notice. Install Bun or build from the released source "
+                "distribution."
+            ) from error
+        return
+
+    bundled_candidates = (
+        PACKAGE_ROOT / THIRD_PARTY_NOTICE_FILENAME,
+        PUBLIC_ROOT / THIRD_PARTY_NOTICE_FILENAME,
+    )
+    for source in bundled_candidates:
+        if source.is_file() and source.resolve() != destination.resolve():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            return
+
+    raise RuntimeError(
+        "Python package builds require the generated "
+        f"{THIRD_PARTY_NOTICE_FILENAME}; no bundled notice or public "
+        "generator was found. Build from the repository checkout or use "
+        "the released source distribution."
+    )
 
 
 def native_library_name() -> str:
@@ -186,8 +243,14 @@ class build_py(_build_py):
         generate_smithy_contract(
             force=os.environ.get("OPENKACHE_REGENERATE_SMITHY") == "1"
         )
+        copy_third_party_notice(
+            PACKAGE_ROOT / "src" / "openkache" / THIRD_PARTY_NOTICE_FILENAME
+        )
         super().run()
         copy_license(Path(self.build_lib) / "openkache" / "LICENSE")
+        copy_third_party_notice(
+            Path(self.build_lib) / "openkache" / THIRD_PARTY_NOTICE_FILENAME
+        )
         self.run_command("build_native")
 
 
@@ -240,6 +303,7 @@ class sdist(_sdist):
         super().make_release_tree(base_dir, files)
         release_root = Path(base_dir)
         copy_license(release_root / "LICENSE")
+        copy_third_party_notice(release_root / THIRD_PARTY_NOTICE_FILENAME)
         source_ignore = shutil.ignore_patterns(
             "__pycache__",
             "*.pyc",

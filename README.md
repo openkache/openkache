@@ -348,3 +348,15 @@ Except where otherwise noted, OpenKache is licensed under the
 under [`clients/`](./clients/) and the shared protocol under
 [`protocol/`](./protocol/) are licensed under the Apache License 2.0; see
 the `LICENSE` file in each directory.
+
+## Third-party attributions
+
+Release archives, container images, and client packages include a generated
+`THIRD-PARTY-NOTICES.txt` derived from the locked Cargo dependency graph. It
+preserves upstream license, notice, and attribution text; OpenKache's own
+license remains in the adjacent `LICENSE` file.
+
+Entries without a separate upstream license file are flagged for maintainer
+review. Do not redistribute an artifact while its notice contains
+`LEGAL REVIEW REQUIRED`. See [`RELEASING.md`](./RELEASING.md) for release
+checks and artifact-specific instructions.

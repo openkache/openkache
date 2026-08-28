@@ -4,6 +4,13 @@ The OpenKache preview image is published at `ghcr.io/openkache/openkache` for
 Linux `amd64` and `arm64`. It contains one static `openkache-server` binary and
 runs as UID/GID `65532` without a shell or package manager.
 
+The image stores OpenKache's `LICENSE` and the generated
+`THIRD-PARTY-NOTICES.txt` at `/usr/share/doc/openkache/`.
+That bundle covers the Cargo code linked into `openkache-server`; the
+distroless Debian base image and any system-provided trust store remain
+separate upstream components and must retain their own notices when the image
+is mirrored or redistributed.
+
 ## Build
 
 Build from the repository root:

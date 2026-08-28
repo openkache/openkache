@@ -27,6 +27,7 @@ compatibility status.
 Run from the public repository root:
 
 ```bash
+bun install --cwd scripts --frozen-lockfile --production
 dotnet build clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 dotnet pack clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 ```
@@ -42,6 +43,10 @@ export OPENKACHE_CLIENT_NATIVE="$PWD/target/debug/libopenkache_client_core.so"
 
 Building from source also requires Bun and Smithy CLI on `PATH`; the project
 generates ignored wire values and Smithy API contracts before compilation.
+
+Published NuGet packages include the Apache-2.0 `LICENSE` and the generated
+`THIRD-PARTY-NOTICES.txt` at the package root. The notice bundle covers the
+locked Rust code linked by the native adapter.
 
 ## Connect and use
 

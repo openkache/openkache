@@ -37,9 +37,20 @@ Windows tags come from their native Python packaging toolchain. Other
 Rust-supported targets can install from the source distribution.
 
 The native Rust adapter supports Linux, macOS, and Windows on Rust-supported
-host architectures, including ARM64. Building from source requires Python,
-Rust 1.85 or newer, and the platform's normal C linker. The package selects
-`.so`, `.dylib`, or `.dll` at import time and does not assume Linux.
+host architectures, including ARM64. Building from a repository checkout
+requires Python, Rust 1.85 or newer, Bun with the locked notice-generator
+dependencies, and the platform's normal C linker. The package selects `.so`,
+`.dylib`, or `.dll` at import time and does not assume Linux. Source
+distributions already carry the generated notice and do not need Bun.
+
+From the repository root, install the notice generator dependencies before a
+checkout build:
+
+```bash
+bun install --cwd scripts --frozen-lockfile --production
+cd clients/python
+python -m build
+```
 
 On Windows checkouts, run the generator from PowerShell:
 

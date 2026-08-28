@@ -21,6 +21,14 @@ The default `quic-quinn` client uses Tokio internally, so an active Tokio
 runtime is required for `Client`. The example below uses `#[tokio::main]`; use
 the runtime setup already used by your application.
 
+## License and third-party notices
+
+The crate is distributed under Apache-2.0. Published crate archives include
+`LICENSE` and the generated `THIRD-PARTY-NOTICES.txt` for the locked Rust
+dependencies linked by the client. When packaging from a repository checkout,
+the release tooling generates that notice before running `cargo package` or
+`cargo publish`.
+
 ## Quick start
 
 The example below assumes a local OpenKache server at `127.0.0.1:4433`.

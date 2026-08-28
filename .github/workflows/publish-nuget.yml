@@ -3,21 +3,75 @@ name: Publish NuGet
 on:
   push:
     branches: [main]
-    paths: ["clients/dotnet/**"]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "LICENSE"
+      - "clients/**"
+      - "protocol/**"
+      - "scripts/**"
+
+concurrency:
+  group: nuget-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build:
+    name: Build and inspect NuGet package
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
       - uses: ./.github/actions/setup-smithy-codegen
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Install notice generator dependencies
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          bun install --cwd scripts --frozen-lockfile --production
       - run: dotnet pack clients/dotnet/OpenKache/OpenKache.csproj -c Release -o out
+      - name: Verify NuGet package attributions
+        run: |
+          set -euo pipefail
+          for package in out/*.nupkg; do
+            unzip -l "${package}" | grep -F "THIRD-PARTY-NOTICES.txt"
+            unzip -l "${package}" | grep -F "LICENSE"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openkache-nuget
+          path: out/*.nupkg
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish NuGet package
+    needs: build
+    runs-on: ubuntu-24.04
+    # The package is compatibility-only, but publication still needs the same
+    # human review of generated legal material as the other release paths.
+    environment: nuget-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: openkache-nuget
+          path: out
+      - name: Recheck NuGet package attributions
+        run: |
+          set -euo pipefail
+          for package in out/*.nupkg; do
+            unzip -l "${package}" | grep -F "THIRD-PARTY-NOTICES.txt"
+            unzip -l "${package}" | grep -F "LICENSE"
+          done
       - uses: NuGet/login@v1
         id: nugetlogin
         with:

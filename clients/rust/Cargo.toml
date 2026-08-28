@@ -12,7 +12,14 @@ documentation = "https://docs.rs/openkache"
 keywords = ["cache", "client", "quic", "tls", "openkache"]
 categories = ["network-programming", "database"]
 rust-version = "1.85"
-include = ["Cargo.toml", "README.md", "LICENSE", "src/**/*.rs", "examples/**/*.rs"]
+include = [
+  "Cargo.toml",
+  "README.md",
+  "LICENSE",
+  "THIRD-PARTY-NOTICES.txt",
+  "src/**/*.rs",
+  "examples/**/*.rs",
+]
 
 [package.metadata.docs.rs]
 all-features = true

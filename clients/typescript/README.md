@@ -155,6 +155,12 @@ synchronous close-now primitive if the object is abandoned. Finalization is
 nondeterministic, cannot report errors, and may never run; it is not a
 replacement for awaiting `close()`.
 
+## License and third-party notices
+
+The client is distributed under Apache-2.0. Published packages include
+`LICENSE` and the generated `THIRD-PARTY-NOTICES.txt` for the Rust code linked
+by the native adapters.
+
 ### Keys
 
 Each operation accepts one of these key types:

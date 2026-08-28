@@ -9,6 +9,12 @@
 # Rust output
 target/
 
+# Public release-tool dependencies are installed locally by Bun.
+scripts/node_modules/
+
+# Third-party notices are generated into package staging directories.
+**/THIRD-PARTY-NOTICES.txt
+
 # Managed client output
 clients/dotnet/**/bin/
 clients/dotnet/**/obj/
