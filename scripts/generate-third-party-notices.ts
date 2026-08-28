@@ -165,7 +165,7 @@ const LICENSE_SELECTIONS: Readonly<Record<string, string>> = {
  * legal text.
  */
 const LICENSE_FILE_NAME =
-  /^(?:(?:third[._ -]?party[._ -]?)?(?:licenses?|licences?|copying(?:[0-9]+)?|notices?|authors?|copyright|unlicenses?|patents?))(?:[._-].*)?$/iu
+  /^(?:(?:third[._ -]?party[._ -]?)?(?:licenses?|licences?|copying(?:[0-9]+)?|notices?|authors?|copyrights?|unlicenses?|patents?))(?:[._-].*)?$/iu
 const CRATES_IO_SOURCE_PREFIX =
   "registry+https://github.com/rust-lang/crates.io-index"
 
@@ -191,7 +191,12 @@ function normalize_text(content: string): string {
 
 function decode_license_text(bytes: Uint8Array, file_path: string): string {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+    return new TextDecoder("utf-8", {
+      fatal: true,
+      // Preserve a UTF-8 BOM as part of the upstream text. The generator only
+      // normalizes line endings and must not silently remove legal content.
+      ignoreBOM: true,
+    }).decode(bytes)
   } catch (error) {
     fail(
       `License or notice file ${file_path} is not valid UTF-8: ${

@@ -1,8 +1,9 @@
 # Release OpenKache packages and server binaries
 
 This guide covers the Python package on PyPI, the Rust crate on crates.io,
-the TypeScript package on npm, and the server archives published as GitHub
-Release assets. Every registry version and server release is immutable.
+the TypeScript package on npm, the .NET compatibility package on NuGet, the
+C and C++ CMake archives, and the server archives published as GitHub Release
+assets. Every registry version and server release is immutable.
 
 The release has two phases:
 
@@ -71,6 +72,52 @@ properties, then publishes per-archive `.sha256` files plus the aggregate
 provenance attestation. These archives remain preview artifacts and must not be
 described as production support until a separate signing and provenance policy
 is in place.
+
+## Compatibility package releases
+
+The .NET and CMake packages expose compatibility or native-installation
+surfaces rather than the maintained three-package client release. They still
+ship the Apache-2.0 `LICENSE` and a generated
+`THIRD-PARTY-NOTICES.txt`; inspect that bundle before approving publication.
+
+### NuGet compatibility package
+
+`.github/workflows/publish-nuget.yml` runs on relevant pushes to `main`. Its
+build job creates and inspects the `.nupkg`, uploads that exact package as a
+short-lived artifact, and does not receive registry credentials. The separate
+publish job downloads and rechecks the artifact, then pauses at the protected
+`nuget-release` environment before obtaining a NuGet trusted-publishing token
+and pushing the package. Configure required reviewers for that environment;
+do not publish a package whose notice still contains `LEGAL REVIEW REQUIRED`.
+
+NuGet publication is independent of the shared Python/Rust/TypeScript version.
+The package version comes from
+`clients/dotnet/OpenKache/OpenKache.csproj`; never overwrite a version that
+NuGet has already accepted.
+
+### C and C++ CMake archives
+
+`.github/workflows/build-cmake-archives.yml` is a manual, non-registry release
+workflow. Dispatch it from the matching `cmake-v<version>` tag with
+`confirm=RELEASE`. The `cmake-release` environment protects the archive build;
+the workflow then uploads deterministic C and C++ source archives,
+`RELEASE-METADATA`, and `SHA256SUMS` for review. It does not publish to a
+package registry. Verify the installed CMake package and its notice bundle
+from the uploaded bytes before mirroring or redistributing either archive.
+
+The C and C++ project versions in `clients/c/CMakeLists.txt` and
+`clients/cpp/CMakeLists.txt` must match the workflow input. A CMake archive is
+not a production support claim; retain the preview boundary in release notes.
+
+### Rolling container preview
+
+The `ghcr.io/openkache/openkache:edge` tag is a mutable preview updated by
+successful `main` container builds, not a legal release approval. Pin its
+manifest digest when consuming it reproducibly. Before mirroring or
+redistributing an image, inspect
+`/usr/share/doc/openkache/THIRD-PARTY-NOTICES.txt` and resolve every
+`LEGAL REVIEW REQUIRED` entry against its upstream source; an `edge` build with
+unresolved entries remains a development preview.
 
 ## Choose the release version
 
@@ -436,6 +483,13 @@ Configure the protected environments before the first release:
   its [Trusted Publisher](https://crates.io/docs/trusted-publishing) with
   owner `openkache`, repository `openkache`, workflow filename
   `publish-crates.yml`, and environment `crates-io-release`.
+- **`nuget-release`** — configure required reviewers for
+  `.github/workflows/publish-nuget.yml`. The build job has no registry
+  credentials; `NuGet/login@v1` runs only after the protected publish job is
+  approved.
+- **`cmake-release`** — configure required reviewers for
+  `.github/workflows/build-cmake-archives.yml`. This environment protects the
+  manual archive build and does not grant registry credentials.
 
 PyPI and npm use GitHub OIDC short-lived credentials. The Rust workflow uses
 the bootstrap secret when present and otherwise obtains a short-lived
@@ -461,10 +515,13 @@ then performs the registry mutation on the tagged checkout:
 | PyPI | `pypa/gh-action-pypi-publish` uploads the sdist and six wheels. |
 | crates.io | `rust-lang/crates-io-auth-action` (after bootstrap) or the protected bootstrap secret supplies the registry token to `cargo publish --manifest-path clients/rust/Cargo.toml --locked`. |
 | npm | `bun run release:publish` publishes the assembled package with the `latest` dist-tag. |
+| NuGet | `NuGet/login@v1` mints the API key, then `dotnet nuget push` uploads the reviewed package. |
 
 There is no separate local publish command in the normal release path. The
-protected workflow rechecks provenance, checksums, package contents, and
-registry availability immediately before its publish step.
+protected registry workflows recheck provenance, checksums, package contents,
+and registry availability immediately before their publish step. The NuGet
+workflow rechecks the downloaded package's required license and notice files
+before its publish step; the CMake workflow only uploads reviewable archives.
 
 ### 2.3 Verify consumers and record the release
 
