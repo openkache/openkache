@@ -136,14 +136,16 @@ cargo run --locked --package openkache-server --bin openkache-server
 服务器运行后,用你选择的语言连接。所有客户端指南都默认使用 `127.0.0.1:4433` 作为本地端点,
 并列出各自语言的完整公开 API。
 
-受维护的客户端包共享同一套协议与值格式(value-format)源码。Rust、TypeScript、Python、
-.NET、Go、C、C++、Swift 等绑定的当前状态见 [clients/README.md](./clients/README.md)。
+OpenKache 分别提供 TypeScript/JavaScript、Python 和 Rust 客户端包。三个包共享同一套协议和
+value-format 源码:
 
 | 包 | 安装 | 文档 | 源码 |
 |---|---|---|---|
 | TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [客户端 README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
 | Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [客户端 README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
 | Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [客户端 README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
+
+.NET、Go、C、C++、Swift 等其他绑定的状态见 [clients/README.md](./clients/README.md)。
 
 Rust SDK 速览:
 

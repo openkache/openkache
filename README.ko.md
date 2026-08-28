@@ -140,15 +140,17 @@ cargo run --locked --package openkache-server --bin openkache-server
 서버가 실행 중이면, 원하는 언어로 연결합니다. 모든 클라이언트 가이드는 기본 로컬
 엔드포인트로 `127.0.0.1:4433`을 사용하며, 각 언어의 전체 공개 API를 안내합니다.
 
-유지 관리되는 클라이언트 패키지는 동일한 프로토콜과 값 형식(value-format) 소스를
-공유합니다. Rust, TypeScript, Python, .NET, Go, C, C++, Swift 등 각 바인딩의 현재 상태는
-[clients/README.md](./clients/README.md)를 참고하세요.
+OpenKache는 TypeScript/JavaScript, Python, Rust 클라이언트를 각각 별도 패키지로
+제공합니다. 세 패키지는 동일한 프로토콜과 값 형식(value-format) 소스를 공유합니다:
 
 | 패키지 | 설치 | 문서 | 소스 |
 |---|---|---|---|
 | TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [클라이언트 README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
 | Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [클라이언트 README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
 | Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [클라이언트 README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
+
+.NET, Go, C, C++, Swift 등 추가 바인딩의 상태는
+[clients/README.md](./clients/README.md)를 참고하세요.
 
 Rust SDK 한눈에 보기:
 

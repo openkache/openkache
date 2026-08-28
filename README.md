@@ -149,15 +149,17 @@ With the server running, connect from your language of choice. All client
 guides use `127.0.0.1:4433` as the default local endpoint and list the complete
 public API for their language.
 
-Maintained client packages share the same protocol and value-format sources.
-See [clients/README.md](./clients/README.md) for the current status of Rust,
-TypeScript, Python, .NET, Go, C, C++, Swift, and other bindings.
+OpenKache publishes separate client packages for TypeScript/JavaScript, Python,
+and Rust. All three share the same protocol and value-format sources:
 
 | Package | Install | Documentation | Source |
 |---|---|---|---|
 | TypeScript / JavaScript | `npm install openkache` | [npm](https://www.npmjs.com/package/openkache) · [client README](clients/typescript/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/typescript) |
 | Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
 | Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [client README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
+
+See [clients/README.md](./clients/README.md) for the status of additional
+bindings, including .NET, Go, C, C++, and Swift.
 
 The Rust SDK in a nutshell:
 
