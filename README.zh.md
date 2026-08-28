@@ -64,23 +64,25 @@ OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即
 
 </div>
 
-> **一个请求从不离开它最初落到的 core。**
+> **一个请求从头到尾都在它最初落到的那个 core 上处理。**
 
-在现代 SSD 上,瓶颈是 CPU,不是磁盘。OpenKache 让每个 core 都忙起来,绝不为在 core 之间搬运
-工作而付费。
+现代 SSD 太快了,慢的已经不是磁盘,而是 CPU。所以整个设计只围绕一件事:绝不把 CPU 浪费在
+core 之间来回协调上。
 
-**Thread-per-core, shared-nothing(无共享)。** 每个 worker 独占一个 core 和自己的数据。没有 lock,
-没有 context switch,没有在 core 之间弹跳的 cache line。
-(参照 [KVell, SOSP '19](https://dl.acm.org/doi/10.1145/3341301.3359628))
+**没有共享数据,就没有等待。** 大多数 database 让多个 core 共用同一份数据,再用 lock 防止它们
+互相破坏。结果 core 们不干活,光排队等 lock。OpenKache 给每个 core 分一块自己的数据。没有共享,
+就没什么可锁的,一个 core 也不会去等另一个。(这就是 shared-nothing 设计。参照 [KVell,
+SOSP '19](https://dl.acm.org/doi/10.1145/3341301.3359628))
 
-**两个 worker,一条 lock-free queue。** network worker 和 storage worker 各占一个 core,只通过
-一条 SPSC queue 对话。解析不会阻塞磁盘 I/O,磁盘 I/O 也不会阻塞解析。
+**读和写互不阻塞。** 一个 core 读 network、解析请求,另一个 core 管 disk。两者通过一条单向通道
+交接:前一个把请求放进去,后一个取出来。它们从不同时去碰同一个东西,所以谁也不用停下来等对方。
 
-**顺序 segment-group 写入。** flash 会因小的随机写而折损寿命,所以 OpenKache 从不发出这样的写。
-它把多个 key 合并成一次顺序 flush。
-(参照 [FairyWren, OSDI '24)](https://www.usenix.org/conference/osdi24/presentation/mcallister))
+**攒够了一次顺序写下去,而不是零敲碎打。** 往 SSD 上到处写小块数据是最慢的用法,也最费寿命。
+OpenKache 把要写的东西攒起来,一次连续写完,让驱动器跑在接近满速,还更耐用。(这就是 segment-group
+批量写。参照 [FairyWren, OSDI '24](https://www.usenix.org/conference/osdi24/presentation/mcallister))
 
-**用 Rust 编写。** 没有 GC 来拖慢 hot path。data race 由 compiler 捕获,而不是在 production 中。
+**用 Rust 编写。** 没有 GC,服务器不会在处理请求时突然卡住。而且一大类并发 bug 在 compile 阶段
+就被拦下,根本到不了 production。
 
 完整设计见 [docs/architecture.zh.md](./docs/architecture.zh.md)。
 

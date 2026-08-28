@@ -65,24 +65,28 @@ OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르며, 단일 스�
 
 </div>
 
-> **request는 처음 배정된 core를 벗어나지 않는다.**
+> **request 하나는 처음 잡은 core에서 끝까지 처리된다.**
 
-요즘 SSD에선 병목이 disk가 아니라 CPU다. OpenKache는 모든 core를 놀리지 않고, work를 core
-사이로 옮기는 데 드는 비용을 아예 없앤다.
+요즘 SSD는 워낙 빨라서 이제 느린 쪽은 disk가 아니라 CPU다. 그래서 설계 전체가 한 가지에
+맞춰져 있다. core끼리 작업을 주고받느라 CPU를 낭비하지 않는 것.
 
-**Thread-per-core, shared-nothing.** worker 하나가 core 하나와 자기 data를 독점한다. lock도,
-context switch도, core 사이를 오가는 cache line도 없다.
-([KVell, SOSP '19](https://dl.acm.org/doi/10.1145/3341301.3359628))
+**공유하는 데이터가 없으니 기다릴 일도 없다.** 보통 database는 하나의 데이터를 여러 core가
+같이 쓰고, 서로 망가뜨리지 못하게 lock을 건다. 그러다 보니 core들이 일은 안 하고 lock 풀리기만
+기다린다. OpenKache는 core마다 자기 몫의 데이터를 따로 준다. 같이 쓰는 게 없으니 lock 걸 일도
+없고, 한 core가 다른 core를 기다리지도 않는다. (이걸 shared-nothing 설계라고 한다. [KVell,
+SOSP '19](https://dl.acm.org/doi/10.1145/3341301.3359628))
 
-**worker 둘, lock-free queue 하나.** network worker와 storage worker가 각자 core를 잡고 SPSC
-queue 하나로만 대화한다. parsing이 disk I/O를 막지 않고, disk I/O도 parsing을 막지 않는다.
+**읽기랑 쓰기가 서로를 안 막는다.** 한 core는 network를 읽어서 요청을 해석하고, 다른 core는
+disk를 맡는다. 둘은 한 방향 통로로 일을 넘긴다. 앞 core가 요청을 놓아두면 뒤 core가 집어간다.
+같은 걸 동시에 건드릴 일이 없으니, 서로 멈춰서 기다릴 필요가 없다.
 
-**순차 segment-group write.** flash는 작은 random write로 수명을 깎아먹는다. 그래서 OpenKache는
-그런 write를 아예 안 한다. 여러 key를 순차 flush 한 번으로 묶는다.
-([FairyWren, OSDI '24](https://www.usenix.org/conference/osdi24/presentation/mcallister))
+**찔끔찔끔 말고 한 번에 몰아서 쓴다.** SSD에 작은 데이터를 여기저기 흩뿌리며 쓰는 게 제일 느리고,
+드라이브 수명도 그만큼 깎인다. OpenKache는 쓸 것들을 모아서 한 번에 쭉 이어 쓴다. 그래서
+드라이브가 제 속도를 내고 더 오래 간다. (이걸 segment-group batching이라고 한다. [FairyWren,
+OSDI '24](https://www.usenix.org/conference/osdi24/presentation/mcallister))
 
-**Rust로 짰다.** hot path를 멈춰 세울 GC가 없다. data race는 production이 아니라 compiler가
-잡는다.
+**Rust로 짰다.** GC가 없어서 요청 처리 중에 서버가 갑자기 멈추는 일이 없다. 게다가 동시성 버그
+상당수를 compile 단계에서 잡아낸다. production까지 갈 일이 없다.
 
 전체 설계는 [docs/architecture.ko.md](./docs/architecture.ko.md)에 있다.
 

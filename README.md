@@ -68,23 +68,32 @@ p99 it is 3.0× and 3.3× lower.
 
 > **A request never leaves the core it landed on.**
 
-On a modern SSD the bottleneck is the CPU, not the disk. OpenKache keeps every
-core busy and never pays to move work between them.
+Modern SSDs are so fast that the disk is no longer the slow part. The CPU is.
+So the whole design is built around one goal: never waste a CPU cycle
+coordinating between cores.
 
-**Thread-per-core, shared-nothing.** Each worker owns one core and its own
-data. No locks, no context switches, no cache lines bouncing between cores.
-Following [KVell (SOSP '19)](https://dl.acm.org/doi/10.1145/3341301.3359628).
+**No shared data, so no waiting.** Most databases spread one dataset across
+every core, then use locks to stop them from corrupting each other. So the
+cores spend their time waiting in line for the lock instead of doing work.
+OpenKache gives each core its own private slice of data. Nothing is shared, so
+there is nothing to lock, and no core ever waits on another. (This is the
+shared-nothing design, following [KVell, SOSP '19](https://dl.acm.org/doi/10.1145/3341301.3359628).)
 
-**Two workers, one lock-free queue.** The network worker and the storage worker
-each own a core and talk through a single SPSC queue. Parsing never blocks disk
-I/O; disk I/O never blocks parsing.
+**Reading and writing never block each other.** One core reads the network and
+understands requests; another core owns the disk. They hand work off through a
+one-way lane: the first core drops a request in, the second picks it up. Since
+they never reach for the same thing at once, neither has to stop and wait for
+the other.
 
-**Sequential segment-group writes.** Flash dies from small random writes, so
-OpenKache never issues one. It batches many keys into one sequential flush.
-Following [FairyWren (OSDI '24)](https://www.usenix.org/conference/osdi24/presentation/mcallister).
+**Written in one big sweep, not a thousand pokes.** Scattering tiny writes all
+over an SSD is the slowest way to use it, and it wears the drive out faster.
+OpenKache collects many writes and lays them down in one continuous sweep, so
+the drive runs near its top speed and lasts longer. (This is segment-group
+batching, following [FairyWren, OSDI '24](https://www.usenix.org/conference/osdi24/presentation/mcallister).)
 
-**Written in Rust.** No garbage collector to stall the hot path. Data races
-caught by the compiler, not in production.
+**Built in Rust.** No garbage collector means nothing randomly freezes the
+server mid-request. And an entire class of concurrency bugs is caught while
+compiling, long before it could reach production.
 
 See [docs/architecture.md](./docs/architecture.md) for the full design.
 
