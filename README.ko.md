@@ -95,8 +95,10 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같�
 
 ## 빠른 시작
 
-OpenKache는 **Linux**에 맞춰 최적화했고 모든 성능 수치를 Linux에서 측정했다.
-Apple Silicon macOS는 기능 개발용으로 지원한다. Windows에서는 WSL2를 사용한다.
+OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크한다.
+
+- **Windows:** WSL2를 권장한다.
+- **macOS:** 기능 개발용이며 성능 비교에는 적합하지 않다.
 
 Linux에서는 `io_uring`과 사용 가능한 CPU 2개가 필요하다.
 

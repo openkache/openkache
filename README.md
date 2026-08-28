@@ -102,8 +102,10 @@ See [docs/architecture.md](./docs/architecture.md) for the full design.
 
 ## Quick start
 
-OpenKache is optimized and benchmarked on **Linux**. Apple Silicon macOS is
-supported for functional development. Use WSL2 on Windows.
+OpenKache is optimized and benchmarked for **Linux**.
+
+- **Windows:** WSL2 is recommended.
+- **macOS:** Intended for functional development, not performance comparisons.
 
 Linux requires `io_uring` and two available CPUs.
 

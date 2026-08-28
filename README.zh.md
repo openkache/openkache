@@ -91,8 +91,10 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 
 ## 快速开始
 
-OpenKache 针对 **Linux** 进行优化，所有性能数据也在 Linux 上测得。Apple Silicon
-macOS 支持功能开发。Windows 请使用 WSL2。
+OpenKache 针对 **Linux** 进行优化和基准测试。
+
+- **Windows：** 建议使用 WSL2。
+- **macOS：** 仅用于功能开发，不用于性能比较。
 
 Linux 需要 `io_uring` 和两个可用 CPU。
 
