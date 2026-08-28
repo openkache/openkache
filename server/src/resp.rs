@@ -1,3 +1,11 @@
+//! RESP (REdis Serialization Protocol) parser and response formatter.
+//!
+//! This module parses incoming RESP arrays (commands) from client socket buffers
+//! and constructs RESP bulk-string responses for values returned by storage. The
+//! parser is stateful, so partial receives spanning multiple socket reads are
+//! handled naturally without re-buffering. SET values allocate straight into an
+//! Arc-backed buffer to avoid an extra copy when passing to storage.
+
 /*
   GET hello:
       header_bytes = "$5\r\n"
@@ -23,21 +31,34 @@ use std::sync::Arc;
 
 use crate::storage_message::{Command, Reply};
 
+/// Which kind of RESP header is being parsed. RESP prefixes each element with a
+/// type byte: `*` for arrays and `$` for bulk strings.
 #[derive(Clone, Copy)]
 enum Header {
     Array,
     Bulk,
 }
 
+/// The parser's position within a RESP message. Modeling this as an explicit
+/// state machine lets `feed` resume mid-message when a socket read splits a
+/// message, without buffering the whole thing first.
 #[derive(Clone, Copy)]
 enum State {
+    /// Expecting the header type byte (`*` or `$`).
     HeaderPrefix(Header),
+    /// Accumulating the header's decimal length digits.
     HeaderNumber { kind: Header, value: Option<usize> },
+    /// Expecting the `\n` that completes a `\r\n` header terminator.
     HeaderLf { kind: Header, value: usize },
+    /// Reading the raw bytes of a bulk string body.
     BulkData { remaining: usize },
+    /// Consuming the trailing `\r\n` after a bulk string body (`pos` tracks which).
     BulkCrlf { pos: u8 },
 }
 
+/// Where the currently-parsed argument's bytes accumulate. A SET value goes
+/// directly into a shared Arc buffer so storage can take ownership without a
+/// copy; every other argument collects into a plain Vec.
 enum CurrentArg {
     VecBuffer(Vec<u8>),
     SetValue {
@@ -53,6 +74,8 @@ $3\r\nkey\r\n
 $5\r\nvalue\r\n
 */
 
+/// A streaming RESP parser. One instance lives per client, so partial messages
+/// across successive socket reads are parsed incrementally without re-buffering.
 pub(super) struct StatefulRespParser {
     state: State,
     arg_count: usize,   // 3
@@ -70,6 +93,10 @@ impl StatefulRespParser {
         }
     }
 
+    /// Feeds received bytes through the state machine, pushing each completed
+    /// command onto `pending_commands`. Returns an error on malformed RESP, which
+    /// the caller treats as a fatal client error. State persists in `self` between
+    /// calls, so a message split across reads resumes exactly where it left off.
     pub(super) fn feed(
         &mut self,
         input: &[u8],
@@ -132,6 +159,9 @@ impl StatefulRespParser {
                             self.state = State::HeaderPrefix(Header::Bulk);
                         }
                         Header::Bulk => {
+                            // The third argument of a SET is the value. Allocate it
+                            // as a shared Arc buffer now so storage takes ownership
+                            // with no copy; all other args use a plain growable Vec.
                             if self.args.len() == 2 && self.args[0].eq_ignore_ascii_case(b"SET") {
                                 self.current_arg = CurrentArg::SetValue {
                                     bytes: Arc::<[u8]>::new_uninit_slice(value),
@@ -141,6 +171,8 @@ impl StatefulRespParser {
                                 self.current_arg = CurrentArg::VecBuffer(Vec::with_capacity(value));
                             }
 
+                            // A zero-length bulk string has no body, so skip
+                            // straight to consuming its trailing CRLF.
                             self.state = if value == 0 {
                                 State::BulkCrlf { pos: 0 }
                             } else {
@@ -150,12 +182,17 @@ impl StatefulRespParser {
                     }
                 }
                 State::BulkData { remaining } => {
+                    // Copy only as much as this input chunk holds; a large value may
+                    // arrive over several reads, so `remaining` carries across calls.
                     let take = remaining.min(input.len() - pos);
                     let source = &input[pos..pos + take];
 
                     match &mut self.current_arg {
                         CurrentArg::VecBuffer(bytes) => bytes.extend_from_slice(source),
                         CurrentArg::SetValue { bytes, written } => {
+                            // Write directly into the Arc buffer. `get_mut` succeeds
+                            // because the parser is still its sole owner until the
+                            // value is finalized and handed off.
                             let destination = Arc::get_mut(bytes)
                                 .ok_or("SET value buffer is unexpectedly shared")?;
 
@@ -249,6 +286,9 @@ impl StatefulRespParser {
     }
 }
 
+/// Builds a `Command` from the fully-parsed argument list, validating each
+/// command's shape (GET/DEL take a key; SET takes a key and value; FLUSH takes
+/// nothing) and rejecting anything unsupported or malformed.
 fn command_from_args(
     args: Vec<Vec<u8>>,
     set_value: Option<Arc<[u8]>>,
@@ -301,18 +341,25 @@ fn command_from_args(
     Err("unsupported command")
 }
 
+// Pre-encoded RESP response fragments for common fixed replies. Using static
+// slices avoids re-formatting these on every request.
 static GET_NOT_FOUND_RESPONSE_BYTES: &[u8] = b"$-1\r\n";
 static SET_OK_RESPONSE_BYTES: &[u8] = b"+OK\r\n";
 static DELETE_FOUND_RESPONSE_BYTES: &[u8] = b":1\r\n";
 static DELETE_NOT_FOUND_RESPONSE_BYTES: &[u8] = b":0\r\n";
 static RESPONSE_END: &[u8] = b"\r\n";
 
+/// A response split into three slices so the network layer can write them all
+/// with a single vectored write (writev) without concatenating first. The value
+/// is kept Arc-backed, so it can be shared with storage without copying.
 pub(crate) struct ResponseToWrite {
     pub header_bytes: Cow<'static, [u8]>,
     pub value_bytes: Option<Arc<[u8]>>,
     pub ending_bytes: &'static [u8],
 }
 
+/// Converts a storage `Reply` into RESP bytes ready to write. Fixed replies borrow
+/// static slices; only a GET hit needs an owned header (the `$length\r\n` line).
 pub(crate) fn make_response_to_write(reply: Reply) -> ResponseToWrite {
     match reply {
         Reply::Get(Some(value_bytes)) => ResponseToWrite {
