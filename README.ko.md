@@ -120,10 +120,10 @@ docker run --rm \
   ghcr.io/openkache/openkache:edge
 ```
 
-### 릴리스 아카이브
+### 내려받아 실행하기
 
-[GitHub Releases](https://github.com/openkache/openkache/releases)에서 운영체제와 CPU에 맞는 파일을
-내려받아 압축을 풀고 `openkache-server`를 실행한다. 같은 폴더에 `openkache-cli`도 들어 있다.
+OpenKache는 아직 정식 릴리스 전이다. [server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0)에서
+소스를 내려받아 압축을 풀고 아래 Cargo 명령으로 실행한다.
 
 ### Cargo
 

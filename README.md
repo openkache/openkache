@@ -127,10 +127,11 @@ docker run --rm \
   ghcr.io/openkache/openkache:edge
 ```
 
-### Release archive
+### Download and run
 
-Download the archive for your platform from [GitHub Releases](https://github.com/openkache/openkache/releases),
-extract it, and run `openkache-server`. The archive also includes `openkache-cli`.
+OpenKache has not published a stable release yet. Download the source from
+[server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0),
+extract it, and run the Cargo command below.
 
 ### Cargo
 

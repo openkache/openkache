@@ -116,10 +116,10 @@ docker run --rm \
   ghcr.io/openkache/openkache:edge
 ```
 
-### 发布归档
+### 下载并运行
 
-从 [GitHub Releases](https://github.com/openkache/openkache/releases) 下载适合当前系统和 CPU 的文件，
-解压后运行 `openkache-server`。同一目录中也包含 `openkache-cli`。
+OpenKache 尚未发布正式版本。从 [server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0)
+下载并解压源码，然后运行下方的 Cargo 命令。
 
 ### Cargo
 
