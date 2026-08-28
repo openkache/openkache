@@ -1,5 +1,7 @@
 # OpenKache Community Guidelines
 
+**English** | [한국어](./COMMUNITY_GUIDELINES.ko.md)
+
 OpenKache is a systems project focused on making caching less expensive and
 easier to operate. The interesting work is in the hard edges: storage recovery,
 safe operations, clear APIs, and documentation that helps people run it well.
