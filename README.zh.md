@@ -76,13 +76,65 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 OpenKache 以 **Linux** 为主要平台:`io_uring` 网络前端和直接 I/O 存储路径都需要它。macOS
 与 Windows/WSL 支持已列入[路线图](#路线图)。
 
-环境要求:
+连接客户端之前,请先启动服务器。按顺序选择第一个适合当前环境的方法:容器镜像、已发布版本
+或 Cargo。
+
+通用要求:
 
 - 支持 `io_uring` 的 Linux
 - 进程可用的两个不同 CPU
-- Rust 以及工作区依赖所需的原生工具链
 
-使用 CPU 0 和 1 在 `127.0.0.1:4433` 上运行服务器:
+### 容器镜像
+
+无需向 GHCR 认证即可运行已发布的预览镜像:
+
+```bash
+podman run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:edge
+```
+
+`edge` 标签跟随 `main` 分支最近一次成功的构建。若需要可重现的部署,请使用多平台镜像清单的
+`sha256` 摘要来固定版本,而不要使用会滚动更新的标签。
+
+如需在本地构建镜像,请在仓库根目录运行:
+
+```bash
+docker build --file server/Dockerfile --tag localhost/openkache:dev .
+docker run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  --volume openkache-data:/var/lib/openkache \
+  localhost/openkache:dev
+```
+
+默认的容器命令将网络线程固定在 CPU 0,存储线程固定在 CPU 1。如果容器的 CPU 集合使用不同的
+编号,请覆盖该命令。详见[容器指南](./docs/container-image.md)。
+
+### GitHub Release
+
+当 `server-v<version>` 发布后,从 [GitHub Releases](https://github.com/openkache/openkache/releases)
+下载适合 Linux 环境的归档。将 `SERVER_VERSION` 设为已发布版本,然后验证并运行归档:
+
+```bash
+VERSION="${SERVER_VERSION:?set SERVER_VERSION to a published version}"
+PLATFORM="linux-x86_64-musl" # arm64 使用 linux-aarch64-musl
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"
+curl --fail --location --remote-name "${BASE}/${ARCHIVE}"
+curl --fail --location --remote-name "${BASE}/SHA256SUMS"
+grep -F " ${ARCHIVE}" SHA256SUMS | sha256sum --check
+tar -xzf "${ARCHIVE}"
+"./openkache-server-${VERSION}-${PLATFORM}/openkache-server"
+```
+
+### Cargo
+
+从源码构建还需要 Rust 以及工作区依赖所需的原生工具链。使用 CPU 0 和 1 在
+`127.0.0.1:4433` 上运行服务器:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
@@ -138,36 +190,6 @@ openkache-cli get hello
 
 > **本地开发信任配置。** 默认的 Gate 0 配置用于本地开发:它在 QUIC 之上使用 TLS 1.3 且绝不
 > 回退到明文,但不验证服务器证书。请勿将这种信任配置用于生产流量。
-
-## 容器镜像
-
-从仓库根目录本地构建:
-
-```bash
-docker build --file server/Dockerfile --tag localhost/openkache:dev .
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  --volume openkache-data:/var/lib/openkache \
-  localhost/openkache:dev
-```
-
-无需向 GHCR 认证即可运行已发布的预览镜像:
-
-```bash
-podman run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  ghcr.io/openkache/openkache:edge
-```
-
-`edge` 标签跟随 `main` 分支最近一次成功的构建。若需要可重现的部署,请使用多平台镜像清单的
-`sha256` 摘要来固定版本,而不要使用会滚动更新的标签。
-
-默认的容器命令将网络线程固定在 CPU 0,存储线程固定在 CPU 1。如果容器的 CPU 集合使用不同的
-编号,请覆盖该命令。详见[容器指南](./docs/container-image.md)。
 
 ## 路线图
 

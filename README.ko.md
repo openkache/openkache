@@ -81,13 +81,67 @@ OpenKache는 **Linux**를 주 플랫폼으로 삼습니다: `io_uring` 네트워
 I/O 스토리지 경로가 Linux를 필요로 합니다. macOS·Windows/WSL 지원은 [로드맵](#로드맵)에
 있습니다.
 
-요구사항:
+클라이언트를 연결하기 전에 먼저 서버를 실행하세요. 환경에 맞는 첫 번째 방법을 선택합니다:
+컨테이너 이미지, 게시된 릴리스, Cargo 순입니다.
+
+공통 요구사항:
 
 - `io_uring`을 지원하는 Linux
 - 프로세스가 쓸 수 있는 서로 다른 CPU 2개
-- Rust와 워크스페이스 의존성이 요구하는 네이티브 툴체인
 
-CPU 0번과 1번을 사용해 서버를 `127.0.0.1:4433`에서 실행:
+### 컨테이너 이미지
+
+GHCR 인증 없이 게시된 프리뷰 이미지를 실행합니다:
+
+```bash
+podman run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:edge
+```
+
+`edge` 태그는 `main` 브랜치의 가장 최근 성공한 빌드를 따라갑니다. 재현 가능한 배포가
+필요하다면 계속 바뀌는 태그 대신 멀티플랫폼 매니페스트를 `sha256` 다이제스트로 고정하세요.
+
+이미지를 로컬에서 빌드하려면 저장소 루트에서 실행합니다:
+
+```bash
+docker build --file server/Dockerfile --tag localhost/openkache:dev .
+docker run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  --volume openkache-data:/var/lib/openkache \
+  localhost/openkache:dev
+```
+
+기본 컨테이너 커맨드는 네트워크 스레드를 CPU 0번에, 스토리지 스레드를 CPU 1번에
+고정합니다. 컨테이너의 CPU 세트가 다른 ID를 사용한다면 커맨드를 재정의하세요. 자세한
+내용은 [컨테이너 가이드](./docs/container-image.md)를 참고하세요.
+
+### GitHub 릴리스
+
+`server-v<version>` 릴리스가 게시되면 [GitHub Releases](https://github.com/openkache/openkache/releases)에서
+Linux 환경에 맞는 아카이브를 다운로드합니다. `SERVER_VERSION`을 게시된 버전으로 지정한
+후 아카이브를 검증하고 실행하세요:
+
+```bash
+VERSION="${SERVER_VERSION:?set SERVER_VERSION to a published version}"
+PLATFORM="linux-x86_64-musl" # arm64에서는 linux-aarch64-musl 사용
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"
+curl --fail --location --remote-name "${BASE}/${ARCHIVE}"
+curl --fail --location --remote-name "${BASE}/SHA256SUMS"
+grep -F " ${ARCHIVE}" SHA256SUMS | sha256sum --check
+tar -xzf "${ARCHIVE}"
+"./openkache-server-${VERSION}-${PLATFORM}/openkache-server"
+```
+
+### Cargo
+
+소스에서 빌드하려면 Rust와 워크스페이스 의존성이 요구하는 네이티브 툴체인도 필요합니다.
+CPU 0번과 1번을 사용해 서버를 `127.0.0.1:4433`에서 실행합니다:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
@@ -145,37 +199,6 @@ openkache-cli get hello
 > **로컬 개발용 신뢰 프로필.** 기본 Gate 0 프로필은 로컬 개발용입니다: QUIC 위에서 TLS
 > 1.3을 사용하고 평문으로 폴백하지 않지만, 서버 인증서를 검증하지 않습니다. 이 신뢰
 > 프로필을 운영(production) 트래픽에 재사용하지 마세요.
-
-## 컨테이너 이미지
-
-저장소 루트에서 로컬로 빌드하기:
-
-```bash
-docker build --file server/Dockerfile --tag localhost/openkache:dev .
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  --volume openkache-data:/var/lib/openkache \
-  localhost/openkache:dev
-```
-
-GHCR에 인증하지 않고 게시된 프리뷰 이미지 실행하기:
-
-```bash
-podman run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  ghcr.io/openkache/openkache:edge
-```
-
-`edge` 태그는 `main` 브랜치의 가장 최근 성공한 빌드를 따라갑니다. 재현 가능한 배포가
-필요하다면 계속 바뀌는 태그 대신 멀티플랫폼 매니페스트를 `sha256` 다이제스트로 고정하세요.
-
-기본 컨테이너 커맨드는 네트워크 스레드를 CPU 0번에, 스토리지 스레드를 CPU 1번에
-고정합니다. 컨테이너의 CPU 세트가 다른 ID를 사용한다면 커맨드를 재정의하세요. 자세한
-내용은 [컨테이너 가이드](./docs/container-image.md)를 참고하세요.
 
 ## 로드맵
 
