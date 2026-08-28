@@ -165,11 +165,11 @@ const LICENSE_SELECTIONS: Readonly<Record<string, string>> = {
  *
  * SPDX/reuse projects often use short names inside `LICENSES/`, which are
  * handled separately below.  The prefix also covers common aggregate files
- * such as `THIRD-PARTY-NOTICES` without treating unrelated source files as
- * legal text.
+ * such as `THIRD-PARTY-NOTICES` and `THIRD_PARTY` without treating unrelated
+ * source files as legal text.
  */
 const LICENSE_FILE_NAME =
-  /^(?:(?:third[._ -]?party[._ -]?)?(?:licenses?|licences?|copying(?:[0-9]+)?|notices?|authors?|copyrights?|unlicenses?|patents?))(?:[._-].*)?$/iu
+  /^(?:(?:third[._ -]?party[._ -]?)?(?:licenses?|licences?|copying(?:[0-9]+)?|notices?|authors?|copyrights?|unlicenses?|patents?|third[._ -]?party))(?:[._-].*)?$/iu
 const CRATES_IO_SOURCE_PREFIX =
   "registry+https://github.com/rust-lang/crates.io-index"
 
