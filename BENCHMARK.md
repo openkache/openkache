@@ -49,7 +49,7 @@ All three systems were driven by kvbench, a custom load generator that speaks
 each system's native protocol: RESP for OpenKache, the PostgreSQL wire protocol
 for PostgreSQL, and the MySQL wire protocol for MySQL. Using a single tool
 across all three systems keeps the client-side code path, key distribution, and
-measurement logic identical — only the wire protocol changes per backend. In
+measurement logic identical; only the wire protocol changes per backend. In
 every run the database was pinned to CPU cores 0–1 and the load generator to
 cores 2–5. kvbench source is under `bench/kvbench/`.
 
@@ -67,8 +67,8 @@ statements were used.
 
 ### Latency
 
-All three systems were driven by kvbench speaking each system's native protocol
-— RESP for OpenKache, the PostgreSQL wire protocol for PostgreSQL, and the
+All three systems were driven by kvbench speaking each system's native protocol:
+RESP for OpenKache, the PostgreSQL wire protocol for PostgreSQL, and the
 MySQL wire protocol for MySQL. The database was pinned to CPU cores 0–1 and the
 load generator to cores 2–5. The generator used a single connection and sent one
 request at a time, so each sample is the full end-to-end latency of one query

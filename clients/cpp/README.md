@@ -111,7 +111,7 @@ uncompressed/unprotected values, and TLS 1.3 with ALPN `openkache/1` and
 derivation.
 `DevelopmentTrust` deliberately disables certificate and hostname verification
 while retaining TLS encryption and has no plaintext fallback.  This profile is
-**development only — do not use this trust profile in production**.  Trust
+**development only: do not use this trust profile in production**.  Trust
 roots, certificates, mTLS, retries, timeouts, cancellation, TTL, conditional
 writes, raw/JSON selectors, Exact Item IDs, compression, and value-protection
 controls are intentionally not part of the maintained facade.

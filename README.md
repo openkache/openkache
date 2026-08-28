@@ -21,13 +21,11 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 - [Connect a client](#connect-a-client)
 - [Container image](#container-image)
 - [Roadmap](#roadmap)
-- [Build and verify](#build-and-verify)
-- [Client packages](#client-packages)
-- [Repository layout](#repository-layout)
-- [Project status](#project-status)
 - [Contributing](#contributing)
 - [License](#license)
 - [Third-party attributions](#third-party-attributions)
+
+---
 
 ## Benchmarks
 
@@ -58,6 +56,8 @@ a single storage core.
 Average GET latency is 1.6× lower than MySQL and 2.3× lower than PostgreSQL; at
 p99 it is 3.0× and 3.3× lower.
 
+---
+
 ## Architecture
 
 <div align="center">
@@ -68,13 +68,13 @@ p99 it is 3.0× and 3.3× lower.
 
 **Why is OpenKache fast?** Because it never hops between cores.
 
-Most servers let a thread pool roam across cores. That is not free — lock
+Most servers let a thread pool roam across cores. That is not free: lock
 contention, mutexes, context switches, and the synchronization and copy cost
 paid every time a cache line bounces from one core to another. The heavier the
 load, the more this overhead eats into throughput.
 
 OpenKache takes a **thread-per-core (shared-nothing)** design. Each worker is
-pinned to a single core, owns its own data, and shares no state — so there are
+pinned to a single core, owns its own data, and shares no state, so there are
 no locks. This is the same design TigerBeetle, ScyllaDB, and Redis converged on
 to squeeze every drop out of the hardware. The network path and the storage
 path each own a core, and they communicate through exactly one **lock-free SPSC
@@ -82,14 +82,14 @@ queue**. RESP parsing never blocks disk I/O.
 
 Redis runs commands on a single core. OpenKache keeps the same shared-nothing
 principle but shards workers across cores, so throughput scales with the
-hardware instead of hitting a single-core ceiling — and with no shared locks,
+hardware instead of hitting a single-core ceiling. With no shared locks,
 adding a core adds no contention.
 
 Values live on the SSD; keys live in a compact RAM index (compressed key →
 segment offset). And just as a subway moves more people than a car, OpenKache
 batches writes from many keys into a single sequential **segment-group** flush
 instead of one SSD write per key, using the drive's sequential bandwidth to the
-fullest — on Linux, submitting that I/O through `io_uring` to erase even the
+fullest. On Linux, it submits that I/O through `io_uring` to erase even the
 system-call overhead.
 
 All of it is written in **Rust**: no GC pauses, data races ruled out at compile
@@ -97,6 +97,8 @@ time, C-level control in hand. There is no room for a garbage-collection pause
 on the fast path.
 
 See [docs/architecture.md](./docs/architecture.md) for the full design.
+
+---
 
 ## Quick start
 
@@ -139,11 +141,16 @@ extract it, and run the Cargo command below.
 cargo run --locked --package openkache-server --bin openkache-server
 ```
 
+---
+
 ## Connect a client
 
 With the server running, connect from your language of choice. All client
 guides use `127.0.0.1:4433` as the default local endpoint and list the complete
 public API for their language.
+
+OpenKache publishes separate client packages for TypeScript/JavaScript, Python,
+and Rust. All three share the same protocol and value-format sources:
 
 | Package | Install | Documentation | Source |
 |---|---|---|---|
@@ -151,21 +158,24 @@ public API for their language.
 | Python | `python -m pip install openkache` | [PyPI](https://pypi.org/project/openkache/) · [client README](clients/python/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/python) |
 | Rust | `cargo add openkache` | [crates.io](https://crates.io/crates/openkache) · [docs.rs](https://docs.rs/openkache/latest/openkache/) · [client README](clients/rust/README.md) | [GitHub](https://github.com/openkache/openkache/tree/main/clients/rust) |
 
+See [clients/README.md](./clients/README.md) for the status of additional
+bindings, including .NET, Go, C, C++, and Swift.
+
 The Rust SDK in a nutshell:
 
 ```rust
 use openkache::{Client, Value};
 
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-client.set("greeting", Value::text("hello")).await?;
-assert_eq!(
-    client.get("greeting").await?.unwrap(),
-    Value::text("hello"),
-);
-client.close().await?;
-# Ok(())
-# }
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client.set("greeting", Value::text("hello")).await?;
+    assert_eq!(
+        client.get("greeting").await?.unwrap(),
+        Value::text("hello"),
+    );
+    client.close().await?;
+    Ok(())
+}
 ```
 
 The source-built [`openkache-cli`](clients/cli/README.md) is the Bash-friendly
@@ -180,10 +190,7 @@ Use `openkache-cli --profile configured` when certificate roots, mutual TLS,
 client-side value protection, or compatibility-only TTL/conditional writes are
 required.
 
-> **Local development trust profile.** The default Gate 0 profile is for local
-> development: it uses TLS 1.3 over QUIC and never falls back to plaintext, but
-> it does not verify the server certificate. Do not reuse this trust profile for
-> production traffic.
+---
 
 ## Roadmap
 
@@ -196,66 +203,15 @@ required.
 
 Full detail in [ROADMAP.md](./ROADMAP.md).
 
-## Build and verify
-
-```bash
-cargo check --locked
-cargo test --locked --package openkache-server
-cargo server-build
-```
-
-The root Cargo workspace owns the protocol, server, shared client core, Rust
-SDK, CLI, and native TypeScript adapter under one lockfile.
-
-Server allocator experiments are available as opt-in features:
-
-```bash
-cargo server-build --features alloc-jemalloc
-cargo server-build --features alloc-mimalloc
-```
-
-Do not enable both allocator features at once.
-
-## Client packages
-
-Maintained client packages share the same protocol and value-format sources.
-See [clients/README.md](./clients/README.md) for the current status of Rust,
-TypeScript, Python, .NET, Go, C, C++, Swift, and other bindings.
-
-The current server compatibility frontend supports only the Gate 0 operation
-subset listed above. Broader APIs described by target contracts may be present
-in generated clients before the server implements them.
-
-## Repository layout
-
-| Path | Contents |
-| --- | --- |
-| `server/` | Current SSD cache server and container definition |
-| `protocol/` | Shared wire model, generated contracts, and codecs |
-| `clients/` | Client SDKs and native adapters |
-| `docs/` | Current usage guides and explicitly identified target documents |
-
-The current server implementation lives in [server/README.md](./server/README.md).
-Protocol details live in [protocol/README.md](./protocol/README.md).
-
-## Project status
-
-| Component | Status |
-| --- | --- |
-| RESP/TCP server | Preview |
-| OpenKache/QUIC Gate 0 server | Preview |
-| SSD storage and deletion | Preview |
-| Restart recovery | Not implemented |
-| Production authentication | Not implemented |
-| Client SDKs | Preview; see package status |
-| Container image | Available for Linux amd64/arm64 |
-| Clustering | Not started |
+---
 
 ## Contributing
 
 - [Contributing guide](./CONTRIBUTING.md)
 - [Community guidelines](./COMMUNITY_GUIDELINES.md)
 - [Code of conduct](./CODE_OF_CONDUCT.md)
+
+---
 
 ## License
 
@@ -264,6 +220,8 @@ Except where otherwise noted, OpenKache is licensed under the
 under [`clients/`](./clients/) and the shared protocol under
 [`protocol/`](./protocol/) are licensed under the Apache License 2.0; see
 the `LICENSE` file in each directory.
+
+---
 
 ## Third-party attributions
 

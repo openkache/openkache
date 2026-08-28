@@ -1,4 +1,4 @@
-# OpenKache Maintained Client Contract — Version 1 Gate 0
+# OpenKache Maintained Client Contract: Version 1 Gate 0
 
 > **Status:** Frozen Gate 0 (`v1-gate0`, 2026-08-24).
 >
@@ -159,7 +159,7 @@ The server still presents a certificate and TLS still encrypts traffic.
 `DevelopmentTrust` deliberately disables client-side chain and hostname
 verification, so it provides passive confidentiality but no active
 man-in-the-middle protection. Every example using it MUST say
-**development only — do not use this trust profile in production**. Plaintext
+**development only: do not use this trust profile in production**. Plaintext
 fallback is never permitted.
 
 The root and namespace are public development fixtures, not production

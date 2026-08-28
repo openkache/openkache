@@ -15,7 +15,7 @@ OpenKache 是一款 SSD 优先(SSD-first)的缓存服务器。它不把 SSD 当�
 ## Thread-per-core,shared-nothing(无共享)
 
 传统服务器把请求交给线程池,而这些线程在核心之间迁移。每次迁移都有代价:锁竞争、互斥量所有权
-转移、上下文切换,以及在核心之间弹跳的缓存行 —— 每一样都强制同步与拷贝。负载之下,成为瓶颈的
+转移、上下文切换,以及在核心之间弹跳的缓存行。每一样都强制同步与拷贝。负载之下,成为瓶颈的
 是这些协调开销,而非实际工作。
 
 OpenKache 把每个工作线程固定到单个核心。工作线程拥有自己的数据,不与其他工作线程共享可变状态,
@@ -43,7 +43,7 @@ Redis 在单一核心上执行命令。OpenKache 保持无共享原则,但将工
 ### 段组写入聚合
 
 一次只往 SSD 写一个键是在浪费驱动器:小的随机写远低于其顺序上限。OpenKache 转而把来自多个键的
-写入合并成一次顺序的 **段组(segment-group)** 刷写 —— 就像地铁一趟运送许多乘客,而不是每人一辆
+写入合并成一次顺序的 **段组(segment-group)** 刷写,就像地铁一趟运送许多乘客,而不是每人一辆
 车。SSD 看到的是大块顺序写入,从而接近其带宽极限。
 
 在 Linux 上,存储工作线程通过 **`io_uring`** 配合直接 I/O 提交这些 I/O,这消除了每次操作的
@@ -53,15 +53,15 @@ Redis 在单一核心上执行命令。OpenKache 保持无共享原则,但将工
 
 服务器在同一个数字地址上暴露两种传输:
 
-- **RESP over TCP** —— Redis 兼容的 `GET`/`SET`/`DEL`,因此现有的 Redis 工具和客户端无需改动
+- **RESP over TCP:** Redis 兼容的 `GET`/`SET`/`DEL`,因此现有的 Redis 工具和客户端无需改动
   即可工作。
-- **OpenKache Gate 0 over QUIC/UDP** —— 原生协议,在 QUIC 之上运行 TLS 1.3。一个兼容性前端把
+- **OpenKache Gate 0 over QUIC/UDP:** 原生协议,在 QUIC 之上运行 TLS 1.3。一个兼容性前端把
   QUIC 桥接到同一个存储引擎。
 
 ## 为什么选择 Rust
 
 整个服务器用 Rust 编写。没有垃圾回收器,因此没有 GC 停顿能打断快路径。所有权与借用模型在编译期
-排除数据竞争 —— 这一点尤为重要,正因为该设计依赖核心本地所有权与无锁队列。而且 Rust 保留了对
+排除数据竞争。这一点尤为重要,正因为该设计依赖核心本地所有权与无锁队列。而且 Rust 保留了对
 内存布局与系统调用的 C 级别控制,因此上述以硬件为中心的设计无需放弃安全性即可表达。
 
 ## 平台支持
@@ -72,6 +72,6 @@ Linux 是主要平台:`io_uring` 网络前端和直接 I/O 存储路径都依赖
 
 ## 相关文档
 
-- [ROADMAP.zh.md](../ROADMAP.zh.md) —— 该设计的走向
-- [server/README.md](../server/README.md) —— 服务器实现与操作子集
-- [protocol/README.md](../protocol/README.md) —— 线协议与生成的契约
+- [ROADMAP.zh.md](../ROADMAP.zh.md): 该设计的走向
+- [server/README.md](../server/README.md): 服务器实现与操作子集
+- [protocol/README.md](../protocol/README.md): 线协议与生成的契约

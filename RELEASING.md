@@ -7,10 +7,10 @@ assets. Every registry version and server release is immutable.
 
 The release has two phases:
 
-1. **Prepare the release** — build and inspect everything, create the package
+1. **Prepare the release:** build and inspect everything, create the package
    tags, and dispatch the workflows. This phase stops while each workflow is
    waiting for its protected-environment approval.
-2. **Publish the release** — review the staged artifacts, approve the
+2. **Publish the release:** review the staged artifacts, approve the
    protected environment, and verify the published versions.
 
 Do not dispatch a workflow until its protected environment requires a reviewer.
@@ -470,24 +470,24 @@ Before approving a package, open its workflow run and verify:
 
 Configure the protected environments before the first release:
 
-- **`pypi-release`** — configure a PyPI Trusted Publisher for owner
+- **`pypi-release`:** configure a PyPI Trusted Publisher for owner
   `openkache`, repository `openkache`, workflow
   `.github/workflows/publish-pypi.yml`, and environment `pypi-release`.
-- **`npm-release`** — configure an npm Trusted Publisher for package
+- **`npm-release`:** configure an npm Trusted Publisher for package
   `openkache`, repository `openkache`, workflow `publish-npm.yml`, and
   environment `npm-release`.
-- **`crates-io-release`** — if `openkache` has never been published, store a
+- **`crates-io-release`:** if `openkache` has never been published, store a
   narrowly scoped `CARGO_REGISTRY_TOKEN` environment secret for the bootstrap
   release. crates.io Trusted Publishing cannot bootstrap a crate that has
   never been published. After the first `openkache` version exists, configure
   its [Trusted Publisher](https://crates.io/docs/trusted-publishing) with
   owner `openkache`, repository `openkache`, workflow filename
   `publish-crates.yml`, and environment `crates-io-release`.
-- **`nuget-release`** — configure required reviewers for
+- **`nuget-release`:** configure required reviewers for
   `.github/workflows/publish-nuget.yml`. The build job has no registry
   credentials; `NuGet/login@v1` runs only after the protected publish job is
   approved.
-- **`cmake-release`** — configure required reviewers for
+- **`cmake-release`:** configure required reviewers for
   `.github/workflows/build-cmake-archives.yml`. This environment protects the
   manual archive build and does not grant registry credentials.
 

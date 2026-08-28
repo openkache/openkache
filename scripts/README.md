@@ -6,9 +6,9 @@
 registered documents stay in sync. It checks staged files before each commit
 and rejects the commit if:
 
-- **co-change violation** — only one language was edited (e.g., you fixed a
+- **co-change violation:** only one language was edited (e.g., you fixed a
   typo in `README.md` but forgot `README.ko.md` and `README.zh.md`)
-- **structural parity violation** — the three files have different numbers of
+- **structural parity violation:** the three files have different numbers of
   `##` / `###` headings or fenced code blocks, or one is missing the
   language-switcher line
 
