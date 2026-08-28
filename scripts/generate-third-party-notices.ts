@@ -161,15 +161,17 @@ const LICENSE_SELECTIONS: Readonly<Record<string, string>> = {
 }
 
 /**
- * Conventional names used for license, notice, copyright, and patent files.
+ * Conventional names used for license, notice, attribution, copyright, and
+ * patent files.
  *
  * SPDX/reuse projects often use short names inside `LICENSES/`, which are
  * handled separately below.  The prefix also covers common aggregate files
- * such as `THIRD-PARTY-NOTICES` and `THIRD_PARTY` without treating unrelated
- * source files as legal text.
+ * such as `THIRD-PARTY-NOTICES` and `THIRD_PARTY`, plus standalone credits
+ * and acknowledgments files, without treating unrelated source files as legal
+ * text.
  */
 const LICENSE_FILE_NAME =
-  /^(?:(?:third[._ -]?party[._ -]?)?(?:licenses?|licences?|copying(?:[0-9]+)?|notices?|authors?|copyrights?|unlicenses?|patents?|third[._ -]?party))(?:[._-].*)?$/iu
+  /^(?:(?:third[._ -]?party[._ -]?)?(?:licenses?|licences?|copying(?:[0-9]+)?|notices?|authors?|contributors?|credits?|acknowledg(?:e)?ments?|copyrights?|unlicenses?|patents?|third[._ -]?party))(?:[._-].*)?$/iu
 const CRATES_IO_SOURCE_PREFIX =
   "registry+https://github.com/rust-lang/crates.io-index"
 
@@ -433,7 +435,11 @@ export function collect_license_files(
           `License or notice path ${relative_path} does not resolve to a regular file.`,
         )
       }
-      if (file_stats.size === 0) continue
+      if (file_stats.size === 0) {
+        fail(
+          `License or notice file ${relative_path} is empty and cannot satisfy a redistribution attribution requirement.`,
+        )
+      }
       const bytes = readFileSync(content_path)
       if (bytes.includes(0)) {
         fail(
