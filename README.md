@@ -66,11 +66,12 @@ p99 it is 3.0× and 3.3× lower.
 
 </div>
 
-> **A request never leaves the core it landed on.**
+> **Every cache bet on RAM. Because disk was slow.**
+> **SSDs changed the bet. The slow part isn't the disk now. It's the CPU.**
+> **So OpenKache is built SSD-first.**
 
-Modern SSDs are so fast that the disk is no longer the slow part. The CPU is.
-So the whole design is built around one goal: never waste a CPU cycle
-coordinating between cores.
+Values live on the SSD; only a small index stays in RAM. From there, every
+design choice removes one more way the CPU could sit idle.
 
 **No shared data, so no waiting.** Most databases spread one dataset across
 every core, then use locks to stop them from corrupting each other. So the

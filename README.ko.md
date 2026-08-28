@@ -65,10 +65,12 @@ OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르며, 단일 스�
 
 </div>
 
-> **request 하나는 처음 잡은 core에서 끝까지 처리된다.**
+> **모든 cache는 RAM에 걸었다. disk가 느렸으니까.**
+> **SSD가 판을 바꿨다. 느린 건 이제 disk가 아니다. CPU다.**
+> **그래서 OpenKache는 SSD-first로 짰다.**
 
-요즘 SSD는 워낙 빨라서 이제 느린 쪽은 disk가 아니라 CPU다. 그래서 설계 전체가 한 가지에
-맞춰져 있다. core끼리 작업을 주고받느라 CPU를 낭비하지 않는 것.
+값은 SSD에 두고, RAM에는 작은 index만 남긴다. 여기서부터 모든 설계 결정은 CPU가 노는 순간을
+하나씩 지워 나간다.
 
 **공유하는 데이터가 없으니 기다릴 일도 없다.** 보통 database는 하나의 데이터를 여러 core가
 같이 쓰고, 서로 망가뜨리지 못하게 lock을 건다. 그러다 보니 core들이 일은 안 하고 lock 풀리기만

@@ -64,10 +64,12 @@ OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即
 
 </div>
 
-> **一个请求从头到尾都在它最初落到的那个 core 上处理。**
+> **所有 cache 都押注 RAM。因为 disk 慢。**
+> **SSD 改变了这个赌注。现在慢的不是 disk,是 CPU。**
+> **所以 OpenKache 从一开始就按 SSD-first 来造。**
 
-现代 SSD 太快了,慢的已经不是磁盘,而是 CPU。所以整个设计只围绕一件事:绝不把 CPU 浪费在
-core 之间来回协调上。
+值放在 SSD 上,RAM 里只留一份小小的 index。从这里开始,每一个设计决策都在消除 CPU 空转的一种
+可能。
 
 **没有共享数据,就没有等待。** 大多数 database 让多个 core 共用同一份数据,再用 lock 防止它们
 互相破坏。结果 core 们不干活,光排队等 lock。OpenKache 给每个 core 分一块自己的数据。没有共享,
