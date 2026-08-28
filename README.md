@@ -29,32 +29,32 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 
 ## Benchmarks
 
-Measured on a 6 vCPU AMD EPYC 7773X host (SSD, kernel 6.8) over loopback, with
-32-byte keys and 100-byte values. Each system is driven by a load tool speaking
-its own native protocol. Full methodology in [BENCHMARK.md](./BENCHMARK.md).
+Benchmarks ran over loopback on
+[serveroptima1](./benchmark/BENCHMARK.md#test-environment).
+
+All three systems were benchmarked with kvbench using their native protocols.
+Each database uses a different protocol, so we built kvbench to measure them
+consistently. See the [full methodology and kvbench
+details](./benchmark/BENCHMARK.md).
 
 **GET throughput**
 
 | System | GET throughput | Load tool |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | kvbench (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
-| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
+| OpenKache | **97,887 ops/s (1×)** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL, reaching
-76% of the machine's single-core 4 KiB random-read ceiling (128,820 IOPS) with
-a single storage core.
+OpenKache reaches 76% of the hardware limit (128,820 IOPS, measured with
+[fio](https://github.com/axboe/fio)).
 
 **GET latency (one request at a time)**
 
 | System | avg | p50 | p99 | p99.9 |
 |---|---:|---:|---:|---:|
-| OpenKache | **238.7 µs** | 229 µs | 386 µs | 1376 µs |
-| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
-| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
-
-Average GET latency is 1.6× lower than MySQL and 2.3× lower than PostgreSQL; at
-p99 it is 3.0× and 3.3× lower.
+| OpenKache | **238.7 µs (1×)** | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
+| MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
+| PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
 
 ---
 
@@ -107,38 +107,42 @@ OpenKache is optimized and benchmarked for **Linux**.
 - **Windows:** WSL2 is recommended.
 - **macOS:** Intended for functional development, not performance comparisons.
 
-Linux requirements:
-
-- Linux with `io_uring`
-- two distinct CPUs available to the process
+Linux requires `io_uring` and two available CPUs.
 
 ### Docker
 
-Download the image:
-
-```bash
-docker pull ghcr.io/openkache/openkache:edge
-```
-
-Run the server:
-
 ```bash
 docker run --rm \
-  --network host \
   --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-### Download and run
+`seccomp=unconfined` allows the container to use `io_uring`.
 
-OpenKache has not published a stable release yet. Download the source from
-[server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0),
-extract it, and run the Cargo command below.
+On macOS and Windows, Docker Desktop selects the matching image architecture
+and runs the Linux image in a VM.
 
-### Cargo
+### Cargo (Linux and macOS)
+
+Install Rust, Bun, Smithy CLI, and a C toolchain. Then build the release binary
+from the repository root:
 
 ```bash
-cargo run --locked --package openkache-server --bin openkache-server
+cargo build --locked --release --package openkache-server --bin openkache-server
+```
+
+Run it on Linux with separate network and storage CPUs:
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433 0 1
+```
+
+Run it on Apple Silicon macOS without CPU arguments:
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433
 ```
 
 ---

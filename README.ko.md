@@ -29,31 +29,31 @@
 
 ## 벤치마크
 
-6 vCPU AMD EPYC 7773X 호스트(SSD, 커널 6.8)에서 루프백 환경으로 측정했으며, 32바이트
-키와 100바이트 값을 사용합니다. 각 시스템은 자체 프로토콜로 통신하는 로드 툴로 구동됩니다.
-전체 방법론은 [BENCHMARK.md](./BENCHMARK.md)를 참고하세요.
+벤치마크는 [serveroptima1](./benchmark/BENCHMARK.md#test-environment)의 loopback에서
+실행했다.
+
+세 시스템 모두 각자의 native protocol로 kvbench 벤치마크를 실행했다.
+데이터베이스마다 프로토콜이 달라서, 같은 기준으로 측정할 수 있는 kvbench를 만들었다.
+전체 방법론과 kvbench 설명은 [benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)에 정리했다.
 
 **GET 처리량**
 
 | 시스템 | GET 처리량 | 로드 툴 |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | kvbench (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
-| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
+| OpenKache | **97,887 ops/s (1×)** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르며, 단일 스토리지 코어로 머신의
-단일 코어 4 KiB 랜덤 읽기 한계치(128,820 IOPS)의 76%에 도달합니다.
+OpenKache는 하드웨어 한계값의 76%([fio](https://github.com/axboe/fio)로
+측정한 128,820 IOPS)에 도달한다.
 
 **GET 지연시간 (요청을 한 번에 하나씩 처리)**
 
 | 시스템 | 평균 | p50 | p99 | p99.9 |
 |---|---:|---:|---:|---:|
-| OpenKache | **238.7 µs** | 229 µs | 386 µs | 1376 µs |
-| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
-| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
-
-평균 GET 지연시간은 MySQL보다 1.6배, PostgreSQL보다 2.3배 낮습니다. p99 기준으로는
-각각 3.0배, 3.3배 낮습니다.
+| OpenKache | **238.7 µs (1×)** | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
+| MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
+| PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
 
 ---
 
@@ -95,42 +95,47 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같�
 
 ## 빠른 시작
 
-OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크합니다.
+OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크한다.
 
-- **Windows:** WSL2 사용을 권장합니다.
-- **macOS:** 기능 개발용이며 성능 비교에는 적합하지 않습니다.
+- **Windows:** WSL2를 권장한다.
+- **macOS:** 기능 개발용이며 성능 비교에는 적합하지 않다.
 
-Linux 요구사항:
-
-- `io_uring`을 지원하는 Linux
-- 프로세스가 쓸 수 있는 서로 다른 CPU 2개
+Linux에서는 `io_uring`과 사용 가능한 CPU 2개가 필요하다.
 
 ### Docker
 
-이미지를 내려받는다:
-
-```bash
-docker pull ghcr.io/openkache/openkache:edge
-```
-
-서버를 실행한다:
-
 ```bash
 docker run --rm \
-  --network host \
   --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-### 내려받아 실행하기
+`seccomp=unconfined`은 container에서 `io_uring`을 쓰기 위해 필요하다.
 
-OpenKache는 아직 정식 릴리스 전이다. [server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0)에서
-소스를 내려받아 압축을 풀고 아래 Cargo 명령으로 실행한다.
+macOS와 Windows에서는 Docker Desktop이 CPU architecture에 맞는 image를 자동으로
+고른 뒤 Linux VM에서 실행한다.
 
-### Cargo
+### Cargo (Linux·macOS)
+
+Rust, Bun, Smithy CLI, C toolchain을 설치한 뒤 저장소 루트에서 release binary를
+빌드한다.
 
 ```bash
-cargo run --locked --package openkache-server --bin openkache-server
+cargo build --locked --release --package openkache-server --bin openkache-server
+```
+
+Linux에서는 network와 storage에 서로 다른 CPU를 지정해 실행한다.
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433 0 1
+```
+
+Apple Silicon macOS에서는 CPU 번호 없이 실행한다.
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433
 ```
 
 ---

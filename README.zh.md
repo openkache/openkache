@@ -29,30 +29,30 @@
 
 ## 基准测试
 
-测试环境为 6 vCPU AMD EPYC 7773X 主机(SSD,内核 6.8),通过环回网络进行,使用 32 字节的键
-和 100 字节的值。每个系统都由讲各自原生协议的负载测试工具驱动。完整方法说明见
-[BENCHMARK.md](./BENCHMARK.md)。
+基准测试在 [serveroptima1](./benchmark/BENCHMARK.md#test-environment) 上通过回环网络运行。
+
+三个系统都使用 kvbench 通过各自的原生协议进行基准测试。由于每个数据库的协议不同,
+我们构建了 kvbench 来用同一标准测量它们。完整方法和 kvbench 说明见
+[benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)。
 
 **GET 吞吐量**
 
 | 系统 | GET 吞吐量 | 负载工具 |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | kvbench (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
-| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
+| OpenKache | **97,887 ops/s (1×)** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即可达到该机器单核
-4 KiB 随机读取上限(128,820 IOPS)的 76%。
+OpenKache 达到硬件上限的 76%(128,820 IOPS,由
+[fio](https://github.com/axboe/fio) 测得)。
 
 **GET 延迟(单次串行请求)**
 
 | 系统 | 平均 | p50 | p99 | p99.9 |
 |---|---:|---:|---:|---:|
-| OpenKache | **238.7 µs** | 229 µs | 386 µs | 1376 µs |
-| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
-| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
-
-平均 GET 延迟比 MySQL 低 1.6 倍,比 PostgreSQL 低 2.3 倍;在 p99 上分别低 3.0 倍和 3.3 倍。
+| OpenKache | **238.7 µs (1×)** | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
+| MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
+| PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
 
 ---
 
@@ -96,37 +96,40 @@ OpenKache 针对 **Linux** 进行优化和基准测试。
 - **Windows：** 建议使用 WSL2。
 - **macOS：** 仅用于功能开发，不用于性能比较。
 
-Linux 要求:
-
-- 支持 `io_uring` 的 Linux
-- 进程可用的两个不同 CPU
+Linux 需要 `io_uring` 和两个可用 CPU。
 
 ### Docker
 
-下载镜像：
-
-```bash
-docker pull ghcr.io/openkache/openkache:edge
-```
-
-运行服务器：
-
 ```bash
 docker run --rm \
-  --network host \
   --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
   ghcr.io/openkache/openkache:edge
 ```
 
-### 下载并运行
+`seccomp=unconfined` 允许容器使用 `io_uring`。
 
-OpenKache 尚未发布正式版本。从 [server-v0.1.0](https://github.com/openkache/openkache/releases/tag/server-v0.1.0)
-下载并解压源码，然后运行下方的 Cargo 命令。
+在 macOS 和 Windows 上，Docker Desktop 会自动选择匹配的镜像架构，并在 Linux 虚拟机中运行。
 
-### Cargo
+### Cargo (Linux 和 macOS)
+
+安装 Rust、Bun、Smithy CLI 和 C toolchain，然后在仓库根目录构建 release binary：
 
 ```bash
-cargo run --locked --package openkache-server --bin openkache-server
+cargo build --locked --release --package openkache-server --bin openkache-server
+```
+
+在 Linux 上为网络和存储指定不同 CPU 后运行：
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433 0 1
+```
+
+在 Apple Silicon macOS 上运行时不传 CPU 参数：
+
+```bash
+./target/release/openkache-server 127.0.0.1:4433
 ```
 
 ---

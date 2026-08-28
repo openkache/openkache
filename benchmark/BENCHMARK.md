@@ -4,29 +4,25 @@
 
 | System | GET throughput | Load tool |
 |---|---:|---|
-| OpenKache | 97,887 ops/s | kvbench (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | kvbench (PostgreSQL wire) |
-| MySQL 8.4.11 | 16,295 ops/s | kvbench (MySQL wire) |
+| OpenKache | 97,887 ops/s (1×) | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. On the
-same machine, the single-core fio 4 KiB random-read ceiling is 128,820 IOPS,
-and OpenKache reaches 76% of that ceiling with a single storage core.
+OpenKache reaches 76% of the hardware limit (128,820 IOPS, measured with
+[fio](https://github.com/axboe/fio)).
 
 ## Latency (GET, single request at a time)
 
 | System | avg | p50 | p99 | p99.9 |
 |---|---:|---:|---:|---:|
-| OpenKache | 238.7 µs | 229 µs | 386 µs | 1376 µs |
-| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
-| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
-
-OpenKache's average GET latency is 1.6× lower than MySQL and 2.3× lower than
-PostgreSQL; at p99 it is 3.0× and 3.3× lower.
+| OpenKache | 238.7 µs (1×) | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
+| MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
+| PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
 
 ## Test Environment
 
-serveroptima1:
-
+- Host: serveroptima1
+- Provider: [ServerOptima](https://www.serveroptima.com/)
 - CPU: AMD EPYC 7773X, 6 vCPU
 - RAM: 19.5 GiB
 - Storage: /dev/sda1, ext4, SSD
@@ -45,11 +41,11 @@ serveroptima1:
 
 ### Throughput
 
-All three systems were driven by kvbench, a custom load generator that speaks
-each system's native protocol: RESP for OpenKache, the PostgreSQL wire protocol
-for PostgreSQL, and the MySQL wire protocol for MySQL. Using a single tool
-across all three systems keeps the client-side code path, key distribution, and
-measurement logic identical; only the wire protocol changes per backend. In
+kvbench is a custom load generator that runs the same workload over each
+system's native protocol: RESP for OpenKache, the PostgreSQL wire protocol for
+PostgreSQL, and the MySQL wire protocol for MySQL. Using a single tool across
+all three systems keeps the client-side code path, key distribution, and
+measurement logic identical — only the wire protocol changes per backend. In
 every run the database was pinned to CPU cores 0–1 and the load generator to
 cores 2–5. kvbench source is under `bench/kvbench/`.
 
@@ -67,9 +63,8 @@ statements were used.
 
 ### Latency
 
-All three systems were driven by kvbench speaking each system's native protocol:
-RESP for OpenKache, the PostgreSQL wire protocol for PostgreSQL, and the
-MySQL wire protocol for MySQL. The database was pinned to CPU cores 0–1 and the
-load generator to cores 2–5. The generator used a single connection and sent one
+kvbench ran the same single-request workload against all three systems over
+their native protocols. The database was pinned to CPU cores 0–1 and the load
+generator to cores 2–5. The generator used a single connection and sent one
 request at a time, so each sample is the full end-to-end latency of one query
 with no queueing. kvbench source is under `bench/kvbench/`.
