@@ -31,9 +31,12 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 ## Benchmarks
 
 Benchmarks ran over loopback on
-[serveroptima1](./benchmark/BENCHMARK.md#test-environment). Each system is
-driven by a load tool speaking its own native protocol. Full methodology in
-[benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md).
+[serveroptima1](./benchmark/BENCHMARK.md#test-environment).
+
+All three systems were benchmarked with kvbench using their native protocols.
+Each database uses a different protocol, so we built kvbench to measure them
+consistently. See the [full methodology and kvbench
+details](./benchmark/BENCHMARK.md).
 
 **GET throughput**
 
@@ -43,8 +46,8 @@ driven by a load tool speaking its own native protocol. Full methodology in
 | PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
 | MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. OpenKache
-reaches 76% of the hardware limit (128,820 IOPS, measured with fio).
+OpenKache reaches 76% of the hardware limit (128,820 IOPS, measured with
+[fio](https://github.com/axboe/fio)).
 
 **GET latency (one request at a time)**
 

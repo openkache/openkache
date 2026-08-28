@@ -8,8 +8,8 @@
 | PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
 | MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. OpenKache
-reaches 76% of the hardware limit (128,820 IOPS, measured with fio).
+OpenKache reaches 76% of the hardware limit (128,820 IOPS, measured with
+[fio](https://github.com/axboe/fio)).
 
 ## Latency (GET, single request at a time)
 
@@ -18,6 +18,12 @@ reaches 76% of the hardware limit (128,820 IOPS, measured with fio).
 | OpenKache | 238.7 µs (1×) | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
 | MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
 | PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
+
+## kvbench
+
+Each database uses a different protocol. We built kvbench to run the same
+workload over RESP, PostgreSQL wire, and MySQL wire. One tool now measures all
+three consistently.
 
 ## Test Environment
 
@@ -41,9 +47,8 @@ serveroptima1:
 
 ### Throughput
 
-All three systems were driven by kvbench speaking each system's native
-protocol: RESP for OpenKache, the PostgreSQL wire protocol, and the MySQL wire
-protocol. In every run the database was pinned to CPU cores 0–1 and the load
+kvbench ran the same GET workload against all three systems over their native
+protocols. In every run the database was pinned to CPU cores 0–1 and the load
 generator to cores 2–5.
 
 For PostgreSQL and MySQL, parameters were swept to find the configuration with
@@ -58,9 +63,8 @@ MySQL: swept innodb_buffer_pool_size over 128 / 256 / 512 MB and threads over
 
 ### Latency
 
-All three systems were driven by one load generator (kvbench) speaking each
-system's native protocol — RESP for OpenKache, the PostgreSQL wire protocol,
-and the MySQL wire protocol. The database was pinned to CPU cores 0–1 and the
-load generator to cores 2–5. The generator used a single connection and sent
-one request at a time, so each sample is the full end-to-end latency of one
-query with no queueing.
+kvbench ran the same single-request workload against all three systems over
+their native protocols. The database was pinned to CPU cores 0–1 and the load
+generator to cores 2–5. The generator used a single connection and sent one
+request at a time, so each sample is the full end-to-end latency of one query
+with no queueing.

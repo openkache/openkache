@@ -31,7 +31,9 @@
 ## 基准测试
 
 基准测试在 [serveroptima1](./benchmark/BENCHMARK.md#test-environment) 上通过回环网络运行。
-每个系统都由使用其原生协议的负载测试工具驱动。完整方法说明见
+
+三个系统都使用 kvbench 通过各自的原生协议进行基准测试。由于每个数据库的协议不同,
+我们构建了 kvbench 来用同一标准测量它们。完整方法和 kvbench 说明见
 [benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)。
 
 **GET 吞吐量**
@@ -42,8 +44,8 @@
 | PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
 | MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍。OpenKache 达到硬件上限的
-76%(128,820 IOPS,由 fio 测得)。
+OpenKache 达到硬件上限的 76%(128,820 IOPS,由
+[fio](https://github.com/axboe/fio) 测得)。
 
 **GET 延迟(单次串行请求)**
 

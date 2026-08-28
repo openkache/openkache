@@ -31,8 +31,11 @@
 ## 벤치마크
 
 벤치마크는 [serveroptima1](./benchmark/BENCHMARK.md#test-environment)의 loopback에서
-실행했다. 각 시스템은 자체 프로토콜을 사용하는 load tool로 구동했다. 전체
-방법론은 [benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)에 정리했다.
+실행했다.
+
+세 시스템 모두 각자의 native protocol로 kvbench 벤치마크를 실행했다.
+데이터베이스마다 프로토콜이 달라서, 같은 기준으로 측정할 수 있는 kvbench를 만들었다.
+전체 방법론과 kvbench 설명은 [benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)에 정리했다.
 
 **GET 처리량**
 
@@ -42,8 +45,8 @@
 | PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
 | MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
-OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르다. OpenKache는 하드웨어
-한계값의 76%(fio로 측정한 128,820 IOPS)에 도달한다.
+OpenKache는 하드웨어 한계값의 76%([fio](https://github.com/axboe/fio)로
+측정한 128,820 IOPS)에 도달한다.
 
 **GET 지연시간 (요청을 한 번에 하나씩 처리)**
 
