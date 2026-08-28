@@ -1,5 +1,7 @@
 # Contributing to OpenKache
 
+**English** · [한국어](./CONTRIBUTING.ko.md)
+
 OpenKache is a performance-focused cache server, and the work that moves it
 forward reflects that: a reproducible bug report, a benchmark that isolates a
 regression, a storage or protocol fix, a client binding, or documentation that
