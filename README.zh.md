@@ -108,19 +108,23 @@ podman run --rm \
   ghcr.io/openkache/openkache:edge
 ```
 
-### Homebrew（Apple Silicon macOS）
+### 发布归档
 
 ```bash
-brew install openkache
-openkache-server
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) PLATFORM="linux-x86_64-musl" ;;
+  Linux-aarch64|Linux-arm64) PLATFORM="linux-aarch64-musl" ;;
+  Darwin-arm64) PLATFORM="macos-arm64" ;;
+  *) echo "不支持的平台" >&2; exit 1 ;;
+esac
+ARCHIVE="openkache-server-0.1.1-${PLATFORM}.tar.gz"
+curl --fail --location --remote-name \
+  "https://github.com/openkache/openkache/releases/download/server-v0.1.1/${ARCHIVE}"
+tar -xzf "${ARCHIVE}"
+"./${ARCHIVE%.tar.gz}/openkache-server"
 ```
 
-### APT 软件包（Ubuntu、Debian 与 WSL2）
-
-```bash
-sudo apt install openkache
-openkache-server
-```
+归档中也包含 `openkache-cli`。
 
 ### Cargo
 

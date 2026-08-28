@@ -112,19 +112,23 @@ podman run --rm \
   ghcr.io/openkache/openkache:edge
 ```
 
-### Homebrew (Apple Silicon macOS)
+### 릴리스 아카이브
 
 ```bash
-brew install openkache
-openkache-server
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) PLATFORM="linux-x86_64-musl" ;;
+  Linux-aarch64|Linux-arm64) PLATFORM="linux-aarch64-musl" ;;
+  Darwin-arm64) PLATFORM="macos-arm64" ;;
+  *) echo "지원하지 않는 플랫폼입니다" >&2; exit 1 ;;
+esac
+ARCHIVE="openkache-server-0.1.1-${PLATFORM}.tar.gz"
+curl --fail --location --remote-name \
+  "https://github.com/openkache/openkache/releases/download/server-v0.1.1/${ARCHIVE}"
+tar -xzf "${ARCHIVE}"
+"./${ARCHIVE%.tar.gz}/openkache-server"
 ```
 
-### APT 패키지 (Ubuntu, Debian, WSL2)
-
-```bash
-sudo apt install openkache
-openkache-server
-```
+압축 파일에는 `openkache-cli`도 들어 있습니다.
 
 ### Cargo
 
