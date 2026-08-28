@@ -1,0 +1,84 @@
+class Openkache < Formula
+  desc "SSD-backed cache server with RESP/TCP and OpenKache/QUIC frontends"
+  homepage "https://github.com/openkache/openkache"
+  url "@URL@"
+  version "@VERSION@"
+  sha256 "@SHA256@"
+  license all_of: ["AGPL-3.0-or-later", "Apache-2.0"]
+
+  depends_on :macos
+  depends_on arch: :arm64
+
+  def install
+    bin.install "openkache-server"
+    bin.install "openkache-cli"
+  end
+
+  test do
+    require "open3"
+
+    address = "127.0.0.1:#{free_port}"
+    log = testpath/"openkache-server.log"
+    server = spawn(bin/"openkache-server", address, chdir: testpath, out: log, err: log)
+
+    begin
+      ready = false
+      100.times do
+        stdout, _stderr, status = Open3.capture3(
+          (bin/"openkache-cli").to_s,
+          "--address",
+          address,
+          "ping",
+        )
+        if status.success? && stdout.include?("PONG")
+          ready = true
+          break
+        end
+        sleep 0.1
+      end
+      assert ready, "server did not become ready:\n#{log.read}"
+
+      stdout, stderr, status = Open3.capture3(
+        (bin/"openkache-cli").to_s,
+        "--address",
+        address,
+        "set",
+        "homebrew-smoke",
+        "works",
+      )
+      assert status.success?, stderr
+      assert_match(/CREATED|REPLACED/, stdout)
+
+      stdout, stderr, status = Open3.capture3(
+        (bin/"openkache-cli").to_s,
+        "--address",
+        address,
+        "get",
+        "homebrew-smoke",
+      )
+      assert status.success?, stderr
+      assert_equal "works\n", stdout
+
+      stdout, stderr, status = Open3.capture3(
+        (bin/"openkache-cli").to_s,
+        "--address",
+        address,
+        "delete",
+        "homebrew-smoke",
+      )
+      assert status.success?, stderr
+      assert_match(/DELETED/, stdout)
+    ensure
+      begin
+        Process.kill("TERM", server)
+      rescue Errno::ESRCH
+        nil
+      end
+      begin
+        Process.wait(server)
+      rescue Errno::ECHILD
+        nil
+      end
+    end
+  end
+end

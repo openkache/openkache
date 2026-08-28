@@ -13,6 +13,21 @@
 
 </div>
 
+## 目录
+
+- [基准测试](#基准测试)
+- [架构](#架构)
+- [快速开始](#快速开始)
+- [连接客户端](#连接客户端)
+- [容器镜像](#容器镜像)
+- [路线图](#路线图)
+- [构建与验证](#构建与验证)
+- [客户端包](#客户端包)
+- [仓库结构](#仓库结构)
+- [项目状态](#项目状态)
+- [参与贡献](#参与贡献)
+- [许可证](#许可证)
+
 ## 基准测试
 
 测试环境为 6 vCPU AMD EPYC 7773X 主机(SSD,内核 6.8),通过环回网络进行,使用 32 字节的键
@@ -73,13 +88,15 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 
 ## 快速开始
 
-OpenKache 以 **Linux** 为主要平台:`io_uring` 网络前端和直接 I/O 存储路径都需要它。macOS
-与 Windows/WSL 支持已列入[路线图](#路线图)。
+OpenKache 针对 **Linux** 进行优化和基准测试。高性能 `io_uring` 网络前端、直接 I/O
+存储路径以及 CPU 绑定运行时均为 Linux 专用。Apple Silicon macOS 提供一个有意不做性能
+优化的可移植性预览版本,使用 Tokio 轮询与缓冲文件 I/O,仅用于功能开发而非性能比较。
+Windows 没有原生服务器;WSL2 使用 Linux 构建,并要求内核允许 `io_uring`。
 
-连接客户端之前,请先启动服务器。按顺序选择第一个适合当前环境的方法:容器镜像、已发布版本
-或 Cargo。
+连接客户端之前,请先启动服务器。按顺序选择第一个适合当前环境的方法:容器镜像、Homebrew
+或 APT 软件包、发布归档,或 Cargo。
 
-通用要求:
+Linux 要求:
 
 - 支持 `io_uring` 的 Linux
 - 进程可用的两个不同 CPU
@@ -114,13 +131,47 @@ docker run --rm \
 默认的容器命令将网络线程固定在 CPU 0,存储线程固定在 CPU 1。如果容器的 CPU 集合使用不同的
 编号,请覆盖该命令。详见[容器指南](./docs/container-image.md)。
 
-### GitHub Release
+### Homebrew（Apple Silicon macOS）
+
+下载对应发布中附带的 formula,再由 Homebrew 安装服务器与 CLI。Formula 测试会启动
+服务器,并通过 `openkache-cli` 执行 `PING`、`SET`、`GET` 和 `DELETE`。
+
+```bash
+VERSION="${SERVER_VERSION:-0.1.0}"
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+curl --fail --location --remote-name "${BASE}/openkache.rb"
+brew install --formula ./openkache.rb
+openkache-server
+```
+
+macOS 服务器有意保持未优化状态。它保留供本地功能开发使用的协议契约,但所有已发布的
+性能结果都仅针对 Linux 服务器。
+
+### APT 软件包（Ubuntu、Debian 与 WSL2）
+
+下载与机器 Debian 架构匹配的软件包并使用 APT 安装。软件包包含服务器、CLI、配置文件
+和仅监听回环地址的 systemd unit;服务不会自动启用。
+
+```bash
+VERSION="${SERVER_VERSION:-0.1.0}"
+ARCH="$(dpkg --print-architecture)"
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+PACKAGE="openkache_${VERSION}_${ARCH}.deb"
+curl --fail --location --remote-name "${BASE}/${PACKAGE}"
+sudo apt install "./${PACKAGE}"
+openkache-server
+```
+
+在 systemd 主机上,可运行 `sudo systemctl enable --now openkache` 启动可选服务。在没有
+systemd 的 WSL2 中,以前台方式运行 `openkache-server`。
+
+### Linux 发布归档
 
 当 `server-v<version>` 发布后,从 [GitHub Releases](https://github.com/openkache/openkache/releases)
 下载适合 Linux 环境的归档。将 `SERVER_VERSION` 设为已发布版本,然后验证并运行归档:
 
 ```bash
-VERSION="${SERVER_VERSION:?set SERVER_VERSION to a published version}"
+VERSION="${SERVER_VERSION:-0.1.0}"
 PLATFORM="linux-x86_64-musl" # arm64 使用 linux-aarch64-musl
 BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
 ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"

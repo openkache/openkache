@@ -1,5 +1,7 @@
 # OpenKache architecture
 
+**English** · [한국어](./architecture.ko.md) · [中文](./architecture.zh.md)
+
 OpenKache is an SSD-first cache server. Instead of treating the SSD as a swap
 target behind an in-memory index, it makes the SSD the primary capacity tier and
 keeps only a compact index in RAM. The design goal is simple: keep every core

@@ -1,0 +1,21 @@
+[Unit]
+Description=OpenKache preview cache server
+Documentation=https://github.com/openkache/openkache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=openkache
+WorkingDirectory=/var/lib/openkache
+ExecStart=/usr/bin/openkache-server --config /etc/openkache/openkache.toml 127.0.0.1:4433 0 1
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

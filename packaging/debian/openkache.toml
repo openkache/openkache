@@ -1,0 +1,8 @@
+# OpenKache preview configuration.
+#
+# The service listens only on loopback by default. Change the address in
+# openkache.service only after accounting for the preview server's lack of
+# authentication.
+
+storage_file_path = "/var/lib/openkache/openkache.data"
+preallocate_file = false
