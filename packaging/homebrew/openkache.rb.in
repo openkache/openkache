@@ -30,21 +30,20 @@ class Openkache < Formula
     log_file.close
 
     begin
-      ready = false
-      100.times do
-        stdout, _stderr, status = Open3.capture3(
-          (bin/"openkache-cli").to_s,
-          "--address",
-          address,
-          "ping",
-        )
-        if status.success? && stdout.include?("PONG")
-          ready = true
-          break
-        end
-        sleep 0.1
-      end
-      assert ready, "server did not become ready:\n#{log.read}"
+      sleep 0.2
+      stdout, stderr, status = Open3.capture3(
+        (bin/"openkache-cli").to_s,
+        "--address",
+        address,
+        "ping",
+      )
+      assert status.success?, <<~EOS
+        client failed:
+        #{stderr}
+        server log:
+        #{log.read}
+      EOS
+      assert_match "PONG", stdout
 
       stdout, stderr, status = Open3.capture3(
         (bin/"openkache-cli").to_s,
