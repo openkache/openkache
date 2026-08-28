@@ -19,12 +19,11 @@
 - [架构](#架构)
 - [快速开始](#快速开始)
 - [连接客户端](#连接客户端)
+- [客户端包](#客户端包)
 - [容器镜像](#容器镜像)
 - [路线图](#路线图)
 - [构建与验证](#构建与验证)
-- [客户端包](#客户端包)
 - [仓库结构](#仓库结构)
-- [项目状态](#项目状态)
 - [参与贡献](#参与贡献)
 - [许可证](#许可证)
 
@@ -216,16 +215,16 @@ Rust SDK 速览:
 ```rust
 use openkache::{Client, Value};
 
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-client.set("greeting", Value::text("hello")).await?;
-assert_eq!(
-    client.get("greeting").await?.unwrap(),
-    Value::text("hello"),
-);
-client.close().await?;
-# Ok(())
-# }
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client.set("greeting", Value::text("hello")).await?;
+    assert_eq!(
+        client.get("greeting").await?.unwrap(),
+        Value::text("hello"),
+    );
+    client.close().await?;
+    Ok(())
+}
 ```
 
 从源码构建的 [`openkache-cli`](clients/cli/README.md) 是 Bash 友好的选项,默认使用同样固定的
@@ -241,6 +240,11 @@ openkache-cli get hello
 
 > **本地开发信任配置。** 默认的 Gate 0 配置用于本地开发:它在 QUIC 之上使用 TLS 1.3 且绝不
 > 回退到明文,但不验证服务器证书。请勿将这种信任配置用于生产流量。
+
+## 客户端包
+
+受维护的客户端包共享同一套协议与值格式(value-format)源码。Rust、TypeScript、Python、
+.NET、Go、C、C++、Swift 等绑定的当前状态见 [clients/README.md](./clients/README.md)。
 
 ## 路线图
 
@@ -267,19 +271,11 @@ TypeScript 适配器。
 服务器分配器(allocator)相关实验作为可选功能提供:
 
 ```bash
+# 选择一种分配器功能。
 cargo server-build --features alloc-jemalloc
+# 或者:
 cargo server-build --features alloc-mimalloc
 ```
-
-不要同时启用这两个分配器功能。
-
-## 客户端包
-
-受维护的客户端包共享同一套协议与值格式(value-format)源码。Rust、TypeScript、Python、
-.NET、Go、C、C++、Swift 等绑定的当前状态见 [clients/README.md](./clients/README.md)。
-
-当前服务器的兼容性前端仅支持上文列出的 Gate 0 操作子集。目标契约(target contract)中描述的
-更广泛 API,可能会先出现在生成的客户端中,而服务器尚未实现。
 
 ## 仓库结构
 
@@ -292,19 +288,6 @@ cargo server-build --features alloc-mimalloc
 
 当前的服务器实现见 [server/README.md](./server/README.md)。协议细节见
 [protocol/README.md](./protocol/README.md)。
-
-## 项目状态
-
-| 组件 | 状态 |
-| --- | --- |
-| RESP/TCP 服务器 | 预览版 |
-| OpenKache/QUIC Gate 0 服务器 | 预览版 |
-| SSD 存储与删除 | 预览版 |
-| 重启恢复 | 未实现 |
-| 生产环境认证 | 未实现 |
-| 客户端 SDK | 预览版;详见各包状态 |
-| 容器镜像 | 支持 Linux amd64/arm64 |
-| 集群 | 尚未开始 |
 
 ## 参与贡献
 

@@ -19,12 +19,11 @@
 - [아키텍처](#아키텍처)
 - [빠른 시작](#빠른-시작)
 - [클라이언트 연결](#클라이언트-연결)
+- [클라이언트 패키지](#클라이언트-패키지)
 - [컨테이너 이미지](#컨테이너-이미지)
 - [로드맵](#로드맵)
 - [빌드 및 검증](#빌드-및-검증)
-- [클라이언트 패키지](#클라이언트-패키지)
 - [저장소 구조](#저장소-구조)
-- [프로젝트 상태](#프로젝트-상태)
 - [기여하기](#기여하기)
 - [라이선스](#라이선스)
 
@@ -225,16 +224,16 @@ Rust SDK 한눈에 보기:
 ```rust
 use openkache::{Client, Value};
 
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-client.set("greeting", Value::text("hello")).await?;
-assert_eq!(
-    client.get("greeting").await?.unwrap(),
-    Value::text("hello"),
-);
-client.close().await?;
-# Ok(())
-# }
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client.set("greeting", Value::text("hello")).await?;
+    assert_eq!(
+        client.get("greeting").await?.unwrap(),
+        Value::text("hello"),
+    );
+    client.close().await?;
+    Ok(())
+}
 ```
 
 소스에서 빌드하는 [`openkache-cli`](clients/cli/README.md)는 Bash 친화적 옵션으로,
@@ -251,6 +250,12 @@ openkache-cli get hello
 > **로컬 개발용 신뢰 프로필.** 기본 Gate 0 프로필은 로컬 개발용입니다: QUIC 위에서 TLS
 > 1.3을 사용하고 평문으로 폴백하지 않지만, 서버 인증서를 검증하지 않습니다. 이 신뢰
 > 프로필을 운영(production) 트래픽에 재사용하지 마세요.
+
+## 클라이언트 패키지
+
+유지 관리되는 클라이언트 패키지들은 동일한 프로토콜과 값 형식(value-format) 소스를
+공유합니다. Rust, TypeScript, Python, .NET, Go, C, C++, Swift 등 각 바인딩의 현재 상태는
+[clients/README.md](./clients/README.md)를 참고하세요.
 
 ## 로드맵
 
@@ -277,21 +282,11 @@ TypeScript 어댑터를 하나의 락파일 아래에서 관리합니다.
 서버 할당자(allocator) 실험은 옵트인 기능으로 제공됩니다:
 
 ```bash
+# 할당자 기능 하나를 선택합니다.
 cargo server-build --features alloc-jemalloc
+# 또는:
 cargo server-build --features alloc-mimalloc
 ```
-
-두 할당자 기능을 동시에 활성화하지 마세요.
-
-## 클라이언트 패키지
-
-유지 관리되는 클라이언트 패키지들은 동일한 프로토콜과 값 형식(value-format) 소스를
-공유합니다. Rust, TypeScript, Python, .NET, Go, C, C++, Swift 등 각 바인딩의 현재 상태는
-[clients/README.md](./clients/README.md)를 참고하세요.
-
-현재 서버의 호환성 프론트엔드는 위에 나열된 Gate 0 오퍼레이션 하위 집합만 지원합니다.
-타깃 계약(target contract)에 기술된 더 넓은 API가 서버가 실제로 구현하기 전에 생성된
-클라이언트에 먼저 존재할 수 있습니다.
 
 ## 저장소 구조
 
@@ -304,19 +299,6 @@ cargo server-build --features alloc-mimalloc
 
 현재 서버 구현은 [server/README.md](./server/README.md)에 있습니다. 프로토콜 세부사항은
 [protocol/README.md](./protocol/README.md)에 있습니다.
-
-## 프로젝트 상태
-
-| 구성 요소 | 상태 |
-| --- | --- |
-| RESP/TCP 서버 | 프리뷰 |
-| OpenKache/QUIC Gate 0 서버 | 프리뷰 |
-| SSD 스토리지 및 삭제 | 프리뷰 |
-| 재시작 복구 | 미구현 |
-| 운영 환경 인증 | 미구현 |
-| 클라이언트 SDK | 프리뷰; 패키지별 상태 참고 |
-| 컨테이너 이미지 | Linux amd64/arm64 지원 |
-| 클러스터링 | 시작 전 |
 
 ## 기여하기
 

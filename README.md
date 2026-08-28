@@ -19,12 +19,11 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [Connect a client](#connect-a-client)
+- [Client packages](#client-packages)
 - [Container image](#container-image)
 - [Roadmap](#roadmap)
 - [Build and verify](#build-and-verify)
-- [Client packages](#client-packages)
 - [Repository layout](#repository-layout)
-- [Project status](#project-status)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -240,16 +239,16 @@ The Rust SDK in a nutshell:
 ```rust
 use openkache::{Client, Value};
 
-# async fn example() -> openkache::Result<()> {
-let client = Client::connect("127.0.0.1:4433").await?;
-client.set("greeting", Value::text("hello")).await?;
-assert_eq!(
-    client.get("greeting").await?.unwrap(),
-    Value::text("hello"),
-);
-client.close().await?;
-# Ok(())
-# }
+async fn example() -> openkache::Result<()> {
+    let client = Client::connect("127.0.0.1:4433").await?;
+    client.set("greeting", Value::text("hello")).await?;
+    assert_eq!(
+        client.get("greeting").await?.unwrap(),
+        Value::text("hello"),
+    );
+    client.close().await?;
+    Ok(())
+}
 ```
 
 The source-built [`openkache-cli`](clients/cli/README.md) is the Bash-friendly
@@ -268,6 +267,12 @@ required.
 > development: it uses TLS 1.3 over QUIC and never falls back to plaintext, but
 > it does not verify the server certificate. Do not reuse this trust profile for
 > production traffic.
+
+## Client packages
+
+Maintained client packages share the same protocol and value-format sources.
+See [clients/README.md](./clients/README.md) for the current status of Rust,
+TypeScript, Python, .NET, Go, C, C++, Swift, and other bindings.
 
 ## Roadmap
 
@@ -294,21 +299,11 @@ SDK, CLI, and native TypeScript adapter under one lockfile.
 Server allocator experiments are available as opt-in features:
 
 ```bash
+# Choose one allocator feature.
 cargo server-build --features alloc-jemalloc
+# Or:
 cargo server-build --features alloc-mimalloc
 ```
-
-Do not enable both allocator features at once.
-
-## Client packages
-
-Maintained client packages share the same protocol and value-format sources.
-See [clients/README.md](./clients/README.md) for the current status of Rust,
-TypeScript, Python, .NET, Go, C, C++, Swift, and other bindings.
-
-The current server compatibility frontend supports only the Gate 0 operation
-subset listed above. Broader APIs described by target contracts may be present
-in generated clients before the server implements them.
 
 ## Repository layout
 
@@ -321,19 +316,6 @@ in generated clients before the server implements them.
 
 The current server implementation lives in [server/README.md](./server/README.md).
 Protocol details live in [protocol/README.md](./protocol/README.md).
-
-## Project status
-
-| Component | Status |
-| --- | --- |
-| RESP/TCP server | Preview |
-| OpenKache/QUIC Gate 0 server | Preview |
-| SSD storage and deletion | Preview |
-| Restart recovery | Not implemented |
-| Production authentication | Not implemented |
-| Client SDKs | Preview; see package status |
-| Container image | Available for Linux amd64/arm64 |
-| Clustering | Not started |
 
 ## Contributing
 
