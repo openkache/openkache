@@ -1,3 +1,11 @@
+//! OpenKache server entry point.
+//!
+//! Wires up the two-thread architecture: a network thread (io_uring RESP server)
+//! and a storage thread, connected only by lock-free SPSC queues. On Linux each
+//! thread is pinned to a dedicated CPU core (thread-per-core), so hot state stays
+//! in that core's cache and the two threads never contend on a lock. On macOS,
+//! placement is left to the scheduler since fine-grained pinning is unavailable.
+
 #[cfg(all(feature = "alloc-mimalloc", feature = "alloc-jemalloc"))]
 compile_error!("only one allocator feature may be enabled");
 
@@ -27,29 +35,33 @@ use std::mem;
 
 use config::{Config, StorageConfig};
 use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
-// Create the network layer.
-// Create storage.
-// Create SPSC queues between the network and storage layers.
 
-// Everything below is handled by network.run().
-// An accept SQE creates a new client.
-// Parse each completed read SQE as RESP, box the key or value, create a request,
-// and push it to the SPSC queue.
-// Stop reading when no input remains or a response SPSC queue is full.
-// Move responses from the SPSC queue into the client's VecDeque without copying.
-// Values currently use Arc-backed ownership.
-// Submit queued writes and reads, starting at the buffer write position and
-// shifting up to the last read position when the buffer is full.
+// End-to-end request flow (all driven by `network.run()`):
+//   1. An accept SQE creates a new client.
+//   2. Each completed read SQE is parsed as RESP; the key or value is boxed into
+//      a request and pushed to the request queue.
+//   3. Reading pauses when no input remains or the response queue is full.
+//   4. Storage responses move from the SPSC queue into the client's write buffer
+//      without copying (values are Arc-backed).
+//   5. Queued writes and reads are submitted, resuming from the last offset when
+//      a buffer wraps.
 
+/// Pins the calling thread to a single CPU core. Pinning is the core of the
+/// thread-per-core design: it keeps each worker's hot data in one core's L1/L2
+/// and prevents the scheduler from migrating the thread mid-request, which would
+/// blow out the cache on every migration.
 #[cfg(target_os = "linux")]
 fn pin_current_thread(cpu: usize) -> io::Result<()> {
+    // SAFETY: cpu_set_t is a plain bitmask; zeroing it produces a valid initial state.
     let mut cpu_set: libc::cpu_set_t = unsafe { mem::zeroed() };
 
+    // SAFETY: cpu_set is valid for the duration of these libc macro calls.
     unsafe {
         libc::CPU_ZERO(&mut cpu_set);
         libc::CPU_SET(cpu, &mut cpu_set);
     }
 
+    // SAFETY: cpu_set outlives the call and its size is passed explicitly.
     let result = unsafe {
         libc::pthread_setaffinity_np(
             libc::pthread_self(),
