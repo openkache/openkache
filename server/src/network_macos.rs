@@ -79,7 +79,7 @@ impl Network {
             .run_until(async move {
                 loop {
                     if super::shutdown_requested() {
-                        break;
+                        return Ok(());
                     }
                     let (stream, peer) =
                         match tokio::time::timeout(Duration::from_millis(100), listener.accept())
@@ -193,10 +193,13 @@ async fn submit_and_receive(
         let submitted = {
             let mut state = state.borrow_mut();
             if state.request_sender.has_capacity() {
-                state
+                let pushed = state
                     .request_sender
-                    .push(request.take().expect("request was not submitted"))
-                    .expect("capacity was checked immediately before push");
+                    .push(request.take().expect("request was not submitted"));
+                assert!(
+                    pushed.is_ok(),
+                    "capacity was checked immediately before push"
+                );
                 true
             } else {
                 false
