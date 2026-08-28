@@ -140,3 +140,66 @@ jobs:
       - name: Build TypeScript native adapters
         working-directory: clients/typescript
         run: bun run build:native
+
+  macos-server-package:
+    name: Apple Silicon Homebrew smoke test
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-smithy-codegen
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Test and build the Apple Silicon server package
+        run: |
+          set -euo pipefail
+          cargo test --locked --package openkache-server
+          cargo build \
+            --locked \
+            --release \
+            --target aarch64-apple-darwin \
+            --package openkache-server \
+            --bin openkache-server \
+            --package openkache-cli \
+            --bin openkache-cli
+
+      - name: Install with Homebrew and run client-server smoke test
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          version="$(
+            cargo metadata \
+              --manifest-path server/Cargo.toml \
+              --locked \
+              --no-deps \
+              --format-version 1 \
+              | jq -r '.packages[] | select(.name == "openkache-server") | .version'
+          )"
+          package_root="${RUNNER_TEMP}/openkache-server-${version}-macos-arm64"
+          archive="${RUNNER_TEMP}/openkache-server-${version}-macos-arm64.tar.gz"
+          mkdir -p "${package_root}"
+          install -m 0755 \
+            target/aarch64-apple-darwin/release/openkache-server \
+            "${package_root}/openkache-server"
+          install -m 0755 \
+            target/aarch64-apple-darwin/release/openkache-cli \
+            "${package_root}/openkache-cli"
+          tar -C "${RUNNER_TEMP}" -czf "${archive}" "$(basename "${package_root}")"
+          archive_sha256="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          formula="${RUNNER_TEMP}/openkache.rb"
+          packaging/homebrew/render-formula.sh \
+            "${version}" \
+            "file://${archive}" \
+            "${archive_sha256}" \
+            "${formula}"
+          brew install --formula --build-from-source "${formula}"
+          brew test openkache
+          brew uninstall --formula openkache
