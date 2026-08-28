@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# OpenKache: enforce trilingual documentation sync before each commit.
+# The check script lives in the repo so it can be shared / promoted to CI.
+# Bypass in a genuine emergency with: git commit --no-verify
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+checker="${repo_root}/scripts/check_doc_i18n.py"
+
+if [ -f "$checker" ]; then
+  python3 "$checker" || exit 1
+fi
