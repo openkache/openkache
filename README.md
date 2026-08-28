@@ -232,18 +232,19 @@ the `LICENSE` file in each directory.
 
 Release archives, container images, and client packages include a
 `THIRD-PARTY-NOTICES.txt` file. It is generated from the locked Cargo
-dependency graph and reproduces the license and notice files supplied by
-upstream packages, including the selected terms for dependencies that offer
-multiple licenses. OpenKache's own license remains in the adjacent `LICENSE`
-file.
+dependency graph and reproduces recognized license, notice, and attribution
+files supplied by upstream packages, including the selected terms for
+dependencies that offer multiple licenses. OpenKache's own license remains in
+the adjacent `LICENSE` file.
 
 The current release graphs record these deliberate dual-license selections:
 `blake3` uses Apache-2.0, `r-efi` uses MIT, `ryu-js` uses Apache-2.0, and
-`zstd-pure-rs` uses BSD-3-Clause. The generator keeps every upstream
-license/notice file present, including files for offered alternatives;
-`cargo-deny` rejects a dependency when its available terms no longer satisfy
-the repository policy, so a dependency license change must be reviewed before
-a release.
+`zstd-pure-rs` uses BSD-3-Clause. The generator keeps recognized license,
+notice, attribution, copyright, patent, and aggregate files, plus every text
+file under `LICENSES/`, including files for offered alternatives. Unknown
+legal filenames still require manual review. `cargo-deny` rejects a dependency
+when its available terms no longer satisfy the repository policy, so a
+dependency license change must be reviewed before a release.
 
 If a registry archive omits a separate license file, the generated entry
 retains the package's license declaration, authors, and upstream URL and
