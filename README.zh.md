@@ -32,15 +32,17 @@
 
 测试环境为 6 vCPU AMD EPYC 7773X 主机(SSD,内核 6.8),通过环回网络进行,使用 32 字节的键
 和 100 字节的值。每个系统都由讲各自原生协议的负载测试工具驱动。完整方法说明见
-[BENCHMARK.md](./BENCHMARK.md)。
+[benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md)。
+
+括号内的数值以 OpenKache 为 1× 计算。
 
 **GET 吞吐量**
 
 | 系统 | GET 吞吐量 | 负载工具 |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | memtier (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
-| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+| OpenKache | **97,887 ops/s (1×)** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
 OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即可达到该机器单核
 4 KiB 随机读取上限(128,820 IOPS)的 76%。
@@ -49,9 +51,9 @@ OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即
 
 | 系统 | 平均 | p50 | p99 | p99.9 |
 |---|---:|---:|---:|---:|
-| OpenKache | **238.7 µs** | 229 µs | 386 µs | 1376 µs |
-| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
-| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
+| OpenKache | **238.7 µs (1×)** | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
+| MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
+| PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
 
 平均 GET 延迟比 MySQL 低 1.6 倍,比 PostgreSQL 低 2.3 倍;在 p99 上分别低 3.0 倍和 3.3 倍。
 

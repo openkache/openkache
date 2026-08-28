@@ -32,15 +32,18 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 
 Measured on a 6 vCPU AMD EPYC 7773X host (SSD, kernel 6.8) over loopback, with
 32-byte keys and 100-byte values. Each system is driven by a load tool speaking
-its own native protocol. Full methodology in [BENCHMARK.md](./BENCHMARK.md).
+its own native protocol. Full methodology in
+[benchmark/BENCHMARK.md](./benchmark/BENCHMARK.md).
+
+Values in parentheses are ratios relative to OpenKache (1×).
 
 **GET throughput**
 
 | System | GET throughput | Load tool |
 |---|---:|---|
-| OpenKache | **97,887 ops/s** | memtier (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
-| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+| OpenKache | **97,887 ops/s (1×)** | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
 OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL, reaching
 76% of the machine's single-core 4 KiB random-read ceiling (128,820 IOPS) with
@@ -50,9 +53,9 @@ a single storage core.
 
 | System | avg | p50 | p99 | p99.9 |
 |---|---:|---:|---:|---:|
-| OpenKache | **238.7 µs** | 229 µs | 386 µs | 1376 µs |
-| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
-| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
+| OpenKache | **238.7 µs (1×)** | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
+| MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
+| PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
 
 Average GET latency is 1.6× lower than MySQL and 2.3× lower than PostgreSQL; at
 p99 it is 3.0× and 3.3× lower.

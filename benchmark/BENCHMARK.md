@@ -1,12 +1,14 @@
 # OpenKache Benchmark
 
+Values in parentheses are ratios relative to OpenKache (1×).
+
 ## Throughput (GET)
 
 | System | GET throughput | Load tool |
 |---|---:|---|
-| OpenKache | 97,887 ops/s | memtier (RESP) |
-| PostgreSQL 17.10 | 17,421 ops/s | pgbench |
-| MySQL 8.4.11 | 16,295 ops/s | sysbench |
+| OpenKache | 97,887 ops/s (1×) | kvbench (RESP) |
+| PostgreSQL 17.10 | 17,421 ops/s (0.18×) | kvbench (PostgreSQL wire) |
+| MySQL 8.4.11 | 16,295 ops/s (0.17×) | kvbench (MySQL wire) |
 
 OpenKache is 5.6× faster than PostgreSQL and 6.0× faster than MySQL. On the
 same machine, the single-core fio 4 KiB random-read ceiling is 128,820 IOPS,
@@ -16,9 +18,9 @@ and OpenKache reaches 76% of that ceiling with a single storage core.
 
 | System | avg | p50 | p99 | p99.9 |
 |---|---:|---:|---:|---:|
-| OpenKache | 238.7 µs | 229 µs | 386 µs | 1376 µs |
-| MySQL 8.4.11 | 385.7 µs | 410 µs | 1169 µs | 2207 µs |
-| PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
+| OpenKache | 238.7 µs (1×) | 229 µs (1×) | 386 µs (1×) | 1376 µs (1×) |
+| MySQL 8.4.11 | 385.7 µs (1.6×) | 410 µs (1.8×) | 1169 µs (3.0×) | 2207 µs (1.6×) |
+| PostgreSQL 17.10 | 558.0 µs (2.3×) | 510 µs (2.2×) | 1263 µs (3.3×) | 3342 µs (2.4×) |
 
 OpenKache's average GET latency is 1.6× lower than MySQL and 2.3× lower than
 PostgreSQL; at p99 it is 3.0× and 3.3× lower.
@@ -45,23 +47,20 @@ serveroptima1:
 
 ### Throughput
 
-memtier speaks only the RESP protocol, so measuring every system with memtier
-would be unfair to the SQL databases. Each system was therefore driven by a
-tool that speaks its own native protocol — memtier (RESP) for OpenKache,
-pgbench for PostgreSQL, and sysbench for MySQL. In every run the database was
-pinned to CPU cores 0–1 and the load generator to cores 2–5.
+All three systems were driven by kvbench speaking each system's native
+protocol: RESP for OpenKache, the PostgreSQL wire protocol, and the MySQL wire
+protocol. In every run the database was pinned to CPU cores 0–1 and the load
+generator to cores 2–5.
 
 For PostgreSQL and MySQL, parameters were swept to find the configuration with
 the highest throughput.
 
 PostgreSQL: swept shared_buffers over 128 / 256 / 512 MB and client count over
-16 / 24 / 32 / 48, selecting shared_buffers 256 MB with 24 clients. Prepared
-statements (`-M prepared`) were used, jit and autovacuum were disabled, and
-ANALYZE was run right after prefill.
+16 / 24 / 32 / 48, selecting shared_buffers 256 MB with 24 clients. Jit and
+autovacuum were disabled, and ANALYZE was run right after prefill.
 
 MySQL: swept innodb_buffer_pool_size over 128 / 256 / 512 MB and threads over
-8 / 16 / 32 / 64, selecting a 512 MB buffer pool with 16 threads. Prepared
-statements were used.
+8 / 16 / 32 / 64, selecting a 512 MB buffer pool with 16 threads.
 
 ### Latency
 
