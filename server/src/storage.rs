@@ -1,3 +1,21 @@
+//! Storage engine: hash table + segment groups + io_uring-backed flush to SSD.
+//!
+//! A RAM+SSD hybrid store built for high-throughput concurrent GET/SET/DELETE.
+//! Core design choices:
+//!
+//! - **Fixed RAM budget**: a few segment groups (SGs) stay mutable in RAM; when
+//!   the working set fills them, the oldest is flushed to SSD and becomes
+//!   read-only, so total RAM use stays bounded.
+//! - **Multi-choice bucket placement**: each key maps to several candidate
+//!   bucket locations per SG; the hash table records the chosen one, so a lookup
+//!   routes directly instead of scanning every choice.
+//! - **Async lookups, synchronous commits**: reads may await a bucket load from
+//!   SSD; the commit step is await-free and, if it triggers a rotation, spawns
+//!   the flush as a detached task.
+//! - **Single-owner, lock-free**: this worker is the sole owner of all storage
+//!   state. It coordinates with the network thread only through SPSC queues, so
+//!   no locks are taken on the request path.
+
 use std::collections::VecDeque;
 use std::io;
 use std::ptr::NonNull;
@@ -33,6 +51,8 @@ const STORAGE_KEY_BYTES: usize = 32;
 /// Number of segment groups kept resident in RAM. Fixed: this multiplied by the
 /// SG size is the fixed RAM budget the memory-efficiency story depends on.
 pub(crate) const MUTABLE_SG_COUNT: usize = 3;
+/// How many candidate bucket locations each key has within an SG. More choices
+/// lower the collision rate but raise lookup cost; 4 balances the two.
 const BUCKET_CHOICE_COUNT: u8 = 4;
 pub(crate) const BUCKET_CHOICE_BITS: u32 = BUCKET_CHOICE_COUNT.ilog2();
 
@@ -42,6 +62,9 @@ pub(crate) const BUCKET_CHOICE_BITS: u32 = BUCKET_CHOICE_COUNT.ilog2();
 pub(crate) struct StorageKey([u8; STORAGE_KEY_BYTES]);
 
 impl StorageKey {
+    /// Derives the fixed-size storage key by hashing the client key with BLAKE3.
+    /// Hashing gives a uniform distribution across buckets and a constant key size
+    /// regardless of client key length, which the fixed bucket layout relies on.
     pub(crate) fn from_key(key: &[u8]) -> Self {
         Self(*blake3::hash(key).as_bytes())
     }
@@ -50,15 +73,26 @@ impl StorageKey {
         &self.0
     }
 
+    /// The 128-bit slice of the hash used to index the table. Different byte
+    /// ranges feed the table index and the per-choice bucket offsets, keeping
+    /// those derivations statistically independent.
     pub(crate) fn table_hash(&self) -> u128 {
         u128::from_le_bytes(self.0[8..24].try_into().unwrap())
     }
 }
 
+/// All storage state, owned exclusively by the storage worker thread.
 struct Storage {
+    /// Maps each key's table hash to its encoded (SG, bucket_choice) location.
     table: Table,
+    /// Every segment group in a fixed-length ring. Each is Unused, Mutable (RAM),
+    /// Flushing (writing to SSD), or Ssd (read-only on disk).
     sgs: Box<[SgState]>,
+    /// Index of the oldest of the MUTABLE_SG_COUNT mutable SGs. Rotation advances
+    /// this, treating `sgs` as a circular buffer.
     oldest_mutable_sg_index: usize,
+    /// One pre-allocated spare SG reused across flushes. Holding exactly one caps
+    /// in-flight flushes at one and avoids allocating on every rotation.
     spare_mutable_sg: Option<MutableSg>,
     /// Buckets per SG, from config; used for bucket index and file offsets.
     buckets_per_sg: usize,
@@ -66,13 +100,21 @@ struct Storage {
     sg_bytes: u64,
 }
 
+/// Lifecycle of a segment group. An SG moves Unused -> Mutable -> Flushing ->
+/// Ssd, and its buffer returns as a reusable spare once the flush completes.
 enum SgState {
+    /// Not in use; available to become Mutable on the next rotation.
     Unused,
+    /// Resident in RAM and accepting writes.
     Mutable(MutableSg),
+    /// Being written to SSD; still readable through the shared buffer.
     Flushing(FlushBuffer),
+    /// Written out and read-only; reads go through the storage file.
     Ssd,
 }
 
+/// A ref-counted view of a mutable SG that is being flushed. `Rc` lets concurrent
+/// reads see the SG while the async write copies the same bytes to SSD.
 #[derive(Clone)]
 struct FlushBuffer(Rc<MutableSg>);
 
@@ -82,40 +124,58 @@ impl IoBuf for FlushBuffer {
     }
 }
 
+/// A pending write of one SG's bytes to its fixed offset in the storage file.
 struct FlushJob {
     sg_index: usize,
     file_offset: u64,
     buffer: FlushBuffer,
 }
 
+/// Candidate locations for a key captured before an await. The commit step
+/// compares against this snapshot to detect concurrent changes and retry
+/// (optimistic concurrency control).
 struct SetPlan {
     candidates: Box<[u32]>,
 }
 
+/// Where a SET found the key during lookup. `None` means the key was absent, so
+/// the SET is an insert rather than a replace.
 struct SetObservation {
     previous: Option<u32>,
 }
 
+/// Like `SetObservation`, plus whether a live value (not a tombstone) existed —
+/// which decides the DELETE reply (`:1` vs `:0`).
 struct DeleteObservation {
     previous: Option<u32>,
     existed: bool,
 }
 
+/// Outcome of inspecting one candidate location during a lookup.
 enum Lookup {
+    /// A live value found in RAM.
     Value(Arc<[u8]>),
+    /// A tombstone (deletion marker) found in RAM.
     Tombstone,
+    /// This candidate does not hold the key; try the next one.
     CandidateMiss,
+    /// The candidate is on SSD; the caller must read the bucket at this offset.
     ReadBucket { file_offset: u64 },
 }
 
+/// Result of a commit attempt for SET. `Retry` means state changed under us
+/// during the await, so the whole SET restarts from a fresh plan.
 enum CommitSet {
     Retry,
     Finished {
         result: Result<(), SetError>,
+        /// A flush to run asynchronously if this SET triggered a rotation.
         flush: Option<FlushJob>,
     },
 }
 
+/// Result of a commit attempt for DELETE. `Finished(bool)` reports whether a
+/// live value existed.
 enum CommitDelete {
     Retry,
     Finished(bool),
@@ -123,10 +183,15 @@ enum CommitDelete {
 
 #[derive(Debug)]
 enum SetError {
+    /// The value is too large to fit in a single bucket.
     ValueTooLarge,
+    /// The hash table has no free slot for this key.
     TableFull,
+    /// A previous flush has not completed, so no spare SG is available.
     FlushStillInFlight,
+    /// Every SG slot is occupied; SSD-backed capacity is exhausted.
     SsdCapacityReached,
+    /// The location we expected to update disappeared before commit.
     TableLocationMissing,
 }
 
@@ -160,6 +225,8 @@ impl Storage {
         MutableSg::new(config.buckets_per_sg, BUCKET_CHOICE_COUNT)
     }
 
+    /// Snapshots a key's current candidate locations before an await. The commit
+    /// step later diffs against this snapshot to detect concurrent modification.
     fn prepare_set(&self, key: &StorageKey) -> SetPlan {
         SetPlan {
             candidates: self
@@ -177,6 +244,10 @@ impl Storage {
             .into_boxed_slice()
     }
 
+    /// Inspects one candidate location and reports what is there. Decodes the
+    /// location, then dispatches on the SG's state: RAM-resident SGs (Mutable or
+    /// Flushing) are read in place; an SSD SG yields the file offset for the
+    /// caller to read asynchronously.
     fn lookup(&self, key: &StorageKey, table_value: u32) -> Lookup {
         let (sg_index, bucket_choice) = Self::decode_table_value(table_value);
         let Some(state) = self.sgs.get(sg_index) else {
@@ -204,7 +275,11 @@ impl Storage {
         }
     }
 
-    /// An await-free section that conditionally updates the observed location and flushes the oldest SG when needed.
+    /// An await-free section that conditionally updates the observed location and
+    /// flushes the oldest SG when needed. Returns `Retry` when concurrent state
+    /// changed since the plan was captured; otherwise `Finished` with the result
+    /// and an optional flush task. Being await-free is what makes the commit
+    /// atomic with respect to other operations on this single-threaded worker.
     fn commit_set(
         &mut self,
         key: &StorageKey,
@@ -212,6 +287,8 @@ impl Storage {
         plan: SetPlan,
         observation: SetObservation,
     ) -> CommitSet {
+        // Reject over-large values up front: cheap, and it guards the append path
+        // from attempting an impossible insert.
         if !Bucket::new().can_append(BucketValue::Value(value)) {
             return CommitSet::Finished {
                 result: Err(SetError::ValueTooLarge),
@@ -220,6 +297,8 @@ impl Storage {
         }
 
         if let Some(previous) = observation.previous {
+            // Replace path: the location we observed must still be a live candidate.
+            // If it vanished during the await, another op changed it — retry.
             if !self
                 .table
                 .values(key.table_hash())
@@ -228,6 +307,8 @@ impl Storage {
                 return CommitSet::Retry;
             }
 
+            // If the previous value lives in a mutable SG, try to overwrite it in
+            // place, which avoids allocating a new bucket slot entirely.
             let (previous_sg_index, previous_bucket_choice) = Self::decode_table_value(previous);
             if let Some(SgState::Mutable(sg)) = self.sgs.get_mut(previous_sg_index) {
                 if sg.replace(key, previous_bucket_choice, BucketValue::Value(value)) {
@@ -238,12 +319,17 @@ impl Storage {
                 }
             }
         } else {
+            // Insert path: bail out if the candidate set changed since the plan was
+            // captured, meaning a concurrent op may have inserted the same key.
             let current_candidates = self.table.values(key.table_hash()).collect::<Vec<_>>();
             if current_candidates.as_slice() != plan.candidates.as_ref() {
                 return CommitSet::Retry;
             }
         }
 
+        // In-place replace was not possible (or this is an insert): append into a
+        // mutable SG. If all mutable SGs are full, rotate the oldest out to SSD to
+        // free a fresh SG, then insert there.
         let mut flush = None;
         let replacement =
             match self.append_to_mutable_sg(key, BucketValue::Value(value), observation.previous) {
@@ -269,12 +355,16 @@ impl Storage {
                 }
             };
 
+        // Point the table at the new location. On replace this is a CAS from the
+        // observed value; on insert it adds a fresh entry.
         let table_updated = match observation.previous {
             Some(previous) => self.table.replace(key.table_hash(), previous, replacement),
             None => self.table.insert(key.table_hash(), replacement).is_ok(),
         };
 
         if !table_updated {
+            // The table changed under us (replace) or is full (insert). Undo the
+            // append so the SG does not leak the orphaned value, and report why.
             self.rollback_append(replacement, key);
             return CommitSet::Finished {
                 result: Err(if observation.previous.is_some() {
@@ -286,6 +376,8 @@ impl Storage {
             };
         }
 
+        // On a successful replace, reclaim the old value's bucket space now that
+        // the table no longer points at it.
         if let Some(previous) = observation.previous {
             self.remove_from_mutable_sg(previous, key);
         }
@@ -322,6 +414,10 @@ impl Storage {
         CommitDelete::Finished(false)
     }
 
+    /// Tries to append `value` into one of the mutable SGs, newest first, and
+    /// returns its encoded location. Returns `None` if every mutable SG is full,
+    /// signalling the caller to rotate. Newest-first keeps the freshest writes in
+    /// the SG that will be flushed last, extending their RAM residency.
     fn append_to_mutable_sg(
         &mut self,
         key: &StorageKey,
@@ -337,6 +433,9 @@ impl Storage {
                 continue;
             };
 
+            // If the new slot maps to the same physical bucket as the value we are
+            // replacing, keeping both would leave two entries for one key in that
+            // bucket. Undo this insert and try another SG so the replace stays clean.
             let same_physical_bucket = previous.is_some_and(|previous| {
                 let (previous_sg_index, previous_bucket_choice) =
                     Self::decode_table_value(previous);
@@ -355,13 +454,21 @@ impl Storage {
         None
     }
 
+    /// Rotates the oldest mutable SG out to SSD and opens a fresh one in its place.
+    /// The old SG becomes `Flushing` (wrapped in an `Rc` so reads continue during
+    /// the write) and the pre-allocated spare becomes the new mutable SG. Returns
+    /// the flush job plus the index of the new mutable SG, or an error if there is
+    /// no free SSD slot or a flush is already in flight.
     fn rotate_mutable(&mut self) -> Result<(FlushJob, usize), SetError> {
         let old_index = self.oldest_mutable_sg_index;
         let new_index = (old_index + MUTABLE_SG_COUNT) % self.sgs.len();
 
+        // The slot the new mutable SG will occupy must be free (not still on SSD).
         if !matches!(self.sgs[new_index], SgState::Unused) {
             return Err(SetError::SsdCapacityReached);
         }
+        // Reusing the single spare bounds in-flight flushes to one; if it is gone,
+        // the previous flush has not completed yet.
         let Some(new_mutable) = self.spare_mutable_sg.take() else {
             return Err(SetError::FlushStillInFlight);
         };
@@ -378,6 +485,7 @@ impl Storage {
         Ok((
             FlushJob {
                 sg_index: old_index,
+                // Each SG occupies a fixed slice of the file at index * sg_bytes.
                 file_offset: old_index as u64 * self.sg_bytes,
                 buffer,
             },
@@ -385,6 +493,9 @@ impl Storage {
         ))
     }
 
+    /// Finalizes a flush: marks the SG `Ssd` and reclaims its buffer as the spare.
+    /// The `Rc::try_unwrap` must succeed because the flush completing means no
+    /// concurrent reader still holds the buffer — that invariant is asserted.
     fn complete_flush(
         &mut self,
         sg_index: usize,
@@ -398,6 +509,8 @@ impl Storage {
         let SgState::Flushing(buffer) = old_state else {
             unreachable!("completed SG must be Flushing");
         };
+        // Recover sole ownership of the SG buffer and clear it for reuse. This is
+        // the reused spare, so no allocation happens on the flush completion path.
         let mut reusable = Rc::try_unwrap(buffer.0)
             .unwrap_or_else(|_| panic!("Flushing state must be the only buffer owner"));
         reusable.clear();
@@ -423,6 +536,8 @@ impl Storage {
         }
     }
 
+    // A table value packs the SG index in the high bits and the bucket choice in
+    // the low `BUCKET_CHOICE_BITS`, so one u32 fully identifies a location.
     fn encode_table_value(sg_index: usize, bucket_choice: u8) -> u32 {
         ((sg_index as u32) << BUCKET_CHOICE_BITS) | u32::from(bucket_choice)
     }
@@ -435,6 +550,10 @@ impl Storage {
         )
     }
 
+    /// Computes the byte offset of a key's bucket within the storage file for an
+    /// SSD-resident SG. Choices 0 and 1 use two independent 64-bit halves of the
+    /// key hash directly; higher choices mix them so each choice lands in a
+    /// different bucket, spreading collisions across the SG.
     fn bucket_file_offset(&self, sg_index: usize, key: &StorageKey, bucket_choice: u8) -> u64 {
         let key_bytes = key.as_bytes();
         let first = u64::from_le_bytes(key_bytes[16..24].try_into().unwrap());
@@ -451,12 +570,20 @@ impl Storage {
     }
 }
 
+/// Holds the storage engine and the completed-responses queue.
 struct WorkerState {
     storage: Storage,
+    /// Responses that have finished execution but await SPSC capacity to send back
+    /// to the network thread.
     completed: VecDeque<StorageResponse>,
+    /// The first fatal I/O error encountered, cached until the main loop checks it.
     fatal_io_error: Option<io::Error>,
 }
 
+/// A raw pointer to `WorkerState` that async tasks use to reach back into the
+/// synchronous storage engine without needing lifetimes or `Arc`. Safe because
+/// WorkerState is pinned in a Box for the thread's lifetime, and the raw pointer
+/// never outlives the runtime that owns it.
 #[derive(Clone, Copy)]
 struct WorkerHandle(NonNull<WorkerState>);
 
@@ -477,6 +604,8 @@ async fn read_bucket(file: Rc<File>, file_offset: u64) -> io::Result<Box<Bucket>
 }
 
 async fn execute_get(worker: WorkerHandle, file: Rc<File>, key: StorageKey) -> io::Result<Reply> {
+    // Fetch the candidate set once, then iterate. If every candidate is a miss,
+    // the key does not exist; otherwise we return on the first hit.
     let candidates = worker.access(|worker| worker.storage.candidates(&key));
 
     for candidate in candidates {
@@ -484,6 +613,9 @@ async fn execute_get(worker: WorkerHandle, file: Rc<File>, key: StorageKey) -> i
             Lookup::Value(value) => return Ok(Reply::Get(Some(value))),
             Lookup::Tombstone => return Ok(Reply::Get(None)),
             Lookup::CandidateMiss => {}
+            // SSD-resident bucket: issue the async read, await it, then search the
+            // loaded bucket for the key. No await happens for RAM-resident buckets,
+            // so a pure-RAM GET is fully synchronous.
             Lookup::ReadBucket { file_offset } => {
                 let bucket = read_bucket(Rc::clone(&file), file_offset).await?;
                 match bucket.get(&key) {
@@ -499,6 +631,10 @@ async fn execute_get(worker: WorkerHandle, file: Rc<File>, key: StorageKey) -> i
     Ok(Reply::Get(None))
 }
 
+/// Resolves the observation for a SET by scanning the captured candidates. If a
+/// candidate holds the key (in RAM or on SSD), the returned `SetObservation`
+/// records its location so `commit_set` can replace or CAS it. If no candidate
+/// holds the key, `previous` is `None`, meaning the SET is an insert.
 async fn resolve_set_plan(
     worker: WorkerHandle,
     file: Rc<File>,
@@ -574,6 +710,11 @@ async fn resolve_delete_plan(
     })
 }
 
+/// Executes a SET as an optimistic loop: capture a plan, resolve the current
+/// location (possibly awaiting an SSD read), then commit. `commit_set` returns
+/// `Retry` if the state changed under us during the await, so we loop until it
+/// finishes. A flush triggered by the commit is spawned as a detached task so
+/// the SET reply is not blocked on disk I/O.
 async fn execute_set(
     worker: WorkerHandle,
     file: Rc<File>,
@@ -619,6 +760,8 @@ async fn execute_flush(worker: WorkerHandle, file: Rc<File>) -> io::Result<Reply
     }
 }
 
+/// Executes a DELETE with the same optimistic capture/resolve/commit loop as
+/// SET, but no flush can be triggered (a delete never grows storage).
 async fn execute_delete(
     worker: WorkerHandle,
     file: Rc<File>,
@@ -634,6 +777,9 @@ async fn execute_delete(
     }
 }
 
+/// Writes one SG's bytes to the storage file and finalizes it. A write failure is
+/// stored as the worker's fatal error, since a lost flush means data on SSD would
+/// be inconsistent — the worker cannot safely continue.
 async fn flush_sg(worker: WorkerHandle, file: Rc<File>, flush: FlushJob) {
     let file_offset = flush.file_offset;
     let mut file = &*file;
@@ -652,6 +798,8 @@ async fn flush_sg(worker: WorkerHandle, file: Rc<File>, flush: FlushJob) {
     });
 }
 
+/// Dispatches one request to the matching executor and packages the reply with
+/// the client id and sequence so the network thread can route it back in order.
 async fn execute_request(
     worker: WorkerHandle,
     file: Rc<File>,
@@ -678,6 +826,9 @@ async fn execute_request(
     })
 }
 
+/// Builds the compio io_uring runtime for this storage thread. The proactor is
+/// configured like the network thread (single_issuer, defer_taskrun) but with
+/// a fixed queue depth matching the config, since we control the concurrency.
 fn create_runtime(config: &StorageConfig) -> io::Result<Runtime> {
     let mut proactor = ProactorBuilder::new();
     proactor
@@ -691,6 +842,10 @@ fn create_runtime(config: &StorageConfig) -> io::Result<Runtime> {
     runtime.build()
 }
 
+/// Opens the storage file with O_DIRECT (Linux) to bypass the page cache and
+/// pre-allocates physical blocks if configured. Bypassing the cache avoids
+/// double-buffering (we already hold data in mutable SGs), and pre-allocation
+/// ensures the file is contiguous on NVMe for sequential-write benchmarks.
 fn open_storage_file(runtime: &Runtime, config: &StorageConfig) -> io::Result<Rc<File>> {
     #[cfg(target_os = "linux")]
     let direct_io_flags = libc::O_DIRECT;
@@ -802,6 +957,11 @@ fn reap_completions(ring_fd: libc::c_int) {
     }
 }
 
+/// The storage worker's main loop. Each iteration: drains the request queue and
+/// spawns an executor task for each, advances all async tasks until they would
+/// block, force-reaps any deferred completions (Linux only; see `reap_completions`),
+/// moves completed responses into the response queue, then checks for fatal errors.
+/// This loop is synchronous and runs on the compio runtime.
 fn run_storage_worker(
     runtime: Runtime,
     mut worker: Box<WorkerState>,
@@ -819,6 +979,10 @@ fn run_storage_worker(
             while let Some(request) = request_receiver.pop() {
                 popped_request = true;
                 let file = Rc::clone(&file);
+                // Spawn an async task for the request; it runs until its first await
+                // (usually an SSD read or flush write), then yields. `detach` means
+                // the worker loop is not blocked by the spawn — it continues and polls
+                // all spawned tasks collectively later.
                 runtime
                     .spawn(async move {
                         match execute_request(worker_handle, file, request).await {
@@ -834,6 +998,7 @@ fn run_storage_worker(
             }
 
             let _ = popped_request;
+            // Advance every spawned task until they all hit an await.
             runtime.run();
             runtime.flush();
             #[cfg(target_os = "linux")]
@@ -850,9 +1015,11 @@ fn run_storage_worker(
                 // nothing and reaps everything, matching the network worker's path.
                 reap_completions(ring_fd);
             }
+            // Poll the ring for completions (non-blocking), which unblocks tasks.
             runtime.poll_with(Some(Duration::ZERO));
             runtime.run();
 
+            // Drain completed responses back to the network thread.
             while response_sender.has_capacity() {
                 let Some(response) = worker_handle.access(|worker| worker.completed.pop_front())
                 else {
@@ -863,6 +1030,8 @@ fn run_storage_worker(
                 };
             }
 
+            // Check for a fatal I/O error (flush failure, mainly) and bail out if
+            // one occurred. Continuing after a failed flush risks data loss.
             if let Some(error) = worker_handle.access(|worker| worker.fatal_io_error.take()) {
                 return Err(error);
             }
@@ -870,6 +1039,9 @@ fn run_storage_worker(
     })
 }
 
+/// Entry point for the storage thread. Sets up the runtime, storage file, storage
+/// engine, and worker state, then enters the main loop. Returns only on a fatal
+/// error, which the main thread logs and terminates on.
 pub(crate) fn run(
     config: StorageConfig,
     request_receiver: Consumer<StorageRequest, STORAGE_QUEUE_SLOTS>,
