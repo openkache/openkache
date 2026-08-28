@@ -19,13 +19,12 @@
 - [아키텍처](#아키텍처)
 - [빠른 시작](#빠른-시작)
 - [클라이언트 연결](#클라이언트-연결)
-- [클라이언트 패키지](#클라이언트-패키지)
 - [컨테이너 이미지](#컨테이너-이미지)
 - [로드맵](#로드맵)
-- [빌드 및 검증](#빌드-및-검증)
-- [저장소 구조](#저장소-구조)
 - [기여하기](#기여하기)
 - [라이선스](#라이선스)
+
+---
 
 ## 벤치마크
 
@@ -54,6 +53,8 @@ OpenKache는 PostgreSQL보다 5.6배, MySQL보다 6.0배 빠르며, 단일 스�
 
 평균 GET 지연시간은 MySQL보다 1.6배, PostgreSQL보다 2.3배 낮습니다. p99 기준으로는
 각각 3.0배, 3.3배 낮습니다.
+
+---
 
 ## 아키텍처
 
@@ -88,6 +89,8 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같�
 수준의 제어를 손에 쥐고. 빠른 경로에 GC 일시정지가 끼어들 자리는 없습니다.
 
 전체 설계는 [docs/architecture.md](./docs/architecture.md) 참고. (한국어 번역 준비 중)
+
+---
 
 ## 빠른 시작
 
@@ -208,10 +211,16 @@ cargo run --locked --package openkache-server --bin openkache-server -- \
 
 캐시 파일은 프로세스 작업 디렉터리에 생성되며 서버가 시작될 때마다 초기화됩니다.
 
+---
+
 ## 클라이언트 연결
 
 서버가 실행 중이면, 원하는 언어로 연결합니다. 모든 클라이언트 가이드는 기본 로컬
 엔드포인트로 `127.0.0.1:4433`을 사용하며, 각 언어의 전체 공개 API를 안내합니다.
+
+유지 관리되는 클라이언트 패키지는 동일한 프로토콜과 값 형식(value-format) 소스를
+공유합니다. Rust, TypeScript, Python, .NET, Go, C, C++, Swift 등 각 바인딩의 현재 상태는
+[clients/README.md](./clients/README.md)를 참고하세요.
 
 | 패키지 | 설치 | 문서 | 소스 |
 |---|---|---|---|
@@ -247,15 +256,7 @@ openkache-cli get hello
 인증서 루트, 상호 TLS, 클라이언트 측 값 보호, 또는 호환성 전용 TTL/조건부 쓰기가 필요한
 경우 `openkache-cli --profile configured`를 사용하세요.
 
-> **로컬 개발용 신뢰 프로필.** 기본 Gate 0 프로필은 로컬 개발용입니다: QUIC 위에서 TLS
-> 1.3을 사용하고 평문으로 폴백하지 않지만, 서버 인증서를 검증하지 않습니다. 이 신뢰
-> 프로필을 운영(production) 트래픽에 재사용하지 마세요.
-
-## 클라이언트 패키지
-
-유지 관리되는 클라이언트 패키지들은 동일한 프로토콜과 값 형식(value-format) 소스를
-공유합니다. Rust, TypeScript, Python, .NET, Go, C, C++, Swift 등 각 바인딩의 현재 상태는
-[clients/README.md](./clients/README.md)를 참고하세요.
+---
 
 ## 로드맵
 
@@ -268,43 +269,15 @@ openkache-cli get hello
 
 상세는 [ROADMAP.md](./ROADMAP.md). (한국어 번역 준비 중)
 
-## 빌드 및 검증
-
-```bash
-cargo check --locked
-cargo test --locked --package openkache-server
-cargo server-build
-```
-
-루트 Cargo 워크스페이스는 프로토콜, 서버, 공유 클라이언트 코어, Rust SDK, CLI, 네이티브
-TypeScript 어댑터를 하나의 락파일 아래에서 관리합니다.
-
-서버 할당자(allocator) 실험은 옵트인 기능으로 제공됩니다:
-
-```bash
-# 할당자 기능 하나를 선택합니다.
-cargo server-build --features alloc-jemalloc
-# 또는:
-cargo server-build --features alloc-mimalloc
-```
-
-## 저장소 구조
-
-| 경로 | 내용 |
-| --- | --- |
-| `server/` | 현재 SSD 캐시 서버와 컨테이너 정의 |
-| `protocol/` | 공유 와이어 모델, 생성된 계약, 코덱 |
-| `clients/` | 클라이언트 SDK와 네이티브 어댑터 |
-| `docs/` | 현재 사용 가이드와 명시적으로 식별된 목표 문서 |
-
-현재 서버 구현은 [server/README.md](./server/README.md)에 있습니다. 프로토콜 세부사항은
-[protocol/README.md](./protocol/README.md)에 있습니다.
+---
 
 ## 기여하기
 
 - [기여 가이드](./CONTRIBUTING.md)
 - [커뮤니티 가이드라인](./COMMUNITY_GUIDELINES.md)
 - [행동 강령](./CODE_OF_CONDUCT.md)
+
+---
 
 ## 라이선스
 

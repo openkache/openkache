@@ -19,13 +19,12 @@
 - [架构](#架构)
 - [快速开始](#快速开始)
 - [连接客户端](#连接客户端)
-- [客户端包](#客户端包)
 - [容器镜像](#容器镜像)
 - [路线图](#路线图)
-- [构建与验证](#构建与验证)
-- [仓库结构](#仓库结构)
 - [参与贡献](#参与贡献)
 - [许可证](#许可证)
+
+---
 
 ## 基准测试
 
@@ -53,6 +52,8 @@ OpenKache 比 PostgreSQL 快 5.6 倍,比 MySQL 快 6.0 倍,单个存储核心即
 | PostgreSQL 17.10 | 558.0 µs | 510 µs | 1263 µs | 3342 µs |
 
 平均 GET 延迟比 MySQL 低 1.6 倍,比 PostgreSQL 低 2.3 倍;在 p99 上分别低 3.0 倍和 3.3 倍。
+
+---
 
 ## 架构
 
@@ -84,6 +85,8 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 快路径上没有任何垃圾回收停顿的容身之处。
 
 完整设计见 [docs/architecture.md](./docs/architecture.md)。(中文翻译准备中)
+
+---
 
 ## 快速开始
 
@@ -199,10 +202,15 @@ cargo run --locked --package openkache-server --bin openkache-server -- \
 
 缓存文件在进程的工作目录中创建,并在服务器每次启动时被截断重置。
 
+---
+
 ## 连接客户端
 
 服务器运行后,用你选择的语言连接。所有客户端指南都默认使用 `127.0.0.1:4433` 作为本地端点,
 并列出各自语言的完整公开 API。
+
+受维护的客户端包共享同一套协议与值格式(value-format)源码。Rust、TypeScript、Python、
+.NET、Go、C、C++、Swift 等绑定的当前状态见 [clients/README.md](./clients/README.md)。
 
 | 包 | 安装 | 文档 | 源码 |
 |---|---|---|---|
@@ -238,13 +246,7 @@ openkache-cli get hello
 当需要证书根、双向 TLS、客户端侧值保护,或仅为兼容性而设的 TTL/条件写入时,请使用
 `openkache-cli --profile configured`。
 
-> **本地开发信任配置。** 默认的 Gate 0 配置用于本地开发:它在 QUIC 之上使用 TLS 1.3 且绝不
-> 回退到明文,但不验证服务器证书。请勿将这种信任配置用于生产流量。
-
-## 客户端包
-
-受维护的客户端包共享同一套协议与值格式(value-format)源码。Rust、TypeScript、Python、
-.NET、Go、C、C++、Swift 等绑定的当前状态见 [clients/README.md](./clients/README.md)。
+---
 
 ## 路线图
 
@@ -257,43 +259,15 @@ openkache-cli get hello
 
 详情见 [ROADMAP.md](./ROADMAP.md)。(中文翻译准备中)
 
-## 构建与验证
-
-```bash
-cargo check --locked
-cargo test --locked --package openkache-server
-cargo server-build
-```
-
-根 Cargo 工作区在同一个锁文件下管理协议、服务器、共享客户端核心、Rust SDK、CLI 以及原生
-TypeScript 适配器。
-
-服务器分配器(allocator)相关实验作为可选功能提供:
-
-```bash
-# 选择一种分配器功能。
-cargo server-build --features alloc-jemalloc
-# 或者:
-cargo server-build --features alloc-mimalloc
-```
-
-## 仓库结构
-
-| 路径 | 内容 |
-| --- | --- |
-| `server/` | 当前的 SSD 缓存服务器与容器定义 |
-| `protocol/` | 共享的传输模型、生成的契约与编解码器 |
-| `clients/` | 客户端 SDK 与原生适配器 |
-| `docs/` | 当前的使用指南以及明确标识的目标文档 |
-
-当前的服务器实现见 [server/README.md](./server/README.md)。协议细节见
-[protocol/README.md](./protocol/README.md)。
+---
 
 ## 参与贡献
 
 - [贡献指南](./CONTRIBUTING.md)
 - [社区准则](./COMMUNITY_GUIDELINES.md)
 - [行为准则](./CODE_OF_CONDUCT.md)
+
+---
 
 ## 许可证
 

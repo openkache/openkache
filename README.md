@@ -19,13 +19,12 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [Connect a client](#connect-a-client)
-- [Client packages](#client-packages)
 - [Container image](#container-image)
 - [Roadmap](#roadmap)
-- [Build and verify](#build-and-verify)
-- [Repository layout](#repository-layout)
 - [Contributing](#contributing)
 - [License](#license)
+
+---
 
 ## Benchmarks
 
@@ -55,6 +54,8 @@ a single storage core.
 
 Average GET latency is 1.6× lower than MySQL and 2.3× lower than PostgreSQL; at
 p99 it is 3.0× and 3.3× lower.
+
+---
 
 ## Architecture
 
@@ -95,6 +96,8 @@ time, C-level control in hand. There is no room for a garbage-collection pause
 on the fast path.
 
 See [docs/architecture.md](./docs/architecture.md) for the full design.
+
+---
 
 ## Quick start
 
@@ -222,11 +225,17 @@ cargo run --locked --package openkache-server --bin openkache-server -- \
 The cache file is created in the process working directory and truncated each
 time the server starts.
 
+---
+
 ## Connect a client
 
 With the server running, connect from your language of choice. All client
 guides use `127.0.0.1:4433` as the default local endpoint and list the complete
 public API for their language.
+
+Maintained client packages share the same protocol and value-format sources.
+See [clients/README.md](./clients/README.md) for the current status of Rust,
+TypeScript, Python, .NET, Go, C, C++, Swift, and other bindings.
 
 | Package | Install | Documentation | Source |
 |---|---|---|---|
@@ -263,16 +272,7 @@ Use `openkache-cli --profile configured` when certificate roots, mutual TLS,
 client-side value protection, or compatibility-only TTL/conditional writes are
 required.
 
-> **Local development trust profile.** The default Gate 0 profile is for local
-> development: it uses TLS 1.3 over QUIC and never falls back to plaintext, but
-> it does not verify the server certificate. Do not reuse this trust profile for
-> production traffic.
-
-## Client packages
-
-Maintained client packages share the same protocol and value-format sources.
-See [clients/README.md](./clients/README.md) for the current status of Rust,
-TypeScript, Python, .NET, Go, C, C++, Swift, and other bindings.
+---
 
 ## Roadmap
 
@@ -285,43 +285,15 @@ TypeScript, Python, .NET, Go, C, C++, Swift, and other bindings.
 
 Full detail in [ROADMAP.md](./ROADMAP.md).
 
-## Build and verify
-
-```bash
-cargo check --locked
-cargo test --locked --package openkache-server
-cargo server-build
-```
-
-The root Cargo workspace owns the protocol, server, shared client core, Rust
-SDK, CLI, and native TypeScript adapter under one lockfile.
-
-Server allocator experiments are available as opt-in features:
-
-```bash
-# Choose one allocator feature.
-cargo server-build --features alloc-jemalloc
-# Or:
-cargo server-build --features alloc-mimalloc
-```
-
-## Repository layout
-
-| Path | Contents |
-| --- | --- |
-| `server/` | Current SSD cache server and container definition |
-| `protocol/` | Shared wire model, generated contracts, and codecs |
-| `clients/` | Client SDKs and native adapters |
-| `docs/` | Current usage guides and explicitly identified target documents |
-
-The current server implementation lives in [server/README.md](./server/README.md).
-Protocol details live in [protocol/README.md](./protocol/README.md).
+---
 
 ## Contributing
 
 - [Contributing guide](./CONTRIBUTING.md)
 - [Community guidelines](./COMMUNITY_GUIDELINES.md)
 - [Code of conduct](./CODE_OF_CONDUCT.md)
+
+---
 
 ## License
 
