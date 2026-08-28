@@ -103,13 +103,68 @@ OpenKache targets **Linux** as its primary platform: the `io_uring` network
 frontend and the direct-I/O storage path require it. macOS and Windows/WSL
 support is on the [roadmap](#roadmap).
 
-Requirements:
+Start the server before connecting a client. Choose the first option that fits
+your environment: container image, published release, or Cargo.
+
+Common requirements:
 
 - Linux with `io_uring`
 - two distinct CPUs available to the process
-- Rust plus the native toolchain required by the workspace dependencies
 
-Run the server on `127.0.0.1:4433` using CPUs 0 and 1:
+### Container image
+
+Run the published preview image without authenticating to GHCR:
+
+```bash
+podman run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:edge
+```
+
+`edge` follows the latest successful build from `main`. For reproducible
+deployments, pin the multi-platform manifest by its `sha256` digest instead of
+using the rolling tag.
+
+To build the image locally, run from the repository root:
+
+```bash
+docker build --file server/Dockerfile --tag localhost/openkache:dev .
+docker run --rm \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/tcp \
+  --publish 4433:4433/udp \
+  --volume openkache-data:/var/lib/openkache \
+  localhost/openkache:dev
+```
+
+The default container command pins the network thread to CPU 0 and the storage
+thread to CPU 1. Override the command when the container CPU set uses different
+IDs. See the [container guide](./docs/container-image.md) for details.
+
+### GitHub release
+
+When a `server-v<version>` release is available, download the matching Linux
+archive from [GitHub Releases](https://github.com/openkache/openkache/releases).
+Set `SERVER_VERSION` to the published version, then verify and run the archive:
+
+```bash
+VERSION="${SERVER_VERSION:?set SERVER_VERSION to a published version}"
+PLATFORM="linux-x86_64-musl" # use linux-aarch64-musl on arm64
+BASE="https://github.com/openkache/openkache/releases/download/server-v${VERSION}"
+ARCHIVE="openkache-server-${VERSION}-${PLATFORM}.tar.gz"
+curl --fail --location --remote-name "${BASE}/${ARCHIVE}"
+curl --fail --location --remote-name "${BASE}/SHA256SUMS"
+grep -F " ${ARCHIVE}" SHA256SUMS | sha256sum --check
+tar -xzf "${ARCHIVE}"
+"./openkache-server-${VERSION}-${PLATFORM}/openkache-server"
+```
+
+### Cargo
+
+Building from source also requires Rust and the native toolchain used by the
+workspace dependencies. Run the server on `127.0.0.1:4433` using CPUs 0 and 1:
 
 ```bash
 cargo run --locked --package openkache-server --bin openkache-server
@@ -171,38 +226,6 @@ required.
 > development: it uses TLS 1.3 over QUIC and never falls back to plaintext, but
 > it does not verify the server certificate. Do not reuse this trust profile for
 > production traffic.
-
-## Container image
-
-Build locally from the repository root:
-
-```bash
-docker build --file server/Dockerfile --tag localhost/openkache:dev .
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  --volume openkache-data:/var/lib/openkache \
-  localhost/openkache:dev
-```
-
-Run the published preview image without authenticating to GHCR:
-
-```bash
-podman run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  ghcr.io/openkache/openkache:edge
-```
-
-`edge` follows the latest successful build from `main`. For reproducible
-deployments, pin the multi-platform manifest by its `sha256` digest instead of
-using the rolling tag.
-
-The default container command pins the network thread to CPU 0 and the storage
-thread to CPU 1. Override the command when the container CPU set uses different
-IDs. See the [container guide](./docs/container-image.md) for details.
 
 ## Roadmap
 
