@@ -117,7 +117,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Linux에서는 `io_uring`과 사용 가능한 CPU 2개가 필요합니다. Apple Silicon macOS
 바이너리는 기능 개발용 네이티브 경로를 사용하며, 성능 수치는 Linux에만 적용됩니다.
 
-### 터미널 1 — 서버 시작
+### 터미널 1: 서버 시작
 
 ```bash
 openkache-server
@@ -125,7 +125,7 @@ openkache-server
 
 OpenKache를 사용하는 동안 이 터미널을 열어 둡니다.
 
-### 터미널 2 — 서버 확인
+### 터미널 2: 서버 확인
 
 두 번째 터미널을 열고 실행합니다.
 

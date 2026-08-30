@@ -125,7 +125,7 @@ Linux requires `io_uring` and two available CPUs. The Apple Silicon macOS
 binary uses the native functional-development path; performance claims apply
 only to Linux.
 
-### Terminal 1 — start the server
+### Terminal 1: start the server
 
 ```bash
 openkache-server
@@ -133,7 +133,7 @@ openkache-server
 
 Keep this terminal open while you use OpenKache.
 
-### Terminal 2 — verify the server
+### Terminal 2: verify the server
 
 Open a second terminal and run:
 

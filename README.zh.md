@@ -111,7 +111,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Linux 需要 `io_uring` 和两个可用 CPU。Apple Silicon macOS 二进制文件使用原生功能
 开发路径；性能数据仅适用于 Linux。
 
-### 终端 1 — 启动服务器
+### 终端 1：启动服务器
 
 ```bash
 openkache-server
@@ -119,7 +119,7 @@ openkache-server
 
 使用 OpenKache 时，请保持此终端开启。
 
-### 终端 2 — 验证服务器
+### 终端 2：验证服务器
 
 打开第二个终端并运行：
 
