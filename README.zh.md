@@ -19,7 +19,6 @@
 - [架构](#架构)
 - [快速开始](#快速开始)
 - [连接客户端](#连接客户端)
-- [容器镜像](#容器镜像)
 - [路线图](#路线图)
 - [参与贡献](#参与贡献)
 - [许可证](#许可证)
@@ -91,46 +90,51 @@ OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)*
 
 ## 快速开始
 
-OpenKache 针对 **Linux** 进行优化和基准测试。
+安装程序会下载最新的标签版本，为 Linux x86-64、Linux ARM64 或 Apple Silicon
+macOS 选择正确的压缩包，验证其 SHA-256 校验和，然后将 `openkache-server` 和
+`openkache-cli` 安装到 `~/.local/bin`。Windows 用户可以在 WSL2 中运行 Linux 版本。
 
-- **Windows：** 建议使用 WSL2。
-- **macOS：** 仅用于功能开发，不用于性能比较。
-
-Linux 需要 `io_uring` 和两个可用 CPU。
-
-### Docker
+### 安装 OpenKache
 
 ```bash
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  ghcr.io/openkache/openkache:edge
+curl -fsSL https://github.com/openkache/openkache/raw/main/install.sh | sh
 ```
 
-`seccomp=unconfined` 允许容器使用 `io_uring`。
+运行前可以先[查看安装程序](./install.sh)。
 
-在 macOS 和 Windows 上，Docker Desktop 会自动选择匹配的镜像架构，并在 Linux 虚拟机中运行。
-
-### Cargo (Linux 和 macOS)
-
-安装 Rust、Bun、Smithy CLI 和 C toolchain，然后在仓库根目录构建 release binary：
+如果 shell 提示 `command not found`，请为当前终端将安装目录添加到 `PATH`：
 
 ```bash
-cargo build --locked --release --package openkache-server --bin openkache-server
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-在 Linux 上为网络和存储指定不同 CPU 后运行：
+Linux 需要 `io_uring` 和两个可用 CPU。Apple Silicon macOS 二进制文件使用原生功能
+开发路径；性能数据仅适用于 Linux。
+
+### 终端 1 — 启动服务器
 
 ```bash
-./target/release/openkache-server 127.0.0.1:4433 0 1
+openkache-server
 ```
 
-在 Apple Silicon macOS 上运行时不传 CPU 参数：
+使用 OpenKache 时，请保持此终端开启。
+
+### 终端 2 — 验证服务器
+
+打开第二个终端并运行：
 
 ```bash
-./target/release/openkache-server 127.0.0.1:4433
+openkache-cli ping
+# PONG
+
+openkache-cli set hello "from CLI"
+# CREATED
+
+openkache-cli get hello
+# from CLI
 ```
+
+返回终端 1，按 <kbd>Ctrl</kbd>+<kbd>C</kbd> 停止服务器。
 
 ---
 
@@ -167,13 +171,8 @@ async fn example() -> openkache::Result<()> {
 }
 ```
 
-从源码构建的 [`openkache-cli`](clients/cli/README.md) 是 Bash 友好的选项,默认使用同样固定的
-Gate 0 配置:
-
-```bash
-openkache-cli set hello "from cli"
-openkache-cli get hello
-```
+每个标签服务器版本都包含 [`openkache-cli`](clients/cli/README.md) 二进制文件，适合在
+Bash 中使用。它默认使用相同的固定 Gate 0 配置；完整示例请参阅[快速开始](#快速开始)。
 
 当需要证书根、双向 TLS、客户端侧值保护,或仅为兼容性而设的 TTL/条件写入时,请使用
 `openkache-cli --profile configured`。

@@ -19,7 +19,6 @@
 - [아키텍처](#아키텍처)
 - [빠른 시작](#빠른-시작)
 - [클라이언트 연결](#클라이언트-연결)
-- [컨테이너 이미지](#컨테이너-이미지)
 - [로드맵](#로드맵)
 - [기여하기](#기여하기)
 - [라이선스](#라이선스)
@@ -95,48 +94,53 @@ Redis는 명령을 단 하나의 코어에서 실행합니다. OpenKache는 같�
 
 ## 빠른 시작
 
-OpenKache는 **Linux**에 맞춰 최적화하고 벤치마크한다.
+설치 프로그램은 최신 태그 릴리스를 내려받고 Linux x86-64, Linux ARM64 또는 Apple
+Silicon macOS에 맞는 아카이브를 선택한 뒤 SHA-256 체크섬을 검증합니다. 그런 다음
+`openkache-server`와 `openkache-cli`를 모두 `~/.local/bin`에 설치합니다. Windows에서는
+WSL2에서 Linux 릴리스를 실행할 수 있습니다.
 
-- **Windows:** WSL2를 권장한다.
-- **macOS:** 기능 개발용이며 성능 비교에는 적합하지 않다.
-
-Linux에서는 `io_uring`과 사용 가능한 CPU 2개가 필요하다.
-
-### Docker
+### OpenKache 설치
 
 ```bash
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  ghcr.io/openkache/openkache:edge
+curl -fsSL https://github.com/openkache/openkache/raw/main/install.sh | sh
 ```
 
-`seccomp=unconfined`은 container에서 `io_uring`을 쓰기 위해 필요하다.
+[설치 프로그램](./install.sh)의 내용을 먼저 확인할 수도 있습니다.
 
-macOS와 Windows에서는 Docker Desktop이 CPU architecture에 맞는 image를 자동으로
-고른 뒤 Linux VM에서 실행한다.
-
-### Cargo (Linux·macOS)
-
-Rust, Bun, Smithy CLI, C toolchain을 설치한 뒤 저장소 루트에서 release binary를
-빌드한다.
+셸에서 `command not found`가 출력되면 현재 터미널의 `PATH`에 설치 디렉터리를
+추가합니다.
 
 ```bash
-cargo build --locked --release --package openkache-server --bin openkache-server
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Linux에서는 network와 storage에 서로 다른 CPU를 지정해 실행한다.
+Linux에서는 `io_uring`과 사용 가능한 CPU 2개가 필요합니다. Apple Silicon macOS
+바이너리는 기능 개발용 네이티브 경로를 사용하며, 성능 수치는 Linux에만 적용됩니다.
+
+### 터미널 1 — 서버 시작
 
 ```bash
-./target/release/openkache-server 127.0.0.1:4433 0 1
+openkache-server
 ```
 
-Apple Silicon macOS에서는 CPU 번호 없이 실행한다.
+OpenKache를 사용하는 동안 이 터미널을 열어 둡니다.
+
+### 터미널 2 — 서버 확인
+
+두 번째 터미널을 열고 실행합니다.
 
 ```bash
-./target/release/openkache-server 127.0.0.1:4433
+openkache-cli ping
+# PONG
+
+openkache-cli set hello "from CLI"
+# CREATED
+
+openkache-cli get hello
+# from CLI
 ```
+
+서버를 중지하려면 터미널 1로 돌아가 <kbd>Ctrl</kbd>+<kbd>C</kbd>를 누릅니다.
 
 ---
 
@@ -174,13 +178,9 @@ async fn example() -> openkache::Result<()> {
 }
 ```
 
-소스에서 빌드하는 [`openkache-cli`](clients/cli/README.md)는 Bash 친화적 옵션으로,
-기본적으로 동일한 고정 Gate 0 프로필을 사용합니다:
-
-```bash
-openkache-cli set hello "from cli"
-openkache-cli get hello
-```
+각 태그 서버 릴리스에 포함된 [`openkache-cli`](clients/cli/README.md) 바이너리는 Bash
+친화적 옵션입니다. 기본적으로 동일한 고정 Gate 0 프로필을 사용하며, 전체 예시는
+[빠른 시작](#빠른-시작)을 참고하세요.
 
 인증서 루트, 상호 TLS, 클라이언트 측 값 보호, 또는 호환성 전용 TTL/조건부 쓰기가 필요한
 경우 `openkache-cli --profile configured`를 사용하세요.
