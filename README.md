@@ -19,7 +19,6 @@ Open source · RESP/TCP · OpenKache/QUIC · Linux `io_uring`
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [Connect a client](#connect-a-client)
-- [Container image](#container-image)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -102,48 +101,54 @@ See [docs/architecture.md](./docs/architecture.md) for the full design.
 
 ## Quick start
 
-OpenKache is optimized and benchmarked for **Linux**.
+The installer downloads the latest tagged release, selects the correct archive
+for Linux x86-64, Linux ARM64, or Apple Silicon macOS, verifies its SHA-256
+checksum, and installs both `openkache-server` and `openkache-cli` to
+`~/.local/bin`. Windows users can run the Linux release in WSL2.
 
-- **Windows:** WSL2 is recommended.
-- **macOS:** Intended for functional development, not performance comparisons.
-
-Linux requires `io_uring` and two available CPUs.
-
-### Docker
+### Install OpenKache
 
 ```bash
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  --publish 4433:4433/tcp \
-  --publish 4433:4433/udp \
-  ghcr.io/openkache/openkache:edge
+curl -fsSL https://github.com/openkache/openkache/raw/main/install.sh | sh
 ```
 
-`seccomp=unconfined` allows the container to use `io_uring`.
+You can [review the installer](./install.sh) before running it.
 
-On macOS and Windows, Docker Desktop selects the matching image architecture
-and runs the Linux image in a VM.
-
-### Cargo (Linux and macOS)
-
-Install Rust, Bun, Smithy CLI, and a C toolchain. Then build the release binary
-from the repository root:
+If your shell reports `command not found`, add the installation directory to
+`PATH` for the current terminal:
 
 ```bash
-cargo build --locked --release --package openkache-server --bin openkache-server
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Run it on Linux with separate network and storage CPUs:
+Linux requires `io_uring` and two available CPUs. The Apple Silicon macOS
+binary uses the native functional-development path; performance claims apply
+only to Linux.
+
+### Terminal 1 — start the server
 
 ```bash
-./target/release/openkache-server 127.0.0.1:4433 0 1
+openkache-server
 ```
 
-Run it on Apple Silicon macOS without CPU arguments:
+Keep this terminal open while you use OpenKache.
+
+### Terminal 2 — verify the server
+
+Open a second terminal and run:
 
 ```bash
-./target/release/openkache-server 127.0.0.1:4433
+openkache-cli ping
+# PONG
+
+openkache-cli set hello "from CLI"
+# CREATED
+
+openkache-cli get hello
+# from CLI
 ```
+
+Return to Terminal 1 and press <kbd>Ctrl</kbd>+<kbd>C</kbd> to stop the server.
 
 ---
 
@@ -182,13 +187,9 @@ async fn example() -> openkache::Result<()> {
 }
 ```
 
-The source-built [`openkache-cli`](clients/cli/README.md) is the Bash-friendly
-option, using the same fixed Gate 0 profile by default:
-
-```bash
-openkache-cli set hello "from cli"
-openkache-cli get hello
-```
+The [`openkache-cli`](clients/cli/README.md) binary included in every tagged
+server release is the Bash-friendly option. It uses the same fixed Gate 0
+profile by default; see the [quick start](#quick-start) for a complete example.
 
 Use `openkache-cli --profile configured` when certificate roots, mutual TLS,
 client-side value protection, or compatibility-only TTL/conditional writes are
