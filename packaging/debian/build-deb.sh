@@ -58,5 +58,8 @@ sed \
 mkdir -p "${output_dir}"
 output="${output_dir}/openkache_${version}_${architecture}.deb"
 dpkg-deb --build --root-owner-group "${package_root}" "${output}" >&2
-sha256sum "${output}" > "${output}.sha256"
+(
+  cd "${output_dir}"
+  sha256sum "$(basename "${output}")" > "$(basename "${output}").sha256"
+)
 echo "${output}"
