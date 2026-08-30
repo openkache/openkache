@@ -65,35 +65,38 @@ OpenKache reaches 76% of the hardware limit (128,820 IOPS, measured with
 
 </div>
 
-**Why is OpenKache fast?** Because it never hops between cores.
+Every request follows one short, predictable path:
 
-Most servers let a thread pool roam across cores. That is not free: lock
-contention, mutexes, context switches, and the synchronization and copy cost
-paid every time a cache line bounces from one core to another. The heavier the
-load, the more this overhead eats into throughput.
+1. A client sends `GET`, `SET`, or `DELETE` over RESP/TCP or OpenKache/QUIC.
+2. A core-pinned network worker parses the request without touching storage.
+3. The request crosses one lock-free **single-producer, single-consumer (SPSC)**
+   queue to a core-pinned storage worker.
+4. The storage worker uses a compact RAM table to choose a candidate 4 KiB
+   bucket, then verifies the 32-byte storage key inside it. Mutable buckets are
+   already in RAM; flushed buckets are read from the SSD.
 
-OpenKache takes a **thread-per-core (shared-nothing)** design. Each worker is
-pinned to a single core, owns its own data, and shares no state, so there are
-no locks. This is the same design TigerBeetle, ScyllaDB, and Redis converged on
-to squeeze every drop out of the hardware. The network path and the storage
-path each own a core, and they communicate through exactly one **lock-free SPSC
-queue**. RESP parsing never blocks disk I/O.
+### Why it is fast
 
-Redis runs commands on a single core. OpenKache keeps the same shared-nothing
-principle but shards workers across cores, so throughput scales with the
-hardware instead of hitting a single-core ceiling. With no shared locks,
-adding a core adds no contention.
+- **Hot state stays core-local.** Each worker owns its data and remains pinned
+  to one core, avoiding shared locks and reducing cache-line movement. This
+  follows the shared-nothing philosophy used to saturate modern NVMe devices in
+  [SOSP '19 · KVell](https://github.com/BLepers/KVell/blob/master/sosp19-final40.pdf).
+- **RAM stores directions, not keys.** The lookup table keeps only an 8-bit
+  fingerprint and a compact segment/bucket candidate. The candidate bucket
+  verifies the full 32-byte storage key next to the value, so RAM is spent on
+  tiny routing metadata rather than a copy of every key
+  ([SIGMOD '26 · Breadcrumb Filters](https://doi.org/10.1145/3786629)).
+- **Small writes become sequential batches.** A segment group combines writes
+  from many keys into one larger flush instead of issuing one SSD write per
+  request. Hybrid flash caches use the same idea to turn tiny-object writes into
+  large sequential I/O
+  ([NSDI '19 · Flashield](https://www.usenix.org/conference/nsdi19/presentation/eisenman),
+  [ASPLOS '26 · Nemo](https://github.com/XMU-DISCLab/Cachelib-Nemo)).
+- **Linux uses `io_uring`.** OpenKache batches asynchronous I/O submission and
+  completion while the network worker continues processing requests.
 
-Values live on the SSD; keys live in a compact RAM index (compressed key →
-segment offset). And just as a subway moves more people than a car, OpenKache
-batches writes from many keys into a single sequential **segment-group** flush
-instead of one SSD write per key, using the drive's sequential bandwidth to the
-fullest. On Linux, it submits that I/O through `io_uring` to erase even the
-system-call overhead.
-
-All of it is written in **Rust**: no GC pauses, data races ruled out at compile
-time, C-level control in hand. There is no room for a garbage-collection pause
-on the fast path.
+The server is written in Rust to keep memory ownership explicit and avoid a
+garbage collector on the request path.
 
 See [docs/architecture.md](./docs/architecture.md) for the full design.
 

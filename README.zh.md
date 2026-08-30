@@ -63,26 +63,31 @@ OpenKache 达到硬件上限的 76%(128,820 IOPS,由
 
 </div>
 
-**OpenKache 为什么快?** 因为它从不在核心之间跳转。
+每个请求都经过一条短而可预测的路径：
 
-大多数服务器让线程池在核心之间游走。这个代价并不便宜:锁竞争、互斥量、上下文切换,以及
-每当缓存行在核心之间弹跳时都要付出的同步与拷贝成本。负载越重,这些开销就越是吞噬吞吐量。
+1. 客户端通过 RESP/TCP 或 OpenKache/QUIC 发送 `GET`、`SET` 或 `DELETE`。
+2. 固定在一个核心上的网络工作线程解析请求，不接触存储。
+3. 请求通过一条无锁的 **SPSC（single-producer, single-consumer）** 队列传给同样固定在
+   一个核心上的存储工作线程。
+4. 存储工作线程使用紧凑的 RAM 表选择一个候选 4 KiB 桶，然后验证桶内的 32 字节存储键。
+   可变桶已在 RAM 中；flush 后的桶从 SSD 读取。
 
-OpenKache 采用 **thread-per-core(shared-nothing,无共享)** 设计。每个工作线程被绑定到
-单个核心,只拥有自己的数据,不共享任何状态,因此没有锁。这正是 TigerBeetle、ScyllaDB、
-Redis 为榨干硬件性能而共同收敛到的设计。网络路径与存储路径各自独占一个核心,两者之间只通过
-一条 **无锁 SPSC 队列** 通信。RESP 解析绝不会阻塞磁盘 I/O。
+### 为什么快
 
-Redis 在单一核心上执行命令。OpenKache 保持同样的无共享原则,但将工作线程按核心分片,使吞吐量
-随硬件扩展,而不是停在单核天花板上。由于没有共享锁,增加核心也不会带来竞争。
+- **热点状态留在本地核心。** 每个工作线程拥有自己的数据并固定在一个核心上，从而减少共享
+  锁和缓存行移动。这与使用 shared-nothing 原则来充分利用现代 NVMe 设备的
+  [SOSP '19 · KVell](https://github.com/BLepers/KVell/blob/master/sosp19-final40.pdf)方向一致。
+- **RAM 存储位置线索，而不是键。** 查询表只保留 8 位 fingerprint 和紧凑的段/桶候选位置。
+  候选桶会验证值旁边完整的 32 字节存储键，因此 RAM 用于微小的路由元数据，而不是保存每个
+  键的副本（[SIGMOD '26 · Breadcrumb Filters](https://doi.org/10.1145/3786629)）。
+- **把小写入变成顺序批次。** 段组不会为每个请求分别发出一次 SSD 写入，而是把多个键的
+  写入合并成一次更大的 flush。混合闪存缓存也用这一思路把微小对象写入转换成大块顺序 I/O
+  （[NSDI '19 · Flashield](https://www.usenix.org/conference/nsdi19/presentation/eisenman)，
+  [ASPLOS '26 · Nemo](https://github.com/XMU-DISCLab/Cachelib-Nemo)）。
+- **Linux 使用 `io_uring`。** 网络工作线程继续处理请求时，OpenKache 会批量处理异步 I/O
+  的提交与完成。
 
-值存放在 SSD 上,键存放在 RAM 的紧凑索引中(压缩键 → 段偏移)。正如地铁比汽车运送更多乘客,
-OpenKache 把许多键的写入合并成一次顺序的 **段组(segment-group)** 刷写,而不是每个键单独写
-一次 SSD,从而最大限度地利用磁盘的顺序带宽。在 Linux 上,OpenKache 通过 `io_uring` 提交这些 I/O,
-连系统调用开销也一并抹去。
-
-这一切都用 **Rust** 编写:没有 GC 停顿,数据竞争在编译期被排除,同时握有 C 级别的控制力。
-快路径上没有任何垃圾回收停顿的容身之处。
+服务器使用 Rust 编写，以明确管理请求路径上的内存所有权，并避免使用垃圾收集器。
 
 完整设计见 [docs/architecture.md](./docs/architecture.md)。(中文翻译准备中)
 
