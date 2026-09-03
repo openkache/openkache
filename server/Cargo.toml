@@ -36,6 +36,8 @@ rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
 serde = { version = "*", features = ["derive"] }
 slab = "*"
+smallvec = "*"
+synchrony = { version = "*", features = ["event"] }
 toml = "*"
 tikv-jemallocator = { version = "*", optional = true }
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"] }

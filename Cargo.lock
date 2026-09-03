@@ -1716,6 +1716,8 @@ dependencies = [
  "rustls",
  "serde",
  "slab",
+ "smallvec",
+ "synchrony",
  "tikv-jemallocator",
  "tokio",
  "toml",

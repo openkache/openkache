@@ -1,10 +1,9 @@
 //! OpenKache server entry point.
 //!
 //! Wires up the two-thread architecture: a network thread (io_uring RESP server)
-//! and a storage thread, connected only by lock-free SPSC queues. On Linux each
-//! thread is pinned to a dedicated CPU core (thread-per-core), so hot state stays
-//! in that core's cache and the two threads never contend on a lock. On macOS,
-//! placement is left to the scheduler since fine-grained pinning is unavailable.
+//! and a storage thread, connected only by lock-free SPSC queues. Each thread is
+//! pinned to a dedicated CPU core (thread-per-core), so hot state stays in that
+//! core's cache and the two threads never contend on a lock.
 
 #[cfg(all(feature = "alloc-mimalloc", feature = "alloc-jemalloc"))]
 compile_error!("only one allocator feature may be enabled");
@@ -24,13 +23,13 @@ mod resp;
 mod resp_proxy;
 mod spsc;
 mod storage;
+mod storage_legacy;
 mod storage_message;
 
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::{env, io, thread};
 
-#[cfg(target_os = "linux")]
 use std::mem;
 
 use config::{Config, StorageConfig};
@@ -50,7 +49,6 @@ use storage_message::{STORAGE_QUEUE_SLOTS, StorageRequest, StorageResponse};
 /// thread-per-core design: it keeps each worker's hot data in one core's L1/L2
 /// and prevents the scheduler from migrating the thread mid-request, which would
 /// blow out the cache on every migration.
-#[cfg(target_os = "linux")]
 fn pin_current_thread(cpu: usize) -> io::Result<()> {
     // SAFETY: cpu_set_t is a plain bitmask; zeroing it produces a valid initial state.
     let mut cpu_set: libc::cpu_set_t = unsafe { mem::zeroed() };
@@ -77,7 +75,6 @@ fn pin_current_thread(cpu: usize) -> io::Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn parse_cpu(value: Option<String>, default: usize, role: &str) -> io::Result<usize> {
     value.map_or(Ok(default), |value| {
         value.parse().map_err(|_| {
@@ -90,22 +87,18 @@ fn parse_cpu(value: Option<String>, default: usize, role: &str) -> io::Result<us
 }
 
 fn usage_error() -> io::Error {
-    #[cfg(target_os = "linux")]
-    let usage = "usage: openkache-server [--config <path>] [address] [network-cpu storage-cpu]";
-    #[cfg(target_os = "macos")]
-    let usage = "usage: openkache-server [--config <path>] [address]";
-    io::Error::new(io::ErrorKind::InvalidInput, usage)
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "usage: openkache-server [--config <path>] [address] [network-cpu storage-cpu]",
+    )
 }
 
 #[derive(Clone, Copy)]
 enum ThreadPlacement {
-    #[cfg(target_os = "linux")]
     Pinned {
         network_cpu: usize,
         storage_cpu: usize,
     },
-    #[cfg(target_os = "macos")]
-    Scheduler,
 }
 
 struct ServerConfig {
@@ -162,7 +155,6 @@ impl ServerConfig {
 }
 
 impl ThreadPlacement {
-    #[cfg(target_os = "linux")]
     fn parse(arguments: &mut impl Iterator<Item = String>) -> io::Result<Self> {
         let network_cpu = parse_cpu(arguments.next(), 0, "network")?;
         let storage_cpu = parse_cpu(arguments.next(), 1, "storage")?;
@@ -180,19 +172,6 @@ impl ThreadPlacement {
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn parse(arguments: &mut impl Iterator<Item = String>) -> io::Result<Self> {
-        if arguments.next().is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "usage: openkache-server [address]",
-            ));
-        }
-
-        Ok(Self::Scheduler)
-    }
-
-    #[cfg(target_os = "linux")]
     fn spawn_storage_thread(
         self,
         config: StorageConfig,
@@ -205,38 +184,16 @@ impl ThreadPlacement {
             .name("storage".into())
             .spawn(move || {
                 pin_current_thread(storage_cpu)?;
-                storage::run(config, request_consumer, response_producer)
+                storage_legacy::run(config, request_consumer, response_producer)
             })
     }
 
-    #[cfg(target_os = "macos")]
-    fn spawn_storage_thread(
-        self,
-        config: StorageConfig,
-        request_consumer: spsc::Consumer<StorageRequest, STORAGE_QUEUE_SLOTS>,
-        response_producer: spsc::Producer<StorageResponse, STORAGE_QUEUE_SLOTS>,
-    ) -> io::Result<thread::JoinHandle<io::Result<()>>> {
-        let Self::Scheduler = self;
-
-        thread::Builder::new()
-            .name("storage".into())
-            .spawn(move || storage::run(config, request_consumer, response_producer))
-    }
-
-    #[cfg(target_os = "linux")]
     fn run_network(self, network: &mut network::Network) -> io::Result<()> {
         let Self::Pinned { network_cpu, .. } = self;
         pin_current_thread(network_cpu)?;
         network.run()
     }
 
-    #[cfg(target_os = "macos")]
-    fn run_network(self, network: &mut network::Network) -> io::Result<()> {
-        let Self::Scheduler = self;
-        network.run()
-    }
-
-    #[cfg(target_os = "linux")]
     fn log_listening(self, tcp_address: std::net::SocketAddr) {
         let Self::Pinned {
             network_cpu,
@@ -244,14 +201,6 @@ impl ThreadPlacement {
         } = self;
         eprintln!(
             "openkache-server listening on {tcp_address} over RESP/TCP and native QUIC/UDP; network CPU={network_cpu}, storage CPU={storage_cpu}"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    fn log_listening(self, tcp_address: std::net::SocketAddr) {
-        let Self::Scheduler = self;
-        eprintln!(
-            "openkache-server listening on {tcp_address} over RESP/TCP and native QUIC/UDP; thread placement delegated to the macOS scheduler"
         );
     }
 }

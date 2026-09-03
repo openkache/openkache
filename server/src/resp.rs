@@ -29,7 +29,7 @@ use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
-use crate::storage_message::{Command, Reply};
+use crate::storage_message::{Command, Reply, StorageKey};
 
 /// Which kind of RESP header is being parsed. RESP prefixes each element with a
 /// type byte: `*` for arrays and `$` for bulk strings.
@@ -307,7 +307,7 @@ fn command_from_args(
         return Ok(Command::Flush);
     }
 
-    let key = args.next().ok_or("missing key")?;
+    let key = StorageKey::from_client_key(&args.next().ok_or("missing key")?);
 
     if args.next().is_some() {
         return Err("too many command arguments");
@@ -317,14 +317,12 @@ fn command_from_args(
         if set_value.is_some() {
             return Err("GET cannot have a value");
         }
-        return Ok(Command::Get {
-            key: key.into_boxed_slice(),
-        });
+        return Ok(Command::Get { key });
     }
 
     if command_name.eq_ignore_ascii_case(b"SET") {
         return Ok(Command::Set {
-            key: key.into_boxed_slice(),
+            key,
             value: set_value.ok_or("SET is missing value")?,
         });
     }
@@ -333,9 +331,7 @@ fn command_from_args(
         if set_value.is_some() {
             return Err("DEL cannot have a value");
         }
-        return Ok(Command::Delete {
-            key: key.into_boxed_slice(),
-        });
+        return Ok(Command::Delete { key });
     }
 
     Err("unsupported command")

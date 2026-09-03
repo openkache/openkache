@@ -1,4 +1,4 @@
-//! A mutable SG that owns contiguous 4 KiB Buckets and selects Bucket candidates for keys.
+//! A legacy mutable SG that owns contiguous 4 KiB Buckets and selects Bucket candidates for keys.
 
 use super::StorageKey;
 use super::bucket::{BUCKET_BYTES, Bucket, BucketValue};

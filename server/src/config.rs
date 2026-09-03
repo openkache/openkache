@@ -3,7 +3,7 @@
 //! Only parameters that are safe to vary at runtime are exposed. Values that are
 //! baked into the on-disk format or index encoding (`BUCKET_BYTES`,
 //! `STORAGE_KEY_BYTES`, `BUCKET_CHOICE_COUNT`, `MUTABLE_SG_COUNT`) stay fixed in
-//! `storage.rs`. `table_value_bits` is not exposed: it is derived from
+//! `storage_legacy.rs`. `table_value_bits` is not exposed: it is derived from
 //! `storage_sg_count` so the SG index can never overflow the table value.
 
 use std::fs;
@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::storage::{BUCKET_BYTES, BUCKET_CHOICE_BITS, MUTABLE_SG_COUNT};
+use crate::storage_legacy::{BUCKET_BYTES, BUCKET_CHOICE_BITS, MUTABLE_SG_COUNT};
 
 /// The largest table value width the index supports (`u32`-backed).
 const MAX_TABLE_VALUE_BITS: u32 = 32;

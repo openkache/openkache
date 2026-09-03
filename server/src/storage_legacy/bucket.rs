@@ -1,4 +1,4 @@
-//! Storage format and operations for a 4 KiB Bucket.
+//! Legacy storage format and operations for a 4 KiB Bucket.
 
 use super::StorageKey;
 use std::mem::MaybeUninit;

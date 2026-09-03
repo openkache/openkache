@@ -1,4 +1,4 @@
-//! A fixed-size compressed Table that maps hashes to 1-32 bit value candidates.
+//! A legacy fixed-size compressed Table that maps hashes to 1-32 bit value candidates.
 
 use std::num::NonZeroU64;
 
